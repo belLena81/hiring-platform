@@ -4,6 +4,8 @@ import cats.effect.IO
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes, ReplaceOptions}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
+import java.time.Instant
+import java.util.Date
 
 object MongoHiringSetup {
   val UsersEmailIndex = "users_emailCanonical_unique"
@@ -11,7 +13,9 @@ object MongoHiringSetup {
   val ApplicationsCandidateJobIndex = "applications_candidate_job_unique"
   val JobsRecruiterStatusCreatedIndex = "jobs_recruiter_status_created_id"
   val ApplicationsCandidateStatusCreatedIndex = "applications_candidate_status_created_id"
+  val ApplicationsCandidateCreatedIndex = "applications_candidate_created_id"
   val ApplicationsJobStatusCreatedIndex = "applications_job_status_created_id"
+  val ApplicationsJobCreatedIndex = "applications_job_created_id"
   val ApplicationEventsApplicationCreatedIndex = "application_events_application_created_id"
   val MigrationId = "phase-2-domain-mongodb-v1"
 
@@ -32,14 +36,24 @@ object MongoHiringSetup {
         Indexes.compoundIndex(Indexes.ascending("candidateId", "status"), Indexes.descending("createdAt", "_id")),
         new IndexOptions().name(ApplicationsCandidateStatusCreatedIndex)),
       createIndex(database.getCollection("applications"),
+        Indexes.compoundIndex(Indexes.ascending("candidateId"), Indexes.descending("createdAt", "_id")),
+        new IndexOptions().name(ApplicationsCandidateCreatedIndex)),
+      createIndex(database.getCollection("applications"),
         Indexes.compoundIndex(Indexes.ascending("jobId", "status"), Indexes.descending("createdAt", "_id")),
         new IndexOptions().name(ApplicationsJobStatusCreatedIndex)),
+      createIndex(database.getCollection("applications"),
+        Indexes.compoundIndex(Indexes.ascending("jobId"), Indexes.descending("createdAt", "_id")),
+        new IndexOptions().name(ApplicationsJobCreatedIndex)),
       createIndex(database.getCollection("application_events"),
         Indexes.compoundIndex(Indexes.ascending("applicationId"), Indexes.descending("occurredAt", "_id")),
         new IndexOptions().name(ApplicationEventsApplicationCreatedIndex))
     ).sequence_.flatMap { _ =>
       val migrations = database.getCollection("schema_migrations")
-      val record = new Document("_id", MigrationId).append("schemaVersion", 1)
+      val record = new Document("_id", MigrationId)
+        .append("schemaVersion", 1)
+        .append("appliedAt", Date.from(Instant.now()))
+        .append("description", "Phase 2 hiring domain MongoDB collections and indexes")
+        .append("checksum", "phase-2-domain-mongodb-v1")
       PublisherBridge.first(migrations.replaceOne(Filters.eq("_id", MigrationId), record, new ReplaceOptions().upsert(true))).void
     }
 

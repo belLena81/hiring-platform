@@ -9,14 +9,16 @@ import scala.jdk.CollectionConverters.*
 
 private[mongo] object MongoHiringCodecs {
   def user(user: User): Document =
-    new Document("_id", user.id.value.toString)
+    appendOptionalString(new Document("_id", user.id.value.toString)
       .append("schemaVersion", 1)
       .append("email", user.email)
       .append("emailCanonical", user.email.toLowerCase)
       .append("name", user.name)
       .append("role", user.role.toString)
-      .append("adminSingletonKey", if (user.role == UserRole.Admin && user.adminSingleton) "singleton-admin" else null)
-      .append("createdAt", Date.from(user.createdAt))
+      .append("createdAt", Date.from(user.createdAt)),
+      "adminSingletonKey",
+      Option.when(user.role == UserRole.Admin && user.adminSingleton)("singleton-admin")
+    )
 
   def readUser(document: Document): User =
     User(
@@ -32,7 +34,7 @@ private[mongo] object MongoHiringCodecs {
   def job(job: Job): Document =
     new Document("_id", job.id.value.toString)
       .append("schemaVersion", 1)
-      .append("version", 0)
+      .append("version", java.lang.Long.valueOf(job.version))
       .append("recruiterId", job.recruiterId.value.toString)
       .append("title", job.title)
       .append("description", job.description)
@@ -54,7 +56,8 @@ private[mongo] object MongoHiringCodecs {
       readLocation(document.get("location", classOf[Document])),
       JobStatus.valueOf(document.getString("status")),
       instant(document, "createdAt"),
-      instant(document, "updatedAt")
+      instant(document, "updatedAt"),
+      Option(document.get("version", classOf[Number])).fold(0L)(_.longValue)
     )
 
   def application(application: Application): Document =
@@ -77,15 +80,23 @@ private[mongo] object MongoHiringCodecs {
     )
 
   def event(event: ApplicationEvent): Document =
-    new Document("_id", event.id.value.toString)
-      .append("schemaVersion", 1)
-      .append("applicationId", event.applicationId.value.toString)
-      .append("previousStatus", event.previousStatus.map(_.toString).orNull)
-      .append("newStatus", event.newStatus.toString)
-      .append("actorId", event.actorId.value.toString)
-      .append("occurredAt", Date.from(event.occurredAt))
-      .append("feedback", event.feedback.orNull)
-      .append("reason", event.reason.orNull)
+    appendOptionalString(
+      appendOptionalString(
+        appendOptionalString(new Document("_id", event.id.value.toString)
+          .append("schemaVersion", 1)
+          .append("applicationId", event.applicationId.value.toString)
+          .append("newStatus", event.newStatus.toString)
+          .append("actorId", event.actorId.value.toString)
+          .append("occurredAt", Date.from(event.occurredAt)),
+          "previousStatus",
+          event.previousStatus.map(_.toString)
+        ),
+        "feedback",
+        event.feedback
+      ),
+      "reason",
+      event.reason
+    )
 
   private def location(location: Location): Document =
     new Document("country", location.country).append("city", location.city).append("remote", location.remote)
@@ -98,4 +109,9 @@ private[mongo] object MongoHiringCodecs {
 
   private def stringList(document: Document, field: String): List[String] =
     document.getList(field, classOf[String]).asScala.toList
+
+  private def appendOptionalString(document: Document, field: String, value: Option[String]): Document = {
+    value.foreach(document.append(field, _))
+    document
+  }
 }

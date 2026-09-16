@@ -1,12 +1,15 @@
 package com.example.graphQL.cats.application.service
 
 import cats.Monad
+import cats.data.EitherT
 import cats.syntax.all.*
-import com.example.graphQL.cats.application.port.{JobRepository, RepositoryError, UserRepository}
-import com.example.graphQL.cats.application.{ActorContext, AuthenticationError, UseCaseError}
+import com.example.graphQL.cats.application.ActorContext
+import com.example.graphQL.cats.application.UseCaseError
+import com.example.graphQL.cats.application.UseCaseError.*
+import com.example.graphQL.cats.application.port.{JobRepository, UserRepository}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.service.JobLifecycle
 import java.time.Instant
 
@@ -28,21 +31,20 @@ final case class UpdateJobInput(
 )
 
 final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepository[F]) {
+  private val authorization = ActorAuthorization(users)
+
   def createJob(
       actor: ActorContext,
       input: CreateJobInput,
       now: Instant,
       jobId: JobId
   ): F[Either[UseCaseError, Job]] =
-    resolveActor(actor).flatMap {
-      case Left(error) => error.asLeft[Job].pure[F]
-      case Right(user) if canManageJobs(user) =>
-        validateNewJob(user.id, input, now, jobId).fold(
-          _.asLeft[Job].pure[F],
-          job => persistJob(JobLifecycle.create(job).runA(job).value.leftMap(error => error: UseCaseError), jobs.create)
-        )
-      case Right(_) => DomainError.Forbidden.asLeft[Job].pure[F]
-    }
+    (for {
+      user <- EitherT(authorization.resolve(actor))
+      _ <- EitherT.cond[F](authorization.canManageJobs(user), (), DomainError.Forbidden: UseCaseError)
+      job <- EitherT.fromEither[F](validateNewJob(user.id, input, now, jobId))
+      created <- EitherT(persistCreatedJob(JobLifecycle.create(job).runA(job).value.widenUseCase))
+    } yield created).value
 
   def updateJob(
       actor: ActorContext,
@@ -51,55 +53,39 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
       now: Instant
   ): F[Either[UseCaseError, Job]] =
     withAuthorizedJob(actor, jobId) { job =>
-      validateUpdatedJob(job, input, now).fold(
-        _.asLeft[Job].pure[F],
-        validated => persistJob(JobLifecycle.update(validated).runA(job).value.leftMap(error => error: UseCaseError), jobs.update)
-      )
+      (for {
+        update <- EitherT.fromEither[F](validateUpdatedJob(job, input, now))
+        updated <- EitherT(persistJob(JobLifecycle.update(update).runA(job).value.widenUseCase))
+      } yield updated).value
     }
 
   def publishJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
     withAuthorizedJob(actor, jobId) { job =>
-      persistJob(JobLifecycle.publish(now).runA(job).value.leftMap(error => error: UseCaseError), jobs.update)
+      persistJob(JobLifecycle.publish(now).runA(job).value.widenUseCase)
     }
 
   def closeJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
     withAuthorizedJob(actor, jobId) { job =>
-      persistJob(JobLifecycle.close(now).runA(job).value.leftMap(error => error: UseCaseError), jobs.update)
+      persistJob(JobLifecycle.close(now).runA(job).value.widenUseCase)
     }
 
   def viewJob(actor: ActorContext, jobId: JobId): F[Either[UseCaseError, Job]] =
-    resolveActor(actor).flatMap {
-      case Left(error) => error.asLeft[Job].pure[F]
-      case Right(user) =>
-        jobs.find(jobId).map {
-          case None => DomainError.NotFound("job").asLeft[Job]
-          case Some(job) if canView(user, job) => job.asRight[UseCaseError]
-          case Some(_) => DomainError.Forbidden.asLeft[Job]
-        }
-    }
+    (for {
+      user <- EitherT(authorization.resolve(actor))
+      job <- EitherT.fromOptionF(jobs.find(jobId), DomainError.NotFound("job"): UseCaseError)
+      _ <- EitherT.cond[F](authorization.canView(user, job), (), DomainError.Forbidden: UseCaseError)
+    } yield job).value
 
   private def withAuthorizedJob(
       actor: ActorContext,
       jobId: JobId
   )(operation: Job => F[Either[UseCaseError, Job]]): F[Either[UseCaseError, Job]] =
-    resolveActor(actor).flatMap {
-      case Left(error) => error.asLeft[Job].pure[F]
-      case Right(user) =>
-        jobs.find(jobId).flatMap {
-          case None => DomainError.NotFound("job").asLeft[Job].pure[F]
-          case Some(job) if canManage(user, job) => operation(job)
-          case Some(_) => DomainError.Forbidden.asLeft[Job].pure[F]
-        }
-    }
-
-  private def resolveActor(actor: ActorContext): F[Either[UseCaseError, User]] =
-    users.find(actor.userId).map {
-      case None => AuthenticationError.Unauthorized.asLeft[User]
-      case Some(user) if user.role != actor.role => DomainError.Forbidden.asLeft[User]
-      case Some(user) if user.role == UserRole.Admin && !user.adminSingleton =>
-        AuthenticationError.SingletonAdminViolation.asLeft[User]
-      case Some(user) => user.asRight[UseCaseError]
-    }
+    (for {
+      user <- EitherT(authorization.resolve(actor))
+      job <- EitherT.fromOptionF(jobs.find(jobId), DomainError.NotFound("job"): UseCaseError)
+      _ <- EitherT.cond[F](authorization.canManage(user, job), (), DomainError.Forbidden: UseCaseError)
+      result <- EitherT(operation(job))
+    } yield result).value
 
   private def validateNewJob(
       recruiterId: UserId,
@@ -123,7 +109,7 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
           now
         )
         .toEither
-        .leftMap(errors => errors: UseCaseError)
+        .widenUseCase
     }
 
   private def validateUpdatedJob(job: Job, input: UpdateJobInput, now: Instant): Either[UseCaseError, JobLifecycle.Update] =
@@ -138,10 +124,11 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
         input.location,
         job.status,
         job.createdAt,
-        now
+        now,
+        job.version
       )
       .toEither
-      .leftMap(errors => errors: UseCaseError)
+      .widenUseCase
       .map(validated =>
         JobLifecycle.Update(
           validated.title,
@@ -153,23 +140,17 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
         )
       )
 
-  private def persistJob(
-      result: Either[UseCaseError, Job],
-      persist: Job => F[Either[RepositoryError, Unit]]
-  ): F[Either[UseCaseError, Job]] =
+  private def persistCreatedJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
     result match {
       case Left(error) => error.asLeft[Job].pure[F]
-      case Right(job) => persist(job).map(_.leftMap(error => error: UseCaseError).as(job))
+      case Right(job) => jobs.create(job).map(_.widenUseCase.as(job))
     }
 
-  private def canManageJobs(user: User): Boolean =
-    user.role == UserRole.Recruiter || (user.role == UserRole.Admin && user.adminSingleton)
-
-  private def canManage(user: User, job: Job): Boolean =
-    (user.role == UserRole.Admin && user.adminSingleton) || (user.role == UserRole.Recruiter && job.recruiterId == user.id)
-
-  private def canView(user: User, job: Job): Boolean =
-    job.status == JobStatus.Open || canManage(user, job)
+  private def persistJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
+    result match {
+      case Left(error) => error.asLeft[Job].pure[F]
+      case Right(job) => jobs.update(job).map(_.widenUseCase)
+    }
 }
 
 object JobService {

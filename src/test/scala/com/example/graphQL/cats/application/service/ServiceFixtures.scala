@@ -49,13 +49,16 @@ private[service] object ServiceFixtures {
     override def create(job: Job): IO[Either[RepositoryError, Unit]] =
       ref.update(_ + (job.id -> job)).as(Right(()))
 
-    override def update(job: Job): IO[Either[RepositoryError, Unit]] =
-      ref.update(_ + (job.id -> job)).as(Right(()))
+    override def update(job: Job): IO[Either[RepositoryError, Job]] = {
+      val persisted = job.copy(version = job.version + 1L)
+      ref.update(_ + (job.id -> persisted)).as(Right(persisted))
+    }
   }
 
   final class InMemoryApplications(
       applications: Ref[IO, Map[ApplicationId, Application]],
-      events: Ref[IO, Vector[ApplicationEvent]]
+      events: Ref[IO, Vector[ApplicationEvent]],
+      nextCreateError: Ref[IO, Option[RepositoryError]]
   ) extends ApplicationRepository[IO] {
     override def find(id: ApplicationId): IO[Option[Application]] =
       applications.get.map(_.get(id))
@@ -66,7 +69,7 @@ private[service] object ServiceFixtures {
     override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[List[Application]] =
       applications.get.map(_.values.filter(_.jobId == jobId).filter(matches(page)).toList)
 
-    override def create(application: Application, initialEvent: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
+    private def create(application: Application, initialEvent: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
       applications.modify { current =>
         if (current.values.exists(existing => existing.candidateId == application.candidateId && existing.jobId == application.jobId)) {
           (current, Left(RepositoryError.DuplicateApplication))
@@ -78,14 +81,40 @@ private[service] object ServiceFixtures {
         case Left(_) => IO.unit
       }
 
+    override def createForOpenJob(
+        observedJob: Job,
+        application: Application,
+        initialEvent: ApplicationEvent
+    ): IO[Either[RepositoryError, Unit]] =
+      nextCreateError.modify(error => (None, error)) flatMap {
+        case Some(error) => IO.pure(Left(error))
+        case None if observedJob.status == JobStatus.Open && observedJob.id == application.jobId &&
+            initialEvent.applicationId == application.id =>
+          create(application, initialEvent)
+        case None => IO.pure(Left(RepositoryError.Conflict))
+      }
+
     override def updateStatus(
         application: Application,
         event: ApplicationEvent
     ): IO[Either[RepositoryError, Unit]] =
-      applications.update(_ + (application.id -> application)).as(Right(())) <* events.update(_ :+ event)
+      applications.modify { current =>
+        current.get(application.id) match {
+          case Some(existing) if event.previousStatus.contains(existing.status) =>
+            (current + (application.id -> application), Right(()))
+          case Some(_) => (current, Left(RepositoryError.Conflict))
+          case None => (current, Left(RepositoryError.Unavailable))
+        }
+      }.flatTap {
+        case Right(()) => events.update(_ :+ event)
+        case Left(_) => IO.unit
+      }
 
     def allEvents: IO[Vector[ApplicationEvent]] =
       events.get
+
+    def rejectNextCreateWith(error: RepositoryError): IO[Unit] =
+      nextCreateError.set(Some(error))
 
     private def matches(page: ApplicationPageRequest)(application: Application): Boolean =
       page.status.forall(_ == application.status)

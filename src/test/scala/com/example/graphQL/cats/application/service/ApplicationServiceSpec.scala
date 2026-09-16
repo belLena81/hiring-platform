@@ -3,7 +3,7 @@ package com.example.graphQL.cats.application.service
 import cats.effect.IO
 import cats.effect.Ref
 import com.example.graphQL.cats.application.ActorContext
-import com.example.graphQL.cats.application.port.{ApplicationPageRequest, PageSize}
+import com.example.graphQL.cats.application.port.{ApplicationPageRequest, PageSize, RepositoryError}
 import com.example.graphQL.cats.application.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
@@ -35,6 +35,19 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         events <- applications.allEvents
       } yield {
         assertEquals(result, Left(DomainError.JobMustBeOpen))
+        assertEquals(events, Vector.empty)
+      }
+    }
+  }
+
+  test("submitApplication preserves repository conflict when job closes before transactional write") {
+    withServices(Map(jobId -> openJob), Map.empty).flatMap { case (_, applications, service) =>
+      for {
+        _ <- applications.rejectNextCreateWith(RepositoryError.Conflict)
+        result <- service.submitApplication(ActorContext(candidateId, UserRole.Candidate), jobId, applicationId, eventId, now)
+        events <- applications.allEvents
+      } yield {
+        assertEquals(result, Left(RepositoryError.Conflict))
         assertEquals(events, Vector.empty)
       }
     }
@@ -120,7 +133,8 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](jobs)
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](applications)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.application.port.RepositoryError]](None)
       jobRepository = InMemoryJobs(jobsRef)
-      applicationRepository = InMemoryApplications(applicationsRef, eventsRef)
+      applicationRepository = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
     } yield (jobRepository, applicationRepository, ApplicationService[IO](InMemoryUsers(usersRef), jobRepository, applicationRepository))
 }

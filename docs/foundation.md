@@ -27,15 +27,24 @@ Stop/start MongoDB with `docker compose stop mongodb` and `docker compose start 
 
 ## Configuration and API tools
 
-The application reads process environment only. Defaults and sanitized examples are in `.env.example`. `.env` and `.local/config/` are storage conventions, not automatic configuration sources.
+The application loads defaults from `src/main/resources/application.conf` and then overlays an ignored root `local.conf` when present. Without `local.conf`, the checked-in configuration is the production-style default. Keep non-sensitive local values hardcoded in `local.conf`; pass only sensitive values, such as credential-bearing MongoDB URIs, through config placeholders like `MONGODB_URI={$MONGODB_URI}`.
 
 ```bash
-HTTP_PORT=8080 sbt run
+cat > local.conf <<'EOF'
+HTTP_HOST=127.0.0.1
+HTTP_PORT=8080
+MONGODB_URI={$MONGODB_URI}
+MONGODB_DATABASE=hiring
+LOG_LEVEL=INFO
+LOG_MASK_SENSITIVE=true
+LOG_REQUEST_PAYLOADS=false
+EOF
+MONGODB_URI=mongodb://127.0.0.1:27017 sbt run
 ```
 
 The repository is backend-only. Download `http://127.0.0.1:8080/schema.graphql` or use an external API client against `/graphql` with introspection. No UI assets, frontend build, or Node tooling are included. See the [API reference](api.md) for operations and error contracts.
 
-For persistent local shell settings, copy the sanitized example into ignored `.local/config/` and explicitly export only reviewed values in your shell before `sbt run`. Never source untrusted configuration files. Mongo credentials belong in the process environment/local ignored configuration, never committed examples or command transcripts.
+For persistent local settings, keep `local.conf` ignored and review it before running the app. Never load untrusted configuration files. Mongo credentials belong in process environment variables referenced by config placeholders, never committed examples or command transcripts.
 
 | Variable | Default | Validation |
 |---|---|---|
@@ -44,8 +53,7 @@ For persistent local shell settings, copy the sanitized example into ignored `.l
 | MONGODB_URI | mongodb://127.0.0.1:27017 | Valid Mongo connection string |
 | MONGODB_DATABASE | hiring | Valid nonempty database name |
 | LOG_LEVEL | INFO | INFO, WARN, ERROR |
-| APP_ENV | production | production or local |
-| LOG_MASK_SENSITIVE | true | false only with local environment and loopback HTTP binding |
+| LOG_MASK_SENSITIVE | true | false only with loopback HTTP binding |
 | LOG_REQUEST_PAYLOADS | false | true only with local loopback binding and masking disabled |
 
 Malformed configuration exits unsuccessfully with a safe category and configuration key. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default; local filtered payload capture requires a separate explicit opt-in. Framework/driver raw output remains suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).

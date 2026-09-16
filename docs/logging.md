@@ -49,24 +49,31 @@ The service and adapter each retain their two-second deadline. The service can c
 
 | Variable | Default | Policy |
 |---|---|---|
-| `APP_ENV` | `production` | Only `production` or `local` |
-| `LOG_MASK_SENSITIVE` | `true` | `false` requires explicit local environment and loopback HTTP binding |
+| `LOG_MASK_SENSITIVE` | `true` | `false` requires loopback HTTP binding |
 | `LOG_REQUEST_PAYLOADS` | `false` | `true` additionally requires masking disabled |
 | `LOG_LEVEL` | `INFO` | `INFO`, `WARN` or `ERROR`; payload/completion records are INFO |
 
 Safe defaults apply even on a developer laptop. To reveal selected diagnostic metadata locally:
 
 ```bash
-APP_ENV=local LOG_MASK_SENSITIVE=false sbt run
+cat > local.conf <<'EOF'
+LOG_MASK_SENSITIVE=false
+EOF
+sbt run
 ```
 
 To additionally capture filtered GraphQL requests locally:
 
 ```bash
-APP_ENV=local LOG_MASK_SENSITIVE=false LOG_REQUEST_PAYLOADS=true LOG_LEVEL=INFO sbt run
+cat > local.conf <<'EOF'
+LOG_MASK_SENSITIVE=false
+LOG_REQUEST_PAYLOADS=true
+LOG_LEVEL=INFO
+EOF
+sbt run
 ```
 
-Keep the default loopback bind (`127.0.0.1`, or IPv6 `::1`). Wildcard/non-loopback bindings reject these unsafe options. Missing/invalid flags fail closed; production refuses unmasking or payload capture. Local-unmasked and payload-enabled startup warnings remain visible at ERROR level. `.env` files are not automatically loaded. Runtime/configuration failure fallback logging always remains masked.
+Keep the default loopback bind (`127.0.0.1`, or IPv6 `::1`). Wildcard/non-loopback bindings reject these unsafe options. Missing/invalid flags fail closed; request payload capture requires masking disabled. `local.conf` is ignored and overlaid on `application.conf`; `.env` files are not automatically loaded. Runtime/configuration failure fallback logging always remains masked.
 
 ## What local payload capture contains
 

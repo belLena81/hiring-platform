@@ -28,6 +28,7 @@ class MainProcessSpec extends CatsEffectSuite {
       IO.blocking {
         val _ = Files.deleteIfExists(directory.resolve("stdout.log"))
         val _ = Files.deleteIfExists(directory.resolve("stderr.log"))
+        val _ = Files.deleteIfExists(directory.resolve("local.conf"))
         val _ = Files.deleteIfExists(directory)
       }
     }
@@ -47,21 +48,27 @@ class MainProcessSpec extends CatsEffectSuite {
       val stdout = directory.resolve("stdout.log")
       val stderr = directory.resolve("stderr.log")
       Resource.make(IO.blocking {
+        val configFile = directory.resolve("local.conf")
+        val defaults = Map(
+          "HTTP_HOST" -> "127.0.0.1",
+          "HTTP_PORT" -> "8080",
+          "MONGODB_URI" -> "{$MONGODB_URI}",
+          "MONGODB_DATABASE" -> "hiring_test",
+          "LOG_LEVEL" -> "ERROR"
+        )
+        val configEntries = defaults ++ environment.removed("MONGODB_URI")
+        Files.writeString(configFile, configEntries.toList.sortBy(_._1).map { case (key, value) => s"$key=$value" }.mkString("", "\n", "\n"))
         val builder = new ProcessBuilder((List(
           Path.of(System.getProperty("java.home"), "bin", "java").toString,
           "-Dfile.encoding=UTF-8",
           "-Djdk.httpclient.allowRestrictedHeaders=connection",
           "-cp", System.getProperty("java.class.path"), entryPoint
-        ) ++ arguments)*).redirectOutput(stdout.toFile).redirectError(stderr.toFile)
+        ) ++ arguments)*).directory(directory.toFile).redirectOutput(stdout.toFile).redirectError(stderr.toFile)
         val childEnvironment = builder.environment()
         childEnvironment.clear()
         (Map(
-          "HTTP_HOST" -> "127.0.0.1",
-          "HTTP_PORT" -> "8080",
-          "MONGODB_URI" -> s"mongodb://test-user:$secret@127.0.0.1:1/?authSource=admin",
-          "MONGODB_DATABASE" -> "hiring_test",
-          "LOG_LEVEL" -> "ERROR"
-        ) ++ environment).foreach { case (key, value) =>
+          "MONGODB_URI" -> s"mongodb://test-user:$secret@127.0.0.1:1/?authSource=admin"
+        ) ++ environment.filter { case (key, _) => key == "MONGODB_URI" }).foreach { case (key, value) =>
           val _ = childEnvironment.put(key, value)
         }
         builder.start()
@@ -133,7 +140,8 @@ class MainProcessSpec extends CatsEffectSuite {
     for {
       port <- listeningSocket().use(socket => IO.pure(socket.getLocalPort))
       result <- runChild("com.example.graphQL.cats.runtime.MainReporterProcess",
-        Map("HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO"), List("--exercise-payload"))
+        Map("HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO"),
+        List("--exercise-payload", "--test-http-host=127.0.0.1", s"--test-http-port=$port"))
     } yield {
       assertEquals(result.exitCode, 0)
       val events = assertSanitized(result, "RUNTIME_FAILED")
@@ -147,21 +155,16 @@ class MainProcessSpec extends CatsEffectSuite {
       assert(!categories.contains("REQUEST_PAYLOAD"))
       assert(events.forall(_.hcursor.get[String]("masking") == Right("enabled")))
       val started = events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
-      assertEquals(started.hcursor.downField("details").get[String]("environment"), Right("production"))
       assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right("[REDACTED]"))
       assertEquals(started.hcursor.downField("details").get[String]("httpPort"), Right(port.toString))
     }
   }
 
   List(
-    ("implicit production unmasking", Map("LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
-    ("explicit production unmasking", Map("APP_ENV" -> "production", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
-    ("production payload capture", Map("LOG_REQUEST_PAYLOADS" -> "true"), "LOG_REQUEST_PAYLOADS"),
-    ("local masked payload capture", Map("APP_ENV" -> "local", "LOG_REQUEST_PAYLOADS" -> "true"), "LOG_REQUEST_PAYLOADS"),
-    ("IPv4 wildcard unmasking", Map("APP_ENV" -> "local", "HTTP_HOST" -> "0.0.0.0", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
-    ("IPv6 wildcard unmasking", Map("APP_ENV" -> "local", "HTTP_HOST" -> "::", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
-    ("IPv6 nonloopback unmasking", Map("APP_ENV" -> "local", "HTTP_HOST" -> "2001:db8::1", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
-    ("invalid environment", Map("APP_ENV" -> "synthetic-secret"), "APP_ENV"),
+    ("masked payload capture", Map("LOG_REQUEST_PAYLOADS" -> "true"), "LOG_REQUEST_PAYLOADS"),
+    ("IPv4 wildcard unmasking", Map("HTTP_HOST" -> "0.0.0.0", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
+    ("IPv6 wildcard unmasking", Map("HTTP_HOST" -> "::", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
+    ("IPv6 nonloopback unmasking", Map("HTTP_HOST" -> "2001:db8::1", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
     ("invalid masking flag", Map("LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE"),
     ("invalid payload flag", Map("LOG_REQUEST_PAYLOADS" -> "synthetic-secret"), "LOG_REQUEST_PAYLOADS")
   ).foreach { case (label, environment, key) =>
@@ -184,8 +187,8 @@ class MainProcessSpec extends CatsEffectSuite {
         port <- listeningSocket(host).use(socket => IO.pure(socket.getLocalPort))
         result <- runChild("com.example.graphQL.cats.runtime.MainReporterProcess", Map(
           "HTTP_HOST" -> host, "HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO",
-          "APP_ENV" -> "local", "LOG_MASK_SENSITIVE" -> "false"
-        ), List("--exercise-payload"))
+          "LOG_MASK_SENSITIVE" -> "false"
+        ), List("--exercise-payload", s"--test-http-host=$host", s"--test-http-port=$port"))
       } yield {
         assertEquals(result.exitCode, 0)
         val events = assertSanitized(result, "RUNTIME_FAILED")
@@ -197,7 +200,6 @@ class MainProcessSpec extends CatsEffectSuite {
           assertEquals(event.hcursor.get[String]("masking"), Right(if (runtimeFailure) "enabled" else "disabled-local"))
         }
         val started = events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
-        assertEquals(started.hcursor.downField("details").get[String]("environment"), Right("local"))
         assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right(host))
         val failure = events.find(_.hcursor.get[String]("category") == Right("RUNTIME_FAILED")).getOrElse(fail("Missing failure"))
         assertEquals(failure.hcursor.downField("details").get[String]("errorType"), Right("java.lang.RuntimeException"))
@@ -208,7 +210,7 @@ class MainProcessSpec extends CatsEffectSuite {
   List(false, true).foreach { payloads =>
     test(s"LOG-03 local startup warnings bypass ERROR with payloads=$payloads and have no duplicates") {
       listeningSocket().use { socket =>
-        runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString, "APP_ENV" -> "local",
+        runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString,
           "LOG_MASK_SENSITIVE" -> "false", "LOG_REQUEST_PAYLOADS" -> payloads.toString)).map { result =>
           assert(result.exitCode != 0)
           val events = assertSanitized(result, "STARTUP_FAILED")
@@ -228,9 +230,9 @@ class MainProcessSpec extends CatsEffectSuite {
     for {
       port <- listeningSocket().use(socket => IO.pure(socket.getLocalPort))
       result <- runChild("com.example.graphQL.cats.runtime.MainReporterProcess", Map(
-        "HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO", "APP_ENV" -> "local",
+        "HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO",
         "LOG_MASK_SENSITIVE" -> "false", "LOG_REQUEST_PAYLOADS" -> "true"
-      ), List("--exercise-payload"))
+      ), List("--exercise-payload", "--test-http-host=127.0.0.1", s"--test-http-port=$port"))
     } yield {
       assertEquals(result.exitCode, 0)
       val events = assertSanitized(result, "RUNTIME_FAILED")

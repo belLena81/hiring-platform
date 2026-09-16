@@ -12,7 +12,7 @@ Payload contract: capture only after schema validation, operation selection and 
 
 The sanitizer traverses at most 64 nodes, depth 8 and 32 children per container; clips user-controlled names to 64 characters; bounds the final serialized payload to 2048 UTF-8 bytes with valid-JSON omission/truncation indicators. Failure omits capture without affecting responses/cancellation. Producers bypass all payload construction when disabled; masked/default renderers drop payload fields/events even if supplied accidentally. Startup warns explicitly when unmasked metadata and/or filtered payload capture is enabled, even at ERROR log level.
 
-Masking defaults on. `APP_ENV` defaults to `production` and permits only `production` or `local`. `LOG_MASK_SENSITIVE` defaults to `true` and accepts only `true`/`false`. Disabling masking requires explicit `APP_ENV=local` and a numeric loopback HTTP bind address; unsafe combinations fail startup without echoing values. Configuration rendering stays redacted in all modes. Emit a visible local-unmasked warning and include masking mode in each structured log record. All API errors remain sanitized regardless of logging flags.
+Masking defaults on from `application.conf`; an ignored `local.conf` may override it for local startup. `LOG_MASK_SENSITIVE` accepts only `true`/`false`. Disabling masking requires a numeric loopback HTTP bind address; unsafe combinations fail startup without echoing values. Configuration rendering stays redacted in all modes. Emit a visible local-unmasked warning and include masking mode in each structured log record. All API errors remain sanitized regardless of logging flags.
 
 ## Contract and implementation
 

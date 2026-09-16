@@ -69,7 +69,17 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line))
-      invalid <- IO(AppConfig.fromEnvironment(Map("MONGODB_URI" -> secret)))
+      invalid <- IO(AppConfig.fromConfig(
+        s"""HTTP_HOST=127.0.0.1
+           |HTTP_PORT=8080
+           |MONGODB_URI=$secret
+           |MONGODB_DATABASE=hiring
+           |LOG_LEVEL=INFO
+           |LOG_MASK_SENSITIVE=true
+           |LOG_REQUEST_PAYLOADS=false
+           |""".stripMargin,
+        Map.empty
+      ))
       _ <- diagnostics.event(LogEvent.ConfigInvalid, Some(secret))
       _ <- diagnostics.event(LogEvent.RequestRejected, Some("validation failed: " + secret))
       _ <- diagnostics.event(LogEvent.MongoAuthFailed)

@@ -11,6 +11,10 @@ import java.util.concurrent.CountDownLatch
 
 object MainReporterProcess {
   def main(args: Array[String]): Unit = {
+    val arguments = args.toList
+    def argumentValue(name: String): Option[String] =
+      arguments.collectFirst { case value if value.startsWith(s"--$name=") => value.drop(name.length + 3) }
+
     val started = new CountDownLatch(1)
     val reported = new CountDownLatch(1)
     val original = System.out
@@ -33,11 +37,12 @@ object MainReporterProcess {
     System.setOut(new PrintStream(forwarding, true, StandardCharsets.UTF_8))
     val injector = new Thread(() => {
       started.await()
-      if (args.contains("--exercise-payload")) {
-        val host = sys.env("HTTP_HOST")
+      if (arguments.contains("--exercise-payload")) {
+        val host = argumentValue("test-http-host").getOrElse("127.0.0.1")
+        val port = argumentValue("test-http-port").getOrElse("8080")
         val authority = if (host.contains(':')) s"[$host]" else host
         val query = """{"query":"query LocalHealth($include: Boolean = true) { health @include(if: $include) { status } __type(name: \"synthetic-secret\") { name } } # synthetic-comment", "variables":{"include":true,"password":"synthetic-secret","api-key":"synthetic-secret"}}"""
-        val request = HttpRequest.newBuilder(URI.create(s"http://$authority:${sys.env("HTTP_PORT")}/graphql"))
+        val request = HttpRequest.newBuilder(URI.create(s"http://$authority:$port/graphql"))
           .timeout(Duration.ofSeconds(8))
           .header("Content-Type", "application/json")
           .header("Connection", "close")

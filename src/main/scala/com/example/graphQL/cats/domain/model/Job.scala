@@ -31,7 +31,8 @@ final case class Job(
   location: Location,
   status: JobStatus,
   createdAt: Instant,
-  updatedAt: Instant
+  updatedAt: Instant,
+  version: Long = 0L
 )
 
 object Job {
@@ -45,7 +46,8 @@ object Job {
       location: Location,
       status: JobStatus,
       createdAt: Instant,
-      updatedAt: Instant
+      updatedAt: Instant,
+      version: Long = 0L
   ): ValidatedNel[DomainValidationError, Job] =
     (
       validateText("title", title),
@@ -54,7 +56,7 @@ object Job {
       validateNonEmptyValues("skills", skills)
     ).mapN { (validTitle, validDescription, validRequirements, validSkills) =>
       Job(id, recruiterId, validTitle, validDescription, validRequirements, validSkills, location, status, createdAt,
-        updatedAt)
+        updatedAt, version)
     }
 
   private def validateRequirements(requirements: List[String]): ValidatedNel[DomainValidationError, List[String]] = {

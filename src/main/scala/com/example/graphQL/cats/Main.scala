@@ -22,7 +22,6 @@ object Main extends IOApp {
           MongoDatabaseProbe.resource(config.mongoUri, config.mongoDatabase, diagnostics = diagnostics)
             .flatMap(probe => FoundationServer.resource(config.host, config.port, probe, diagnostics))
             .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
-              LogField.Environment -> config.appEnv,
               LogField.HttpHost -> config.host,
               LogField.HttpPort -> config.port.toString
             )) *> IO.never[ExitCode])

@@ -682,6 +682,16 @@ Index:
 }
 ```
 
+When the optional status filter is absent, use a paired pagination index that keeps the equality prefix aligned with the query:
+
+```javascript
+{
+  candidateId: 1,
+  createdAt: -1,
+  _id: -1
+}
+```
+
 ---
 
 ### Applications for a job
@@ -701,6 +711,16 @@ Index:
 {
   jobId: 1,
   status: 1,
+  createdAt: -1,
+  _id: -1
+}
+```
+
+When the optional status filter is absent, use the paired pagination index:
+
+```javascript
+{
+  jobId: 1,
   createdAt: -1,
   _id: -1
 }
