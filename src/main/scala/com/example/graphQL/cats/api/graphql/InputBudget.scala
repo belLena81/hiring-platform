@@ -18,12 +18,38 @@ object InputBudget {
       else if (!block && input.charAt(offset) == '"') Some(offset + 1)
       else quoted(offset + 1, block)
 
-    def word(character: Char): Boolean =
-      character.isLetterOrDigit || character == '_' || character == '.' || character == '-' || character == '+'
+    def nameStart(character: Char): Boolean =
+      character == '_' || (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+
+    def digit(character: Char): Boolean = character >= '0' && character <= '9'
 
     @tailrec
-    def wordEnd(offset: Int): Int =
-      if (offset < input.length && word(input.charAt(offset))) wordEnd(offset + 1) else offset
+    def nameEnd(offset: Int): Int =
+      if (offset < input.length && (nameStart(input.charAt(offset)) || digit(input.charAt(offset))))
+        nameEnd(offset + 1)
+      else offset
+
+    @tailrec
+    def digitsEnd(offset: Int): Int =
+      if (offset < input.length && digit(input.charAt(offset))) digitsEnd(offset + 1) else offset
+
+    def numberEnd(offset: Int): Int = {
+      val integerStart = offset + (if (input.charAt(offset) == '-') 1 else 0)
+      val integerEnd = if (input.charAt(integerStart) == '0') integerStart + 1 else digitsEnd(integerStart)
+      val fractionEnd =
+        if (integerEnd + 1 < input.length && input.charAt(integerEnd) == '.' && digit(input.charAt(integerEnd + 1)))
+          digitsEnd(integerEnd + 1)
+        else integerEnd
+      if (fractionEnd < input.length && (input.charAt(fractionEnd) == 'e' || input.charAt(fractionEnd) == 'E')) {
+        val exponentStart = fractionEnd + 1
+        val signedStart =
+          if (exponentStart < input.length && (input.charAt(exponentStart) == '+' || input.charAt(exponentStart) == '-'))
+            exponentStart + 1
+          else exponentStart
+        if (signedStart < input.length && digit(input.charAt(signedStart))) digitsEnd(signedStart)
+        else fractionEnd
+      } else fractionEnd
+    }
 
     @tailrec
     def scan(offset: Int, stack: List[Char], tokens: Int): Boolean =
@@ -47,8 +73,12 @@ object InputBudget {
           case expected :: rest if expected == character => scan(offset + 1, rest, tokens + 1)
           case _                                         => false
         }
-        case character if word(character) => scan(wordEnd(offset + 1), stack, tokens + 1)
-        case _                            => scan(offset + 1, stack, tokens + 1)
+        case character if nameStart(character) => scan(nameEnd(offset + 1), stack, tokens + 1)
+        case character if digit(character) => scan(numberEnd(offset), stack, tokens + 1)
+        case '-' if offset + 1 < input.length && digit(input.charAt(offset + 1)) =>
+          scan(numberEnd(offset), stack, tokens + 1)
+        case '.' if graphql && input.startsWith("...", offset) => scan(offset + 3, stack, tokens + 1)
+        case _ => scan(offset + 1, stack, tokens + 1)
       }
 
     scan(0, Nil, 0)

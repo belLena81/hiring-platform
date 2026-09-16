@@ -1,10 +1,15 @@
 package com.example.graphQL.cats.infrastructure.mongo
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
 import com.github.dockerjava.api.model.ExposedPort
-import com.example.graphQL.cats.application.{DatabaseProbe, ProbeResult}
+import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
+import com.example.graphQL.cats.api.http.{Admission, FoundationRoutes}
+import io.circe.Json
 import munit.CatsEffectSuite
 import org.bson.Document
+import org.http4s.{Method, Request, Status, Uri}
+import org.http4s.circe.*
+import org.typelevel.ci.CIString
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
@@ -102,9 +107,58 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
       val valid = s"mongodb://foundation:$password@$address/?authSource=admin"
       val invalid = s"mongodb://foundation:incorrect@$address/?authSource=admin"
       MongoDatabaseProbe.resource(valid, "foundation").use { authenticated =>
-        ready(authenticated) *> MongoDatabaseProbe.resource(invalid, "foundation").use { rejected =>
-          rejected.check.flatMap(result => IO(assertEquals(result, ProbeResult.AuthenticationFailed)))
-        } *> ready(authenticated)
+        for {
+          _ <- ready(authenticated)
+          records <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
+          diagnostics = new Diagnostics {
+            def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+              records.update(_ :+ ((event, id, fields)))
+          }
+          requestId = Some("fe211944-7015-4e73-8dc1-000000000001")
+          result <- MongoDatabaseProbe.resource(invalid, "foundation", diagnostics).use(_.check(requestId))
+          captured <- records.get
+          _ <- IO {
+            assertEquals(result, ProbeResult.AuthenticationFailed)
+            assertEquals(captured.size, 1)
+            assert(captured.forall { case (event, id, fields) =>
+              event == LogEvent.MongoProbeFailed && id == requestId &&
+                fields.get(LogField.Reason).contains("AUTHENTICATION_FAILED") &&
+                fields.get(LogField.ErrorType).contains("com.mongodb.MongoSecurityException") &&
+                fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0)
+            })
+            assert(!captured.toString.contains("incorrect"))
+            assert(!captured.toString.contains(password))
+            assert(!captured.toString.contains("authSource"))
+          }
+          _ <- records.set(Vector.empty)
+          _ <- MongoDatabaseProbe.resource(invalid, "foundation", diagnostics).use { rejected =>
+            for {
+              admission <- Admission.create
+              http = new FoundationRoutes(new HealthService(rejected, diagnostics), diagnostics, admission).app
+              response <- http(Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+                .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }"))))
+              body <- response.as[Json]
+              correlated <- records.get
+            } yield {
+              val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+              assertEquals(response.status, Status.Ok)
+              assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
+              assertEquals(correlated.map(_._1), Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed,
+                LogEvent.GraphQLCompleted, LogEvent.RequestCompleted))
+              assert(id.nonEmpty)
+              assert(correlated.forall(_._2 == id))
+              assert(correlated.filter(_._1 == LogEvent.MongoProbeFailed).forall(_._3.get(LogField.ErrorType)
+                .contains("com.mongodb.MongoSecurityException")))
+            }
+          }
+          throwing = new Diagnostics {
+            def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+              throw new IllegalStateException("synthetic-sink-secret")
+          }
+          unchanged <- MongoDatabaseProbe.resource(invalid, "foundation", throwing).use(_.check(requestId))
+          _ <- IO(assertEquals(unchanged, ProbeResult.AuthenticationFailed))
+          _ <- ready(authenticated)
+        } yield ()
       }
     }
   }

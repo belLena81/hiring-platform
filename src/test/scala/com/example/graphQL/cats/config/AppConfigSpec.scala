@@ -49,4 +49,70 @@ class AppConfigSpec extends FunSuite {
     assert(!result.toString.contains("synthetic-secret"))
     assert(!result.toString.contains("mongodb://"))
   }
+
+  test("LOG-03 secure defaults apply even to direct configuration construction") {
+    val config = AppConfig("127.0.0.1", 8080, "mongodb://localhost", "hiring", "INFO")
+    assertEquals(config.appEnv, "production")
+    assert(config.maskSensitive)
+    assert(!config.requestPayloads)
+    assertEquals(AppConfig.fromEnvironment(Map.empty).map(value =>
+      (value.appEnv, value.maskSensitive, value.requestPayloads)), Right(("production", true, false)))
+  }
+
+  test("LOG-03 explicit local unmasking and payload opt-in accept parsed loopback addresses") {
+    List("127.0.0.1", "127.0.0.0", "127.25.67.89", "127.255.255.255",
+      "::1", "0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001",
+      "::ffff:127.0.0.1").foreach { host =>
+      List("false", "true").foreach { payloads =>
+        val result = AppConfig.fromEnvironment(Map(
+          "HTTP_HOST" -> host, "APP_ENV" -> "local", "LOG_MASK_SENSITIVE" -> "false",
+          "LOG_REQUEST_PAYLOADS" -> payloads
+        ))
+        assertEquals(result.map(value => (value.appEnv, value.maskSensitive, value.requestPayloads)),
+          Right(("local", false, payloads == "true")), clues(host))
+      }
+    }
+  }
+
+  test("LOG-03 unsafe logging flags require explicit local loopback and disabled masking") {
+    List("0.0.0.0", "::", "192.0.2.1", "126.255.255.255", "128.0.0.1",
+      "::2", "2001:db8::1", "::ffff:192.0.2.1").foreach { host =>
+      assertEquals(AppConfig.fromEnvironment(Map("HTTP_HOST" -> host, "APP_ENV" -> "local",
+        "LOG_MASK_SENSITIVE" -> "false")), Left(ConfigError.UnsafeMaskSensitive), clues(host))
+      assert(AppConfig.fromEnvironment(Map("HTTP_HOST" -> host)).isRight, clues(host))
+    }
+    List(Map.empty[String, String], Map("APP_ENV" -> "production")).foreach { environment =>
+      assertEquals(AppConfig.fromEnvironment(environment + ("LOG_MASK_SENSITIVE" -> "false")),
+        Left(ConfigError.UnsafeMaskSensitive))
+      assertEquals(AppConfig.fromEnvironment(environment + ("LOG_REQUEST_PAYLOADS" -> "true")),
+        Left(ConfigError.UnsafeRequestPayloads))
+    }
+    assertEquals(AppConfig.fromEnvironment(Map("APP_ENV" -> "local", "LOG_REQUEST_PAYLOADS" -> "true")),
+      Left(ConfigError.UnsafeRequestPayloads))
+  }
+
+  test("LOG-03 environment and logging booleans are strict with safe configuration keys") {
+    List(
+      ("APP_ENV", List("", "LOCAL", "development", " local", "local\n", "synthetic-secret"), ConfigError.InvalidAppEnv),
+      ("LOG_MASK_SENSITIVE", List("", "TRUE", "0", "false ", "synthetic-secret"), ConfigError.InvalidMaskSensitive),
+      ("LOG_REQUEST_PAYLOADS", List("", "FALSE", "1", "true\n", "synthetic-secret"), ConfigError.InvalidRequestPayloads)
+    ).foreach { case (key, values, expected) =>
+      values.foreach { value =>
+        val result = AppConfig.fromEnvironment(Map(key -> value))
+        assertEquals(result, Left(expected), clues(key))
+        assertEquals(expected.key, key)
+        assert(!result.toString.contains("synthetic-secret"))
+      }
+    }
+    assertEquals(AppConfig.fromEnvironment(Map("APP_ENV" -> "local", "HTTP_HOST" -> "localhost",
+      "LOG_MASK_SENSITIVE" -> "false")), Left(ConfigError.InvalidHost))
+  }
+
+  test("LOG-04 configuration remains redacted when local metadata and payload capture are enabled") {
+    val result = AppConfig.fromEnvironment(Map("APP_ENV" -> "local", "LOG_MASK_SENSITIVE" -> "false",
+      "LOG_REQUEST_PAYLOADS" -> "true", "MONGODB_URI" -> "mongodb://user:synthetic-secret@127.0.0.1:1"))
+    assert(result.isRight)
+    assert(!result.toString.contains("synthetic-secret"))
+    assert(!result.toString.contains("mongodb://"))
+  }
 }

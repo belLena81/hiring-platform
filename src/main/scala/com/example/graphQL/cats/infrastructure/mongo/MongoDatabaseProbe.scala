@@ -1,13 +1,14 @@
 package com.example.graphQL.cats.infrastructure.mongo
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.application.{DatabaseProbe, ProbeResult}
-import com.mongodb.{ConnectionString, MongoClientSettings, MongoSecurityException}
+import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
+import com.mongodb.{ConnectionString, MongoClientSettings, MongoSecurityException, MongoSocketException, MongoTimeoutException}
 import com.mongodb.reactivestreams.client.{MongoClient, MongoClients}
 import org.bson.Document
 
 import java.util.concurrent.TimeUnit
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 object MongoDatabaseProbe {
   def effectiveSettings(uri: String): MongoClientSettings =
@@ -27,20 +28,39 @@ object MongoDatabaseProbe {
   private[mongo] def clientResource(uri: String): Resource[IO, MongoClient] =
     Resource.make(IO.blocking(MongoClients.create(effectiveSettings(uri))))(client => IO.blocking(client.close()))
 
-  def resource(uri: String, database: String): Resource[IO, DatabaseProbe] =
-    clientResource(uri).map { client =>
+  private[mongo] def connectionMetadata(uri: String, database: String): Map[LogField, String] =
+    Map(LogField.MongoHosts -> new ConnectionString(uri).getHosts.asScala.take(4).mkString(","),
+      LogField.MongoDatabase -> database)
+
+  def resource(uri: String, database: String, diagnostics: Diagnostics = Diagnostics.noop): Resource[IO, DatabaseProbe] =
+    clientResource(uri).evalMap { client => IO {
+      val metadata = connectionMetadata(uri, database)
       new DatabaseProbe {
-        override def check: IO[ProbeResult] =
+        override def check: IO[ProbeResult] = check(None)
+
+        override def check(requestId: Option[String]): IO[ProbeResult] =
           PublisherBridge.first(client.getDatabase(database).runCommand(new Document("ping", 1)))
             .map {
-              case Some(_) => ProbeResult.Ready
-              case None => ProbeResult.Unavailable
+              case Some(_) => (ProbeResult.Ready, Map.empty[LogField, String])
+              case None => (ProbeResult.Unavailable, Map(LogField.Reason -> "EMPTY_RESULT"))
             }
-            .handleError {
-              case _: MongoSecurityException => ProbeResult.AuthenticationFailed
-              case _ => ProbeResult.Unavailable
+            .handleError { error =>
+              val (result, reason) = error match {
+                case _: MongoSecurityException => (ProbeResult.AuthenticationFailed, "AUTHENTICATION_FAILED")
+                case _: MongoTimeoutException => (ProbeResult.Unavailable, "DATABASE_TIMEOUT")
+                case _: MongoSocketException => (ProbeResult.Unavailable, "DATABASE_NETWORK")
+                case _ => (ProbeResult.Unavailable, "DATABASE_ERROR")
+              }
+              (result, LogFields.failure(error) + (LogField.Reason -> reason))
             }
-            .timeoutTo(2.seconds, IO.pure(ProbeResult.Unavailable))
+            .timeoutTo(2.seconds, IO.pure((ProbeResult.Unavailable,
+              LogFields.failure(new java.util.concurrent.TimeoutException()) + (LogField.Reason -> "PROBE_TIMEOUT"))))
+            .timed.flatMap { case (elapsed, (result, failure)) =>
+              val fields = metadata ++ failure ++ Map(LogField.DurationMs -> elapsed.toMillis.toString,
+                LogField.Outcome -> "NOT_READY")
+              (if (result == ProbeResult.Ready) IO.unit
+              else Diagnostics.emit(diagnostics, LogEvent.MongoProbeFailed, requestId, fields)).as(result)
+            }
       }
-    }
+    }}
 }

@@ -44,7 +44,9 @@ Named operations and variables:
 }
 ```
 
-Send `Content-Type: application/json`; responses use JSON. `query` is required. Missing/null `variables` means an empty object, and missing/null `operationName` means no selected name. When the document contains several operations, provide an operation name. Supply required variables explicitly; the pinned Sangria version has a documented limitation with omitted required-variable defaults.
+Send `Content-Type: application/json`; responses use JSON. An absent `Accept` header is supported. When supplied, the most-specific matching range determines JSON quality (`application/json`, then `application/*`, then `*/*`); explicit JSON quality zero excludes it even with a positive wildcard. Quality values must be 0 through 1 with at most three decimal places; malformed or duplicate quality parameters return 406. Equally specific matching ranges use their highest quality, and omitted quality defaults to 1.
+
+`query` is required. Missing/null `variables` means an empty object, and missing/null `operationName` means no selected name. When the document contains several operations, provide an operation name. Supply required variables explicitly; the pinned Sangria version has a documented limitation with omitted required-variable defaults.
 
 ## Errors and limits
 

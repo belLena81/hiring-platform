@@ -1,24 +1,36 @@
 package com.example.graphQL.cats
 
 import cats.effect.{ExitCode, IO, IOApp}
-import com.example.graphQL.cats.application.LogEvent
+import com.example.graphQL.cats.application.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.mongo.MongoDatabaseProbe
 import com.example.graphQL.cats.runtime.FoundationServer
 
 object Main extends IOApp {
+  override protected def reportFailure(error: Throwable): IO[Unit] =
+    SafeDiagnostics.configure("ERROR").flatMap { diagnostics =>
+      Diagnostics.emit(diagnostics, LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+    }
+
   def run(args: List[String]): IO[ExitCode] =
     SafeDiagnostics.configure("INFO").flatMap { fallback =>
       AppConfig.load.flatMap {
-        case Left(_) => fallback.event(LogEvent.ConfigInvalid).as(ExitCode.Error)
-        case Right(config) => SafeDiagnostics.configure(config.logLevel).flatMap { diagnostics =>
-          MongoDatabaseProbe.resource(config.mongoUri, config.mongoDatabase)
+        case Left(error) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
+          fields = Map(LogField.ConfigKey -> error.key)).as(ExitCode.Error)
+        case Right(config) => SafeDiagnostics.configure(config.logLevel, config.maskSensitive, config.requestPayloads).flatMap { diagnostics =>
+          MongoDatabaseProbe.resource(config.mongoUri, config.mongoDatabase, diagnostics = diagnostics)
             .flatMap(probe => FoundationServer.resource(config.host, config.port, probe, diagnostics))
-            .use(_ => diagnostics.event(LogEvent.Started) *> IO.never[ExitCode])
-            .guarantee(diagnostics.event(LogEvent.Shutdown))
-            .handleErrorWith(_ => diagnostics.event(LogEvent.StartupFailed).as(ExitCode.Error))
+            .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
+              LogField.Environment -> config.appEnv,
+              LogField.HttpHost -> config.host,
+              LogField.HttpPort -> config.port.toString
+            )) *> IO.never[ExitCode])
+            .guarantee(Diagnostics.emit(diagnostics, LogEvent.Shutdown))
+            .handleErrorWith(error => Diagnostics.emit(diagnostics, LogEvent.StartupFailed,
+              fields = LogFields.failure(error)).as(ExitCode.Error))
         }
-      }.handleErrorWith(_ => fallback.event(LogEvent.StartupFailed).as(ExitCode.Error))
+      }.handleErrorWith(error => Diagnostics.emit(fallback, LogEvent.StartupFailed,
+        fields = LogFields.failure(error)).as(ExitCode.Error))
     }
 }

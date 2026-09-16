@@ -18,6 +18,25 @@ final class InputBudgetSpec extends FunSuite {
     assert(!InputBudget.lexical(List.fill(4097)("token").mkString(" "), graphql = true))
   }
 
+  test("compact spreads and adjacent signed numbers count as separate tokens") {
+    assert(InputBudget.lexical("...F" * 2048, graphql = true))
+    assert(!InputBudget.lexical("...F" * 2049, graphql = true))
+    assert(InputBudget.lexical("-1" * 4096, graphql = true))
+    assert(!InputBudget.lexical("-1" * 4097, graphql = true))
+    val numbers = "-1" * 4097
+    assert(!accepted(s"query Check($$values: [Int] = [$numbers]) { health { status } }"))
+    assert(!accepted(s"{ health(values: [$numbers]) { status } }"))
+    assert(InputBudget.lexical(List.fill(4096)("-1.25e+12").mkString(" "), graphql = true))
+    assert(!InputBudget.lexical(List.fill(4097)("-1.25e+12").mkString(" "), graphql = true))
+    assert(InputBudget.lexical("[0,-2,3.14,4e-2]", graphql = false))
+    assert(InputBudget.lexical("0" * 4096, graphql = true))
+    assert(!InputBudget.lexical("0" * 4097, graphql = true))
+    val zeros = "0" * 4097
+    assert(!accepted(s"query Check($$values: [Int] = [$zeros]) { health { status } }"))
+    assert(!accepted(s"{ health(values: [$zeros]) { status } }"))
+    assert(InputBudget.lexical("[0,-0,0.125,-0.25e+2,0e-2]", graphql = true))
+  }
+
   test("selected-operation aliases and depth have inclusive boundaries") {
     assert(accepted("{" + (1 to 32).map(index => s"alias$index: health {status}").mkString(" ") + "}"))
     assert(!accepted("{" + (1 to 33).map(index => s"alias$index: health {status}").mkString(" ") + "}"))

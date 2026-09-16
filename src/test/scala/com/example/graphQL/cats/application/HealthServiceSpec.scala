@@ -10,12 +10,71 @@ class HealthServiceSpec extends CatsEffectSuite {
 
   private def diagnostics(events: Ref[IO, Vector[(LogEvent, Option[String])]]): Diagnostics =
     new Diagnostics {
-      def event(event: LogEvent, requestId: Option[String]): IO[Unit] =
+      def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] =
         events.update(_ :+ (event -> requestId))
     }
 
   private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
     def check: IO[ProbeResult] = result
+  }
+
+  test("readiness forwards correlation and records safe failure classification and elapsed time") {
+    for {
+      forwarded <- Ref.of[IO, Option[String]](None)
+      recorded <- Ref.of[IO, Map[LogField, String]](Map.empty)
+      contextual = new DatabaseProbe {
+        def check: IO[ProbeResult] = IO.raiseError(new AssertionError("Context overload required"))
+        override def check(id: Option[String]): IO[ProbeResult] =
+          forwarded.set(id) *> IO.raiseError(new IllegalStateException("synthetic-service-secret"))
+      }
+      sink = new Diagnostics {
+        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] = recorded.set(fields)
+      }
+      result <- new HealthService(contextual, sink).readiness(requestId)
+      id <- forwarded.get
+      fields <- recorded.get
+    } yield {
+      assertEquals(result, ProbeResult.Unavailable)
+      assertEquals(id, requestId)
+      assertEquals(fields.get(LogField.Reason), Some("DATABASE_ERROR"))
+      assertEquals(fields.get(LogField.ErrorType), Some("java.lang.IllegalStateException"))
+      assert(fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0))
+      assert(fields.forall { case (field, value) => LogFields.validPublic(field, value) })
+      assert(!fields.toString.contains("synthetic-service-secret"))
+    }
+  }
+
+  test("synchronous and effectful diagnostic failures cannot change probe outcomes") {
+    List(true, false).traverse_ { synchronous =>
+      val sink = new Diagnostics {
+        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+          if (synchronous) throw new IllegalStateException("synthetic-sink-secret")
+          else IO.raiseError(new IllegalStateException("synthetic-sink-secret"))
+      }
+      List(ProbeResult.Ready, ProbeResult.Unavailable, ProbeResult.AuthenticationFailed).traverse_ { expected =>
+        new HealthService(probe(IO.pure(expected)), sink).readiness(requestId)
+          .map(result => assertEquals(result, expected))
+      }
+    }
+  }
+
+  test("deadline diagnostics distinguish the service timeout after probe finalization") {
+    for {
+      finalized <- Ref.of[IO, Boolean](false)
+      captured <- Ref.of[IO, Map[LogField, String]](Map.empty)
+      sink = new Diagnostics {
+        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+          finalized.get.flatMap(done => IO(assert(done))) *> captured.set(fields)
+      }
+      result <- new HealthService(probe(IO.never[ProbeResult].onCancel(finalized.set(true))), sink).readiness(requestId)
+      fields <- captured.get
+    } yield {
+      assertEquals(result, ProbeResult.Unavailable)
+      assertEquals(fields.get(LogField.Reason), Some("PROBE_TIMEOUT"))
+      assertEquals(fields.get(LogField.ErrorType), Some("java.util.concurrent.TimeoutException"))
+      assert(fields.get(LogField.ErrorLocation).exists(_.matches("HealthService\\.scala:[1-9][0-9]*")))
+      assert(fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 2000))
+    }
   }
 
   test("P1-AC04 successful readiness produces no failure diagnostic") {

@@ -20,6 +20,22 @@ final class FoundationContractSpec extends CatsEffectSuite {
     fixture("foundation.graphql").map(expected => assertEquals(FoundationSchema.sdl, expected))
   }
 
+  test("a closed request context causes a sanitized GraphQL field execution error") {
+    for {
+      parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj(
+        "query" -> Json.fromString("{ readiness { status } }")
+      ).noSpaces))(new IllegalArgumentException("Invalid test operation"))
+      closed <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(IO.pure)
+      result <- FoundationSchema.executeInContext(parsed, closed)
+    } yield {
+      val body = result.fold(failure => fail(failure.toString), identity)
+      assertEquals(body.hcursor.get[Json]("errors"),
+        Right(Json.arr(Json.obj("message" -> Json.fromString("Execution failed")))))
+      assert(!body.noSpaces.contains("Request context is closed"))
+      assert(!body.noSpaces.contains("IllegalStateException"))
+    }
+  }
+
   List("health.graphql", "readiness.graphql", "introspection.graphql").foreach { name =>
     test(s"execute consumer fixture $name") {
       for {

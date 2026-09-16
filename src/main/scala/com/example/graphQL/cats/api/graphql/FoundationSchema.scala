@@ -30,23 +30,26 @@ object FoundationSchema {
 
   def execute(request: GraphQLRequest, service: HealthService, requestId: String): IO[Either[Failure, Json]] =
     RequestContext.resource(service.readiness(Some(requestId))).use { context =>
-      IO.executionContext.flatMap { implicit executionContext =>
-        IO.fromFuture(IO(Executor.execute(
-          schema = schema,
-          queryAst = request.document,
-          userContext = context,
-          variables = request.variables,
-          operationName = request.operationName,
-          exceptionHandler = ExceptionHandler { case (_, _) => HandledException("Execution failed") },
-          errorsLimit = Some(1)
-        ))).map { result =>
-          Right(if (result.hcursor.downField("errors").succeeded)
-            result.mapObject(_.add("errors", Json.arr(Json.obj("message" -> Json.fromString("Execution failed")))))
-          else result)
-        }.handleError {
-          case _: QueryAnalysisError => Left(Failure.InvalidQuery)
-          case _                     => Left(Failure.Internal)
-        }
+      executeInContext(request, context)
+    }
+
+  private[api] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
+    IO.executionContext.flatMap { implicit executionContext =>
+      IO.fromFuture(IO(Executor.execute(
+        schema = schema,
+        queryAst = request.document,
+        userContext = context,
+        variables = request.variables,
+        operationName = request.operationName,
+        exceptionHandler = ExceptionHandler { case (_, _) => HandledException("Execution failed") },
+        errorsLimit = Some(1)
+      ))).map { result =>
+        Right(if (result.hcursor.downField("errors").succeeded)
+          result.mapObject(_.add("errors", Json.arr(Json.obj("message" -> Json.fromString("Execution failed")))))
+        else result)
+      }.handleError {
+        case _: QueryAnalysisError => Left(Failure.InvalidQuery)
+        case _                     => Left(Failure.Internal)
       }
     }
 }

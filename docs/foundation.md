@@ -44,8 +44,11 @@ For persistent local shell settings, copy the sanitized example into ignored `.l
 | MONGODB_URI | mongodb://127.0.0.1:27017 | Valid Mongo connection string |
 | MONGODB_DATABASE | hiring | Valid nonempty database name |
 | LOG_LEVEL | INFO | INFO, WARN, ERROR |
+| APP_ENV | production | production or local |
+| LOG_MASK_SENSITIVE | true | false only with local environment and loopback HTTP binding |
+| LOG_REQUEST_PAYLOADS | false | true only with local loopback binding and masking disabled |
 
-Malformed configuration exits unsuccessfully with a safe category. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs contain UTC timestamp, severity, category, and safe request correlation. Framework/driver raw output is suppressed. API responses include a generated X-Request-ID; incoming IDs are not trusted.
+Malformed configuration exits unsuccessfully with a safe category and configuration key. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default; local filtered payload capture requires a separate explicit opt-in. Framework/driver raw output remains suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).
 
 ## HTTP contract and budgets
 
@@ -61,7 +64,7 @@ POST `/graphql` accepts JSON with required string `query`, optional object `vari
 
 The runtime admits sixteen GraphQL/readiness requests, with immediate overload rejection. GET `/health` bypasses this gate; GraphQL health does not. Request body maximum is 64 KiB streamed, with a five-second deadline starting before consumption. Parsing allows 4096 tokens/nesting 32; document/fragment work is bounded before schema validation. Selected operations allow field depth sixteen (root one), 1000 expanded field occurrences, and 32 expanded aliases. Fragment containers do not add field depth. These conservative local budgets include the standard introspection fixture and are not measured performance guarantees.
 
-Each request owns its resolver effects. Resource release/caller cancellation cancels and joins them before returning its admission permit. The installed Ember transport awaits response computation before its next socket operation: a peer disconnect alone is not an immediate cancellation signal. Disconnected probes are bounded by the two-second probe deadline; stalled request bodies by the five-second request deadline. Finalizer and scheduler time follow those budgets. Real socket-reset tests check eventual cleanup and subsequent successful requests.
+Each request owns its resolver effects. Resource release closes resolver submission before dispatcher teardown; submissions are rejected even while cancellation finalizers are still running. Resource release/caller cancellation cancels and joins the effects before returning its admission permit. The installed Ember transport awaits response computation before its next socket operation: a peer disconnect alone is not an immediate cancellation signal. Disconnected probes are bounded by the two-second probe deadline; stalled request bodies by the five-second request deadline. Finalizer and scheduler time follow those budgets. Real socket-reset tests check eventual cleanup and subsequent successful requests.
 
 MongoDB uses one resource-managed client, pool maximum ten, bounded driver timeouts, and an outer two-second probe deadline. Fixed limits override conflicting URI pool/timeout options. Readiness aliases share one probe per request; no result is cached between requests.
 

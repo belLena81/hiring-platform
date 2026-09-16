@@ -5,8 +5,17 @@ import com.comcast.ip4s.IpAddress
 import com.mongodb.ConnectionString
 import scala.util.Try
 
-enum ConfigError {
-  case InvalidHost, InvalidPort, InvalidMongoUri, InvalidMongoDatabase, InvalidLogLevel
+enum ConfigError(val key: String) {
+  case InvalidHost extends ConfigError("HTTP_HOST")
+  case InvalidPort extends ConfigError("HTTP_PORT")
+  case InvalidMongoUri extends ConfigError("MONGODB_URI")
+  case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
+  case InvalidLogLevel extends ConfigError("LOG_LEVEL")
+  case InvalidAppEnv extends ConfigError("APP_ENV")
+  case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
+  case InvalidRequestPayloads extends ConfigError("LOG_REQUEST_PAYLOADS")
+  case UnsafeMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
+  case UnsafeRequestPayloads extends ConfigError("LOG_REQUEST_PAYLOADS")
 }
 
 final case class AppConfig(
@@ -14,7 +23,10 @@ final case class AppConfig(
     port: Int,
     mongoUri: String,
     mongoDatabase: String,
-    logLevel: String
+    logLevel: String,
+    appEnv: String = "production",
+    maskSensitive: Boolean = true,
+    requestPayloads: Boolean = false
 ) {
   override def toString: String = "AppConfig([REDACTED])"
 }
@@ -28,13 +40,13 @@ object AppConfig {
     val uri = env.getOrElse("MONGODB_URI", "mongodb://127.0.0.1:27017")
     val database = env.getOrElse("MONGODB_DATABASE", "hiring")
     val level = env.getOrElse("LOG_LEVEL", "INFO")
+    val appEnv = env.getOrElse("APP_ENV", "production")
+    val maskSensitive = env.getOrElse("LOG_MASK_SENSITIVE", "true")
+    val requestPayloads = env.getOrElse("LOG_REQUEST_PAYLOADS", "false")
 
     for {
-      _ <- Either.cond(
-        host.matches("[0-9a-fA-F:.]+") && IpAddress.fromString(host).isDefined,
-        (),
-        ConfigError.InvalidHost
-      )
+      address <- IpAddress.fromString(host).filter(_ => host.matches("[0-9a-fA-F:.]+"))
+        .toRight(ConfigError.InvalidHost)
       validPort <- port.toIntOption.filter(value => value >= 1 && value <= 65535)
         .filter(_ => port.matches("[0-9]+")).toRight(ConfigError.InvalidPort)
       _ <- Try(new ConnectionString(uri)).toEither.left.map(_ => ConfigError.InvalidMongoUri)
@@ -45,6 +57,17 @@ object AppConfig {
         ConfigError.InvalidMongoDatabase
       )
       _ <- Either.cond(Set("INFO", "WARN", "ERROR").contains(level), (), ConfigError.InvalidLogLevel)
-    } yield AppConfig(host, validPort, uri, database, level)
+      _ <- Either.cond(Set("production", "local").contains(appEnv), (), ConfigError.InvalidAppEnv)
+      masking <- strictBoolean(maskSensitive, ConfigError.InvalidMaskSensitive)
+      payloads <- strictBoolean(requestPayloads, ConfigError.InvalidRequestPayloads)
+      _ <- Either.cond(masking || (appEnv == "local" && address.isLoopback), (), ConfigError.UnsafeMaskSensitive)
+      _ <- Either.cond(!payloads || (!masking && appEnv == "local" && address.isLoopback), (), ConfigError.UnsafeRequestPayloads)
+    } yield AppConfig(host, validPort, uri, database, level, appEnv, masking, payloads)
+  }
+
+  private def strictBoolean(value: String, error: ConfigError): Either[ConfigError, Boolean] = value match {
+    case "true" => Right(true)
+    case "false" => Right(false)
+    case _ => Left(error)
   }
 }
