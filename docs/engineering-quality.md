@@ -52,7 +52,7 @@ The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (
 | Performance | Same reproducible before/after workload, query plans/counts, latency/resource/cost comparison |
 | Docs/skills | Local references, skill validation, and independent scenario review |
 
-Scala compiler warnings are checked by the build. A formatter and database integration tasks are not currently configured. When a slice introduces them, update this guide and the local command with real supported tasks. Until then, report those limitations; do not claim nonexistent checks passed. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
+Scala compiler warnings are checked by the build. No Scala formatter is configured. Foundation adds the explicit `sbt 'IntegrationTest / test'` task for live HTTP and disposable MongoDB checks; run it separately from the Docker-independent local unit command. GraphQL SDL and operation fixtures are checked in the unit suite. MongoDB transactions/migrations remain later-phase infrastructure; connectivity tests cannot certify those guarantees. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
 
 ## Review before and after coding
 

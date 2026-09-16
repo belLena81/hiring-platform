@@ -1,0 +1,8 @@
+query FoundationReadiness($include: Boolean = true) {
+  health {
+    status
+  }
+  readiness @include(if: $include) {
+    status
+  }
+}

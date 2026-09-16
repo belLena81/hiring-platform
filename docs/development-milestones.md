@@ -34,6 +34,8 @@ Production Hardening
 
 ## Phase 1 — Foundation
 
+The [Foundation specification](specs/phase-1-foundation.md) records the approved contract and current acceptance evidence. The [local runbook](foundation.md) covers the host application and Compose database workflow. This phase serves only health/readiness; hiring persistence and authorization remain later slices.
+
 ### Goal
 
 Create the minimal production-shaped application skeleton.
@@ -59,7 +61,7 @@ Establish:
 - structured logging
 - MongoDB connection management
 - GraphQL endpoint
-- GraphiQL
+- backend schema export and GraphQL introspection for API documentation/testing
 - health/readiness queries
 
 ### Milestone

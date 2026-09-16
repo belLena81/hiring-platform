@@ -6,9 +6,9 @@
 
 [Use cases](use-cases.md) define UC01–UC13 and initial SLO targets. [Development plan](../INITIAL_DEVELOPMENT_PLAN.md) supplies the overall plan; [development milestones](development-milestones.md) defines phase acceptance criteria. Unspecified details remain implementation decisions; do not invent prior agreement.
 
-The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and MUnit. MongoDB driver and Testcontainers are dependencies, while the current adapters still use Doobie/PostgreSQL and `Main.run` remains unfinished. Flyway, formatting, and database integration tests are not configured. Build alignment is not a claim that persistence migration or Foundation features are complete. Inspect the live build before each task.
+The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and MUnit. Foundation starts a health-only HTTP/GraphQL application with a resource-managed MongoDB client. Unused SQL adapters, user-query scaffolds and their dependencies have been removed. Unit tests are Docker-independent; the explicit `IntegrationTest` configuration contains live HTTP and disposable MongoDB checks. Flyway and formatting are not configured. Consult the [Foundation spec](specs/phase-1-foundation.md) for actual acceptance/review evidence; connectivity does not implement hiring persistence or data migration. Inspect the live build before each task.
 
-The updated root rules replace the old ZIO/Caliban/PostgreSQL target preferences with the documented target while preserving PostgreSQL conventions for existing code. The Scala 3 build migration is recorded in `docs/specs/build-alignment.md`; replacing the PostgreSQL adapters and migrating any data remains a separate implementation slice.
+The updated root rules replace the old ZIO/Caliban/PostgreSQL target preferences with the documented target. Historical Scala 3 build migration evidence remains in `docs/specs/build-alignment.md`; the Foundation spec records the later source/dependency cleanup. No stored SQL data was migrated or deleted.
 
 ## Entry point and roles
 
@@ -69,6 +69,6 @@ An optimization needs a baseline, a demonstrated bottleneck, a measured improvem
 
 Use [local engineering quality](engineering-quality.md) for pure FP, debugging, review, and the `bash scripts/check-local.sh` command. There is no CI/CD pipeline; integration and [migration/contract checks](schema-evolution.md) must be run locally when required.
 
-Run `sbt test` for the configured unit suite. Run repository/resolver integration tests when those behaviors change, with an appropriate real database; a missing integration harness is work to add in that slice, not a passing gate. Run formatting/linting when configured. Do not invoke `sbt run` as a health check while `Main.run` is unfinished.
+Run `sbt test` for the configured unit suite and `sbt 'IntegrationTest / test'` for live HTTP/disposable MongoDB checks when relevant. Missing Docker is blocked infrastructure, not a passing gate. Run formatting/linting when configured. `sbt run` now starts the long-running Foundation server; use its probe endpoints and the [runbook](foundation.md), not process exit, to check health.
 
 For skill edits, run the project-owned `python3 scripts/check-skills.py`, check local references, and request independent scenario review. Frontmatter validation alone does not prove orchestration behavior or native discovery. No database migration or runtime deployment is needed for documentation-only changes.

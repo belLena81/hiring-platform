@@ -1,6 +1,6 @@
 # Data migrations and contract evolution
 
-These are rules for future changes, not a statement that migration or schema-versioning infrastructure already exists. The scaffold currently uses PostgreSQL/Doobie; the target uses MongoDB. Flyway is not active, and there is no exported GraphQL schema/compatibility harness yet. Add executable tooling and tests with the first relevant slice; do not preinstall a second database or pipeline now.
+These are rules for future data changes, not a statement that migration infrastructure already exists. Foundation serves health/readiness through a resource-managed MongoDB connection. Unused PostgreSQL/Doobie adapters and their source-only user schema have been removed at the user's request; no database data is changed. No hiring data is migrated or written. Flyway is not active. The first served GraphQL schema has deterministic SDL and executable operation fixtures under `src/test/resources/graphql/`. Add migration tooling with the first relevant persistence slice.
 
 ## Keep version boundaries separate
 

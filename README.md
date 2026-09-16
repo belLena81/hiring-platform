@@ -8,11 +8,20 @@ A practical playground for functional Scala, GraphQL API design, MongoDB data mo
 
 Start with `$product-manager` to coordinate specialist work and independent reviews. See [agent workflow and usage](docs/agent-development.md) and [project rules](AGENTS.md). Local skills cover Product Manager, Software Architect, Scala Developer, Data Engineer, Big Data Engineer, QA Engineer, Security Engineer, and Code Reviewer.
 
-The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB driver, Logback, and MUnit/Testcontainers. The existing Doobie/PostgreSQL adapter remains a transitional dependency; MongoDB persistence and the unfinished server startup still need implementation.
+The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, Logback, and MUnit/Testcontainers core. Foundation supplies a health-only HTTP/GraphQL runtime with a resource-managed MongoDB client. Unused Doobie/PostgreSQL dependencies and the old user-query/demo scaffold have been removed. Hiring models, persistence, and authorization belong to Phase 2.
 
 ## Local build
 
-`sbt run` forks a separate JVM so Cats Effect `IOApp` owns its application lifecycle. The current `Main` is a no-op startup smoke check that exits successfully, not a running HTTP server.
+`sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. Start MongoDB locally, then run the application on `127.0.0.1:8080`:
+
+```bash
+docker compose up -d mongodb
+sbt run
+```
+
+`GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
+
+See the [Foundation runbook](docs/foundation.md) for configuration, shutdown, limits, and integration commands, and the [Foundation specification](docs/specs/phase-1-foundation.md) for current verification and review evidence.
 
 For project-only sbt JDK selection, create an ignored `.sbtopts` file in this root with `-java-home /path/to/jdk-17` (this machine: `/usr/lib/jvm/java-17-openjdk-amd64`). The installed sbt launcher reads it for commands such as `sbt compile` and `sbt test`; it does not change your shell's Java or other projects. Keep machine-specific paths out of Git. IntelliJ's JDK settings remain separate. The local-check script's Java prerequisite check still uses `JAVA_HOME`, so set that variable for the script as described below.
 
@@ -22,7 +31,7 @@ Use Java 17+ and sbt 1.11.1. Set `JAVA_HOME` to your installed JDK when the defa
 bash scripts/check-local.sh
 ```
 
-The command validates local skills and runs the MUnit suite. MongoDB/Testcontainers dependencies do not imply database integration tests are implemented or that Docker is required for the current unit tests. Dependency choices and remaining migration scope are recorded in the [build alignment spec](docs/specs/build-alignment.md).
+The command validates local skills and runs the Docker-independent MUnit suite. Run `sbt 'IntegrationTest / test'` separately for real HTTP lifecycle and disposable MongoDB tests; Docker is required for the database tests. These commands are local checks, not deployment or performance certification. Historical dependency choices are recorded in the [build alignment spec](docs/specs/build-alignment.md).
 
 ## Documentation
 

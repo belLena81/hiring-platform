@@ -5,7 +5,7 @@
 Hiring Management Platform for Candidate, Recruiter, and singleton Admin.
 
 - Target: Scala 3, Cats Effect 3, FS2, Sangria, http4s, Circe, MongoDB, Docker Compose, MUnit/Cats Effect and Testcontainers. Kafka, Spark, and Delta/Databricks belong to later phases.
-- Current build: Scala 3.9 LTS on Java 17+, Cats Effect, Sangria/http4s, and MUnit; MongoDB driver and Testcontainers dependencies are available. Doobie/PostgreSQL adapters remain transitional and the server is unfinished. Inspect build and source before changes; adding dependencies does not implement a MongoDB runtime or data migration.
+- Current build: Scala 3.9 LTS on Java 17+, Cats Effect, Sangria/http4s, and MUnit. Foundation serves health/readiness with a resource-managed MongoDB reactive client and an explicit IntegrationTest harness. Unused Doobie/PostgreSQL dependencies and scaffolds have been removed. Inspect build, source, and the Foundation spec's evidence before changes; connectivity does not implement hiring persistence or data migration.
 - Explicit user instructions take precedence. This file governs workflow; README and architecture/plan documents describe intent; source/build describe implemented behavior. Report mismatches and resolve material ambiguity before dependent changes.
 - Read relevant sections of `README.md`, `ARCHITECTURE.md`, `INITIAL_DEVELOPMENT_PLAN.md`, `docs/mongodb-design.md`, `docs/big-data-architecture.md`, `docs/use-cases.md`, and `docs/development-milestones.md`. Keep these canonical documents current; supporting documentation belongs in `docs/`, not numbered copies in root.
 - `docs/agent-development.md` explains baseline, usage, handoffs, and evidence. Load role instructions only from this project's `.agents/skills/*/SKILL.md` files. Do not use global skills or substitute a same-named global role; if a required project skill is missing, report it and restore it within the project.
@@ -81,6 +81,9 @@ No author approves their own work. Security and QA require separate verdicts eve
 ## Security
 
 - Keep machine-specific application settings in `.local/config/`, runtime/generated data in `.local/data/`, logs in `.local/logs/`, and dumps/backups in `.local/backups/`; all are ignored. Local `.env` files and `.codex/config.toml` are also ignored. Commit only sanitized configuration examples/defaults, migrations, schemas, and small intentional fixtures. Never put local output in source/docs or force-add ignored secrets. These locations do not imply that the application automatically loads them; wire configuration explicitly in its owning slice. See `docs/engineering-quality.md` for the convention.
+
+- This repository is backend-only. API documentation/testing uses GraphQL SDL, introspection, and operation fixtures; do not add frontend/UI assets or a Node toolchain without explicit scoped authorization.
+- Before installing dependencies or generating artifacts, add repository-wide ignore rules for their directories and verify them with `git check-ignore`. Never stage vendor trees such as `node_modules/` or build/runtime output, including nested directories. Before handoff, inspect `git status` and the staged file list for generated files. If task-generated files were accidentally staged, remove only those paths from the index while preserving unrelated staged work. Do not silence dependency-tree CRLF warnings by changing global Git line-ending settings or normalizing vendor files; fix the ignore/index issue first.
 
 - Deny by default; enforce authorization/ownership in services, not only resolvers. Derive actor IDs from trusted authentication context.
 - Never commit secrets or log credentials, tokens, resumes, or unnecessary personal data. Audit sensitive actions with safe correlation; sanitize API errors.
