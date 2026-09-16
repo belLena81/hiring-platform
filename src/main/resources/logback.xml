@@ -1,12 +1,12 @@
 <configuration>
   <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
-  <appender name="FOUNDATION" class="ch.qos.logback.core.ConsoleAppender">
+  <appender name="HIRING-PLATFORM" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
       <pattern>%msg%n</pattern>
     </encoder>
   </appender>
   <logger name="hiring.foundation" level="INFO" additivity="false">
-    <appender-ref ref="FOUNDATION"/>
+    <appender-ref ref="HIRING-PLATFORM"/>
   </logger>
   <root level="OFF"/>
 </configuration>
