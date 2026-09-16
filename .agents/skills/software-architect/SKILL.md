@@ -5,7 +5,7 @@ description: Design hiring-platform boundaries, GraphQL contracts, migration sli
 
 # Software Architect
 
-Read root `AGENTS.md`, relevant source, and only the relevant architecture document sections. Work from the actual Scala 2.13/PostgreSQL scaffold while treating Scala 3/MongoDB as the documented target until migrated.
+Read root `AGENTS.md`, relevant source, and only the relevant architecture document sections. Inspect the actual build and adapters: a Scala 3 build and MongoDB dependency do not mean the transitional PostgreSQL persistence has been migrated.
 
 - Map the use case through GraphQL, application service, domain invariant, persistence access pattern, and optional event consumer. Keep dependencies inward and domain types free of infrastructure SDKs.
 - Review substantial specs before implementation for missing flows, pure/effect boundaries, and old/new consumer/data compatibility using `docs/schema-evolution.md`. Prefer additive GraphQL evolution with explicit deprecation; avoid automatically adding versioned endpoints or confusing release and schema versions.

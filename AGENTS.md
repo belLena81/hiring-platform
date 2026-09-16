@@ -5,7 +5,7 @@
 Hiring Management Platform for Candidate, Recruiter, and singleton Admin.
 
 - Target: Scala 3, Cats Effect 3, FS2, Sangria, http4s, Circe, MongoDB, Docker Compose, MUnit/Cats Effect and Testcontainers. Kafka, Spark, and Delta/Databricks belong to later phases.
-- Actual scaffold: Scala 2.13, Cats Effect, Sangria, http4s, Doobie/PostgreSQL, ScalaTest. Inspect build and source before changes; target syntax/libraries require a scoped migration.
+- Current build: Scala 3.9 LTS on Java 17+, Cats Effect, Sangria/http4s, and MUnit; MongoDB driver and Testcontainers dependencies are available. Doobie/PostgreSQL adapters remain transitional and the server is unfinished. Inspect build and source before changes; adding dependencies does not implement a MongoDB runtime or data migration.
 - Explicit user instructions take precedence. This file governs workflow; README and architecture/plan documents describe intent; source/build describe implemented behavior. Report mismatches and resolve material ambiguity before dependent changes.
 - Read relevant sections of `README.md`, `ARCHITECTURE.md`, `INITIAL_DEVELOPMENT_PLAN.md`, `docs/mongodb-design.md`, `docs/big-data-architecture.md`, `docs/use-cases.md`, and `docs/development-milestones.md`. Keep these canonical documents current; supporting documentation belongs in `docs/`, not numbered copies in root.
 - `docs/agent-development.md` explains baseline, usage, handoffs, and evidence. Load role instructions only from this project's `.agents/skills/*/SKILL.md` files. Do not use global skills or substitute a same-named global role; if a required project skill is missing, report it and restore it within the project.

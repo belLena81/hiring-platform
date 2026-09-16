@@ -42,7 +42,7 @@ Run from the project root:
 bash scripts/check-local.sh
 ```
 
-The command uses Python 3.9+ to validate project-local skills, then runs the current `sbt test` suite, including compilation required by sbt. It is an explicit local command, not a hook, CI job, deploy command, schema migration, or complete readiness certification. It runs without requiring a Git repository or staged files or any global skill installation.
+The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (using `JAVA_HOME` when set), then runs the current MUnit `sbt test` suite, including compilation required by sbt. It is an explicit local command, not a hook, CI job, deploy command, schema migration, or complete readiness certification. It runs without requiring a Git repository or staged files or any global skill installation.
 
 | Change | Additional evidence before completion |
 |---|---|
@@ -52,7 +52,7 @@ The command uses Python 3.9+ to validate project-local skills, then runs the cur
 | Performance | Same reproducible before/after workload, query plans/counts, latency/resource/cost comparison |
 | Docs/skills | Local references, skill validation, and independent scenario review |
 
-Formatting/linting and integration tasks are not currently configured. When a slice introduces them, update this guide and the local command with real supported tasks. Until then, report those limitations; do not claim nonexistent checks passed. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
+Scala compiler warnings are checked by the build. A formatter and database integration tasks are not currently configured. When a slice introduces them, update this guide and the local command with real supported tasks. Until then, report those limitations; do not claim nonexistent checks passed. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
 
 ## Review before and after coding
 

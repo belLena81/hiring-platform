@@ -1,9 +1,9 @@
 package com.example.graphQL.cats.models
 
 import com.example.graphQL.cats.models.Role.{Admin, Candidate, Recruiter}
-import org.scalatest.funsuite.AnyFunSuite
+import munit.FunSuite
 
-final class RoleSpec extends AnyFunSuite {
+final class RoleSpec extends FunSuite {
   test("fromRole maps known role names") {
     assert(Role.fromRole("Admin") == Admin)
     assert(Role.fromRole("Recruiter") == Recruiter)

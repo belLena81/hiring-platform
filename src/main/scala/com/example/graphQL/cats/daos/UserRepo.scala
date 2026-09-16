@@ -1,17 +1,12 @@
 package com.example.graphQL.cats.daos
 
 import cats.effect._
-import cats.syntax.all._
-import cats.effect.implicits._
 import doobie._
 import doobie.implicits._
-import doobie.util.ExecutionContexts
-import com.example.graphQL.cats.models.Role._
 import com.example.graphQL.cats.models.{Role, User}
-import org.typelevel.log4cats.Logger
 
 
-abstract class UserRepo[F[_]: Async] {
+abstract class UserRepo[F[_]] {
   def fetchAll(): F[List[User]]
   def fetchById(id: String): F[Option[User]]
   def fetchByRole(role: Role): F[List[User]]

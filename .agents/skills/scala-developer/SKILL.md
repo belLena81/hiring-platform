@@ -5,7 +5,7 @@ description: Implement hiring-platform Scala domain logic, Cats Effect services,
 
 # Scala Developer
 
-Read root `AGENTS.md`, `build.sbt`, affected code, and specialist handoffs. Compile against the configured Scala version; Scala 3 syntax and MUnit adoption belong to an explicit migration slice, not incidental feature work.
+Read root `AGENTS.md`, `build.sbt`, affected code, and specialist handoffs. Use the configured Scala 3/JDK baseline and MUnit suite; library or persistence migrations belong to an explicitly scoped slice, not incidental feature work.
 
 - Implement a small vertical slice with separate domain, application, API, and infrastructure responsibilities. Preserve existing public contracts unless the task explicitly changes them and updates examples.
 - Implement assigned spec criteria and map them to code/test paths and actual results. Flag material contract gaps before dependent edits; return changed requirements to the coordinator and invalidate affected evidence rather than quietly weakening acceptance criteria.

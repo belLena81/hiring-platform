@@ -1,19 +1,8 @@
 package com.example.graphQL.cats.schemas
 
 import sangria.schema._
-import sangria.macros._
-import cats.effect._
-import cats.effect.implicits._
-import cats.implicits._
-import cats.effect.kernel.MonadCancelThrow
-import cats.effect.std.Dispatcher
-import cats.effect.unsafe.IORuntime.global
-import cats.implicits.toFunctorOps
-import com.example.graphQL.cats.daos.{Dao, FutureDao}
-import com.example.graphQL.cats.models.{Role, User}
-import sangria.execution._
-
-import scala.concurrent.Future
+import com.example.graphQL.cats.daos.FutureDao
+import com.example.graphQL.cats.models.Role
 
 object QueryType {
 
@@ -36,7 +25,7 @@ object QueryType {
   def apply: ObjectType[FutureDao, Unit] =
     ObjectType(
       name = "Query",
-      fields = fields(
+      fields = fields[FutureDao, Unit](
         Field(
           name = "users",
           fieldType = ListType(UserType.apply),

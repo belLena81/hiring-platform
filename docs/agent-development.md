@@ -6,9 +6,9 @@
 
 [Use cases](use-cases.md) define UC01–UC13 and initial SLO targets. [Development plan](../INITIAL_DEVELOPMENT_PLAN.md) supplies the overall plan; [development milestones](development-milestones.md) defines phase acceptance criteria. Unspecified details remain implementation decisions; do not invent prior agreement.
 
-The current scaffold uses Scala 2.13.16, Cats Effect, Sangria, http4s, Doobie/PostgreSQL, and ScalaTest. `Main.run` is unfinished. Flyway is commented out; no active formatter or integration-test setup is configured. The target is not a claim that these migrations or features already exist. Inspect the live build before each task.
+The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and MUnit. MongoDB driver and Testcontainers are dependencies, while the current adapters still use Doobie/PostgreSQL and `Main.run` remains unfinished. Flyway, formatting, and database integration tests are not configured. Build alignment is not a claim that persistence migration or Foundation features are complete. Inspect the live build before each task.
 
-The updated root rules replace the old ZIO/Caliban/PostgreSQL target preferences with the documented target while preserving PostgreSQL conventions for existing code. Database/language migration is its own scoped implementation task. This agent setup does not migrate the application.
+The updated root rules replace the old ZIO/Caliban/PostgreSQL target preferences with the documented target while preserving PostgreSQL conventions for existing code. The Scala 3 build migration is recorded in `docs/specs/build-alignment.md`; replacing the PostgreSQL adapters and migrating any data remains a separate implementation slice.
 
 ## Entry point and roles
 

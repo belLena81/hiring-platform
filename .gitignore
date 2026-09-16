@@ -5,6 +5,7 @@ target/
 
 ### Local settings and runtime data ###
 /.local/
+/.sbtopts
 /.codex/config.toml
 .env
 .env.*

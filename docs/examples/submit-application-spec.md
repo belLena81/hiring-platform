@@ -8,9 +8,9 @@ This demonstrates the [spec workflow](../spec-driven-development.md) using [UC04
 
 An authenticated Candidate submits an application to an open job and receives its initial status. The application and initial history event must be consistent.
 
-Current source facts: `build.sbt` configures Scala 2.13 and Doobie/PostgreSQL; `src/main/scala/com/example/graphQL/cats/Main.scala` has unfinished startup and scaffold models; `src/main/scala/com/example/graphQL/cats/daos/Dao.scala` exposes the user repository. These are not a working application-submission service. Recheck them before using this example for a real task.
+Current source facts: `build.sbt` configures Scala 3.9 LTS/Java 17+ with a transitional Doobie/PostgreSQL dependency group; `src/main/scala/com/example/graphQL/cats/Main.scala` has unfinished startup and scaffold models; `src/main/scala/com/example/graphQL/cats/daos/Dao.scala` exposes the user repository. These are not a working application-submission service. Recheck them before using this example for a real task.
 
-The target roadmap uses Scala 3/MongoDB. The coordinator must first place this feature after its required Foundation/domain/auth work, or explicitly scope prerequisite slices. Do not quietly include a store/language migration. Kafka, Spark, real notifications, embedding calls, and paid services are outside this illustrative slice.
+The target roadmap uses MongoDB; a configured driver dependency is not an implemented adapter. The coordinator must first place this feature after its required Foundation/domain/auth work, or explicitly scope prerequisite slices. Do not quietly include a store/language migration. Kafka, Spark, real notifications, embedding calls, and paid services are outside this illustrative slice.
 
 ## Contract and open decisions
 

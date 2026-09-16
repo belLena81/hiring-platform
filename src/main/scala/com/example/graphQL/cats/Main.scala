@@ -1,24 +1,8 @@
 package com.example.graphQL.cats
 
 import cats.effect._
-import cats.implicits._
-import com.example.graphQL.cats.daos.Dao
-import doobie._
 import doobie.hikari._
 import doobie.util.ExecutionContexts
-import doobie.implicits._
-import org.http4s._
-import org.http4s.dsl.io._
-import org.http4s.blaze.server._
-import sangria.execution._
-import sangria.macros.derive._
-import sangria.parser._
-import sangria.schema._
-import org.typelevel.log4cats.Logger
-import org.typelevel.log4cats.slf4j.Slf4jLogger
-
-import java.util.UUID
-import scala.concurrent.ExecutionContext.Implicits.global
 
 case class Company(id: String, name: String, website: String, description: String)
 case class Job(id: String, title: String, description: String, companyId: String, location: String, isRemote: Boolean)
@@ -52,7 +36,8 @@ object DB {
 
 // MAIN
 object Main extends IOApp {
-  def run(args: List[String]): IO[ExitCode] = ???
+  def run(args: List[String]): IO[ExitCode] =
+    IO.apply(ExitCode.Success)
 //    DB.transactorResource.use { xa =>
 //      implicit val log = Slf4jLogger.getLogger[IO]
 //      val userRepo = new DoobieUserRepo[IO](xa)

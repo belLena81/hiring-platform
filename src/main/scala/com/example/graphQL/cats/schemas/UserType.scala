@@ -1,9 +1,8 @@
 package com.example.graphQL.cats.schemas
 
-import com.example.graphQL.cats.daos.{Dao, FutureDao}
+import com.example.graphQL.cats.daos.FutureDao
 import com.example.graphQL.cats.models.{Role, User}
 import sangria.schema._
-import cats.effect._
 import com.example.graphQL.cats.models.Role.{Admin, Candidate, Recruiter}
 
 object UserType {
