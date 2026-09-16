@@ -47,7 +47,7 @@ object JobLifecycle {
     State { job =>
       job.status match {
         case JobStatus.Draft | JobStatus.Open =>
-          val updated = job.copy(status = JobStatus.Closed, updatedAt = updatedAt)
+          val updated = job.copy(status = JobStatus.Closed, updatedAt = updatedAt, closedAt = Some(updatedAt))
           (updated, Right(updated))
         case JobStatus.Closed =>
           (job, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed)))

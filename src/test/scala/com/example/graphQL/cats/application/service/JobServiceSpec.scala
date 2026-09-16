@@ -58,6 +58,22 @@ class JobServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result, Left(AuthenticationError.SingletonAdminViolation))
   }
 
+  test("closeJob records explicit close timestamp") {
+    for {
+      users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](
+        Map(recruiterId -> recruiter)
+      )
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      result <- service.closeJob(ActorContext(recruiterId, UserRole.Recruiter), jobId, later)
+      stored <- jobs.get.map(_.get(jobId))
+    } yield {
+      assertEquals(result.map(_.status), Right(JobStatus.Closed))
+      assertEquals(result.map(_.closedAt), Right(Some(later)))
+      assertEquals(stored.map(_.closedAt), Some(Some(later)))
+    }
+  }
+
   test("candidate can view only open jobs") {
     for {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](

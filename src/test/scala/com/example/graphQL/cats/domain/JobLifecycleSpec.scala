@@ -65,6 +65,7 @@ class JobLifecycleSpec extends FunSuite {
 
     assertEquals(closedResult.map(_.status), Right(JobStatus.Closed))
     assertEquals(closedState.status, JobStatus.Closed)
+    assertEquals(closedState.closedAt, Some(updatedAt))
     assertEquals(rejectedResult, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed)))
     assertEquals(unchangedState, closedState)
   }

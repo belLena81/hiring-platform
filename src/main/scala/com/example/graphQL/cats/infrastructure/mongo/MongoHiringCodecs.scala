@@ -9,15 +9,19 @@ import scala.jdk.CollectionConverters.*
 
 private[mongo] object MongoHiringCodecs {
   def user(user: User): Document =
-    appendOptionalString(new Document("_id", user.id.value.toString)
-      .append("schemaVersion", 1)
-      .append("email", user.email)
-      .append("emailCanonical", user.email.toLowerCase)
-      .append("name", user.name)
-      .append("role", user.role.toString)
-      .append("createdAt", Date.from(user.createdAt)),
-      "adminSingletonKey",
-      Option.when(user.role == UserRole.Admin && user.adminSingleton)("singleton-admin")
+    appendOptionalDocument(
+      appendOptionalString(new Document("_id", user.id.value.toString)
+        .append("schemaVersion", 1)
+        .append("email", user.email)
+        .append("emailCanonical", user.email.toLowerCase)
+        .append("name", user.name)
+        .append("role", user.role.toString)
+        .append("createdAt", Date.from(user.createdAt)),
+        "adminSingletonKey",
+        Option.when(user.role == UserRole.Admin && user.adminSingleton)("singleton-admin")
+      ),
+      "profile",
+      user.profile.map(profile)
     )
 
   def readUser(document: Document): User =
@@ -26,13 +30,13 @@ private[mongo] object MongoHiringCodecs {
       document.getString("email"),
       document.getString("name"),
       UserRole.valueOf(document.getString("role")),
-      None,
+      Option(document.get("profile", classOf[Document])).map(readProfile),
       instant(document, "createdAt"),
       Option(document.getString("adminSingletonKey")).contains("singleton-admin")
     )
 
   def job(job: Job): Document =
-    new Document("_id", job.id.value.toString)
+    appendOptionalDate(new Document("_id", job.id.value.toString)
       .append("schemaVersion", 1)
       .append("version", java.lang.Long.valueOf(job.version))
       .append("recruiterId", job.recruiterId.value.toString)
@@ -43,7 +47,10 @@ private[mongo] object MongoHiringCodecs {
       .append("location", location(job.location))
       .append("status", job.status.toString)
       .append("createdAt", Date.from(job.createdAt))
-      .append("updatedAt", Date.from(job.updatedAt))
+      .append("updatedAt", Date.from(job.updatedAt)),
+      "closedAt",
+      job.closedAt
+    )
 
   def readJob(document: Document): Job =
     Job(
@@ -57,6 +64,7 @@ private[mongo] object MongoHiringCodecs {
       JobStatus.valueOf(document.getString("status")),
       instant(document, "createdAt"),
       instant(document, "updatedAt"),
+      Option(document.getDate("closedAt")).map(_.toInstant),
       Option(document.get("version", classOf[Number])).fold(0L)(_.longValue)
     )
 
@@ -104,6 +112,20 @@ private[mongo] object MongoHiringCodecs {
   private def readLocation(document: Document): Location =
     Location(document.getString("country"), document.getString("city"), document.getBoolean("remote"))
 
+  private def profile(profile: CandidateProfile): Document =
+    appendOptionalString(
+      appendOptionalString(new Document("skills", profile.skills.toList.sorted.asJava), "experienceSummary", profile.experienceSummary),
+      "resumeRef",
+      profile.resumeRef
+    )
+
+  private def readProfile(document: Document): CandidateProfile =
+    CandidateProfile(
+      stringList(document, "skills").toSet,
+      Option(document.getString("experienceSummary")),
+      Option(document.getString("resumeRef"))
+    )
+
   private def instant(document: Document, field: String): Instant =
     document.getDate(field).toInstant
 
@@ -111,6 +133,16 @@ private[mongo] object MongoHiringCodecs {
     document.getList(field, classOf[String]).asScala.toList
 
   private def appendOptionalString(document: Document, field: String, value: Option[String]): Document = {
+    value.foreach(document.append(field, _))
+    document
+  }
+
+  private def appendOptionalDate(document: Document, field: String, value: Option[Instant]): Document = {
+    value.foreach(instant => document.append(field, Date.from(instant)))
+    document
+  }
+
+  private def appendOptionalDocument(document: Document, field: String, value: Option[Document]): Document = {
     value.foreach(document.append(field, _))
     document
   }

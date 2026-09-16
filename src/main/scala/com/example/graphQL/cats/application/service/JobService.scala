@@ -125,6 +125,7 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
         job.status,
         job.createdAt,
         now,
+        job.closedAt,
         job.version
       )
       .toEither

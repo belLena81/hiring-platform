@@ -40,6 +40,27 @@ class DomainValidationSpec extends FunSuite {
     )))
   }
 
+  test("job validation rejects blank location fields before persistence") {
+    val result = Job.validate(
+      jobId,
+      userId,
+      " ",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect"),
+      Location(" ", "", remote = true),
+      JobStatus.Open,
+      now,
+      now
+    )
+
+    assertEquals(result.leftMap(_.toList).toEither, Left(List(
+      BlankField("title"),
+      BlankField("country"),
+      BlankField("city")
+    )))
+  }
+
   test("valid job validation preserves ADT status and normalized text") {
     val result = Job.validate(
       jobId,

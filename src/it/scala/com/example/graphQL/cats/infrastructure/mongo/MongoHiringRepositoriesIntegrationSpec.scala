@@ -4,7 +4,9 @@ import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.application.port.{ApplicationPageRequest, PageSize, RepositoryError}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  Application, ApplicationEvent, ApplicationStatus, CandidateProfile, Job, JobStatus, Location, User, UserRole
+}
 import com.mongodb.client.model.Filters
 import munit.CatsEffectSuite
 import org.bson.Document
@@ -83,7 +85,12 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.standalone(database)
         val page = ApplicationPageRequest(None, None, PageSize.fromInt(10).toOption.get)
-        val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
+        val candidateProfile = CandidateProfile(
+          Set("Scala", "Cats Effect", "MongoDB"),
+          Some("Builds backend services"),
+          Some("resume://candidate-101")
+        )
+        val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, Some(candidateProfile), now)
         val recruiter = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
         val admin = User(adminId, "admin@example.com", "Admin", UserRole.Admin, None, now, adminSingleton = true)
         val unseededAdmin =
@@ -131,6 +138,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(staleJob, Left(RepositoryError.Conflict))
           assertEquals(staleStatus, Left(RepositoryError.Conflict))
           assertEquals(foundCandidate.map(_.email), Some("candidate@example.com"))
+          assertEquals(foundCandidate.flatMap(_.profile), Some(candidateProfile))
           assertEquals(foundAdmin.map(_.adminSingleton), Some(true))
           assertEquals(updatedJob.map(_.version), Right(1L))
           assertEquals(foundJob.map(_.title), Some("Principal Scala Developer"))
@@ -156,12 +164,15 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- MongoHiringSetup.initialize(database)
           _ <- jobs.create(openJob)
-          closed <- jobs.update(openJob.copy(status = JobStatus.Closed, updatedAt = later))
+          closed <- jobs.update(openJob.copy(status = JobStatus.Closed, updatedAt = later, closedAt = Some(later)))
           result <- applications.createForOpenJob(openJob, application, initialEvent)
+          storedJob <- jobs.find(jobId)
           storedApplication <- applications.find(applicationId)
           history <- PublisherBridge.all(database.getCollection("application_events").find())
         } yield {
           assertEquals(closed.map(_.status), Right(JobStatus.Closed))
+          assertEquals(closed.map(_.closedAt), Right(Some(later)))
+          assertEquals(storedJob.flatMap(_.closedAt), Some(later))
           assertEquals(result, Left(RepositoryError.Conflict))
           assertEquals(storedApplication, None)
           assertEquals(history, Nil)
