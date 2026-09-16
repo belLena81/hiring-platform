@@ -12,18 +12,24 @@ trait UserRepository[F[_]] {
   def find(id: UserId): F[Option[User]]
 }
 
+enum RepositoryError {
+  case DuplicateApplication
+  case Conflict
+  case Unavailable
+}
+
 trait JobRepository[F[_]] {
   def find(id: JobId): F[Option[Job]]
-  def create(job: Job): F[Unit]
-  def update(job: Job): F[Unit]
+  def create(job: Job): F[Either[RepositoryError, Unit]]
+  def update(job: Job): F[Either[RepositoryError, Unit]]
 }
 
 trait ApplicationRepository[F[_]] {
   def find(id: ApplicationId): F[Option[Application]]
   def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): F[List[Application]]
   def findByJob(jobId: JobId, page: ApplicationPageRequest): F[List[Application]]
-  def create(application: Application, initialEvent: ApplicationEvent): F[Unit]
-  def updateStatus(application: Application, event: ApplicationEvent): F[Unit]
+  def create(application: Application, initialEvent: ApplicationEvent): F[Either[RepositoryError, Unit]]
+  def updateStatus(application: Application, event: ApplicationEvent): F[Either[RepositoryError, Unit]]
 }
 
 final case class ApplicationCursor(createdAt: Instant, id: ApplicationId)

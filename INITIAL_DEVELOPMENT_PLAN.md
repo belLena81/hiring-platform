@@ -1093,6 +1093,10 @@ consumer restarts
 
 Kafka slices must follow an event-driven architecture pattern: operational services persist current state in MongoDB, record a durable event/outbox entry in the same reliable boundary where required, and publish to Kafka asynchronously. Kafka availability must not block OLTP writes. Consumers are at-least-once, idempotent, replayable, and version-aware.
 
+Future cross-boundary workflows must use the Saga pattern when they coordinate MongoDB state with Kafka, embeddings, Vector Search, notifications, scheduling, external storage, or other systems that cannot share one transaction. Keep Phase 2 domain writes as MongoDB transactions; introduce Saga only in a later vertical slice with durable Saga state, idempotency keys, bounded retries, compensation or explicit non-reversible steps, and observable repair paths.
+
+The strongest Saga demonstration for this app is a real hiring workflow with meaningful partial failures, such as application submission enrichment, interview scheduling, job closing with bulk downstream effects, outbox publication repair, or candidate/job profile reindexing.
+
 ---
 
 # 16. Lakehouse

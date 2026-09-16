@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.domain.error
 
 import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.domain.model.JobStatus
 
 enum DomainError {
   case CandidateRequired
@@ -9,6 +10,7 @@ enum DomainError {
   case DuplicateApplication
   case Forbidden
   case NotFound(entity: String)
+  case InvalidJobTransition(from: JobStatus, to: JobStatus)
   case InvalidStatusTransition(from: ApplicationStatus, to: ApplicationStatus)
   case RejectionFeedbackRequired
   case DeclineReasonRequired

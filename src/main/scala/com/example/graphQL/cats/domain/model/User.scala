@@ -36,7 +36,8 @@ final case class User(
   name: String,
   role: UserRole,
   profile: Option[CandidateProfile],
-  createdAt: Instant
+  createdAt: Instant,
+  adminSingleton: Boolean = false
 )
 
 object User {

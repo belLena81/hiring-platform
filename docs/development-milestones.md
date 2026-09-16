@@ -425,6 +425,8 @@ Kafka integration must follow the event-driven architecture pattern for all prod
 - partition keys document ordering guarantees
 - queues, fibers, and retries are bounded and supervised
 
+Future cross-boundary workflows must use the Saga pattern when one business operation coordinates MongoDB with Kafka, embeddings, Vector Search, notifications, interview scheduling, external storage, or another system that cannot join the same transaction. The Saga slice must include durable state, idempotency keys, bounded retry behavior, compensation or explicit non-reversible steps, failure observability, and restart recovery tests. Do not introduce Saga into the Phase 2 local MongoDB transaction path.
+
 ### Milestone
 
 A successful domain operation eventually produces exactly one logical analytical event despite retries and duplicate delivery.
@@ -1100,6 +1102,7 @@ Vector Search
 
 ```text
 event-driven architecture
+Saga pattern
 Kafka partitioning
 ordering
 at-least-once delivery

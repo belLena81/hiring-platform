@@ -13,6 +13,7 @@ The Hiring Management Platform is designed around four primary engineering goals
 - Clean separation between domain, application, API, and infrastructure code
 - Functional effect management using Cats Effect
 - MongoDB data modeling optimized for GraphQL access patterns
+- Saga-based coordination for future cross-boundary workflows with retries, compensation, and recovery
 - High read performance with minimal unnecessary data duplication
 
 The architecture should remain simple enough for an MVP while allowing individual infrastructure components to be replaced without changing business logic.
@@ -676,7 +677,84 @@ The database transaction protects consistency between current state and history.
 
 ---
 
-# 15. Duplication Strategy
+# 15. Saga Pattern for Cross-Boundary Workflows
+
+The Saga pattern is mandatory for future workflows that span multiple durable systems or external side effects that cannot participate in one MongoDB transaction.
+
+Do not use Saga for the Phase 2 core hiring write path when MongoDB can protect the invariant directly. Submitting an application and changing an application status remain local transactional operations:
+
+```text
+MongoDB transaction
+
+applications
+     +
+application_events
+```
+
+Use Saga only after the workflow crosses a boundary such as:
+
+```text
+MongoDB
+Kafka
+embedding provider
+Vector Search index
+email or notification provider
+calendar or interview scheduling service
+external storage
+```
+
+The preferred shape is an orchestrated Saga owned by the application layer:
+
+```text
+GraphQL mutation
+      │
+      ▼
+Application service
+      │
+      ├── local transaction / outbox write
+      │
+      ▼
+Saga state
+      │
+      ├── execute next step
+      ├── retry transient failures
+      ├── record completed steps
+      ├── compensate reversible steps
+      └── mark failed workflows for operator repair
+```
+
+Saga state must be durable, idempotent, observable, and recoverable after process restart. It must not live only in `Ref`, an in-memory queue, or a detached fiber.
+
+Each Saga step must define:
+
+- forward command
+- idempotency key
+- retry policy with bounded attempts or backoff
+- compensating action, or an explicit statement that the step is not safely reversible
+- terminal failure state and operator-visible repair path
+- safe audit fields such as `sagaId`, `step`, `applicationId`, `jobId`, `eventId`, and timestamps
+
+The most useful Saga showcases for this application are:
+
+- application submission enrichment: submit application, then parse resume, generate embeddings, update Vector Search metadata, and notify recruiter
+- interview scheduling: move an application to `INTERVIEW`, reserve an interview slot, send candidate/recruiter notifications, and compensate calendar reservations if notification or persistence fails
+- job closing with bulk effects: close a job, prevent new applications immediately, then asynchronously decline or archive remaining active applications according to explicit product rules
+- event publication repair: publish outbox events to Kafka with retry, deduplication, and dead-letter/quarantine handling while keeping MongoDB as operational truth
+- candidate or job profile reindexing: update profile/job content first, then regenerate embeddings and search index entries without blocking the user-facing mutation
+
+Saga is not a substitute for:
+
+- MongoDB transactions inside one consistency boundary
+- unique constraints for duplicate applications
+- domain transition validation
+- transactional outbox for reliable event handoff
+- idempotent Kafka consumers
+
+Future implementation should add Saga in the smallest vertical slice that includes one real external boundary, durable state, retry and compensation tests, and observability. Do not add a generic Saga framework before there is a concrete workflow that needs it.
+
+---
+
+# 16. Duplication Strategy
 
 The default is **minimal duplication**, not zero duplication.
 
@@ -708,7 +786,7 @@ because these are bounded value objects owned by their parent.
 
 ---
 
-# 16. Controlled Denormalization
+# 17. Controlled Denormalization
 
 Duplication is acceptable when it removes a measured performance bottleneck.
 
@@ -746,7 +824,7 @@ Rule:
 
 ---
 
-# 17. GraphQL N+1 Strategy
+# 18. GraphQL N+1 Strategy
 
 Consider:
 
@@ -800,7 +878,7 @@ Batch loaders should be scoped to the GraphQL request to provide both batching a
 
 ---
 
-# 18. Cursor Pagination
+# 19. Cursor Pagination
 
 Avoid deep pagination using:
 
@@ -855,7 +933,7 @@ Fetch `limit + 1` records to determine `hasNextPage`.
 
 ---
 
-# 19. Vector Search Data Model
+# 20. Vector Search Data Model
 
 Jobs contain their searchable embedding:
 
@@ -904,7 +982,7 @@ Keeping the vector on the job avoids an additional lookup after vector retrieval
 
 ---
 
-# 20. Candidate Embeddings
+# 21. Candidate Embeddings
 
 Candidate profiles can similarly contain:
 
@@ -944,7 +1022,7 @@ without introducing a dedicated vector-document collection during the MVP.
 
 ---
 
-# 21. Embedding Metadata
+# 22. Embedding Metadata
 
 Store enough metadata to determine whether an embedding is stale.
 
@@ -975,7 +1053,7 @@ This prevents unnecessary embedding API calls.
 
 ---
 
-# 22. Embedding Pipeline
+# 23. Embedding Pipeline
 
 Do not generate embeddings synchronously inside normal mutations unless immediately required.
 
@@ -1014,7 +1092,7 @@ Concurrency must be configurable.
 
 ---
 
-# 23. Hybrid Search
+# 24. Hybrid Search
 
 Semantic search should not replace structured filtering.
 
