@@ -160,6 +160,8 @@ Application state update
 ApplicationEvent append
 ```
 
+Job aggregate transitions introduced in this phase or later must express pure state evolution with `cats.data.State`; effectful services execute that transition, enforce authorization, and persist the result atomically with required history/event records.
+
 ### Milestone
 
 A complete application can move:
@@ -413,6 +415,15 @@ Kafka publish
 where one can succeed while the other fails.
 
 Introduce a transactional/event outbox strategy or equivalent reliable publication mechanism.
+
+Kafka integration must follow the event-driven architecture pattern for all producer and consumer work:
+
+- domain operations create versioned immutable events
+- OLTP state remains in MongoDB
+- event publication uses a durable outbox or equivalent handoff
+- consumers are idempotent and replayable
+- partition keys document ordering guarantees
+- queues, fibers, and retries are bounded and supervised
 
 ### Milestone
 

@@ -165,6 +165,8 @@ enum ApplicationStatus:
 
 Business transitions belong in the domain/application layer rather than GraphQL resolvers or MongoDB repositories.
 
+Job aggregate state changes must be modeled as pure `cats.data.State` programs over the `Job` aggregate. This applies to create/publish/update/close style transitions and any later job lifecycle expansion. `State` is for deterministic in-memory transition logic only; application services remain responsible for authorization, time/ID inputs, repository effects, atomic persistence, and event handoff.
+
 ---
 
 # 5. Ports
@@ -262,6 +264,15 @@ def appResource: Resource[IO, Server] =
 ```
 
 Do not create Mongo or HTTP clients inside resolvers.
+
+Concurrency is introduced through Cats Effect only when a concrete workflow needs it:
+
+- `Ref` is allowed for process-local coordination such as request-scoped counters, lifecycle gates, or in-memory test fixtures; it is not a substitute for MongoDB consistency.
+- Bounded `Queue` is allowed for explicit asynchronous handoff such as embedding work or outbox dispatch; unbounded queues are forbidden.
+- Fibers must be owned by `Resource`, request scope, or another structured supervisor, with cancellation and finalization tests for long-lived work.
+- `parTraverse`, `parEvalMap`, and similar concurrency must have explicit bounds and must preserve authorization and backpressure.
+
+Detached fire-and-forget fibers, unbounded queues, and process-local `Ref` state for durable business invariants are not allowed.
 
 ---
 

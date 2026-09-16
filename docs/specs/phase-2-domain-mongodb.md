@@ -16,6 +16,7 @@ Status: in progress
 - Target requirements: `docs/development-milestones.md` Phase 2 names User, CandidateProfile, Job, Application, ApplicationStatus, ApplicationEvent, repository ports, duplicate prevention, closed-job validation, status transitions, and atomic application/history writes.
 - Current user request: make the Scala Developer skill require ADTs, domain typed errors, and `ValidatedNel` validation.
 - Current user request update: Scala Developer work must follow TDD, with focused tests prepared before code for new behavior.
+- Current user request update: job aggregate state changes must use `cats.data.State`; concurrency primitives may be introduced only with bounded Cats Effect ownership; Kafka work must follow event-driven architecture.
 - Decision: implement pure domain and ports first. MongoDB uniqueness and transaction guarantees remain specified but unimplemented until the repository-adapter slice introduces replica-set-capable integration tests. Future implementation slices must record the planned failing test or test-first evidence before completing the matching code.
 
 ## Behavior and contracts
@@ -26,6 +27,9 @@ Status: in progress
 - Permitted application transitions are `Created -> Accepted | Declined | Rejected`, `Accepted -> Interview`, and `Interview -> Hired | Rejected`.
 - Rejection requires non-blank feedback; decline requires non-blank reason. Created applications always start in `Created`. Closed jobs reject new applications.
 - Repository ports exist as application-layer contracts only; application list queries require cursor plus validated page size. Adapters, schema migrations, unique indexes, and transaction behavior are pending implementation.
+- Future job create/publish/update/close rules must be represented as pure `cats.data.State` transitions over the job aggregate. This slice has not implemented job state transitions beyond the `JobStatus` ADT.
+- `Ref`, bounded `Queue`, and fibers are allowed only in application/infrastructure slices with resource ownership, cancellation behavior, and tests; they are not part of this pure-domain slice.
+- Kafka/event-driven architecture remains out of scope for Phase 2A implementation, but later event slices must use durable outbox-style publication, versioned event envelopes, idempotent consumers, and replay/recovery tests.
 
 ## Acceptance and evidence
 

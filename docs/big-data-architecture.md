@@ -62,6 +62,8 @@ The analytical platform must never become a dependency of transactional operatio
 
 Important domain operations produce immutable events.
 
+Kafka-facing work follows an event-driven architecture pattern. Operational services own current state in MongoDB and expose immutable domain events through a durable handoff, such as an outbox, before Kafka publication. Kafka consumers must be idempotent, replayable, version-aware, and tolerant of duplicate, late, and out-of-order records.
+
 Examples:
 
 ```text

@@ -96,6 +96,8 @@ Every status change produces immutable historical information.
 
 Invalid transitions are rejected by domain logic.
 
+Job aggregate state changes use `cats.data.State` for pure transition logic. Services supply authorization, time, IDs, persistence, and event handoff around that pure state program; `State` must not hide effects.
+
 ---
 
 # 4. MVP Use Cases
@@ -1088,6 +1090,8 @@ retries
 late events
 consumer restarts
 ```
+
+Kafka slices must follow an event-driven architecture pattern: operational services persist current state in MongoDB, record a durable event/outbox entry in the same reliable boundary where required, and publish to Kafka asynchronously. Kafka availability must not block OLTP writes. Consumers are at-least-once, idempotent, replayable, and version-aware.
 
 ---
 
