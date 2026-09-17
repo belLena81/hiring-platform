@@ -3,14 +3,16 @@ package com.example.graphQL.cats.infrastructure.mongo
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes, JwtActorAuthenticator}
-import com.example.graphQL.cats.application.{Diagnostics, HealthService}
+import com.example.graphQL.cats.application.{ActorContext, Diagnostics, HealthService}
 import com.example.graphQL.cats.application.port.{
-  ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, JobSearchFilter, PageSize, RepositoryError
+  ApplicationEventPageRequest, ApplicationPageRequest, EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector,
+  JobPageRequest, JobSearchFilter, PageSize, RepositoryError
 }
-import com.example.graphQL.cats.config.JwtAuthConfig
+import com.example.graphQL.cats.application.service.{CreateJobInput, SourceHash}
+import com.example.graphQL.cats.config.{JwtAuthConfig, VectorSearchConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
-  Application, ApplicationEvent, ApplicationStatus, CandidateProfile, Job, JobStatus, Location, User, UserRole
+  Application, ApplicationEvent, ApplicationStatus, CandidateProfile, Job, JobStatus, Location, SearchableText, User, UserRole
 }
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
 import io.circe.Json
@@ -441,6 +443,36 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     }
   }
 
+  test("enabled vector runtime wires semantic search service and embedding pipeline for job writes") {
+    replicaSetContainer.use { uri =>
+      MongoHiringRuntime.resource(uri, "hiring_vector_runtime", Diagnostics.noop, vectorConfig,
+        (config, _) => FakeEmbeddingService(config)).use { runtime =>
+        val recruiterUser = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
+        val create = CreateJobInput(
+          "Vector Scala Developer",
+          "Build semantic search services",
+          List("Scala and MongoDB"),
+          Set("Scala", "MongoDB"),
+          Location("Ukraine", "Kyiv", remote = true),
+          JobStatus.Open
+        )
+        for {
+          setup <- runtime.ensureSetup
+          _ = assert(setup)
+          _ = assert(runtime.services.semanticSearchService.nonEmpty)
+          _ <- runtime.services.users.asInstanceOf[MongoUserRepository].insert(recruiterUser)
+          created <- runtime.services.jobService.createJob(ActorContext(recruiterId, UserRole.Recruiter), create, now, jobId)
+          job <- IO.fromEither(created.leftMap(error => new AssertionError(s"createJob failed: $error")))
+          embedded <- eventually(runtime.services.jobs.find(jobId).map(_.flatMap(_.embedding)))(_.nonEmpty)
+        } yield {
+          assertEquals(embedded.map(_.meta.model), Some(vectorConfig.voyageModel))
+          assertEquals(embedded.map(_.meta.version), Some(vectorConfig.embeddingVersion))
+          assertEquals(embedded.map(_.meta.sourceHash), Some(SourceHash.sha256(SearchableText.job(job))))
+        }
+      }
+    }
+  }
+
   private def container: Resource[IO, String] =
     Resource.make(IO.blocking {
       val instance = new Standalone
@@ -536,6 +568,36 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     assertEquals(index.get("key", classOf[Document]), keys)
     unique.foreach(expected => assertEquals(index.getBoolean("unique", false), expected))
     partial.foreach(expected => assertEquals(index.get("partialFilterExpression", classOf[Document]), expected))
+  }
+
+  private val vectorConfig: VectorSearchConfig =
+    VectorSearchConfig(
+      enabled = true,
+      voyageApiKey = Some("synthetic-voyage-key"),
+      voyageEndpoint = "https://example.test/embeddings",
+      voyageModel = "voyage-4-lite",
+      voyageDimension = 1024,
+      embeddingVersion = 1,
+      queueSize = 16,
+      parallelism = 1,
+      timeoutMillis = 1000,
+      jobVectorIndex = "jobs_embedding_vector",
+      candidateVectorIndex = "candidates_embedding_vector",
+      numCandidates = 10
+    )
+
+  private final case class FakeEmbeddingService(config: VectorSearchConfig) extends EmbeddingService[IO] {
+    override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+      IO.pure(Right(EmbeddingVector(List.fill(config.voyageDimension)(0.1f), config.voyageModel, config.voyageDimension)))
+  }
+
+  private def eventually[A](effect: IO[A])(accepted: A => Boolean): IO[A] = {
+    def loop(remaining: Int): IO[A] =
+      effect.flatMap { value =>
+        if (accepted(value) || remaining <= 0) IO.pure(value)
+        else IO.sleep(100.millis) *> loop(remaining - 1)
+      }
+    loop(30)
   }
 
   private def jobFixture(id: JobId, status: JobStatus): Job =

@@ -27,13 +27,13 @@ Stop/start MongoDB with `docker compose stop mongodb` and `docker compose start 
 
 ## Configuration and API tools
 
-The application loads defaults from `src/main/resources/application.conf` and then overlays an ignored root `local.conf` when present. Without `local.conf`, the checked-in configuration is the production-style default. Keep non-sensitive local values hardcoded in `local.conf`; pass only sensitive values, such as credential-bearing MongoDB URIs, through config placeholders like `MONGODB_URI={$MONGODB_URI}`.
+The application loads defaults from `src/main/resources/application.conf` and then overlays an ignored root `local.conf` when present. Without `local.conf`, the checked-in configuration is the production-style default. Keep non-sensitive local values hardcoded in `local.conf`; pass only sensitive values, such as credential-bearing MongoDB URIs, through config placeholders like `MONGODB_URI=${MONGODB_URI}`.
 
 ```bash
 cat > local.conf <<'EOF'
 HTTP_HOST=127.0.0.1
 HTTP_PORT=8080
-MONGODB_URI={$MONGODB_URI}
+MONGODB_URI=${MONGODB_URI}
 MONGODB_DATABASE=hiring
 LOG_LEVEL=INFO
 LOG_MASK_SENSITIVE=true

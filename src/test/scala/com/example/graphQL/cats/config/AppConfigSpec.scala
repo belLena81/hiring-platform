@@ -49,12 +49,12 @@ class AppConfigSpec extends FunSuite {
     val config =
       """HTTP_HOST=::1
         |HTTP_PORT=65535
-        |MONGODB_URI={$MONGODB_URI}
+        |MONGODB_URI=${MONGODB_URI}
         |MONGODB_DATABASE=hiring_test-2
         |LOG_LEVEL=WARN
         |LOG_MASK_SENSITIVE=true
         |LOG_REQUEST_PAYLOADS=false
-        |AUTH_JWT_HS256_SECRET={$AUTH_JWT_HS256_SECRET}
+        |AUTH_JWT_HS256_SECRET=${AUTH_JWT_HS256_SECRET}
         |AUTH_JWT_ISSUER=hiring-platform-local
         |AUTH_JWT_AUDIENCE=hiring-graphql-api
         |VECTOR_SEARCH_ENABLED=false
@@ -82,8 +82,17 @@ class AppConfigSpec extends FunSuite {
 
   test("VHS-AC08 packaged application config is sanitized and parseable") {
     val raw = resource("application.conf")
-    val result = AppConfig.fromConfig(raw, Map.empty)
+    val result = AppConfig.fromConfig(raw, Map(
+      "HTTP_HOST" -> "127.0.0.1",
+      "HTTP_PORT" -> "8080",
+      "MONGODB_URI" -> "mongodb://127.0.0.1:27017",
+      "AUTH_JWT_HS256_SECRET" -> "disabled",
+      "VOYAGE_API_KEY" -> "disabled",
+      "VOYAGE_MODEL" -> "voyage-4-lite"
+    ))
     assert(result.isRight)
+    assert(raw.contains("HTTP_HOST=${HTTP_HOST}"))
+    assert(raw.contains("MONGODB_URI=${MONGODB_URI}"))
     assert(!raw.contains("mongodb+srv://"))
     assert(!raw.contains("synthetic-secret"))
     assert(!raw.contains(" //"))
@@ -101,9 +110,47 @@ class AppConfigSpec extends FunSuite {
       Right((9090, "ERROR", false)))
   }
 
+  test("P1-AC01 local config overrides unresolved deploy placeholders before env resolution") {
+    val defaults =
+      """HTTP_HOST=${HTTP_HOST}
+        |HTTP_PORT=${HTTP_PORT}
+        |MONGODB_URI=${MONGODB_URI}
+        |MONGODB_DATABASE=hiring
+        |LOG_LEVEL=INFO
+        |LOG_MASK_SENSITIVE=true
+        |LOG_REQUEST_PAYLOADS=false
+        |AUTH_JWT_HS256_SECRET=${AUTH_JWT_HS256_SECRET}
+        |AUTH_JWT_ISSUER=hiring-platform-local
+        |AUTH_JWT_AUDIENCE=hiring-graphql-api
+        |VECTOR_SEARCH_ENABLED=false
+        |VOYAGE_API_KEY=${VOYAGE_API_KEY}
+        |VOYAGE_ENDPOINT=https://api.voyageai.com/v1/embeddings
+        |VOYAGE_MODEL=${VOYAGE_MODEL}
+        |VOYAGE_DIMENSION=1024
+        |EMBEDDING_VERSION=1
+        |EMBEDDING_QUEUE_SIZE=128
+        |EMBEDDING_PARALLELISM=4
+        |EMBEDDING_TIMEOUT_MS=5000
+        |JOB_VECTOR_INDEX=jobs_embedding_vector
+        |CANDIDATE_VECTOR_INDEX=candidates_embedding_vector
+        |VECTOR_NUM_CANDIDATES=100
+        |""".stripMargin
+    val local =
+      """HTTP_HOST=127.0.0.1
+        |HTTP_PORT=8080
+        |MONGODB_URI=mongodb://127.0.0.1:27017
+        |AUTH_JWT_HS256_SECRET=disabled
+        |VOYAGE_API_KEY=disabled
+        |VOYAGE_MODEL=voyage-4-lite
+        |""".stripMargin
+
+    assertEquals(AppConfig.fromRawConfig(defaults, local, _ => None).map(config =>
+      (config.host, config.port, config.mongoUri)), Right(("127.0.0.1", 8080, "mongodb://127.0.0.1:27017")))
+  }
+
   test("P1-AC01 config text rejects malformed lines and missing secret env placeholders safely") {
     assertEquals(AppConfig.fromConfig("HTTP_HOST 127.0.0.1\n", Map.empty), Left(ConfigError.InvalidConfigFile))
-    assertEquals(AppConfig.fromConfig("MONGODB_URI={$MONGODB_URI}\n", Map.empty), Left(ConfigError.InvalidMongoUri))
+    assertEquals(AppConfig.fromConfig("MONGODB_URI=${MONGODB_URI}\n", Map.empty), Left(ConfigError.InvalidMongoUri))
   }
 
   test("P1-AC01 rejects missing required settings rather than using code defaults") {
@@ -179,7 +226,7 @@ class AppConfigSpec extends FunSuite {
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
     assertEquals(AppConfig.fromConfig(defaultConfig + "VECTOR_SEARCH_ENABLED=true\n", Map.empty),
       Left(ConfigError.InvalidVoyageApiKey))
-    val result = AppConfig.fromConfig(defaultConfig + "VECTOR_SEARCH_ENABLED=true\nVOYAGE_API_KEY={$VOYAGE_API_KEY}\n",
+    val result = AppConfig.fromConfig(defaultConfig + "VECTOR_SEARCH_ENABLED=true\nVOYAGE_API_KEY=${VOYAGE_API_KEY}\n",
       Map("VOYAGE_API_KEY" -> "synthetic-voyage-key"))
     assertEquals(result.map(_.vectorSearch.voyageApiKey), Right(Some("synthetic-voyage-key")))
   }
@@ -188,7 +235,7 @@ class AppConfigSpec extends FunSuite {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth), Right(defaultJwtAuth))
     assertEquals(AppConfig.fromConfig(defaultConfig + "AUTH_JWT_HS256_SECRET=short\n", Map.empty),
       Left(ConfigError.InvalidJwtSecret))
-    val loaded = AppConfig.fromConfig(defaultConfig + "AUTH_JWT_HS256_SECRET={$AUTH_JWT_HS256_SECRET}\n",
+    val loaded = AppConfig.fromConfig(defaultConfig + "AUTH_JWT_HS256_SECRET=${AUTH_JWT_HS256_SECRET}\n",
       Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456"))
     assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right(Some("abcdefghijklmnopqrstuvwxyz123456")))
   }

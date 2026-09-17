@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.config
 
 import cats.effect.IO
-import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
 import com.mongodb.ConnectionString
 import java.nio.charset.StandardCharsets
@@ -81,7 +80,7 @@ object AppConfig {
     IO.blocking {
       loadDefaultConfig().flatMap { defaults =>
         val local = if (Files.isRegularFile(localConfig)) Files.readString(localConfig, StandardCharsets.UTF_8) else ""
-        fromConfig(defaults, env, None).flatMap(defaultConfig => fromConfig(local, env, defaultConfig.some))
+        fromRawConfig(defaults, local, env)
       }
     }
 
@@ -98,6 +97,18 @@ object AppConfig {
       resolved <- resolve(parsed, env)
       merged = base.fold(resolved)(configToEntries(_) ++ resolved)
       config <- fromEntries(merged)
+    } yield config
+
+  private[config] def fromRawConfig(
+      defaults: String,
+      local: String,
+      env: String => Option[String]
+  ): Either[ConfigError, AppConfig] =
+    for {
+      defaultEntries <- parse(defaults)
+      localEntries <- parse(local)
+      resolved <- resolve(defaultEntries ++ localEntries, env)
+      config <- fromEntries(resolved)
     } yield config
 
   private def fromEntries(entries: Map[String, String]): Either[ConfigError, AppConfig] = {
@@ -236,7 +247,7 @@ object AppConfig {
     "VECTOR_NUM_CANDIDATES" -> config.vectorSearch.numCandidates.toString
   )
 
-  private val EnvReference = """\{\$([A-Z0-9_]+)\}""".r
+  private val EnvReference = """\$\{([A-Z0-9_]+)\}""".r
 
   private def errorFor(key: String): ConfigError =
     key match {

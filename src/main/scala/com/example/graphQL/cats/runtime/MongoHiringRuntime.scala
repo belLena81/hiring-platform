@@ -4,11 +4,16 @@ import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
+import com.example.graphQL.cats.application.port.EmbeddingService
 import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, ProbeResult}
-import com.example.graphQL.cats.application.service.{ApplicationService, JobService}
+import com.example.graphQL.cats.application.service.{ApplicationService, EmbeddingPipeline, JobService, SemanticSearchService}
+import com.example.graphQL.cats.config.VectorSearchConfig
+import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.infrastructure.mongo.{
-  MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoUserRepository
+  MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
+  MongoUserRepository
 }
+import com.mongodb.reactivestreams.client.MongoDatabase
 
 final case class MongoHiringRuntime(
     probe: DatabaseProbe,
@@ -18,23 +23,112 @@ final case class MongoHiringRuntime(
 
 object MongoHiringRuntime {
   def resource(uri: String, databaseName: String, diagnostics: Diagnostics): Resource[IO, MongoHiringRuntime] =
-    MongoDatabaseProbe.clientResource(uri).evalMap { client =>
+    resource(uri, databaseName, diagnostics, disabledVectorSearch)
+
+  def resource(
+      uri: String,
+      databaseName: String,
+      diagnostics: Diagnostics,
+      vectorSearch: VectorSearchConfig
+  ): Resource[IO, MongoHiringRuntime] =
+    resource(uri, databaseName, diagnostics, vectorSearch, voyageEmbeddingService)
+
+  def resource(
+      uri: String,
+      databaseName: String,
+      diagnostics: Diagnostics,
+      vectorSearch: VectorSearchConfig,
+      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO]
+  ): Resource[IO, MongoHiringRuntime] =
+    MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
-      (Ref.of[IO, Boolean](false), Semaphore[IO](1)).mapN { (setupComplete, setupLock) =>
+      Resource.eval((Ref.of[IO, Boolean](false), Semaphore[IO](1)).tupled).flatMap { case (setupComplete, setupLock) =>
         val users = new MongoUserRepository(database)
         val jobs = new MongoJobRepository(database)
         val applications = MongoApplicationRepository.transactional(database, client)
-        val services = HiringGraphQLServices(
-          users,
-          jobs,
-          applications,
-          JobService[IO](users, jobs),
-          ApplicationService[IO](users, jobs, applications)
-        )
-        val setup = ensureSetup(database, setupComplete, setupLock)
-        MongoHiringRuntime(probe(uri, databaseName, diagnostics, setup), services, setup)
+        hiringServices(database, users, jobs, applications, vectorSearch, embeddingService).map { services =>
+          val setup = ensureSetup(database, setupComplete, setupLock)
+          MongoHiringRuntime(probe(uri, databaseName, diagnostics, setup), services, setup)
+        }
       }
     }
+
+  private def hiringServices(
+      database: MongoDatabase,
+      users: MongoUserRepository,
+      jobs: MongoJobRepository,
+      applications: MongoApplicationRepository,
+      vectorSearch: VectorSearchConfig,
+      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO]
+  ): Resource[IO, HiringGraphQLServices] =
+    if (!vectorSearch.enabled) {
+      Resource.pure(HiringGraphQLServices(
+        users,
+        jobs,
+        applications,
+        JobService[IO](users, jobs),
+        ApplicationService[IO](users, jobs, applications)
+      ))
+    } else {
+      Resource.eval(IO.fromOption(vectorSearch.voyageApiKey)(
+        new IllegalArgumentException("VOYAGE_API_KEY is required when vector search is enabled")
+      )).flatMap { apiKey =>
+        val embeddings = embeddingService(vectorSearch, apiKey)
+        val search = new MongoSemanticSearchRepository(
+          database,
+          vectorSearch.jobVectorIndex,
+          vectorSearch.candidateVectorIndex,
+          vectorSearch.numCandidates
+        )
+        EmbeddingPipeline.resource(
+          users,
+          jobs,
+          embeddings,
+          vectorSearch.voyageModel,
+          vectorSearch.embeddingVersion,
+          vectorSearch.queueSize,
+          vectorSearch.parallelism
+        ).map { queue =>
+          val jobService = JobService[IO](users, jobs, queue)
+          val applicationService = ApplicationService[IO](users, jobs, applications)
+          val semanticSearch = SemanticSearchService[IO](users, jobs, embeddings, search, vectorSearch.embeddingVersion)
+          val services = HiringGraphQLServices(
+            users,
+            jobs,
+            applications,
+            jobService,
+            applicationService,
+            Some(semanticSearch)
+          )
+          services
+        }
+      }
+    }
+
+  private def voyageEmbeddingService(config: VectorSearchConfig, apiKey: String): EmbeddingService[IO] =
+    new VoyageEmbeddingService(
+      apiKey,
+      config.voyageEndpoint,
+      config.voyageModel,
+      config.voyageDimension,
+      config.timeoutMillis
+    )
+
+  private val disabledVectorSearch: VectorSearchConfig =
+    VectorSearchConfig(
+      enabled = false,
+      voyageApiKey = None,
+      voyageEndpoint = "https://api.voyageai.com/v1/embeddings",
+      voyageModel = "voyage-4-lite",
+      voyageDimension = 1024,
+      embeddingVersion = 1,
+      queueSize = 128,
+      parallelism = 4,
+      timeoutMillis = 5000,
+      jobVectorIndex = "jobs_embedding_vector",
+      candidateVectorIndex = "candidates_embedding_vector",
+      numCandidates = 100
+    )
 
   private def probe(
       uri: String,

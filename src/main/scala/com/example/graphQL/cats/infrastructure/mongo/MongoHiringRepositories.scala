@@ -2,8 +2,11 @@ package com.example.graphQL.cats.infrastructure.mongo
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.application.port.*
+import com.example.graphQL.cats.application.service.SourceHash
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, EntityEmbedding, Job, JobStatus, User, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  Application, ApplicationEvent, ApplicationStatus, EntityEmbedding, Job, JobStatus, SearchableText, User, UserRole
+}
 import com.mongodb.{MongoCommandException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
 import com.mongodb.client.result.InsertOneResult
@@ -217,25 +220,14 @@ final class MongoSemanticSearchRepository(
     )
     val pipeline = List(vectorSearchStage(candidateVectorIndex, query.vector, filter, query.first), scoreStage).asJava
     PublisherBridge.all(users.aggregate(pipeline)).map { documents =>
-      Right(documents.flatMap { document =>
-        for {
-          embedding <- MongoHiringCodecs.readUser(document).embedding
-          score <- Option(document.get("score", classOf[Number]))
-        } yield RankedCandidate(MongoHiringCodecs.readUser(document), score.doubleValue, query.mode, embedding.meta, query.searchId)
-      })
+      Right(documents.flatMap(document => MongoSemanticSearchResult.rankedCandidate(document, query)))
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
   private def rankedJobs(query: VectorSearchQuery, filter: Bson): IO[Either[RepositoryError, List[RankedJob]]] = {
     val pipeline = List(vectorSearchStage(jobVectorIndex, query.vector, filter, query.first), scoreStage).asJava
     PublisherBridge.all(jobs.aggregate(pipeline)).map { documents =>
-      Right(documents.flatMap { document =>
-        val job = MongoHiringCodecs.readJob(document)
-        for {
-          embedding <- job.embedding
-          score <- Option(document.get("score", classOf[Number]))
-        } yield RankedJob(job, score.doubleValue, query.mode, embedding.meta, query.searchId)
-      })
+      Right(documents.flatMap(document => MongoSemanticSearchResult.rankedJob(document, query)))
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
@@ -262,6 +254,31 @@ final class MongoSemanticSearchRepository(
 
   private val scoreStage: Document =
     new Document("$set", new Document("score", new Document("$meta", "vectorSearchScore")))
+}
+
+private[mongo] object MongoSemanticSearchResult {
+  def rankedJob(document: Document, query: VectorSearchQuery): Option[RankedJob] = {
+    val job = MongoHiringCodecs.readJob(document)
+    for {
+      embedding <- job.embedding
+      if embedding.meta.model == query.model
+      if embedding.meta.version == query.version
+      if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job))
+      score <- Option(document.get("score", classOf[Number]))
+    } yield RankedJob(job, score.doubleValue, query.mode, embedding.meta, query.searchId)
+  }
+
+  def rankedCandidate(document: Document, query: VectorSearchQuery): Option[RankedCandidate] = {
+    val candidate = MongoHiringCodecs.readUser(document)
+    for {
+      profile <- candidate.profile
+      embedding <- candidate.embedding
+      if embedding.meta.model == query.model
+      if embedding.meta.version == query.version
+      if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
+      score <- Option(document.get("score", classOf[Number]))
+    } yield RankedCandidate(candidate, score.doubleValue, query.mode, embedding.meta, query.searchId)
+  }
 }
 
 final class MongoApplicationRepository private (

@@ -52,9 +52,12 @@ class MainProcessSpec extends CatsEffectSuite {
         val defaults = Map(
           "HTTP_HOST" -> "127.0.0.1",
           "HTTP_PORT" -> "8080",
-          "MONGODB_URI" -> "{$MONGODB_URI}",
+          "MONGODB_URI" -> "${MONGODB_URI}",
           "MONGODB_DATABASE" -> "hiring_test",
-          "LOG_LEVEL" -> "ERROR"
+          "LOG_LEVEL" -> "ERROR",
+          "AUTH_JWT_HS256_SECRET" -> "disabled",
+          "VOYAGE_API_KEY" -> "disabled",
+          "VOYAGE_MODEL" -> "voyage-4-lite"
         )
         val configEntries = defaults ++ environment.removed("MONGODB_URI")
         Files.writeString(configFile, configEntries.toList.sortBy(_._1).map { case (key, value) => s"$key=$value" }.mkString("", "\n", "\n"))
