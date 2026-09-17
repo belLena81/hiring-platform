@@ -12,7 +12,7 @@ node_modules/
 .env.*
 !.env.example
 !.env.*.example
-/local.conf
+local.conf
 
 ### IntelliJ IDEA ###
 .idea/
