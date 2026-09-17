@@ -7,6 +7,10 @@ type Application {
   job: Job
 }
 
+input ApplicationActionInput {
+  applicationId: ID!
+}
+
 type ApplicationConnection {
   edges: [ApplicationEdge!]!
   pageInfo: PageInfo!
@@ -59,6 +63,11 @@ type CandidateProfile {
   resumeRef: String
 }
 
+input DeclineApplicationInput {
+  applicationId: ID!
+  reason: String
+}
+
 type Health {
   status: HealthStatus!
 }
@@ -80,6 +89,10 @@ type Job {
   recruiter: User
 }
 
+input JobActionInput {
+  jobId: ID!
+}
+
 type JobConnection {
   edges: [JobEdge!]!
   pageInfo: PageInfo!
@@ -89,6 +102,16 @@ type JobConnection {
 type JobEdge {
   node: Job!
   cursor: String!
+}
+
+input JobInput {
+  title: String!
+  description: String!
+  requirements: [String!]!
+  inputSkills: [String!]!
+  country: String!
+  city: String
+  remote: Boolean!
 }
 
 type JobPayload {
@@ -109,16 +132,16 @@ type Location {
 }
 
 type Mutation {
-  submitApplication(jobId: ID!): ApplicationPayload!
-  createJob(title: String!, description: String!, requirements: [String!]!, inputSkills: [String!]!, country: String!, city: String, remote: Boolean!): JobPayload!
-  updateJob(id: ID!, title: String!, description: String!, requirements: [String!]!, inputSkills: [String!]!, country: String!, city: String, remote: Boolean!): JobPayload!
-  publishJob(id: ID!): JobPayload!
-  closeJob(id: ID!): JobPayload!
-  acceptApplication(applicationId: ID!): ApplicationPayload!
-  moveApplicationToInterview(applicationId: ID!): ApplicationPayload!
-  hireApplication(applicationId: ID!): ApplicationPayload!
-  rejectApplication(applicationId: ID!, feedback: String): ApplicationPayload!
-  declineApplication(applicationId: ID!, reason: String): ApplicationPayload!
+  submitApplication(input: SubmitApplicationInput!): ApplicationPayload!
+  createJob(input: JobInput!): JobPayload!
+  updateJob(input: UpdateJobInput!): JobPayload!
+  publishJob(input: JobActionInput!): JobPayload!
+  closeJob(input: JobActionInput!): JobPayload!
+  acceptApplication(input: ApplicationActionInput!): ApplicationPayload!
+  moveApplicationToInterview(input: ApplicationActionInput!): ApplicationPayload!
+  hireApplication(input: ApplicationActionInput!): ApplicationPayload!
+  rejectApplication(input: RejectApplicationInput!): ApplicationPayload!
+  declineApplication(input: DeclineApplicationInput!): ApplicationPayload!
 }
 
 type PageInfo {
@@ -149,6 +172,20 @@ type Readiness {
 enum ReadinessStatus {
   READY
   NOT_READY
+}
+
+input RejectApplicationInput {
+  applicationId: ID!
+  feedback: String
+}
+
+input SubmitApplicationInput {
+  jobId: ID!
+}
+
+input UpdateJobInput {
+  id: ID!
+  patch: JobInput!
 }
 
 type User {

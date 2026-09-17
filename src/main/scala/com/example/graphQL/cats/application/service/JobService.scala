@@ -32,6 +32,7 @@ final case class UpdateJobInput(
 
 final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepository[F]) {
   private val authorization = ActorAuthorization(users)
+  private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
   def createJob(
       actor: ActorContext,
@@ -52,7 +53,7 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
       input: UpdateJobInput,
       now: Instant
   ): F[Either[UseCaseError, Job]] =
-    withAuthorizedJob(actor, jobId) { job =>
+    authorizedJobs.manage(actor, jobId) { job =>
       (for {
         update <- EitherT.fromEither[F](validateUpdatedJob(job, input, now))
         updated <- EitherT(persistJob(JobLifecycle.update(update).runA(job).value.widenUseCase))
@@ -60,12 +61,12 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
     }
 
   def publishJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
-    withAuthorizedJob(actor, jobId) { job =>
+    authorizedJobs.manage(actor, jobId) { job =>
       persistJob(JobLifecycle.publish(now).runA(job).value.widenUseCase)
     }
 
   def closeJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
-    withAuthorizedJob(actor, jobId) { job =>
+    authorizedJobs.manage(actor, jobId) { job =>
       persistJob(JobLifecycle.close(now).runA(job).value.widenUseCase)
     }
 
@@ -75,17 +76,6 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
       job <- EitherT.fromOptionF(jobs.find(jobId), DomainError.NotFound("job"): UseCaseError)
       _ <- EitherT.cond[F](authorization.canView(user, job), (), DomainError.Forbidden: UseCaseError)
     } yield job).value
-
-  private def withAuthorizedJob(
-      actor: ActorContext,
-      jobId: JobId
-  )(operation: Job => F[Either[UseCaseError, Job]]): F[Either[UseCaseError, Job]] =
-    (for {
-      user <- EitherT(authorization.resolve(actor))
-      job <- EitherT.fromOptionF(jobs.find(jobId), DomainError.NotFound("job"): UseCaseError)
-      _ <- EitherT.cond[F](authorization.canManage(user, job), (), DomainError.Forbidden: UseCaseError)
-      result <- EitherT(operation(job))
-    } yield result).value
 
   private def validateNewJob(
       recruiterId: UserId,

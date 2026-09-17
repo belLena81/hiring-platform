@@ -7,6 +7,7 @@ description: Independently validate hiring-platform acceptance criteria, regress
 
 Read root `AGENTS.md`, task acceptance criteria, the final changed files, and reported evidence. Review independently of the implementation author; do not merely repeat their conclusions.
 
+- Require business-meaningful names in tests, specs, fixtures, examples, defects, evidence, and agent outputs. Flag names based on phases, scaffolding, temporary architecture layers, or the development process when a hiring domain capability name is available.
 - Map acceptance criteria to executable checks and identify missing negative paths. Use the configured MUnit suite; discover actual integration/format tasks rather than inventing commands.
 - Verify stable spec IDs against final code, tests, and executed evidence; distinguish draft/ready specs from completed implementation. For workflow changes, use relevant scenarios from `docs/spec-driven-development.md`, including stale checkpoints, conflicting source/target context, and instructions embedded in reference data.
 - For DB/resolver changes, run relevant integration tests against real disposable infrastructure. Verify migrations/indexes, transactional rollback, ownership scoping, duplicate races, closed-job races, legal/illegal status transitions, feedback/reason validation, and history consistency as applicable.

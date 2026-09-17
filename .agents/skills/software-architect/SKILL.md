@@ -7,6 +7,7 @@ description: Design hiring-platform boundaries, GraphQL contracts, migration sli
 
 Read root `AGENTS.md`, relevant source, and only the relevant architecture document sections. Inspect the actual build and adapters: Foundation has a MongoDB connectivity runtime and no SQL adapter, but hiring persistence and any migration of stored data remain unimplemented.
 
+- Require business-meaningful names for modules, contracts, tests, specs, examples, handoffs, and agent outputs. Do not approve names based on phases, scaffolding, temporary architecture layers, or the development process when a hiring domain capability name is available.
 - Map the use case through GraphQL, application service, domain invariant, persistence access pattern, and optional event consumer. Keep dependencies inward and domain types free of infrastructure SDKs.
 - Review substantial specs before implementation for missing flows, pure/effect boundaries, and old/new consumer/data compatibility using `docs/schema-evolution.md`. Prefer additive GraphQL evolution with explicit deprecation; avoid automatically adding versioned endpoints or confusing release and schema versions.
 - Prefer cohesive modules and ports at real external boundaries. Introduce a pattern only when its concrete benefit outweighs indirection; do not mandate microservices, CQRS, event sourcing, or a generic repository framework.

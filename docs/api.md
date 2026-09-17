@@ -17,7 +17,7 @@ An external GraphQL API client can load `/graphql` through introspection or impo
 
 The checked schema snapshot is [hiring.graphql](../src/test/resources/graphql/hiring.graphql). Backend contract tests compare it with the live schema definition, verify the download endpoint matches, and execute [health](../src/test/resources/graphql/health.graphql), [readiness](../src/test/resources/graphql/readiness.graphql), and [standard introspection](../src/test/resources/graphql/introspection.graphql) fixtures. Update schema and consumer fixtures together when contracts evolve; a schema diff alone does not establish compatible behavior.
 
-The schema now includes Phase 3 hiring operations and typed payloads for jobs, applications, status transitions, cursor connections, and application history. HTTP does not yet include an authentication source that can build trusted `ActorContext`; hiring operations therefore return sanitized unauthorized payloads through the served endpoint until a separate auth slice is implemented. Resolver tests inject trusted actors below the HTTP boundary to verify the GraphQL contract against Phase 2 services.
+The schema now includes Hiring GraphQL API operations and typed payloads for jobs, applications, status transitions, cursor connections, and application history. HTTP does not yet include an authentication source that can build trusted `ActorContext`; hiring operations therefore return sanitized unauthorized payloads through the served endpoint until a separate auth slice is implemented. Resolver tests inject trusted actors below the HTTP boundary to verify the GraphQL contract against domain services.
 
 ## Execute operations
 

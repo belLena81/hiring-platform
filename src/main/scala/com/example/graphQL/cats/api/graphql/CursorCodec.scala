@@ -11,34 +11,58 @@ import java.util.{Base64, UUID}
 import scala.util.Try
 
 private[graphql] object CursorCodec {
-  private final case class Cursor(createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
+  private enum CursorKind(val value: String) {
+    case Job extends CursorKind("job")
+    case Application extends CursorKind("application")
+    case ApplicationEvent extends CursorKind("applicationEvent")
+  }
 
-  private given Encoder[Cursor] = Encoder.forProduct3("createdAt", "occurredAt", "id")(cursor =>
-    (cursor.createdAt.map(_.toString), cursor.occurredAt.map(_.toString), cursor.id.toString)
+  private final case class Cursor(kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
+
+  private given Encoder[CursorKind] = Encoder.encodeString.contramap(_.value)
+
+  private given Decoder[CursorKind] = Decoder.decodeString.emap {
+    case CursorKind.Job.value => Right(CursorKind.Job)
+    case CursorKind.Application.value => Right(CursorKind.Application)
+    case CursorKind.ApplicationEvent.value => Right(CursorKind.ApplicationEvent)
+    case other => Left(s"Unknown cursor kind: $other")
+  }
+
+  private given Encoder[Cursor] = Encoder.forProduct4("kind", "createdAt", "occurredAt", "id")(cursor =>
+    (cursor.kind, cursor.createdAt.map(_.toString), cursor.occurredAt.map(_.toString), cursor.id.toString)
   )
 
-  private given Decoder[Cursor] = Decoder.forProduct3("createdAt", "occurredAt", "id")(
-    (createdAt: Option[String], occurredAt: Option[String], id: String) =>
-      Cursor(createdAt.map(Instant.parse), occurredAt.map(Instant.parse), UUID.fromString(id))
+  private given Decoder[Cursor] = Decoder.forProduct4("kind", "createdAt", "occurredAt", "id")(
+    (kind: CursorKind, createdAt: Option[String], occurredAt: Option[String], id: String) =>
+      Cursor(kind, createdAt.map(Instant.parse), occurredAt.map(Instant.parse), UUID.fromString(id))
   )
 
   def encodeJob(cursor: JobCursor): String =
-    encode(Cursor(Some(cursor.createdAt), None, cursor.id.value))
+    encode(Cursor(CursorKind.Job, Some(cursor.createdAt), None, cursor.id.value))
 
   def encodeApplication(cursor: ApplicationCursor): String =
-    encode(Cursor(Some(cursor.createdAt), None, cursor.id.value))
+    encode(Cursor(CursorKind.Application, Some(cursor.createdAt), None, cursor.id.value))
 
   def encodeEvent(cursor: ApplicationEventCursor): String =
-    encode(Cursor(None, Some(cursor.occurredAt), cursor.id.value))
+    encode(Cursor(CursorKind.ApplicationEvent, None, Some(cursor.occurredAt), cursor.id.value))
 
   def decodeJob(value: String): Option[JobCursor] =
-    decodeCursor(value).flatMap(cursor => cursor.createdAt.map(JobCursor(_, JobId(cursor.id))))
+    decodeCursor(value).flatMap {
+      case Cursor(CursorKind.Job, Some(createdAt), None, id) => Some(JobCursor(createdAt, JobId(id)))
+      case _ => None
+    }
 
   def decodeApplication(value: String): Option[ApplicationCursor] =
-    decodeCursor(value).flatMap(cursor => cursor.createdAt.map(ApplicationCursor(_, ApplicationId(cursor.id))))
+    decodeCursor(value).flatMap {
+      case Cursor(CursorKind.Application, Some(createdAt), None, id) => Some(ApplicationCursor(createdAt, ApplicationId(id)))
+      case _ => None
+    }
 
   def decodeEvent(value: String): Option[ApplicationEventCursor] =
-    decodeCursor(value).flatMap(cursor => cursor.occurredAt.map(ApplicationEventCursor(_, ApplicationEventId(cursor.id))))
+    decodeCursor(value).flatMap {
+      case Cursor(CursorKind.ApplicationEvent, None, Some(occurredAt), id) => Some(ApplicationEventCursor(occurredAt, ApplicationEventId(id)))
+      case _ => None
+    }
 
   private def encode(cursor: Cursor): String =
     Base64.getUrlEncoder.withoutPadding().encodeToString(cursor.asJson.noSpaces.getBytes(StandardCharsets.UTF_8))

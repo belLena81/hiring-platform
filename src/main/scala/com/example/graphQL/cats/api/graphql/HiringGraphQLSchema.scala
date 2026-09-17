@@ -4,11 +4,11 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.application.{AuthenticationError, HealthService, ProbeResult, UseCaseError}
 import com.example.graphQL.cats.application.port.*
-import com.example.graphQL.cats.application.service.{CreateJobInput, JobService, UpdateJobInput}
+import com.example.graphQL.cats.application.service.{ActorAuthorization, CreateJobInput, JobService, UpdateJobInput}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
-import io.circe.Json
+import io.circe.{Decoder, Json}
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
 import sangria.marshalling.circe.*
 import sangria.renderer.SchemaRenderer
@@ -24,6 +24,36 @@ object HiringGraphQLSchema {
   private final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, errors: List[GraphQLError] = Nil)
   private final case class JobPayload(job: Option[Job], errors: List[GraphQLError])
   private final case class ApplicationPayload(application: Option[Application], errors: List[GraphQLError])
+  private final case class SubmitApplicationGraphQLInput(jobId: String)
+  private final case class JobGraphQLInput(
+      title: String,
+      description: String,
+      requirements: List[String],
+      inputSkills: List[String],
+      country: String,
+      city: Option[String],
+      remote: Boolean
+  )
+  private final case class UpdateJobGraphQLInput(id: String, patch: JobGraphQLInput)
+  private final case class JobActionGraphQLInput(jobId: String)
+  private final case class ApplicationActionGraphQLInput(applicationId: String)
+  private final case class RejectApplicationGraphQLInput(applicationId: String, feedback: Option[String])
+  private final case class DeclineApplicationGraphQLInput(applicationId: String, reason: Option[String])
+
+  private given Decoder[SubmitApplicationGraphQLInput] =
+    Decoder.forProduct1("jobId")(SubmitApplicationGraphQLInput.apply)
+  private given Decoder[JobGraphQLInput] =
+    Decoder.forProduct7("title", "description", "requirements", "inputSkills", "country", "city", "remote")(JobGraphQLInput.apply)
+  private given Decoder[UpdateJobGraphQLInput] =
+    Decoder.forProduct2("id", "patch")(UpdateJobGraphQLInput.apply)
+  private given Decoder[JobActionGraphQLInput] =
+    Decoder.forProduct1("jobId")(JobActionGraphQLInput.apply)
+  private given Decoder[ApplicationActionGraphQLInput] =
+    Decoder.forProduct1("applicationId")(ApplicationActionGraphQLInput.apply)
+  private given Decoder[RejectApplicationGraphQLInput] =
+    Decoder.forProduct2("applicationId", "feedback")(RejectApplicationGraphQLInput.apply)
+  private given Decoder[DeclineApplicationGraphQLInput] =
+    Decoder.forProduct2("applicationId", "reason")(DeclineApplicationGraphQLInput.apply)
 
   private val healthStatus = EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))
   private val readinessStatus = EnumType("ReadinessStatus", values = List(
@@ -43,14 +73,43 @@ object HiringGraphQLSchema {
   private val createdAfterArgument = Argument("createdAfter", OptionInputType(StringType))
   private val jobStatusArgument = Argument("status", OptionInputType(jobStatus))
   private val applicationStatusArgument = Argument("status", OptionInputType(applicationStatus))
-  private val feedbackArgument = Argument("feedback", OptionInputType(StringType))
-  private val reasonArgument = Argument("reason", OptionInputType(StringType))
-  private val titleArgument = Argument("title", StringType)
-  private val descriptionArgument = Argument("description", StringType)
-  private val requirementsArgument = Argument("requirements", ListInputType(StringType))
-  private val remoteArgument = Argument("remote", BooleanType)
-  private val countryArgument = Argument("country", StringType)
-  private val inputSkillsArgument = Argument("inputSkills", ListInputType(StringType))
+  private val submitApplicationInputType = InputObjectType[SubmitApplicationGraphQLInput]("SubmitApplicationInput", List(
+    InputField("jobId", IDType)
+  ))
+  private val jobInputType = InputObjectType[JobGraphQLInput]("JobInput", List(
+    InputField("title", StringType),
+    InputField("description", StringType),
+    InputField("requirements", ListInputType(StringType)),
+    InputField("inputSkills", ListInputType(StringType)),
+    InputField("country", StringType),
+    InputField("city", OptionInputType(StringType)),
+    InputField("remote", BooleanType)
+  ))
+  private val updateJobInputType = InputObjectType[UpdateJobGraphQLInput]("UpdateJobInput", List(
+    InputField("id", IDType),
+    InputField("patch", jobInputType)
+  ))
+  private val jobActionInputType = InputObjectType[JobActionGraphQLInput]("JobActionInput", List(
+    InputField("jobId", IDType)
+  ))
+  private val applicationActionInputType = InputObjectType[ApplicationActionGraphQLInput]("ApplicationActionInput", List(
+    InputField("applicationId", IDType)
+  ))
+  private val rejectApplicationInputType = InputObjectType[RejectApplicationGraphQLInput]("RejectApplicationInput", List(
+    InputField("applicationId", IDType),
+    InputField("feedback", OptionInputType(StringType))
+  ))
+  private val declineApplicationInputType = InputObjectType[DeclineApplicationGraphQLInput]("DeclineApplicationInput", List(
+    InputField("applicationId", IDType),
+    InputField("reason", OptionInputType(StringType))
+  ))
+  private val submitApplicationInputArgument = Argument("input", submitApplicationInputType)
+  private val createJobInputArgument = Argument("input", jobInputType)
+  private val updateJobInputArgument = Argument("input", updateJobInputType)
+  private val jobActionInputArgument = Argument("input", jobActionInputType)
+  private val applicationActionInputArgument = Argument("input", applicationActionInputType)
+  private val rejectApplicationInputArgument = Argument("input", rejectApplicationInputType)
+  private val declineApplicationInputArgument = Argument("input", declineApplicationInputType)
 
   private val healthType = ObjectType("Health", fields[RequestContext, Unit](
     Field("status", healthStatus, resolve = _ => "UP")))
@@ -142,26 +201,26 @@ object HiringGraphQLSchema {
         resolve = context => context.ctx.unsafeToFuture(applicationHistory(context)))
     )),
     Some(ObjectType("Mutation", fields[RequestContext, Unit](
-      Field("submitApplication", applicationPayloadType, arguments = jobIdArgument :: Nil,
+      Field("submitApplication", applicationPayloadType, arguments = submitApplicationInputArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(submitApplication(context))),
-      Field("createJob", jobPayloadType, arguments = jobInputArguments,
+      Field("createJob", jobPayloadType, arguments = createJobInputArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(createJob(context))),
-      Field("updateJob", jobPayloadType, arguments = idArgument :: jobInputArguments,
+      Field("updateJob", jobPayloadType, arguments = updateJobInputArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(updateJob(context))),
-      Field("publishJob", jobPayloadType, arguments = idArgument :: Nil,
+      Field("publishJob", jobPayloadType, arguments = jobActionInputArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(changeJob(context, _.publishJob))),
-      Field("closeJob", jobPayloadType, arguments = idArgument :: Nil,
+      Field("closeJob", jobPayloadType, arguments = jobActionInputArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(changeJob(context, _.closeJob))),
-      Field("acceptApplication", applicationPayloadType, arguments = applicationIdArgument :: Nil,
-        resolve = context => context.ctx.unsafeToFuture(changeApplicationStatus(context, ApplicationStatus.Accepted, None, None))),
-      Field("moveApplicationToInterview", applicationPayloadType, arguments = applicationIdArgument :: Nil,
-        resolve = context => context.ctx.unsafeToFuture(changeApplicationStatus(context, ApplicationStatus.Interview, None, None))),
-      Field("hireApplication", applicationPayloadType, arguments = applicationIdArgument :: Nil,
-        resolve = context => context.ctx.unsafeToFuture(changeApplicationStatus(context, ApplicationStatus.Hired, None, None))),
-      Field("rejectApplication", applicationPayloadType, arguments = applicationIdArgument :: feedbackArgument :: Nil,
-        resolve = context => context.ctx.unsafeToFuture(changeApplicationStatus(context, ApplicationStatus.Rejected, context.arg(feedbackArgument), None))),
-      Field("declineApplication", applicationPayloadType, arguments = applicationIdArgument :: reasonArgument :: Nil,
-        resolve = context => context.ctx.unsafeToFuture(changeApplicationStatus(context, ApplicationStatus.Declined, None, context.arg(reasonArgument))))
+      Field("acceptApplication", applicationPayloadType, arguments = applicationActionInputArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(applicationStatusAction(context, ApplicationStatus.Accepted))),
+      Field("moveApplicationToInterview", applicationPayloadType, arguments = applicationActionInputArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(applicationStatusAction(context, ApplicationStatus.Interview))),
+      Field("hireApplication", applicationPayloadType, arguments = applicationActionInputArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(applicationStatusAction(context, ApplicationStatus.Hired))),
+      Field("rejectApplication", applicationPayloadType, arguments = rejectApplicationInputArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(rejectApplication(context))),
+      Field("declineApplication", applicationPayloadType, arguments = declineApplicationInputArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(declineApplication(context)))
     )))
   )
 
@@ -207,20 +266,21 @@ object HiringGraphQLSchema {
       Field("pageInfo", pageInfoType, resolve = _.value.pageInfo),
       Field("errors", ListType(errorType), resolve = _.value.errors)))
 
-  private def jobInputArguments: List[Argument[?]] =
-    titleArgument :: descriptionArgument :: requirementsArgument :: inputSkillsArgument :: countryArgument :: cityArgument :: remoteArgument :: Nil
-
   private def jobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
     withHiringConnection(context) { hiring =>
       page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob).flatMap {
         case Left(error) => IO.pure(graphQLErrorConnection(error))
         case Right((page, requested)) =>
-        val filter = JobSearchFilter(
-          context.arg(cityArgument),
-          context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
-          context.arg(createdAfterArgument).flatMap(value => Either.catchNonFatal(Instant.parse(value)).toOption)
-        )
-        hiring.jobs.findOpen(filter, page).flatTap(jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))).map(jobConnection(_, requested))
+          createdAfter(context.arg(createdAfterArgument)) match {
+            case Left(error) => IO.pure(graphQLErrorConnection(error))
+            case Right(createdAfter) =>
+              val filter = JobSearchFilter(
+                context.arg(cityArgument),
+                context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
+                createdAfter
+              )
+              hiring.jobs.findOpen(filter, page).flatTap(jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))).map(jobConnection(_, requested))
+          }
       }
     }
 
@@ -285,7 +345,7 @@ object HiringGraphQLSchema {
 
   private def submitApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] =
     authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
-      parseJobId(context.arg(jobIdArgument)) match {
+      parseJobId(context.arg(submitApplicationInputArgument).jobId) match {
         case None => IO.pure(ApplicationPayload(None, List(error(DomainError.NotFound("job")))))
         case Some(jobId) =>
           IO.realTimeInstant.flatMap(now =>
@@ -301,7 +361,7 @@ object HiringGraphQLSchema {
 
   private def createJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
-      jobInput(context, JobStatus.Open).fold(error => IO.pure(JobPayload(None, List(this.error(error)))), input =>
+      jobInput(context.arg(createJobInputArgument), JobStatus.Open).fold(error => IO.pure(JobPayload(None, List(this.error(error)))), input =>
         IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(jobId =>
           hiring.jobService.createJob(actor, input, now, JobId(jobId))
             .map(_.fold(error => JobPayload(None, List(this.error(error))), job => JobPayload(Some(job), Nil)))))
@@ -310,7 +370,8 @@ object HiringGraphQLSchema {
 
   private def updateJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
-      (parseJobId(context.arg(idArgument)), updateInput(context)) match {
+      val input = context.arg(updateJobInputArgument)
+      (parseJobId(input.id), updateInput(input.patch)) match {
         case (Some(jobId), Right(input)) =>
           IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, jobId, input, now)
             .map(_.fold(error => JobPayload(None, List(this.error(error))), job => JobPayload(Some(job), Nil))))
@@ -324,21 +385,27 @@ object HiringGraphQLSchema {
       method: JobService[IO] => (com.example.graphQL.cats.application.ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
   ): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
-      parseJobId(context.arg(idArgument)) match {
+      parseJobId(context.arg(jobActionInputArgument).jobId) match {
         case None => IO.pure(JobPayload(None, List(error(DomainError.NotFound("job")))))
         case Some(jobId) => IO.realTimeInstant.flatMap(now =>
           method(hiring.jobService)(actor, jobId, now).map(_.fold(error => JobPayload(None, List(this.error(error))), job => JobPayload(Some(job), Nil))))
       }
     }
 
+  private def applicationStatusAction(context: Context[RequestContext, Unit], status: ApplicationStatus): IO[ApplicationPayload] = {
+    val input = context.arg(applicationActionInputArgument)
+    changeApplicationStatus(context, input.applicationId, status, None, None)
+  }
+
   private def changeApplicationStatus(
       context: Context[RequestContext, Unit],
+      applicationIdValue: String,
       status: ApplicationStatus,
       feedback: Option[String],
       reason: Option[String]
   ): IO[ApplicationPayload] =
     authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
-      parseApplicationId(context.arg(applicationIdArgument)) match {
+      parseApplicationId(applicationIdValue) match {
         case None => IO.pure(ApplicationPayload(None, List(error(DomainError.NotFound("application")))))
         case Some(applicationId) =>
           IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(eventId =>
@@ -346,6 +413,16 @@ object HiringGraphQLSchema {
               .map(_.fold(error => ApplicationPayload(None, List(this.error(error))), application => ApplicationPayload(Some(application), Nil)))))
       }
     }
+
+  private def rejectApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] = {
+    val input = context.arg(rejectApplicationInputArgument)
+    changeApplicationStatus(context, input.applicationId, ApplicationStatus.Rejected, input.feedback, None)
+  }
+
+  private def declineApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] = {
+    val input = context.arg(declineApplicationInputArgument)
+    changeApplicationStatus(context, input.applicationId, ApplicationStatus.Declined, None, input.reason)
+  }
 
   private def withHiringConnection[A](context: Context[RequestContext, Unit])(action: HiringGraphQLServices => IO[Connection[A]]): IO[Connection[A]] =
     context.ctx.hiring.fold(IO.pure(errorConnection[A](AuthenticationError.Unauthorized)))(action)
@@ -403,27 +480,33 @@ object HiringGraphQLSchema {
       case _ => page
     }
 
-  private def jobInput(context: Context[RequestContext, Unit], status: JobStatus): Either[UseCaseError, CreateJobInput] =
-    location(context).map(location => CreateJobInput(
-      context.arg(titleArgument),
-      context.arg(descriptionArgument),
-      context.arg(requirementsArgument).toList,
-      context.arg(inputSkillsArgument).toSet,
+  private def createdAfter(value: Option[String]): Either[GraphQLError, Option[Instant]] =
+    value.traverse(raw =>
+      Either.catchNonFatal(Instant.parse(raw))
+        .leftMap(_ => GraphQLError("INVALID_CREATED_AFTER", "createdAfter must be an ISO-8601 instant"))
+    )
+
+  private def jobInput(input: JobGraphQLInput, status: JobStatus): Either[UseCaseError, CreateJobInput] =
+    location(input).map(location => CreateJobInput(
+      input.title,
+      input.description,
+      input.requirements,
+      input.inputSkills.toSet,
       location,
       status
     ))
 
-  private def updateInput(context: Context[RequestContext, Unit]): Either[UseCaseError, UpdateJobInput] =
-    location(context).map(location => UpdateJobInput(
-      context.arg(titleArgument),
-      context.arg(descriptionArgument),
-      context.arg(requirementsArgument).toList,
-      context.arg(inputSkillsArgument).toSet,
+  private def updateInput(input: JobGraphQLInput): Either[UseCaseError, UpdateJobInput] =
+    location(input).map(location => UpdateJobInput(
+      input.title,
+      input.description,
+      input.requirements,
+      input.inputSkills.toSet,
       location
     ))
 
-  private def location(context: Context[RequestContext, Unit]): Either[UseCaseError, Location] =
-    Location.validate(context.arg(countryArgument), context.arg(cityArgument).getOrElse(""), context.arg(remoteArgument)).toEither.leftMap(identity)
+  private def location(input: JobGraphQLInput): Either[UseCaseError, Location] =
+    Location.validate(input.country, input.city.getOrElse(""), input.remote).toEither.leftMap(identity)
 
   private def parseJobId(value: String): Option[JobId] =
     Either.catchNonFatal(JobId(UUID.fromString(value))).toOption
@@ -436,20 +519,20 @@ object HiringGraphQLSchema {
       hiring: HiringGraphQLServices,
       applicationId: ApplicationId
   ): IO[Either[UseCaseError, Unit]] =
-    hiring.applications.find(applicationId).flatMap {
-      case None => IO.pure(Left(DomainError.NotFound("application")))
-      case Some(application) if application.candidateId == actor.userId => IO.pure(Right(()))
-      case Some(application) =>
-        hiring.users.find(actor.userId).flatMap {
-          case Some(user) if user.role == UserRole.Admin && user.adminSingleton => IO.pure(Right(()))
-          case Some(user) if user.role == UserRole.Recruiter =>
+    ActorAuthorization[IO](hiring.users).resolve(actor).flatMap {
+      case Left(error) => IO.pure(Left(error))
+      case Right(user) =>
+        hiring.applications.find(applicationId).flatMap {
+          case None => IO.pure(Left(DomainError.NotFound("application")))
+          case Some(application) if application.candidateId == user.id && user.role == UserRole.Candidate => IO.pure(Right(()))
+          case Some(_) if user.role == UserRole.Admin && user.adminSingleton => IO.pure(Right(()))
+          case Some(application) if user.role == UserRole.Recruiter =>
             hiring.jobs.find(application.jobId).map {
               case Some(job) if job.recruiterId == user.id => Right(())
               case Some(_) => Left(DomainError.Forbidden)
               case None => Left(DomainError.NotFound("job"))
             }
           case Some(_) => IO.pure(Left(DomainError.Forbidden))
-          case None => IO.pure(Left(AuthenticationError.Unauthorized))
         }
     }
 

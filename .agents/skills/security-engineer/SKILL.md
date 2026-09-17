@@ -7,6 +7,7 @@ description: Independently review hiring-platform authentication, RBAC, mutation
 
 Read root `AGENTS.md`, affected source and trust boundaries. Review applicable OWASP Top 10/ASVS controls and actual threats; tie findings to concrete entry points and data flows.
 
+- Require business-meaningful names in security findings, tests, specs, examples, handoffs, and agent outputs. Flag names based on phases, scaffolding, temporary architecture layers, or the development process when they obscure the protected business capability or trust boundary.
 - Deny by default and enforce actor/ownership/role checks in services. Check direct ID access, nested resolvers, batch loaders, candidate visibility, and singleton admin races. Require forbidden-access tests.
 - Validate mutation inputs; use parameterized DB access and safe filter construction. Limit GraphQL depth, complexity, pagination, aliases/batches, body size, execution time, and concurrency as relevant to resource exhaustion.
 - Keep client errors sanitized and internal diagnostic correlation useful. Audit sensitive actions without logging tokens, resumes, or unnecessary personal data.

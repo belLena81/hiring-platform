@@ -42,7 +42,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("setup is idempotent and creates named indexes plus migration record") {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_setup")
+        val database = client.getDatabase("hiring_setup")
         for {
           _ <- MongoHiringSetup.initialize(database)
           _ <- MongoHiringSetup.initialize(database)
@@ -51,15 +51,17 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           applications <- indexes(database.getCollection("applications"))
           events <- indexes(database.getCollection("application_events"))
           migration <- PublisherBridge.first(database.getCollection("schema_migrations")
-            .find(new Document("_id", MongoHiringSetup.MigrationId)))
-          phase3Migration <- PublisherBridge.first(database.getCollection("schema_migrations")
-            .find(new Document("_id", MongoHiringSetup.Phase3MigrationId)))
+            .find(new Document("_id", MongoHiringSetup.HiringDomainMongoMigrationId)))
+          graphqlPerformanceMigration <- PublisherBridge.first(database.getCollection("schema_migrations")
+            .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
         } yield {
           assertIndex(users, MongoHiringSetup.UsersEmailIndex, new Document("emailCanonical", 1), unique = Some(true), partial = None)
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex,
             new Document("recruiterId", 1).append("status", 1).append("createdAt", -1).append("_id", -1), None, None)
+          assertIndex(jobs, MongoHiringSetup.JobsOpenCreatedIndex,
+            new Document("status", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(jobs, MongoHiringSetup.JobsOpenCityCreatedIndex,
             new Document("status", 1).append("location.city", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(applications, MongoHiringSetup.ApplicationsCandidateJobIndex,
@@ -77,8 +79,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(migration.exists(_.getInteger("schemaVersion") == 1))
           assert(migration.exists(_.containsKey("appliedAt")))
           assert(migration.exists(_.getString("description").nonEmpty))
-          assert(migration.exists(_.getString("checksum") == MongoHiringSetup.MigrationId))
-          assert(phase3Migration.exists(_.getString("checksum") == MongoHiringSetup.Phase3MigrationId))
+          assert(migration.exists(_.getString("checksum") == MongoHiringSetup.HiringDomainMongoMigrationId))
+          assert(graphqlPerformanceMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringGraphQLSearchIndexMigrationId))
         }
       }
     }
@@ -87,7 +89,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("repositories round-trip users, jobs, applications, and status history") {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_roundtrip")
+        val database = client.getDatabase("hiring_roundtrip")
         val users = MongoUserRepository(database)
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.standalone(database)
@@ -174,7 +176,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("transactional application repository rejects closed-job submissions without partial writes") {
     replicaSetContainer.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_closed_submit")
+        val database = client.getDatabase("hiring_closed_submit")
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.transactional(database, client)
         val openJob = jobFixture(jobId, JobStatus.Open)
@@ -203,7 +205,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("transactional application repository rolls back application when initial event insert fails") {
     replicaSetContainer.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_submit_rollback")
+        val database = client.getDatabase("hiring_submit_rollback")
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.transactional(database, client)
         val job = jobFixture(jobId, JobStatus.Open)
@@ -229,7 +231,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("transactional status changes roll back application update when event insert fails") {
     replicaSetContainer.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_status_rollback")
+        val database = client.getDatabase("hiring_status_rollback")
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.transactional(database, client)
         val job = jobFixture(jobId, JobStatus.Open)
@@ -259,7 +261,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("transactional duplicate submissions keep one application and one initial event") {
     replicaSetContainer.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_duplicate_race")
+        val database = client.getDatabase("hiring_duplicate_race")
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.transactional(database, client)
         val job = jobFixture(jobId, JobStatus.Open)
@@ -293,7 +295,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   test("application list queries have explain evidence for status and no-status indexes") {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
-        val database = client.getDatabase("phase2_explain")
+        val database = client.getDatabase("hiring_explain")
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.standalone(database)
         val page = ApplicationPageRequest(None, None, PageSize.fromInt(10).toOption.get)
@@ -312,7 +314,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           candidateStatus <- explainIndex(database, "candidateId", candidateId.value.toString, statusPage)
           jobNoStatus <- explainIndex(database, "jobId", jobId.value.toString, page)
           jobStatus <- explainIndex(database, "jobId", jobId.value.toString, statusPage)
-          openJobSearch <- explainJobSearchIndex(database)
+          openJobSearch <- explainJobSearchIndex(database, city = None)
+          openCityJobSearch <- explainJobSearchIndex(database, city = Some("Kyiv"))
           historyIndex <- explainHistoryIndex(database)
         } yield {
           assertEquals(inconsistent, Left(RepositoryError.Conflict))
@@ -320,7 +323,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(candidateStatus, Some(MongoHiringSetup.ApplicationsCandidateStatusCreatedIndex))
           assertEquals(jobNoStatus, Some(MongoHiringSetup.ApplicationsJobCreatedIndex))
           assertEquals(jobStatus, Some(MongoHiringSetup.ApplicationsJobStatusCreatedIndex))
-          assertEquals(openJobSearch, Some(MongoHiringSetup.JobsOpenCityCreatedIndex))
+          assertEquals(openJobSearch, Some(MongoHiringSetup.JobsOpenCreatedIndex))
+          assertEquals(openCityJobSearch, Some(MongoHiringSetup.JobsOpenCityCreatedIndex))
           assertEquals(historyIndex, Some(MongoHiringSetup.ApplicationEventsApplicationCreatedIndex))
         }
       }
@@ -428,10 +432,13 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
   }
 
-  private def explainJobSearchIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[String]] = {
+  private def explainJobSearchIndex(database: com.mongodb.reactivestreams.client.MongoDatabase, city: Option[String]): IO[Option[String]] = {
+    val filter = city
+      .map(value => new Document("status", JobStatus.Open.toString).append("location.city", value))
+      .getOrElse(new Document("status", JobStatus.Open.toString))
     val command = new Document("explain",
       new Document("find", "jobs")
-        .append("filter", new Document("status", JobStatus.Open.toString).append("location.city", "Kyiv"))
+        .append("filter", filter)
         .append("sort", new Document("createdAt", -1).append("_id", -1))
         .append("limit", 10)
     ).append("verbosity", "executionStats")
