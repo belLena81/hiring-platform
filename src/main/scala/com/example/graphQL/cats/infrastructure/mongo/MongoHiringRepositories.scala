@@ -6,8 +6,11 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, 
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, JobStatus, User, UserRole}
 import com.mongodb.{MongoCommandException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
-import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoDatabase}
+import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
 import org.bson.Document
+import org.bson.conversions.Bson
+
+import java.time.Instant
 
 private[mongo] trait MongoTransactionRunner {
   def run(operation: Option[ClientSession] => IO[Either[RepositoryError, Unit]]): IO[Either[RepositoryError, Unit]]
@@ -46,6 +49,30 @@ private[mongo] object MongoTransactionRunner {
     error.getErrorCode == 112 || error.hasErrorLabel("TransientTransactionError")
 }
 
+private[mongo] object MongoKeysetPaging {
+  def byId[A](collection: MongoCollection[Document], ids: List[String])(read: Document => A): IO[List[A]] =
+    if (ids.isEmpty) IO.pure(Nil)
+    else PublisherBridge.all(collection.find(Filters.in("_id", ids.distinct*))).map(_.map(read))
+
+  def page[A](collection: MongoCollection[Document], filter: Bson, timestampField: String, pageSize: PageSize)(
+      read: Document => A
+  ): IO[List[A]] =
+    PublisherBridge.all(
+      collection.find(filter)
+        .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending("_id")))
+        .limit(pageSize.value)
+    ).map(_.map(read))
+
+  def filter(filters: List[Option[Bson]]): Bson =
+    Filters.and(filters.flatten*)
+
+  def beforeCursor(timestampField: String, occurredAt: Instant, id: String): Bson =
+    Filters.or(
+      Filters.lt(timestampField, java.util.Date.from(occurredAt)),
+      Filters.and(Filters.eq(timestampField, java.util.Date.from(occurredAt)), Filters.lt("_id", id))
+    )
+}
+
 final class MongoUserRepository(database: MongoDatabase) extends UserRepository[IO] {
   private val collection = database.getCollection("users")
 
@@ -55,6 +82,9 @@ final class MongoUserRepository(database: MongoDatabase) extends UserRepository[
 
   override def find(id: UserId): IO[Option[User]] =
     PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString))).map(_.map(MongoHiringCodecs.readUser))
+
+  override def findMany(ids: List[UserId]): IO[List[User]] =
+    MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
 
   private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
     error match {
@@ -68,6 +98,15 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
 
   override def find(id: JobId): IO[Option[Job]] =
     PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString))).map(_.map(MongoHiringCodecs.readJob))
+
+  override def findMany(ids: List[JobId]): IO[List[Job]] =
+    MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)
+
+  override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[List[Job]] =
+    findMany(baseSearchFilter(filter, page), page)
+
+  override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[List[Job]] =
+    findMany(baseJobFilter(List(Some(Filters.eq("recruiterId", recruiterId.value.toString)), page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
   override def create(job: Job): IO[Either[RepositoryError, Unit]] =
     PublisherBridge.first(collection.insertOne(MongoHiringCodecs.job(job))).as(Right(())).handleError(mapWrite)
@@ -89,6 +128,24 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
       case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
       case _ => Left(RepositoryError.Unavailable)
     }
+
+  private def findMany(filter: Bson, page: JobPageRequest): IO[List[Job]] =
+    MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)
+
+  private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): Bson =
+    baseJobFilter(List(
+      Some(Filters.eq("status", JobStatus.Open.toString)),
+      filter.city.map(city => Filters.eq("location.city", city)),
+      Option.when(filter.skills.nonEmpty)(Filters.all("skills", filter.skills.toList.sorted*)),
+      filter.createdAfter.map(createdAfter => Filters.gte("createdAt", java.util.Date.from(createdAfter)))
+    ), page)
+
+  private def baseJobFilter(filters: List[Option[Bson]], page: JobPageRequest): Bson = {
+    val cursorFilter = page.cursor.map(cursor =>
+      MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString)
+    )
+    MongoKeysetPaging.filter(filters :+ cursorFilter)
+  }
 }
 
 final class MongoApplicationRepository private (
@@ -107,6 +164,9 @@ final class MongoApplicationRepository private (
 
   override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[List[Application]] =
     findMany(baseFilter("jobId", jobId.value.toString, page), page)
+
+  override def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[List[ApplicationEvent]] =
+    MongoKeysetPaging.page(events, eventFilter(applicationId, page), "occurredAt", page.pageSize)(MongoHiringCodecs.readEvent)
 
   override def createForOpenJob(
       observedJob: Job,
@@ -140,22 +200,22 @@ final class MongoApplicationRepository private (
       }
     }.handleError(mapWrite)
 
-  private def findMany(filter: org.bson.conversions.Bson, page: ApplicationPageRequest): IO[List[Application]] =
-    PublisherBridge.all(
-      collection.find(filter)
-        .sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id")))
-        .limit(page.pageSize.value)
-    ).map(_.map(MongoHiringCodecs.readApplication))
+  private def findMany(filter: Bson, page: ApplicationPageRequest): IO[List[Application]] =
+    MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readApplication)
 
-  private def baseFilter(field: String, id: String, page: ApplicationPageRequest): org.bson.conversions.Bson = {
+  private def baseFilter(field: String, id: String, page: ApplicationPageRequest): Bson = {
     val statusFilter = page.status.map(status => Filters.eq("status", status.toString))
     val cursorFilter = page.cursor.map(cursor =>
-      Filters.or(
-        Filters.lt("createdAt", java.util.Date.from(cursor.createdAt)),
-        Filters.and(Filters.eq("createdAt", java.util.Date.from(cursor.createdAt)), Filters.lt("_id", cursor.id.value.toString))
-      )
+      MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString)
     )
-    Filters.and((List(Some(Filters.eq(field, id)), statusFilter, cursorFilter).flatten)*)
+    MongoKeysetPaging.filter(List(Some(Filters.eq(field, id)), statusFilter, cursorFilter))
+  }
+
+  private def eventFilter(applicationId: ApplicationId, page: ApplicationEventPageRequest): Bson = {
+    val cursorFilter = page.cursor.map(cursor =>
+      MongoKeysetPaging.beforeCursor("occurredAt", cursor.occurredAt, cursor.id.value.toString)
+    )
+    MongoKeysetPaging.filter(List(Some(Filters.eq("applicationId", applicationId.value.toString)), cursorFilter))
   }
 
   private def submitWithRetry(

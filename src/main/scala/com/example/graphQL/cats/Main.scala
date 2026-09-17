@@ -5,7 +5,7 @@ import com.example.graphQL.cats.application.{Diagnostics, LogEvent, LogField, Lo
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.mongo.MongoDatabaseProbe
-import com.example.graphQL.cats.runtime.FoundationServer
+import com.example.graphQL.cats.runtime.HiringPlatformServer
 
 object Main extends IOApp {
   override protected def reportFailure(error: Throwable): IO[Unit] =
@@ -20,7 +20,7 @@ object Main extends IOApp {
           fields = Map(LogField.ConfigKey -> error.key)).as(ExitCode.Error)
         case Right(config) => SafeDiagnostics.configure(config.logLevel, config.maskSensitive, config.requestPayloads).flatMap { diagnostics =>
           MongoDatabaseProbe.resource(config.mongoUri, config.mongoDatabase, diagnostics = diagnostics)
-            .flatMap(probe => FoundationServer.resource(config.host, config.port, probe, diagnostics))
+            .flatMap(probe => HiringPlatformServer.resource(config.host, config.port, probe, diagnostics))
             .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
               LogField.HttpHost -> config.host,
               LogField.HttpPort -> config.port.toString

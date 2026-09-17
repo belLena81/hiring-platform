@@ -2,7 +2,9 @@ package com.example.graphQL.cats.infrastructure.mongo
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.application.port.{ApplicationPageRequest, PageSize, RepositoryError}
+import com.example.graphQL.cats.application.port.{
+  ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, JobSearchFilter, PageSize, RepositoryError
+}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   Application, ApplicationEvent, ApplicationStatus, CandidateProfile, Job, JobStatus, Location, User, UserRole
@@ -50,12 +52,16 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           events <- indexes(database.getCollection("application_events"))
           migration <- PublisherBridge.first(database.getCollection("schema_migrations")
             .find(new Document("_id", MongoHiringSetup.MigrationId)))
+          phase3Migration <- PublisherBridge.first(database.getCollection("schema_migrations")
+            .find(new Document("_id", MongoHiringSetup.Phase3MigrationId)))
         } yield {
           assertIndex(users, MongoHiringSetup.UsersEmailIndex, new Document("emailCanonical", 1), unique = Some(true), partial = None)
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex,
             new Document("recruiterId", 1).append("status", 1).append("createdAt", -1).append("_id", -1), None, None)
+          assertIndex(jobs, MongoHiringSetup.JobsOpenCityCreatedIndex,
+            new Document("status", 1).append("location.city", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(applications, MongoHiringSetup.ApplicationsCandidateJobIndex,
             new Document("candidateId", 1).append("jobId", 1), unique = Some(true), partial = None)
           assertIndex(applications, MongoHiringSetup.ApplicationsCandidateStatusCreatedIndex,
@@ -72,6 +78,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(migration.exists(_.containsKey("appliedAt")))
           assert(migration.exists(_.getString("description").nonEmpty))
           assert(migration.exists(_.getString("checksum") == MongoHiringSetup.MigrationId))
+          assert(phase3Migration.exists(_.getString("checksum") == MongoHiringSetup.Phase3MigrationId))
         }
       }
     }
@@ -85,6 +92,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val jobs = MongoJobRepository(database)
         val applications = MongoApplicationRepository.standalone(database)
         val page = ApplicationPageRequest(None, None, PageSize.fromInt(10).toOption.get)
+        val jobPageRequest = JobPageRequest(Some(JobStatus.Open), None, PageSize.fromInt(10).toOption.get)
+        val eventPage = ApplicationEventPageRequest(None, PageSize.fromInt(10).toOption.get)
         val candidateProfile = CandidateProfile(
           Set("Scala", "Cats Effect", "MongoDB"),
           Some("Builds backend services"),
@@ -130,8 +139,13 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           foundAdmin <- users.find(adminId)
           foundJob <- jobs.find(jobId)
           foundApplication <- applications.find(applicationId)
+          foundManyUsers <- users.findMany(List(candidateId, recruiterId))
+          foundManyJobs <- jobs.findMany(List(jobId))
+          openJobs <- jobs.findOpen(JobSearchFilter(Some("Kyiv"), Set("Scala"), None), jobPageRequest)
+          recruiterJobs <- jobs.findByRecruiter(recruiterId, jobPageRequest)
           candidatePage <- applications.findByCandidate(candidateId, page)
           jobPage <- applications.findByJob(jobId, page)
+          eventHistory <- applications.history(applicationId, eventPage)
           history <- PublisherBridge.all(database.getCollection("application_events").find())
         } yield {
           assertEquals(rejectedAdmin, Left(RepositoryError.Conflict))
@@ -144,8 +158,13 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(foundJob.map(_.title), Some("Principal Scala Developer"))
           assertEquals(foundJob.map(_.version), Some(2L))
           assertEquals(foundApplication.map(_.status), Some(ApplicationStatus.Accepted))
+          assertEquals(foundManyUsers.map(_.id).toSet, Set(candidateId, recruiterId))
+          assertEquals(foundManyJobs.map(_.id), List(jobId))
+          assertEquals(openJobs.map(_.id), List(jobId))
+          assertEquals(recruiterJobs.map(_.id), List(jobId))
           assertEquals(candidatePage.map(_.id), List(applicationId))
           assertEquals(jobPage.map(_.id), List(applicationId))
+          assertEquals(eventHistory.map(_.newStatus).toSet, Set(ApplicationStatus.Created, ApplicationStatus.Accepted))
           assertEquals(history.size, 2)
         }
       }
@@ -293,12 +312,16 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           candidateStatus <- explainIndex(database, "candidateId", candidateId.value.toString, statusPage)
           jobNoStatus <- explainIndex(database, "jobId", jobId.value.toString, page)
           jobStatus <- explainIndex(database, "jobId", jobId.value.toString, statusPage)
+          openJobSearch <- explainJobSearchIndex(database)
+          historyIndex <- explainHistoryIndex(database)
         } yield {
           assertEquals(inconsistent, Left(RepositoryError.Conflict))
           assertEquals(candidateNoStatus, Some(MongoHiringSetup.ApplicationsCandidateCreatedIndex))
           assertEquals(candidateStatus, Some(MongoHiringSetup.ApplicationsCandidateStatusCreatedIndex))
           assertEquals(jobNoStatus, Some(MongoHiringSetup.ApplicationsJobCreatedIndex))
           assertEquals(jobStatus, Some(MongoHiringSetup.ApplicationsJobStatusCreatedIndex))
+          assertEquals(openJobSearch, Some(MongoHiringSetup.JobsOpenCityCreatedIndex))
+          assertEquals(historyIndex, Some(MongoHiringSetup.ApplicationEventsApplicationCreatedIndex))
         }
       }
     }
@@ -401,6 +424,26 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         .append("filter", filter)
         .append("sort", new Document("createdAt", -1).append("_id", -1))
         .append("limit", page.pageSize.value)
+    ).append("verbosity", "executionStats")
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+  }
+
+  private def explainJobSearchIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[String]] = {
+    val command = new Document("explain",
+      new Document("find", "jobs")
+        .append("filter", new Document("status", JobStatus.Open.toString).append("location.city", "Kyiv"))
+        .append("sort", new Document("createdAt", -1).append("_id", -1))
+        .append("limit", 10)
+    ).append("verbosity", "executionStats")
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+  }
+
+  private def explainHistoryIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[String]] = {
+    val command = new Document("explain",
+      new Document("find", "application_events")
+        .append("filter", new Document("applicationId", applicationId.value.toString))
+        .append("sort", new Document("occurredAt", -1).append("_id", -1))
+        .append("limit", 10)
     ).append("verbosity", "executionStats")
     PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
   }

@@ -1,4 +1,4 @@
-query FoundationHealth {
+query HiringHealth {
   health {
     status
   }

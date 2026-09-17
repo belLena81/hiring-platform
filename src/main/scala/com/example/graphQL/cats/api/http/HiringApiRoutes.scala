@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.Kleisli
 import cats.effect.IO
-import com.example.graphQL.cats.api.graphql.{DiagnosticPayload, FoundationSchema, GraphQLRequest, InputBudget}
+import com.example.graphQL.cats.api.graphql.{DiagnosticPayload, HiringGraphQLSchema, GraphQLRequest, InputBudget}
 import com.example.graphQL.cats.application.{Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
 import io.circe.Json
 import org.http4s.*
@@ -10,7 +10,7 @@ import org.http4s.circe.*
 import org.typelevel.ci.CIString
 import scala.concurrent.duration.*
 
-final class FoundationRoutes(service: HealthService, diagnostics: Diagnostics, admission: Admission) {
+final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, admission: Admission) {
   private enum RejectionReason {
     case INVALID_REQUEST, INVALID_QUERY, UNSUPPORTED_MEDIA, NOT_ACCEPTABLE, PAYLOAD_TOO_LARGE,
       OVERLOADED, DEADLINE_EXCEEDED, INTERNAL_ERROR, METHOD_NOT_ALLOWED, NOT_FOUND
@@ -66,10 +66,10 @@ final class FoundationRoutes(service: HealthService, diagnostics: Diagnostics, a
       if (bytes.size > InputBudget.MaxBytes) rejected(Status.PayloadTooLarge, "Request body too large", requestId, RejectionReason.PAYLOAD_TOO_LARGE)
       else IO(GraphQLRequest.parseBody(new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8))).flatMap {
         case None => rejected(Status.BadRequest, "Invalid GraphQL request", requestId, RejectionReason.INVALID_REQUEST)
-        case Some(parsed) => FoundationSchema.execute(parsed, service, requestId).flatMap {
+        case Some(parsed) => HiringGraphQLSchema.execute(parsed, service, requestId).flatMap {
           case Right(result) => completedGraphQL(parsed, result, requestId)
-          case Left(FoundationSchema.Failure.InvalidQuery) => rejected(Status.BadRequest, "Invalid GraphQL query", requestId, RejectionReason.INVALID_QUERY)
-          case Left(FoundationSchema.Failure.Internal) => rejected(Status.InternalServerError, "Request failed", requestId, RejectionReason.INTERNAL_ERROR)
+          case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Status.BadRequest, "Invalid GraphQL query", requestId, RejectionReason.INVALID_QUERY)
+          case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Status.InternalServerError, "Request failed", requestId, RejectionReason.INTERNAL_ERROR)
         }
       }
     }
@@ -98,7 +98,7 @@ final class FoundationRoutes(service: HealthService, diagnostics: Diagnostics, a
   private def route(request: Request[IO], requestId: String): IO[Response[IO]] =
     (request.method, request.uri.path.renderString) match {
       case (Method.GET, "/health") => IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
-      case (Method.GET, "/schema.graphql") => IO.pure(Response[IO](Status.Ok).withEntity(FoundationSchema.sdl))
+      case (Method.GET, "/schema.graphql") => IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl))
       case (Method.GET, "/ready") => admitted(requestId) {
         service.readiness(Some(requestId)).map { result =>
           val ready = result == ProbeResult.Ready

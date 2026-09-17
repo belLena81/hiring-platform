@@ -1,4 +1,4 @@
-# Filtering and debugging Foundation logs
+# Filtering and debugging hiring platform logs
 
 Application records are single-line JSON. Existing `timestamp`, `severity`, `category` and generated `requestId` remain; `marker`, `component`, `message`, `masking` and bounded `details` add searchable evidence. SLF4J also receives the matching marker and severity. Raw framework/driver loggers stay disabled.
 
@@ -89,4 +89,4 @@ Passwords, tokens, authorization/cookie headers, URI credentials/options, raw ex
 
 Ordinary metadata values are limited to 128 characters, 12 detail fields and 8 KiB per JSON record. Mongo target metadata contains at most four parsed hosts, never the original URI. Logging errors are best-effort and do not recursively log themselves or change application results; cancellation and mandatory cleanup remain owned by the original request.
 
-See [diagnostics acceptance evidence](specs/foundation-diagnostics.md).
+See [diagnostics acceptance evidence](specs/hiring-platform-diagnostics.md).

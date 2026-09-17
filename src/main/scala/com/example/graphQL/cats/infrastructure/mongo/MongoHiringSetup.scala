@@ -17,7 +17,9 @@ object MongoHiringSetup {
   val ApplicationsJobStatusCreatedIndex = "applications_job_status_created_id"
   val ApplicationsJobCreatedIndex = "applications_job_created_id"
   val ApplicationEventsApplicationCreatedIndex = "application_events_application_created_id"
+  val JobsOpenCityCreatedIndex = "jobs_open_city_created_id"
   val MigrationId = "phase-2-domain-mongodb-v1"
+  val Phase3MigrationId = "phase-3-graphql-performance-v1"
 
   def initialize(database: MongoDatabase): IO[Unit] =
     List(
@@ -46,7 +48,10 @@ object MongoHiringSetup {
         new IndexOptions().name(ApplicationsJobCreatedIndex)),
       createIndex(database.getCollection("application_events"),
         Indexes.compoundIndex(Indexes.ascending("applicationId"), Indexes.descending("occurredAt", "_id")),
-        new IndexOptions().name(ApplicationEventsApplicationCreatedIndex))
+        new IndexOptions().name(ApplicationEventsApplicationCreatedIndex)),
+      createIndex(database.getCollection("jobs"),
+        Indexes.compoundIndex(Indexes.ascending("status", "location.city"), Indexes.descending("createdAt", "_id")),
+        new IndexOptions().name(JobsOpenCityCreatedIndex))
     ).sequence_.flatMap { _ =>
       val migrations = database.getCollection("schema_migrations")
       val record = new Document("_id", MigrationId)
@@ -54,7 +59,13 @@ object MongoHiringSetup {
         .append("appliedAt", Date.from(Instant.now()))
         .append("description", "Phase 2 hiring domain MongoDB collections and indexes")
         .append("checksum", "phase-2-domain-mongodb-v1")
-      PublisherBridge.first(migrations.replaceOne(Filters.eq("_id", MigrationId), record, new ReplaceOptions().upsert(true))).void
+      val phase3Record = new Document("_id", Phase3MigrationId)
+        .append("schemaVersion", 1)
+        .append("appliedAt", Date.from(Instant.now()))
+        .append("description", "Phase 3 GraphQL job search indexes")
+        .append("checksum", "phase-3-graphql-performance-v1")
+      PublisherBridge.first(migrations.replaceOne(Filters.eq("_id", MigrationId), record, new ReplaceOptions().upsert(true))).void *>
+        PublisherBridge.first(migrations.replaceOne(Filters.eq("_id", Phase3MigrationId), phase3Record, new ReplaceOptions().upsert(true))).void
     }
 
   private def createIndex(

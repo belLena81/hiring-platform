@@ -60,13 +60,13 @@ object LogFields {
   )
   private val locations = Map(
     "com.example.graphQL.cats.Main" -> "Main.scala",
-    "com.example.graphQL.cats.api.http.FoundationRoutes" -> "FoundationRoutes.scala",
-    "com.example.graphQL.cats.api.graphql.FoundationSchema" -> "FoundationSchema.scala",
+    "com.example.graphQL.cats.api.http.HiringApiRoutes" -> "HiringApiRoutes.scala",
+    "com.example.graphQL.cats.api.graphql.HiringGraphQLSchema" -> "HiringGraphQLSchema.scala",
     "com.example.graphQL.cats.api.graphql.RequestContext" -> "RequestContext.scala",
     "com.example.graphQL.cats.application.HealthService" -> "HealthService.scala",
     "com.example.graphQL.cats.infrastructure.mongo.MongoDatabaseProbe" -> "MongoDatabaseProbe.scala",
     "com.example.graphQL.cats.infrastructure.mongo.PublisherBridge" -> "PublisherBridge.scala",
-    "com.example.graphQL.cats.runtime.FoundationServer" -> "FoundationServer.scala"
+    "com.example.graphQL.cats.runtime.HiringPlatformServer" -> "HiringPlatformServer.scala"
   )
 
   def failure(error: Throwable): Map[LogField, String] = scala.util.Try {

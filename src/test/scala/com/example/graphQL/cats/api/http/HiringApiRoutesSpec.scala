@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.http
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.graphql.{FoundationSchema, GraphQLRequest, RequestContext}
+import com.example.graphQL.cats.api.graphql.{HiringGraphQLSchema, GraphQLRequest, RequestContext}
 import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
 import io.circe.Json
 import munit.CatsEffectSuite
@@ -11,11 +11,11 @@ import org.http4s.circe.*
 import org.typelevel.ci.CIString
 import scala.concurrent.duration.*
 
-final class FoundationRoutesSpec extends CatsEffectSuite {
+final class HiringApiRoutesSpec extends CatsEffectSuite {
   private def app(effect: IO[ProbeResult], diagnostics: Diagnostics = Diagnostics.noop): IO[HttpApp[IO]] =
     Admission.create.map { admission =>
       val probe = new DatabaseProbe { def check: IO[ProbeResult] = effect }
-      new FoundationRoutes(new HealthService(probe, diagnostics), diagnostics, admission).app
+      new HiringApiRoutes(new HealthService(probe, diagnostics), diagnostics, admission).app
     }
 
   private def request(query: String): Request[IO] =
@@ -45,11 +45,11 @@ final class FoundationRoutesSpec extends CatsEffectSuite {
         "variables" -> Json.obj("include" -> Json.True, "password" -> Json.fromString("synthetic-field-value-secret"))
       ).noSpaces))(new IllegalArgumentException("Invalid test query"))
       closed <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(IO.pure)
-      execution <- FoundationSchema.executeInContext(parsed, closed)
+      execution <- HiringGraphQLSchema.executeInContext(parsed, closed)
       result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
       admission <- Admission.create
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      routes = new FoundationRoutes(new HealthService(probe, sink), sink, admission)
+      routes = new HiringApiRoutes(new HealthService(probe, sink), sink, admission)
       id <- IO.randomUUID.map(_.toString)
       response <- routes.completedGraphQL(parsed, result, id)
       body <- response.as[Json]
@@ -94,7 +94,7 @@ final class FoundationRoutesSpec extends CatsEffectSuite {
         finish <- Deferred[IO, Unit]
         admission <- Admission.create
         probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-        http = new FoundationRoutes(new HealthService(probe, sink), sink, admission).app
+        http = new HiringApiRoutes(new HealthService(probe, sink), sink, admission).app
         slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
           .onFinalize(finalizing.complete(()) *> finish.get *> IO.delay(finalized.set(true))))
         _ <- List.fill(15)(admission.permit).sequence.use { held =>
@@ -365,7 +365,7 @@ final class FoundationRoutesSpec extends CatsEffectSuite {
         def check: IO[ProbeResult] = (entered.complete(()) *> IO.never[ProbeResult])
           .onCancel(finalizing.complete(()) *> finishFinalizer.get)
       }
-      http = new FoundationRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
+      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
       _ <- List.fill(15)(admission.permit).sequence.use { held =>
         for {
           _ <- IO(assert(held.forall(identity)))
@@ -403,7 +403,7 @@ final class FoundationRoutesSpec extends CatsEffectSuite {
       schema <- response.as[String]
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(schema, com.example.graphQL.cats.api.graphql.FoundationSchema.sdl)
+      assertEquals(schema, com.example.graphQL.cats.api.graphql.HiringGraphQLSchema.sdl)
       assert(!schema.contains("users"))
     }
   }
@@ -662,7 +662,7 @@ final class FoundationRoutesSpec extends CatsEffectSuite {
     for {
       admission <- Admission.create
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http = new FoundationRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
+      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
       ui <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql")))
       asset <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql/assets/graphiql.js")))
       _ <- admission.close

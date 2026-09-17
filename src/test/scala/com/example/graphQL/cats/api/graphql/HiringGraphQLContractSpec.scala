@@ -5,7 +5,7 @@ import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, HealthS
 import io.circe.Json
 import munit.CatsEffectSuite
 
-final class FoundationContractSpec extends CatsEffectSuite {
+final class HiringGraphQLContractSpec extends CatsEffectSuite {
   private def fixture(name: String): IO[String] = IO.blocking {
     val stream = Option(getClass.getResourceAsStream(s"/graphql/$name"))
       .getOrElse(throw new IllegalArgumentException("Missing contract fixture"))
@@ -17,7 +17,7 @@ final class FoundationContractSpec extends CatsEffectSuite {
   private val service = new HealthService(probe, Diagnostics.noop)
 
   test("served SDL matches the deterministic contract fixture") {
-    fixture("foundation.graphql").map(expected => assertEquals(FoundationSchema.sdl, expected))
+    fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))
   }
 
   test("a closed request context causes a sanitized GraphQL field execution error") {
@@ -26,7 +26,7 @@ final class FoundationContractSpec extends CatsEffectSuite {
         "query" -> Json.fromString("{ readiness { status } }")
       ).noSpaces))(new IllegalArgumentException("Invalid test operation"))
       closed <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(IO.pure)
-      result <- FoundationSchema.executeInContext(parsed, closed)
+      result <- HiringGraphQLSchema.executeInContext(parsed, closed)
     } yield {
       val body = result.fold(failure => fail(failure.toString), identity)
       assertEquals(body.hcursor.get[Json]("errors"),
@@ -42,7 +42,7 @@ final class FoundationContractSpec extends CatsEffectSuite {
         query <- fixture(name)
         parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
           new IllegalArgumentException("Fixture exceeds request contract"))
-        result <- FoundationSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001")
+        result <- HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001")
       } yield {
         val json = result.fold(failure => fail(failure.toString), identity)
         assert(json.hcursor.downField("data").succeeded)

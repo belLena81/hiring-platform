@@ -1,4 +1,4 @@
-# Foundation API reference
+# API reference
 
 This is a backend-only GraphQL API. The GraphQL equivalent of an OpenAPI contract is its schema (SDL), complemented by introspection and executable operations. The server exports the schema directly; no UI or Node toolchain is included in this repository.
 
@@ -15,7 +15,9 @@ Default base URL: `http://127.0.0.1:8080`.
 
 An external GraphQL API client can load `/graphql` through introspection or import the SDL from `/schema.graphql`. An HTTP-only client can execute the examples below. Do not use OpenAPI generation as a substitute for the GraphQL schema: GraphQL operations select their own fields and share one execution endpoint.
 
-The checked schema snapshot is [foundation.graphql](../src/test/resources/graphql/foundation.graphql). Backend contract tests compare it with the live schema definition, verify the download endpoint matches, and execute [health](../src/test/resources/graphql/health.graphql), [readiness](../src/test/resources/graphql/readiness.graphql), and [standard introspection](../src/test/resources/graphql/introspection.graphql) fixtures. Update schema and consumer fixtures together when contracts evolve; a schema diff alone does not establish compatible behavior.
+The checked schema snapshot is [hiring.graphql](../src/test/resources/graphql/hiring.graphql). Backend contract tests compare it with the live schema definition, verify the download endpoint matches, and execute [health](../src/test/resources/graphql/health.graphql), [readiness](../src/test/resources/graphql/readiness.graphql), and [standard introspection](../src/test/resources/graphql/introspection.graphql) fixtures. Update schema and consumer fixtures together when contracts evolve; a schema diff alone does not establish compatible behavior.
+
+The schema now includes Phase 3 hiring operations and typed payloads for jobs, applications, status transitions, cursor connections, and application history. HTTP does not yet include an authentication source that can build trusted `ActorContext`; hiring operations therefore return sanitized unauthorized payloads through the served endpoint until a separate auth slice is implemented. Resolver tests inject trusted actors below the HTTP boundary to verify the GraphQL contract against Phase 2 services.
 
 ## Execute operations
 
@@ -50,6 +52,6 @@ Send `Content-Type: application/json`; responses use JSON. An absent `Accept` he
 
 ## Errors and limits
 
-Errors use a sanitized `errors` array and a generated `X-Request-ID` response header. Invalid syntax/schema/variables/operation selection or query budgets produce 400; unsupported method/media produce 405/406/415; oversized body 413; overload 503; deadline 504; unexpected failures 500. Normal field errors use GraphQL's HTTP 200 response convention. No user-data queries or hiring mutations exist in Foundation.
+Errors use a sanitized `errors` array and a generated `X-Request-ID` response header. Invalid syntax/schema/variables/operation selection or query budgets produce 400; unsupported method/media produce 405/406/415; oversized body 413; overload 503; deadline 504; unexpected failures 500. Normal field errors and typed hiring payload errors use GraphQL's HTTP 200 response convention. Hiring payloads expose stable codes such as `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `DUPLICATE_APPLICATION`, `INVALID_STATUS_TRANSITION`, and validation codes without raw driver messages or stack traces.
 
 The [runbook](foundation.md#http-contract-and-budgets) specifies request, nesting, complexity, alias, concurrency, and deadline bounds. Introspection uses those same limits. Run `sbt test` for contract checks and `sbt 'IntegrationTest / test'` for real HTTP/database checks.

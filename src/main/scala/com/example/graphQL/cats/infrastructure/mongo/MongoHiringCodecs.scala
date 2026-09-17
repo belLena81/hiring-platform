@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.infrastructure.mongo
 
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import org.bson.Document
 import java.time.Instant
@@ -104,6 +104,18 @@ private[mongo] object MongoHiringCodecs {
       ),
       "reason",
       event.reason
+    )
+
+  def readEvent(document: Document): ApplicationEvent =
+    ApplicationEvent(
+      ApplicationEventId(UUID.fromString(document.getString("_id"))),
+      ApplicationId(UUID.fromString(document.getString("applicationId"))),
+      Option(document.getString("previousStatus")).map(ApplicationStatus.valueOf),
+      ApplicationStatus.valueOf(document.getString("newStatus")),
+      UserId(UUID.fromString(document.getString("actorId"))),
+      instant(document, "occurredAt"),
+      Option(document.getString("feedback")),
+      Option(document.getString("reason"))
     )
 
   private def location(location: Location): Document =

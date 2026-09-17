@@ -1,4 +1,4 @@
-query FoundationReadiness($include: Boolean = true) {
+query HiringReadiness($include: Boolean = true) {
   health {
     status
   }

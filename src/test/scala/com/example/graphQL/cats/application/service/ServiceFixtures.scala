@@ -3,14 +3,15 @@ package com.example.graphQL.cats.application.service
 import cats.effect.IO
 import cats.effect.Ref
 import com.example.graphQL.cats.application.port.{
-  ApplicationPageRequest, ApplicationRepository, JobRepository, RepositoryError, UserRepository
+  ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, JobRepository, JobSearchFilter,
+  ApplicationRepository, RepositoryError, UserRepository
 }
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, JobStatus, Location, User, UserRole}
 import java.time.Instant
 import java.util.UUID
 
-private[service] object ServiceFixtures {
+private[cats] object ServiceFixtures {
   val now: Instant = Instant.parse("2026-09-16T10:15:30Z")
   val later: Instant = Instant.parse("2026-09-16T11:15:30Z")
   val candidateId: UserId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000001"))
@@ -37,14 +38,51 @@ private[service] object ServiceFixtures {
 
   val createdApplication: Application = Application.create(applicationId, candidateId, jobId, now)
 
-  final class InMemoryUsers(ref: Ref[IO, Map[UserId, User]]) extends UserRepository[IO] {
-    override def find(id: UserId): IO[Option[User]] =
+  private[cats] trait RefBackedLookup[Id, Value] {
+    protected def ref: Ref[IO, Map[Id, Value]]
+
+    protected def findOne(id: Id): IO[Option[Value]] =
       ref.get.map(_.get(id))
+
+    protected def findAll(ids: List[Id]): IO[List[Value]] =
+      ref.get.map(values => ids.distinct.flatMap(values.get))
   }
 
-  final class InMemoryJobs(ref: Ref[IO, Map[JobId, Job]]) extends JobRepository[IO] {
+  final class InMemoryUsers(protected val ref: Ref[IO, Map[UserId, User]])
+      extends UserRepository[IO]
+      with RefBackedLookup[UserId, User] {
+    override def find(id: UserId): IO[Option[User]] =
+      findOne(id)
+
+    override def findMany(ids: List[UserId]): IO[List[User]] =
+      findAll(ids)
+  }
+
+  final class InMemoryJobs(protected val ref: Ref[IO, Map[JobId, Job]])
+      extends JobRepository[IO]
+      with RefBackedLookup[JobId, Job] {
     override def find(id: JobId): IO[Option[Job]] =
-      ref.get.map(_.get(id))
+      findOne(id)
+
+    override def findMany(ids: List[JobId]): IO[List[Job]] =
+      findAll(ids)
+
+    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[List[Job]] =
+      ref.get.map(_.values.filter { job =>
+        job.status == JobStatus.Open &&
+          filter.city.forall(_ == job.location.city) &&
+          filter.skills.subsetOf(job.skills) &&
+          filter.createdAfter.forall(!job.createdAt.isBefore(_)) &&
+          matches(page)(job) &&
+          keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
+      }.toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+
+    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[List[Job]] =
+      ref.get.map(_.values.filter(job =>
+        job.recruiterId == recruiterId &&
+          matches(page)(job) &&
+          keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
 
     override def create(job: Job): IO[Either[RepositoryError, Unit]] =
       ref.update(_ + (job.id -> job)).as(Right(()))
@@ -53,6 +91,10 @@ private[service] object ServiceFixtures {
       val persisted = job.copy(version = job.version + 1L)
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
+
+    private def matches(page: JobPageRequest)(job: Job): Boolean =
+      page.status.forall(_ == job.status)
+
   }
 
   final class InMemoryApplications(
@@ -64,10 +106,24 @@ private[service] object ServiceFixtures {
       applications.get.map(_.get(id))
 
     override def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): IO[List[Application]] =
-      applications.get.map(_.values.filter(_.candidateId == candidateId).filter(matches(page)).toList)
+      applications.get.map(_.values.filter(application =>
+        application.candidateId == candidateId &&
+          matches(page)(application) &&
+          keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(_.createdAt, _.id.value.toString)
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
 
     override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[List[Application]] =
-      applications.get.map(_.values.filter(_.jobId == jobId).filter(matches(page)).toList)
+      applications.get.map(_.values.filter(application =>
+        application.jobId == jobId &&
+          matches(page)(application) &&
+          keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(_.createdAt, _.id.value.toString)
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+
+    override def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[List[ApplicationEvent]] =
+      events.get.map(_.filter(event =>
+        event.applicationId == applicationId &&
+          keysetAfter(page.cursor.map(cursor => cursor.occurredAt -> cursor.id.value.toString))(event)(_.occurredAt, _.id.value.toString)
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.occurredAt, _.id.value.toString))
 
     private def create(application: Application, initialEvent: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
       applications.modify { current =>
@@ -119,4 +175,16 @@ private[service] object ServiceFixtures {
     private def matches(page: ApplicationPageRequest)(application: Application): Boolean =
       page.status.forall(_ == application.status)
   }
+
+  private def keysetAfter[A](cursor: Option[(Instant, String)])(value: A)(timestamp: A => Instant, id: A => String): Boolean =
+    cursor.forall { case (cursorTimestamp, cursorId) =>
+      timestamp(value).isBefore(cursorTimestamp) ||
+        (timestamp(value) == cursorTimestamp && id(value) < cursorId)
+    }
+
+  private def keysetPage[A](values: List[A], pageSize: Int)(timestamp: A => Instant, id: A => String): List[A] =
+    values.sortWith { (left, right) =>
+      timestamp(left).isAfter(timestamp(right)) ||
+        (timestamp(left) == timestamp(right) && id(left) > id(right))
+    }.take(pageSize)
 }

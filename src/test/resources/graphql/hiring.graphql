@@ -1,0 +1,167 @@
+type Application {
+  id: ID!
+  status: ApplicationStatus!
+  createdAt: String!
+  updatedAt: String!
+  candidate: User
+  job: Job
+}
+
+type ApplicationConnection {
+  edges: [ApplicationEdge!]!
+  pageInfo: PageInfo!
+  errors: [PayloadError!]!
+}
+
+type ApplicationEdge {
+  node: Application!
+  cursor: String!
+}
+
+type ApplicationEvent {
+  id: ID!
+  previousStatus: ApplicationStatus
+  newStatus: ApplicationStatus!
+  actorId: ID!
+  occurredAt: String!
+  feedback: String
+  reason: String
+}
+
+type ApplicationEventConnection {
+  edges: [ApplicationEventEdge!]!
+  pageInfo: PageInfo!
+  errors: [PayloadError!]!
+}
+
+type ApplicationEventEdge {
+  node: ApplicationEvent!
+  cursor: String!
+}
+
+type ApplicationPayload {
+  application: Application
+  errors: [PayloadError!]!
+}
+
+enum ApplicationStatus {
+  Created
+  Accepted
+  Declined
+  Interview
+  Hired
+  Rejected
+}
+
+type CandidateProfile {
+  skills: [String!]!
+  experienceSummary: String
+  resumeRef: String
+}
+
+type Health {
+  status: HealthStatus!
+}
+
+enum HealthStatus {
+  UP
+}
+
+type Job {
+  id: ID!
+  title: String!
+  description: String!
+  requirements: [String!]!
+  skills: [String!]!
+  location: Location!
+  status: JobStatus!
+  createdAt: String!
+  updatedAt: String!
+  recruiter: User
+}
+
+type JobConnection {
+  edges: [JobEdge!]!
+  pageInfo: PageInfo!
+  errors: [PayloadError!]!
+}
+
+type JobEdge {
+  node: Job!
+  cursor: String!
+}
+
+type JobPayload {
+  job: Job
+  errors: [PayloadError!]!
+}
+
+enum JobStatus {
+  Draft
+  Open
+  Closed
+}
+
+type Location {
+  country: String!
+  city: String!
+  remote: Boolean!
+}
+
+type Mutation {
+  submitApplication(jobId: ID!): ApplicationPayload!
+  createJob(title: String!, description: String!, requirements: [String!]!, inputSkills: [String!]!, country: String!, city: String, remote: Boolean!): JobPayload!
+  updateJob(id: ID!, title: String!, description: String!, requirements: [String!]!, inputSkills: [String!]!, country: String!, city: String, remote: Boolean!): JobPayload!
+  publishJob(id: ID!): JobPayload!
+  closeJob(id: ID!): JobPayload!
+  acceptApplication(applicationId: ID!): ApplicationPayload!
+  moveApplicationToInterview(applicationId: ID!): ApplicationPayload!
+  hireApplication(applicationId: ID!): ApplicationPayload!
+  rejectApplication(applicationId: ID!, feedback: String): ApplicationPayload!
+  declineApplication(applicationId: ID!, reason: String): ApplicationPayload!
+}
+
+type PageInfo {
+  hasNextPage: Boolean!
+  endCursor: String
+}
+
+type PayloadError {
+  code: String!
+  message: String!
+}
+
+type Query {
+  health: Health!
+  readiness: Readiness!
+  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: String): JobConnection!
+  job(id: ID!): Job
+  myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
+  myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
+  jobApplications(jobId: ID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
+  applicationHistory(applicationId: ID!, first: Int!, after: String): ApplicationEventConnection!
+}
+
+type Readiness {
+  status: ReadinessStatus!
+}
+
+enum ReadinessStatus {
+  READY
+  NOT_READY
+}
+
+type User {
+  id: ID!
+  email: String!
+  name: String!
+  role: UserRole!
+  profile: CandidateProfile
+  createdAt: String!
+}
+
+enum UserRole {
+  Candidate
+  Recruiter
+  Admin
+}

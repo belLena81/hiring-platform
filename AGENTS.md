@@ -60,6 +60,7 @@ No author approves their own work. Security and QA require separate verdicts eve
 ## Engineering and GraphQL
 
 - Separate domain, application, API, and infrastructure; dependencies point inward. Domain logic stays free of GraphQL/DB/HTTP/JSON/auth/AI SDK dependencies.
+- Name production code, specs, examples, and agent outputs after business capabilities and domain concepts, not delivery phases, scaffolding history, or development process labels. Prefer names such as `HiringGraphQLSchema`, `HiringApiSchema`, or `RecruitingGraphQLSchema` over generic names such as `FoundationSchema` once the code carries hiring behavior.
 - Prefer typed IDs, ADTs/enums, explicit validation, and `Either`/typed effect errors. Use UTC `Instant`. Keep GraphQL inputs separate from domain and persistence models separate when needed.
 - Keep domain functions pure and immutable: pass time/IDs as values, express absence with `Option`, and use typed failures rather than business exceptions, nulls, or partial operations. Services sequence effects; adapters isolate I/O and any necessary framework interop. See the quality guide for testing and effect-boundary rules.
 - Use Cats Effect `Resource` for clients/pools/servers, cancellation-safe ownership, bounded concurrency, and FS2 backpressure. Keep blocking work off compute threads and unsafe execution out of business logic.
