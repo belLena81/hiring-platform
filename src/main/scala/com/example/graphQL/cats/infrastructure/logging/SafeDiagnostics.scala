@@ -47,6 +47,7 @@ object SafeDiagnostics {
       sink: (LogEvent, String) => IO[Unit]): Diagnostics = new Diagnostics {
     override val payloadsEnabled: Boolean = requestPayloads && !maskSensitive
     private val threshold = level match {
+      case "TRACE" | "DEBUG" => 0
       case "INFO" => 0
       case "WARN" => 1
       case _ => 2

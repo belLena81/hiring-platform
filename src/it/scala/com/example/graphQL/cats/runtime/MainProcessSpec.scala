@@ -49,18 +49,8 @@ class MainProcessSpec extends CatsEffectSuite {
       val stderr = directory.resolve("stderr.log")
       Resource.make(IO.blocking {
         val configFile = directory.resolve("local.conf")
-        val defaults = Map(
-          "HTTP_HOST" -> "127.0.0.1",
-          "HTTP_PORT" -> "8080",
-          "MONGODB_URI" -> "${MONGODB_URI}",
-          "MONGODB_DATABASE" -> "hiring_test",
-          "LOG_LEVEL" -> "ERROR",
-          "AUTH_JWT_HS256_SECRET" -> "disabled",
-          "VOYAGE_API_KEY" -> "disabled",
-          "VOYAGE_MODEL" -> "voyage-4-lite"
-        )
-        val configEntries = defaults ++ environment.removed("MONGODB_URI")
-        Files.writeString(configFile, configEntries.toList.sortBy(_._1).map { case (key, value) => s"$key=$value" }.mkString("", "\n", "\n"))
+        val config = hoconConfig(environment.removed("MONGODB_URI"))
+        Files.writeString(configFile, config)
         val builder = new ProcessBuilder((List(
           Path.of(System.getProperty("java.home"), "bin", "java").toString,
           "-Dfile.encoding=UTF-8",
@@ -84,6 +74,62 @@ class MainProcessSpec extends CatsEffectSuite {
         }
       }
     }
+
+  private def hoconConfig(overrides: Map[String, String]): String = {
+    val values = Map(
+      "HTTP_HOST" -> "127.0.0.1",
+      "HTTP_PORT" -> "8080",
+      "MONGODB_DATABASE" -> "hiring_test",
+      "LOG_LEVEL" -> "ERROR",
+      "AUTH_JWT_HS256_SECRET" -> "disabled",
+      "VOYAGE_API_KEY" -> "disabled",
+      "VOYAGE_MODEL" -> "voyage-4-lite"
+    ) ++ overrides
+    def value(key: String): String = values(key)
+
+    s"""http {
+       |  host = ${hoconString(value("HTTP_HOST"))}
+       |  port = ${value("HTTP_PORT")}
+       |}
+       |mongo {
+       |  uri = $${?MONGODB_URI}
+       |  database = ${hoconString(value("MONGODB_DATABASE"))}
+       |}
+       |logging {
+       |  level = ${hoconString(value("LOG_LEVEL"))}
+       |  mask-sensitive = ${values.getOrElse("LOG_MASK_SENSITIVE", "true")}
+       |  request-payloads = ${values.getOrElse("LOG_REQUEST_PAYLOADS", "false")}
+       |}
+       |auth.jwt {
+       |  hs256-secret = ${hoconString(value("AUTH_JWT_HS256_SECRET"))}
+       |  issuer = "hiring-platform-local"
+       |  audience = "hiring-graphql-api"
+       |}
+       |vector-search {
+       |  enabled = false
+       |  voyage {
+       |    api-key = ${hoconString(value("VOYAGE_API_KEY"))}
+       |    endpoint = "https://api.voyageai.com/v1/embeddings"
+       |    model = ${hoconString(value("VOYAGE_MODEL"))}
+       |    dimension = 1024
+       |  }
+       |  embedding {
+       |    version = 1
+       |    queue-size = 128
+       |    parallelism = 4
+       |    timeout-ms = 5000
+       |  }
+       |  indexes {
+       |    jobs = "jobs_embedding_vector"
+       |    candidates = "candidates_embedding_vector"
+       |  }
+       |  num-candidates = 100
+       |}
+       |""".stripMargin
+  }
+
+  private def hoconString(value: String): String =
+    "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
   private def assertSanitized(result: ChildResult, expectedCategory: String): Vector[Json] = {
     val captured = result.stdout + result.stderr

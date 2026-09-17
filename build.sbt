@@ -10,6 +10,7 @@ lazy val logbackVersion        = "1.6.3"
 lazy val mongoVersion          = "5.11.1"
 lazy val munitVersion          = "1.3.6"
 lazy val munitCatsEffectVersion = "2.2.0"
+lazy val pureConfigVersion     = "0.17.10"
 lazy val sangriaVersion        = "4.2.19"
 lazy val sangriaCirceVersion   = "1.3.2"
 lazy val testcontainersVersion = "2.0.5"
@@ -46,6 +47,7 @@ lazy val root = (project in file("."))
       "io.circe"            %% "circe-core"             % circeVersion,
       "io.circe"            %% "circe-parser"           % circeVersion,
       "org.mongodb"         % "mongodb-driver-reactivestreams" % mongoVersion,
+      "com.github.pureconfig" %% "pureconfig-core"       % pureConfigVersion,
       "org.typelevel"       %% "log4cats-slf4j"         % log4catsVersion,
       "ch.qos.logback"       % "logback-classic"        % logbackVersion % Runtime,
       "org.scalameta"       %% "munit"                  % munitVersion % Test,

@@ -70,13 +70,19 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line))
       invalid <- IO(AppConfig.fromConfig(
-        s"""HTTP_HOST=127.0.0.1
-           |HTTP_PORT=8080
-           |MONGODB_URI=$secret
-           |MONGODB_DATABASE=hiring
-           |LOG_LEVEL=INFO
-           |LOG_MASK_SENSITIVE=true
-           |LOG_REQUEST_PAYLOADS=false
+        s"""http {
+           |  host = "127.0.0.1"
+           |  port = 8080
+           |}
+           |mongo {
+           |  uri = "$secret"
+           |  database = "hiring"
+           |}
+           |logging {
+           |  level = "INFO"
+           |  mask-sensitive = true
+           |  request-payloads = false
+           |}
            |""".stripMargin,
         Map.empty
       ))
@@ -97,7 +103,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   }
 
   test("P1-AC09 application thresholds suppress lower severity events") {
-    List("INFO" -> 14, "WARN" -> 9, "ERROR" -> 5).traverse_ { case (level, count) =>
+    List("TRACE" -> 14, "DEBUG" -> 14, "INFO" -> 14, "WARN" -> 9, "ERROR" -> 5).traverse_ { case (level, count) =>
       for {
         emitted <- Ref.of[IO, Vector[String]](Vector.empty)
         diagnostics = SafeDiagnostics.withSink(level, line => emitted.update(_ :+ line))
@@ -208,7 +214,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   }
 
   test("P1-AC09 backend suppresses raw framework and driver emitters at every app level") {
-    List("INFO", "WARN", "ERROR").traverse_ { level =>
+    List("TRACE", "DEBUG", "INFO", "WARN", "ERROR").traverse_ { level =>
       SafeDiagnostics.configure(level).flatMap { _ => IO {
         List("ROOT", "org.mongodb.driver", "org.http4s", "org.typelevel", "com.mongodb.ConnectionString").foreach { name =>
           val logger = LoggerFactory.getLogger(name)

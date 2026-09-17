@@ -51,13 +51,15 @@ The service and adapter each retain their two-second deadline. The service can c
 |---|---|---|
 | `LOG_MASK_SENSITIVE` | `true` | `false` requires loopback HTTP binding |
 | `LOG_REQUEST_PAYLOADS` | `false` | `true` additionally requires masking disabled |
-| `LOG_LEVEL` | `INFO` | `INFO`, `WARN` or `ERROR`; payload/completion records are INFO |
+| `LOG_LEVEL` | `INFO` | `TRACE`, `DEBUG`, `INFO`, `WARN` or `ERROR`; payload/completion records are INFO |
 
 Safe defaults apply even on a developer laptop. To reveal selected diagnostic metadata locally:
 
 ```bash
 cat > local.conf <<'EOF'
-LOG_MASK_SENSITIVE=false
+logging {
+  mask-sensitive = false
+}
 EOF
 sbt run
 ```
@@ -66,9 +68,11 @@ To additionally capture filtered GraphQL requests locally:
 
 ```bash
 cat > local.conf <<'EOF'
-LOG_MASK_SENSITIVE=false
-LOG_REQUEST_PAYLOADS=true
-LOG_LEVEL=INFO
+logging {
+  mask-sensitive = false
+  request-payloads = true
+  level = "INFO"
+}
 EOF
 sbt run
 ```
