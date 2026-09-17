@@ -1,0 +1,66 @@
+package com.example.graphQL.cats.service
+
+import cats.Monad
+import cats.syntax.all.*
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.error.DomainError
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, User, UserRole}
+import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
+import com.example.graphQL.cats.service.protocol.HiringReadModel
+import com.example.graphQL.cats.service.auth.ActorAuthorization
+import com.example.graphQL.cats.shared.pagination.ApplicationEventPageRequest
+
+final class HiringReadService[F[_]: Monad](
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    applications: ApplicationRepository[F]
+) extends HiringReadModel[F] {
+  private val authorization = ActorAuthorization(users)
+
+  override def user(id: UserId): F[Option[User]] =
+    users.find(id)
+
+  override def users(ids: List[UserId]): F[List[User]] =
+    users.findMany(ids)
+
+  override def job(id: JobId): F[Option[Job]] =
+    jobs.find(id)
+
+  override def jobs(ids: List[JobId]): F[List[Job]] =
+    jobs.findMany(ids)
+
+  override def application(id: ApplicationId): F[Option[Application]] =
+    applications.find(id)
+
+  override def canViewApplication(actor: ActorContext, applicationId: ApplicationId): F[Either[UseCaseError, Unit]] =
+    authorization.resolve(actor).flatMap {
+      case Left(error) => error.asLeft[Unit].pure[F]
+      case Right(user) =>
+        applications.find(applicationId).flatMap {
+          case None => DomainError.NotFound("application").asLeft[Unit].pure[F]
+          case Some(application) if application.candidateId == user.id && user.role == UserRole.Candidate =>
+            ().asRight[UseCaseError].pure[F]
+          case Some(_) if user.role == UserRole.Admin && user.adminSingleton =>
+            ().asRight[UseCaseError].pure[F]
+          case Some(application) if user.role == UserRole.Recruiter =>
+            jobs.find(application.jobId).map {
+              case Some(job) if job.recruiterId == user.id => Right(())
+              case Some(_) => Left(DomainError.Forbidden)
+              case None => Left(DomainError.NotFound("job"))
+            }
+          case Some(_) => DomainError.Forbidden.asLeft[Unit].pure[F]
+        }
+    }
+
+  override def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[List[ApplicationEvent]] =
+    applications.history(applicationId, page)
+}
+
+object HiringReadService {
+  def apply[F[_]: Monad](
+      users: UserRepository[F],
+      jobs: JobRepository[F],
+      applications: ApplicationRepository[F]
+  ): HiringReadService[F] =
+    new HiringReadService(users, jobs, applications)
+}

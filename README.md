@@ -119,9 +119,9 @@ Collections modeled around GraphQL access patterns, not relational normalization
               Infrastructure: MongoDB · Vector Search · LLM API
 ```
 
-Dependencies point inward (`API → Application → Domain`); the domain layer stays free of Sangria, MongoDB, http4s, Circe, JWT, and AI-SDK dependencies.
+Dependencies point inward (`transport → service → domain`); the domain layer stays free of Sangria, MongoDB, http4s, Circe, JWT, and AI-SDK dependencies.
 
-Suggested module layout: `domain/` (model, error, service) → `application/` (port, service) → `infrastructure/` (mongo, ai, auth) → `api/graphql/` (schema, resolver, input, output, dataloader).
+Current module layout: `transport/` (GraphQL, HTTP, auth adapters) → `service/` (protocols and job/application/search use cases) → `repository/` (protocols and Mongo implementation) → `domain/` (model, error, pure policy) plus `shared/` utilities and DTOs.
 
 ## MVP Use Cases (13)
 

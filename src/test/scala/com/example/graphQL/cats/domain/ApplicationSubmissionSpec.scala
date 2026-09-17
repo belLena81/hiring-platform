@@ -3,7 +3,7 @@ package com.example.graphQL.cats.domain
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
-import com.example.graphQL.cats.domain.service.ApplicationSubmission
+import com.example.graphQL.cats.domain.policy.ApplicationSubmission
 import java.time.Instant
 import java.util.UUID
 import munit.FunSuite

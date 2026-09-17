@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, ProbeResult}
+import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, ProbeResult}
 import io.circe.Json
 import io.circe.parser.parse
 import java.net.{InetSocketAddress, Socket, URI}

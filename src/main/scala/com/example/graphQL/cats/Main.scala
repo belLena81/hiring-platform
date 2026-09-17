@@ -1,7 +1,7 @@
 package com.example.graphQL.cats
 
 import cats.effect.{ExitCode, IO, IOApp}
-import com.example.graphQL.cats.application.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
@@ -27,6 +27,7 @@ object Main extends IOApp {
               config.admissionPermits,
               Some(runtime.services),
               Some(config.jwtAuth),
+              Some(runtime.userAuthenticator),
               runtime.ensureSetup
             ))
             .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(

@@ -56,9 +56,9 @@ The project follows **Clean Architecture / Ports and Adapters**.
 Dependencies always point inward.
 
 ```text
-API ───────► Application ───────► Domain
+Transport ───────► Service ───────► Domain
 
-Infrastructure ─────────────────► Domain Ports
+Repository adapters ─────────────► Repository protocols
 ```
 
 The domain must not depend on:
@@ -77,49 +77,42 @@ The domain must not depend on:
 ```text
 src/main/scala/
 │
-├── domain/
-│   ├── model/
-│   │   ├── User.scala
-│   │   ├── Job.scala
-│   │   ├── Application.scala
-│   │   └── ApplicationStatus.scala
-│   │
-│   ├── error/
-│   └── service/
-│
-├── application/
-│   ├── port/
-│   │   ├── JobRepository.scala
-│   │   ├── ApplicationRepository.scala
-│   │   ├── UserRepository.scala
-│   │   ├── SemanticSearch.scala
-│   │   └── EmbeddingService.scala
-│   │
-│   └── service/
-│       ├── JobService.scala
-│       ├── ApplicationService.scala
-│       └── MatchingService.scala
-│
-├── infrastructure/
-│   ├── mongo/
-│   │   ├── model/
-│   │   ├── repository/
-│   │   ├── codec/
-│   │   └── index/
-│   │
-│   ├── ai/
+├── transport/
+│   ├── graphql/
+│   ├── http/
 │   └── auth/
 │
-├── api/
-│   └── graphql/
-│       ├── schema/
-│       ├── resolver/
-│       ├── input/
-│       ├── output/
-│       └── dataloader/
+├── service/
+│   ├── protocol/
+│   ├── job/
+│   ├── application/
+│   ├── search/
+│   └── auth/
 │
+├── repository/
+│   ├── protocol/
+│   └── mongo/
+│
+├── domain/
+│   ├── model/
+│   ├── error/
+│   └── policy/
+│
+├── shared/
+│   ├── pagination/
+│   ├── search/
+│   └── crypto/
+│
+├── infrastructure/
+│   ├── embedding/
+│   └── logging/
+│
+├── config/
+├── runtime/
 └── Main.scala
 ```
+
+Transport owns protocol adapters such as GraphQL, HTTP, and JWT parsing. It talks to service protocols and shared DTOs, not Mongo repositories. Service implementations own hiring use cases, authorization, and effect sequencing. Repository protocols describe storage/search boundaries, and `repository.mongo` contains the current MongoDB implementation. Domain policies remain pure and infrastructure-free.
 
 ---
 

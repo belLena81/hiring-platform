@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.embedding
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.application.port.{EmbeddingError, EmbeddingInput, EmbeddingInputType, EmbeddingService, EmbeddingVector}
+import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingInputType, EmbeddingService, EmbeddingVector}
 import io.circe.Json
 import io.circe.parser.parse
 import java.net.URI

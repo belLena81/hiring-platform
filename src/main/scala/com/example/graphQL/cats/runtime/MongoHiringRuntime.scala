@@ -3,13 +3,17 @@ package com.example.graphQL.cats.runtime
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
-import com.example.graphQL.cats.application.port.EmbeddingService
-import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, LogField, ProbeResult}
-import com.example.graphQL.cats.application.service.{ApplicationService, EmbeddingPipeline, JobService, SemanticSearchService}
+import com.example.graphQL.cats.transport.graphql.HiringGraphQLServices
+import com.example.graphQL.cats.repository.protocol.EmbeddingService
+import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogField, ProbeResult}
+import com.example.graphQL.cats.service.application.ApplicationService
+import com.example.graphQL.cats.service.auth.UserAuthenticationService
+import com.example.graphQL.cats.service.job.JobService
+import com.example.graphQL.cats.service.protocol.UserAuthenticator
+import com.example.graphQL.cats.service.search.{EmbeddingPipeline, SemanticSearchService}
 import com.example.graphQL.cats.config.VectorSearchConfig
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
-import com.example.graphQL.cats.infrastructure.mongo.{
+import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
   MongoUserRepository
 }
@@ -18,6 +22,7 @@ import com.mongodb.reactivestreams.client.MongoDatabase
 final case class MongoHiringRuntime(
     probe: DatabaseProbe,
     services: HiringGraphQLServices,
+    userAuthenticator: UserAuthenticator[IO],
     ensureSetup: IO[Boolean]
 )
 
@@ -49,7 +54,7 @@ object MongoHiringRuntime {
         hiringServices(database, users, jobs, applications, vectorSearch, embeddingService).map { services =>
           val setup = ensureSetup(database, setupComplete, setupLock)
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
-          MongoHiringRuntime(probe(database, metadata, diagnostics, setup), services, setup)
+          MongoHiringRuntime(probe(database, metadata, diagnostics, setup), services, UserAuthenticationService[IO](users), setup)
         }
       }
     }
@@ -63,10 +68,9 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO]
   ): Resource[IO, HiringGraphQLServices] =
     if (!vectorSearch.enabled) {
+      val readModel = HiringReadService[IO](users, jobs, applications)
       Resource.pure(HiringGraphQLServices(
-        users,
-        jobs,
-        applications,
+        readModel,
         JobService[IO](users, jobs),
         ApplicationService[IO](users, jobs, applications)
       ))
@@ -92,6 +96,7 @@ object MongoHiringRuntime {
         ).map { queue =>
           val jobService = JobService[IO](users, jobs, queue)
           val applicationService = ApplicationService[IO](users, jobs, applications)
+          val readModel = HiringReadService[IO](users, jobs, applications)
           val semanticSearch = SemanticSearchService[IO](
             users,
             jobs,
@@ -101,9 +106,7 @@ object MongoHiringRuntime {
             vectorSearch.embeddingVersion
           )
           val services = HiringGraphQLServices(
-            users,
-            jobs,
-            applications,
+            readModel,
             jobService,
             applicationService,
             Some(semanticSearch)

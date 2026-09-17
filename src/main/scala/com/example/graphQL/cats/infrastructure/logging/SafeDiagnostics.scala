@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.logging
 
 import cats.effect.IO
-import com.example.graphQL.cats.application.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import io.circe.Json
 import java.nio.charset.StandardCharsets
 import org.slf4j.{LoggerFactory, MarkerFactory}

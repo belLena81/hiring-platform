@@ -89,8 +89,8 @@ For each accepted performance-sensitive operation, record `executionTimeMillis`,
   - MongoDB performance: implement required queries/index setup updates and explain-backed integration tests.
   - Review closure: obtain independent Code Reviewer, Security Engineer, and QA verdicts after fixes.
 - Allowed write paths:
-  - Architect/Scala Developer: `src/main/scala/com/example/graphQL/cats/api/graphql`, `src/main/scala/com/example/graphQL/cats/api/http`, `src/main/scala/com/example/graphQL/cats/application`, GraphQL fixtures, and related tests.
-  - Data Engineer: `src/main/scala/com/example/graphQL/cats/infrastructure/mongo`, Mongo integration tests, and this spec's access-pattern/evidence sections.
+  - Architect/Scala Developer: `src/main/scala/com/example/graphQL/cats/transport/graphql`, `src/main/scala/com/example/graphQL/cats/transport/http`, `src/main/scala/com/example/graphQL/cats/service`, GraphQL fixtures, and related tests.
+  - Data Engineer: `src/main/scala/com/example/graphQL/cats/repository/mongo`, Mongo integration tests, and this spec's access-pattern/evidence sections.
   - Documentation owner: `docs/api.md`, `docs/mongodb-design.md`, `docs/development-milestones.md`, and this spec when contracts/evidence change.
 - Serialization: schema/context changes land before resolvers; repository port changes land before Mongo adapter changes; explain evidence lands after query/index implementation. Avoid overlapping edits to the same files across agents.
 - Current blockers: no planned-scope blocker remains. Real performance SLO claims require a workload benchmark not included here. Production identity-provider integration and token issuance remain separately scoped, but served HTTP hiring workflows can execute with configured HS256 bearer JWTs.

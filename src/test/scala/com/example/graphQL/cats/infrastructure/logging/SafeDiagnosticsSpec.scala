@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.logging
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.application.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.config.AppConfig
 import io.circe.parser.parse
 import java.time.Instant

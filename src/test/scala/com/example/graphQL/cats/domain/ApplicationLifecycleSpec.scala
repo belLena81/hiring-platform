@@ -5,7 +5,7 @@ import com.example.graphQL.cats.domain.model.Application
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.ApplicationStatus.{Accepted, Created, Declined, Hired, Interview, Rejected}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.service.ApplicationLifecycle
+import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import java.time.Instant
 import java.util.UUID
 import munit.FunSuite
