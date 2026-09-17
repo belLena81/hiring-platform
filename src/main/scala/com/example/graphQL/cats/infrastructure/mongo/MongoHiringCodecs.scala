@@ -9,19 +9,22 @@ import scala.jdk.CollectionConverters.*
 
 private[mongo] object MongoHiringCodecs {
   def user(user: User): Document =
-    appendOptionalDocument(
-      appendOptionalString(new Document("_id", user.id.value.toString)
-        .append("schemaVersion", 1)
-        .append("email", user.email)
-        .append("emailCanonical", user.email.toLowerCase)
-        .append("name", user.name)
-        .append("role", user.role.toString)
-        .append("createdAt", Date.from(user.createdAt)),
-        "adminSingletonKey",
-        Option.when(user.role == UserRole.Admin && user.adminSingleton)("singleton-admin")
+    appendOptionalEmbedding(
+      appendOptionalDocument(
+        appendOptionalString(new Document("_id", user.id.value.toString)
+          .append("schemaVersion", 1)
+          .append("email", user.email)
+          .append("emailCanonical", user.email.toLowerCase)
+          .append("name", user.name)
+          .append("role", user.role.toString)
+          .append("createdAt", Date.from(user.createdAt)),
+          "adminSingletonKey",
+          Option.when(user.role == UserRole.Admin && user.adminSingleton)("singleton-admin")
+        ),
+        "profile",
+        user.profile.map(profile)
       ),
-      "profile",
-      user.profile.map(profile)
+      user.embedding
     )
 
   def readUser(document: Document): User =
@@ -32,24 +35,28 @@ private[mongo] object MongoHiringCodecs {
       UserRole.valueOf(document.getString("role")),
       Option(document.get("profile", classOf[Document])).map(readProfile),
       instant(document, "createdAt"),
-      Option(document.getString("adminSingletonKey")).contains("singleton-admin")
+      Option(document.getString("adminSingletonKey")).contains("singleton-admin"),
+      readEmbedding(document)
     )
 
   def job(job: Job): Document =
-    appendOptionalDate(new Document("_id", job.id.value.toString)
-      .append("schemaVersion", 1)
-      .append("version", java.lang.Long.valueOf(job.version))
-      .append("recruiterId", job.recruiterId.value.toString)
-      .append("title", job.title)
-      .append("description", job.description)
-      .append("requirements", job.requirements.asJava)
-      .append("skills", job.skills.toList.sorted.asJava)
-      .append("location", location(job.location))
-      .append("status", job.status.toString)
-      .append("createdAt", Date.from(job.createdAt))
-      .append("updatedAt", Date.from(job.updatedAt)),
-      "closedAt",
-      job.closedAt
+    appendOptionalEmbedding(
+      appendOptionalDate(new Document("_id", job.id.value.toString)
+        .append("schemaVersion", 1)
+        .append("version", java.lang.Long.valueOf(job.version))
+        .append("recruiterId", job.recruiterId.value.toString)
+        .append("title", job.title)
+        .append("description", job.description)
+        .append("requirements", job.requirements.asJava)
+        .append("skills", job.skills.toList.sorted.asJava)
+        .append("location", location(job.location))
+        .append("status", job.status.toString)
+        .append("createdAt", Date.from(job.createdAt))
+        .append("updatedAt", Date.from(job.updatedAt)),
+        "closedAt",
+        job.closedAt
+      ),
+      job.embedding
     )
 
   def readJob(document: Document): Job =
@@ -65,7 +72,8 @@ private[mongo] object MongoHiringCodecs {
       instant(document, "createdAt"),
       instant(document, "updatedAt"),
       Option(document.getDate("closedAt")).map(_.toInstant),
-      Option(document.get("version", classOf[Number])).fold(0L)(_.longValue)
+      Option(document.get("version", classOf[Number])).fold(0L)(_.longValue),
+      readEmbedding(document)
     )
 
   def application(application: Application): Document =
@@ -138,6 +146,30 @@ private[mongo] object MongoHiringCodecs {
       Option(document.getString("resumeRef"))
     )
 
+  def embeddingDocument(embedding: EntityEmbedding): Document =
+    new Document("embedding", embedding.values.map(float => java.lang.Double.valueOf(float.toDouble)).asJava)
+      .append("embeddingMeta", embeddingMeta(embedding.meta))
+
+  private def embeddingMeta(meta: EmbeddingMeta): Document =
+    new Document("model", meta.model)
+      .append("version", java.lang.Integer.valueOf(meta.version))
+      .append("sourceHash", meta.sourceHash)
+      .append("updatedAt", Date.from(meta.updatedAt))
+
+  private def readEmbedding(document: Document): Option[EntityEmbedding] =
+    for {
+      values <- Option(document.getList("embedding", classOf[Number]))
+      meta <- Option(document.get("embeddingMeta", classOf[Document]))
+    } yield EntityEmbedding(
+      values.asScala.toList.map(_.floatValue),
+      EmbeddingMeta(
+        meta.getString("model"),
+        meta.get("version", classOf[Number]).intValue,
+        meta.getString("sourceHash"),
+        instant(meta, "updatedAt")
+      )
+    )
+
   private def instant(document: Document, field: String): Instant =
     document.getDate(field).toInstant
 
@@ -156,6 +188,14 @@ private[mongo] object MongoHiringCodecs {
 
   private def appendOptionalDocument(document: Document, field: String, value: Option[Document]): Document = {
     value.foreach(document.append(field, _))
+    document
+  }
+
+  private def appendOptionalEmbedding(document: Document, value: Option[EntityEmbedding]): Document = {
+    value.foreach { embedding =>
+      document.append("embedding", embedding.values.map(float => java.lang.Double.valueOf(float.toDouble)).asJava)
+      document.append("embeddingMeta", embeddingMeta(embedding.meta))
+    }
     document
   }
 }

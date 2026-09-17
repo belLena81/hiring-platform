@@ -30,7 +30,11 @@ final case class UpdateJobInput(
     location: Location
 )
 
-final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepository[F]) {
+final class JobService[F[_]: Monad](
+    users: UserRepository[F],
+    jobs: JobRepository[F],
+    embeddingWork: EmbeddingWorkPublisher[F]
+) {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
@@ -56,7 +60,7 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
     authorizedJobs.manage(actor, jobId) { job =>
       (for {
         update <- EitherT.fromEither[F](validateUpdatedJob(job, input, now))
-        updated <- EitherT(persistJob(JobLifecycle.update(update).runA(job).value.widenUseCase))
+        updated <- EitherT(persistUpdatedJob(JobLifecycle.update(update).runA(job).value.widenUseCase))
       } yield updated).value
     }
 
@@ -152,7 +156,17 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
   private def persistCreatedJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
     result match {
       case Left(error) => error.asLeft[Job].pure[F]
-      case Right(job) => jobs.create(job).map(_.widenUseCase.as(job))
+      case Right(job) =>
+        jobs.create(job).map(_.widenUseCase.as(job)).flatTap {
+          case Right(created) => embeddingWork.publish(EmbeddingWork.JobChanged(created.id))
+          case Left(_) => ().pure[F]
+        }
+    }
+
+  private def persistUpdatedJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
+    persistJob(result).flatTap {
+      case Right(updated) => embeddingWork.publish(EmbeddingWork.JobChanged(updated.id))
+      case Left(_) => ().pure[F]
     }
 
   private def persistJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
@@ -164,5 +178,12 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
 
 object JobService {
   def apply[F[_]: Monad](users: UserRepository[F], jobs: JobRepository[F]): JobService[F] =
-    new JobService(users, jobs)
+    new JobService(users, jobs, EmbeddingWorkPublisher.noop[F])
+
+  def apply[F[_]: Monad](
+      users: UserRepository[F],
+      jobs: JobRepository[F],
+      embeddingWork: EmbeddingWorkPublisher[F]
+  ): JobService[F] =
+    new JobService(users, jobs, embeddingWork)
 }

@@ -7,7 +7,7 @@ import com.example.graphQL.cats.application.port.{
   ApplicationRepository, RepositoryError, UserRepository
 }
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, EntityEmbedding, Job, JobStatus, Location, User, UserRole}
 import java.time.Instant
 import java.util.UUID
 
@@ -56,6 +56,14 @@ private[cats] object ServiceFixtures {
 
     override def findMany(ids: List[UserId]): IO[List[User]] =
       findAll(ids)
+
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+      ref.modify { users =>
+        users.get(id) match {
+          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+          case None => (users, Left(RepositoryError.Conflict))
+        }
+      }
   }
 
   final class InMemoryJobs(protected val ref: Ref[IO, Map[JobId, Job]])
@@ -97,6 +105,14 @@ private[cats] object ServiceFixtures {
       val persisted = job.copy(version = job.version + 1L)
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
+
+    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+      ref.modify { jobs =>
+        jobs.get(id) match {
+          case Some(job) => (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
+          case None => (jobs, Left(RepositoryError.Conflict))
+        }
+      }
 
     private def matches(page: JobPageRequest)(job: Job): Boolean =
       page.status.forall(_ == job.status)

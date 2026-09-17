@@ -5,12 +5,14 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.error.DomainValidationError.InvalidNumber
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, EmbeddingMeta, EntityEmbedding, Job, SearchMode, User}
 import java.time.Instant
+import java.util.UUID
 
 trait UserRepository[F[_]] {
   def find(id: UserId): F[Option[User]]
   def findMany(ids: List[UserId]): F[List[User]]
+  def updateEmbedding(id: UserId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
 enum RepositoryError {
@@ -27,7 +29,43 @@ trait JobRepository[F[_]] {
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[List[Job]]
   def create(job: Job): F[Either[RepositoryError, Unit]]
   def update(job: Job): F[Either[RepositoryError, Job]]
+  def updateEmbedding(id: JobId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
+
+trait EmbeddingService[F[_]] {
+  def embed(input: EmbeddingInput): F[Either[EmbeddingError, EmbeddingVector]]
+}
+
+enum EmbeddingInputType {
+  case Query, Document
+}
+
+final case class EmbeddingInput(text: String, inputType: EmbeddingInputType)
+final case class EmbeddingVector(values: List[Float], model: String, dimension: Int)
+
+enum EmbeddingError {
+  case ProviderUnavailable
+  case InvalidResponse
+}
+
+trait SemanticSearchRepository[F[_]] {
+  def searchJobs(query: VectorSearchQuery): F[Either[RepositoryError, List[RankedJob]]]
+  def recommendedJobs(query: VectorSearchQuery): F[Either[RepositoryError, List[RankedJob]]]
+  def candidateMatches(query: VectorSearchQuery): F[Either[RepositoryError, List[RankedCandidate]]]
+}
+
+final case class VectorSearchQuery(
+    vector: List[Float],
+    filter: JobSearchFilter,
+    first: PageSize,
+    mode: SearchMode,
+    model: String,
+    version: Int,
+    searchId: UUID
+)
+
+final case class RankedJob(job: Job, score: Double, mode: SearchMode, meta: EmbeddingMeta, searchId: UUID)
+final case class RankedCandidate(candidate: User, score: Double, mode: SearchMode, meta: EmbeddingMeta, searchId: UUID)
 
 trait ApplicationRepository[F[_]] {
   def find(id: ApplicationId): F[Option[Application]]

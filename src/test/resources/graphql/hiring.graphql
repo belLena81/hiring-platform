@@ -57,6 +57,17 @@ enum ApplicationStatus {
   Rejected
 }
 
+type CandidateMatchCandidate {
+  id: ID!
+  name: String!
+  profile: CandidateMatchProfile
+}
+
+type CandidateMatchProfile {
+  skills: [String!]!
+  experienceSummary: String
+}
+
 type CandidateProfile {
   skills: [String!]!
   experienceSummary: String
@@ -102,6 +113,12 @@ type JobConnection {
 type JobEdge {
   node: Job!
   cursor: String!
+}
+
+input JobFilter {
+  city: String
+  skills: [String!]
+  createdAfter: String
 }
 
 input JobInput {
@@ -158,11 +175,42 @@ type Query {
   health: Health!
   readiness: Readiness!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: String): JobConnection!
+  semanticJobSearch(query: String!, filter: JobFilter, first: Int!): RankedJobResults!
+  recommendedJobs(first: Int!): RankedJobResults!
+  candidateMatches(jobId: ID!, first: Int!): RankedCandidateResults!
   job(id: ID!): Job
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
   jobApplications(jobId: ID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
   applicationHistory(applicationId: ID!, first: Int!, after: String): ApplicationEventConnection!
+}
+
+type RankedCandidate {
+  candidate: CandidateMatchCandidate!
+  score: Float!
+  searchMode: SearchMode!
+  model: String!
+  version: Int!
+  searchId: ID!
+}
+
+type RankedCandidateResults {
+  results: [RankedCandidate!]!
+  errors: [PayloadError!]!
+}
+
+type RankedJob {
+  job: Job!
+  score: Float!
+  searchMode: SearchMode!
+  model: String!
+  version: Int!
+  searchId: ID!
+}
+
+type RankedJobResults {
+  results: [RankedJob!]!
+  errors: [PayloadError!]!
 }
 
 type Readiness {
@@ -177,6 +225,12 @@ enum ReadinessStatus {
 input RejectApplicationInput {
   applicationId: ID!
   feedback: String
+}
+
+enum SearchMode {
+  FILTER
+  VECTOR
+  HYBRID
 }
 
 input SubmitApplicationInput {

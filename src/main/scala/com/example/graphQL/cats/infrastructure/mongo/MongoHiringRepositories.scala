@@ -3,7 +3,7 @@ package com.example.graphQL.cats.infrastructure.mongo
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.application.port.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, JobStatus, User, UserRole}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, EntityEmbedding, Job, JobStatus, User, UserRole}
 import com.mongodb.{MongoCommandException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
 import com.mongodb.client.result.InsertOneResult
@@ -12,6 +12,7 @@ import org.bson.Document
 import org.bson.conversions.Bson
 
 import java.time.Instant
+import scala.jdk.CollectionConverters.*
 
 private[mongo] trait MongoTransactionRunner {
   def run(operation: Option[ClientSession] => IO[Either[RepositoryError, Unit]]): IO[Either[RepositoryError, Unit]]
@@ -107,6 +108,21 @@ final class MongoUserRepository(database: MongoDatabase) extends UserRepository[
 
   override def findMany(ids: List[UserId]): IO[List[User]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
+
+  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+    val encoded = MongoHiringCodecs.embeddingDocument(embedding)
+    PublisherBridge.first(collection.updateOne(
+      Filters.eq("_id", id.value.toString),
+      Updates.combine(
+        Updates.set("embedding", encoded.get("embedding")),
+        Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
+      )
+    )).map {
+      case Some(result) if result.getMatchedCount == 1L => Right(())
+      case Some(_) => Left(RepositoryError.Conflict)
+      case None => Left(RepositoryError.Unavailable)
+    }.handleError(mapWrite)
+  }
 }
 
 final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO] with MongoConflictWriteMapping {
@@ -142,6 +158,21 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
     }.handleError(mapWrite)
   }
 
+  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+    val encoded = MongoHiringCodecs.embeddingDocument(embedding)
+    PublisherBridge.first(collection.updateOne(
+      Filters.eq("_id", id.value.toString),
+      Updates.combine(
+        Updates.set("embedding", encoded.get("embedding")),
+        Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
+      )
+    )).map {
+      case Some(result) if result.getMatchedCount == 1L => Right(())
+      case Some(_) => Left(RepositoryError.Conflict)
+      case None => Left(RepositoryError.Unavailable)
+    }.handleError(mapWrite)
+  }
+
   private def findMany(filter: Bson, page: JobPageRequest): IO[List[Job]] =
     MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)
 
@@ -160,6 +191,77 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
     val activeFilters = (filters :+ cursorFilter).flatten
     if (activeFilters.isEmpty) new Document() else Filters.and(activeFilters*)
   }
+}
+
+final class MongoSemanticSearchRepository(
+    database: MongoDatabase,
+    jobVectorIndex: String,
+    candidateVectorIndex: String,
+    numCandidates: Int
+) extends SemanticSearchRepository[IO] {
+  private val jobs = database.getCollection("jobs")
+  private val users = database.getCollection("users")
+
+  override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
+    rankedJobs(query, jobFilter(query, query.filter))
+
+  override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
+    rankedJobs(query, jobFilter(query, JobSearchFilter(None, Set.empty, None)))
+
+  override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] = {
+    val filter = Filters.and(
+      Filters.eq("role", UserRole.Candidate.toString),
+      Filters.exists("profile"),
+      Filters.eq("embeddingMeta.model", query.model),
+      Filters.eq("embeddingMeta.version", query.version)
+    )
+    val pipeline = List(vectorSearchStage(candidateVectorIndex, query.vector, filter, query.first), scoreStage).asJava
+    PublisherBridge.all(users.aggregate(pipeline)).map { documents =>
+      Right(documents.flatMap { document =>
+        for {
+          embedding <- MongoHiringCodecs.readUser(document).embedding
+          score <- Option(document.get("score", classOf[Number]))
+        } yield RankedCandidate(MongoHiringCodecs.readUser(document), score.doubleValue, query.mode, embedding.meta, query.searchId)
+      })
+    }.handleError(_ => Left(RepositoryError.Unavailable))
+  }
+
+  private def rankedJobs(query: VectorSearchQuery, filter: Bson): IO[Either[RepositoryError, List[RankedJob]]] = {
+    val pipeline = List(vectorSearchStage(jobVectorIndex, query.vector, filter, query.first), scoreStage).asJava
+    PublisherBridge.all(jobs.aggregate(pipeline)).map { documents =>
+      Right(documents.flatMap { document =>
+        val job = MongoHiringCodecs.readJob(document)
+        for {
+          embedding <- job.embedding
+          score <- Option(document.get("score", classOf[Number]))
+        } yield RankedJob(job, score.doubleValue, query.mode, embedding.meta, query.searchId)
+      })
+    }.handleError(_ => Left(RepositoryError.Unavailable))
+  }
+
+  private def jobFilter(query: VectorSearchQuery, filter: JobSearchFilter): Bson =
+    MongoKeysetPaging.filter(List(
+      Some(Filters.eq("status", JobStatus.Open.toString)),
+      Some(Filters.eq("embeddingMeta.model", query.model)),
+      Some(Filters.eq("embeddingMeta.version", query.version)),
+      filter.city.map(city => Filters.eq("location.city", city)),
+      skillsFilter(filter.skills),
+      filter.createdAfter.map(createdAfter => Filters.gte("createdAt", java.util.Date.from(createdAfter)))
+    ))
+
+  private def skillsFilter(skills: Set[String]): Option[Bson] =
+    Option.when(skills.nonEmpty)(Filters.and(skills.toList.sorted.map(skill => Filters.eq("skills", skill))*))
+
+  private def vectorSearchStage(index: String, vector: List[Float], filter: Bson, first: PageSize): Document =
+    new Document("$vectorSearch", new Document("index", index)
+      .append("path", "embedding")
+      .append("queryVector", vector.map(float => java.lang.Double.valueOf(float.toDouble)).asJava)
+      .append("numCandidates", java.lang.Integer.valueOf(math.max(numCandidates, first.value)))
+      .append("limit", java.lang.Integer.valueOf(first.value))
+      .append("filter", filter))
+
+  private val scoreStage: Document =
+    new Document("$set", new Document("score", new Document("$meta", "vectorSearchScore")))
 }
 
 final class MongoApplicationRepository private (

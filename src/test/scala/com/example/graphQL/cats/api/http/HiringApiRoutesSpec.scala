@@ -2,8 +2,11 @@ package com.example.graphQL.cats.api.http
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.graphql.{HiringGraphQLSchema, GraphQLRequest, RequestContext}
+import com.example.graphQL.cats.api.graphql.{HiringGraphQLSchema, GraphQLRequest, RequestContext, HiringGraphQLServices}
 import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.application.service.{ApplicationService, JobService, ServiceFixtures}
+import com.example.graphQL.cats.config.JwtAuthConfig
+import com.example.graphQL.cats.domain.model.UserRole
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.*
@@ -23,12 +26,100 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       .withEntity(Json.obj("query" -> Json.fromString(query)))
 
   private val health = request("{ health { status } }")
+  private val jwtSecret = "01234567890123456789012345678901"
+  private val jwtConfig = JwtAuthConfig(Some(jwtSecret), "hiring-platform-local", "hiring-graphql-api")
 
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
   private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics = new Diagnostics {
     def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
       records.update(_ :+ ((event, id, fields)))
+  }
+
+  private def signedToken(
+      userId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+      forgedRole: UserRole
+  ): String =
+    JwtActorAuthenticator.sign(
+      Json.obj("alg" -> Json.fromString("HS256")),
+      Json.obj(
+        "sub" -> Json.fromString(userId.value.toString),
+        "iss" -> Json.fromString(jwtConfig.issuer),
+        "aud" -> Json.fromString(jwtConfig.audience),
+        "exp" -> Json.fromLong(ServiceFixtures.now.plusSeconds(300).getEpochSecond),
+        "role" -> Json.fromString(forgedRole.toString)
+      ),
+      jwtSecret
+    )
+
+  test("served GraphQL hiring workflow derives ActorContext from a signed bearer token") {
+    val mutation =
+      s"""mutation {
+         |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
+         |    application { id status }
+         |    errors { code }
+         |  }
+         |}""".stripMargin
+    val applicationsQuery =
+      """query {
+        |  myApplications(first: 10) {
+        |    edges { node { status job { id } candidate { id } } }
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+    for {
+      usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
+        Map(ServiceFixtures.candidateId -> ServiceFixtures.candidate, ServiceFixtures.recruiterId -> ServiceFixtures.recruiter)
+      )
+      jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](
+        Map(ServiceFixtures.jobId -> ServiceFixtures.openJob)
+      )
+      applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
+      eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.application.port.RepositoryError]](None)
+      admission <- Admission.create
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      users = ServiceFixtures.InMemoryUsers(usersRef)
+      jobs = ServiceFixtures.InMemoryJobs(jobsRef)
+      applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
+      services = HiringGraphQLServices(users, jobs, applications, JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      authenticator = JwtActorAuthenticator(jwtConfig, users, IO.pure(ServiceFixtures.now))
+      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        Some(services), authenticator.authenticate).app
+      token = signedToken(ServiceFixtures.candidateId, UserRole.Admin)
+      submitted <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
+      listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
+    } yield {
+      val payload = submitted.hcursor.downField("data").downField("submitApplication")
+      assertEquals(payload.downField("application").get[String]("status"), Right("Created"))
+      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      val edge = listed.hcursor.downField("data").downField("myApplications").downField("edges").downArray
+      assertEquals(edge.downField("node").get[String]("status"), Right("Created"))
+      assertEquals(edge.downField("node").downField("job").get[String]("id"), Right(ServiceFixtures.jobId.value.toString))
+      assertEquals(edge.downField("node").downField("candidate").get[String]("id"), Right(ServiceFixtures.candidateId.value.toString))
+      assert(!submitted.noSpaces.contains("Admin"))
+    }
+  }
+
+  test("served GraphQL hiring operation without a valid token returns typed unauthorized payload") {
+    val mutation =
+      s"""mutation {
+         |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
+         |    application { id }
+         |    errors { code }
+         |  }
+         |}""".stripMargin
+    for {
+      admission <- Admission.create
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
+      response <- http(request(mutation))
+      body <- response.as[Json]
+    } yield {
+      assertEquals(response.status, Status.Ok)
+      assertEquals(body.hcursor.downField("data").downField("submitApplication").downField("errors").downArray.get[String]("code"),
+        Right("UNAUTHORIZED"))
+    }
   }
 
   test("validated Sangria field errors retain their response and emit correlated filtered payloads") {

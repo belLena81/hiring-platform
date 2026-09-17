@@ -993,7 +993,7 @@ The project can be demonstrated end-to-end as one coherent architecture rather t
 
 ---
 
-# 23. Final Milestone
+# 13. Final Milestone
 
 The final system should demonstrate the complete lifecycle:
 
@@ -1056,7 +1056,7 @@ Precision / Recall / MRR / NDCG
 
 ---
 
-# 24. What the Finished Project Demonstrates
+# 14. What the Finished Project Demonstrates
 
 The project should provide evidence of knowledge rather than merely list technologies.
 

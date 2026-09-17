@@ -11,7 +11,39 @@ class AppConfigSpec extends FunSuite {
       |LOG_LEVEL=INFO
       |LOG_MASK_SENSITIVE=true
       |LOG_REQUEST_PAYLOADS=false
+      |AUTH_JWT_HS256_SECRET=disabled
+      |AUTH_JWT_ISSUER=hiring-platform-local
+      |AUTH_JWT_AUDIENCE=hiring-graphql-api
+      |VECTOR_SEARCH_ENABLED=false
+      |VOYAGE_API_KEY=disabled
+      |VOYAGE_ENDPOINT=https://api.voyageai.com/v1/embeddings
+      |VOYAGE_MODEL=voyage-4-lite
+      |VOYAGE_DIMENSION=1024
+      |EMBEDDING_VERSION=1
+      |EMBEDDING_QUEUE_SIZE=128
+      |EMBEDDING_PARALLELISM=4
+      |EMBEDDING_TIMEOUT_MS=5000
+      |JOB_VECTOR_INDEX=jobs_embedding_vector
+      |CANDIDATE_VECTOR_INDEX=candidates_embedding_vector
+      |VECTOR_NUM_CANDIDATES=100
       |""".stripMargin
+  private val defaultVectorSearch =
+    VectorSearchConfig(
+      enabled = false,
+      voyageApiKey = None,
+      voyageEndpoint = "https://api.voyageai.com/v1/embeddings",
+      voyageModel = "voyage-4-lite",
+      voyageDimension = 1024,
+      embeddingVersion = 1,
+      queueSize = 128,
+      parallelism = 4,
+      timeoutMillis = 5000,
+      jobVectorIndex = "jobs_embedding_vector",
+      candidateVectorIndex = "candidates_embedding_vector",
+      numCandidates = 100
+    )
+  private val defaultJwtAuth =
+    JwtAuthConfig(None, "hiring-platform-local", "hiring-graphql-api")
 
   test("P1-AC01 loads application settings from config text and resolves secret env placeholders") {
     val config =
@@ -22,12 +54,39 @@ class AppConfigSpec extends FunSuite {
         |LOG_LEVEL=WARN
         |LOG_MASK_SENSITIVE=true
         |LOG_REQUEST_PAYLOADS=false
+        |AUTH_JWT_HS256_SECRET={$AUTH_JWT_HS256_SECRET}
+        |AUTH_JWT_ISSUER=hiring-platform-local
+        |AUTH_JWT_AUDIENCE=hiring-graphql-api
+        |VECTOR_SEARCH_ENABLED=false
+        |VOYAGE_API_KEY=disabled
+        |VOYAGE_ENDPOINT=https://api.voyageai.com/v1/embeddings
+        |VOYAGE_MODEL=voyage-4-lite
+        |VOYAGE_DIMENSION=1024
+        |EMBEDDING_VERSION=1
+        |EMBEDDING_QUEUE_SIZE=128
+        |EMBEDDING_PARALLELISM=4
+        |EMBEDDING_TIMEOUT_MS=5000
+        |JOB_VECTOR_INDEX=jobs_embedding_vector
+        |CANDIDATE_VECTOR_INDEX=candidates_embedding_vector
+        |VECTOR_NUM_CANDIDATES=100
         |""".stripMargin
     assertEquals(AppConfig.fromConfig(config, Map(
-      "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin"
+      "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
+      "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
     )), Right(AppConfig("::1", 65535,
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
-      "hiring_test-2", "WARN", maskSensitive = true, requestPayloads = false)))
+      "hiring_test-2", "WARN", maskSensitive = true, requestPayloads = false,
+      JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api"),
+      defaultVectorSearch)))
+  }
+
+  test("VHS-AC08 packaged application config is sanitized and parseable") {
+    val raw = resource("application.conf")
+    val result = AppConfig.fromConfig(raw, Map.empty)
+    assert(result.isRight)
+    assert(!raw.contains("mongodb+srv://"))
+    assert(!raw.contains("synthetic-secret"))
+    assert(!raw.contains(" //"))
   }
 
   test("P1-AC01 local config overlays application config values") {
@@ -112,9 +171,34 @@ class AppConfigSpec extends FunSuite {
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "LOG_MASK_SENSITIVE=false\n", Map.empty),
       Right(AppConfig("127.0.0.1", 8080, "mongodb://127.0.0.1:27017", "hiring", "INFO",
-        maskSensitive = false, requestPayloads = false)))
+        maskSensitive = false, requestPayloads = false, defaultJwtAuth, defaultVectorSearch.copy(enabled = false))))
     assertEquals(AppConfig.fromConfig(defaultConfig + "LOG_REQUEST_PAYLOADS=true\n", Map.empty),
       Left(ConfigError.UnsafeRequestPayloads))
+  }
+
+  test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
+    assertEquals(AppConfig.fromConfig(defaultConfig + "VECTOR_SEARCH_ENABLED=true\n", Map.empty),
+      Left(ConfigError.InvalidVoyageApiKey))
+    val result = AppConfig.fromConfig(defaultConfig + "VECTOR_SEARCH_ENABLED=true\nVOYAGE_API_KEY={$VOYAGE_API_KEY}\n",
+      Map("VOYAGE_API_KEY" -> "synthetic-voyage-key"))
+    assertEquals(result.map(_.vectorSearch.voyageApiKey), Right(Some("synthetic-voyage-key")))
+  }
+
+  test("HGQL-AC02 JWT auth config is disabled by default and requires a strong external secret when enabled") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth), Right(defaultJwtAuth))
+    assertEquals(AppConfig.fromConfig(defaultConfig + "AUTH_JWT_HS256_SECRET=short\n", Map.empty),
+      Left(ConfigError.InvalidJwtSecret))
+    val loaded = AppConfig.fromConfig(defaultConfig + "AUTH_JWT_HS256_SECRET={$AUTH_JWT_HS256_SECRET}\n",
+      Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456"))
+    assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right(Some("abcdefghijklmnopqrstuvwxyz123456")))
+  }
+
+  test("VHS-AC07 vector search dimension is fixed to the configured Atlas index contract") {
+    List("256", "512", "2048").foreach { dimension =>
+      assertEquals(AppConfig.fromConfig(defaultConfig + s"VOYAGE_DIMENSION=$dimension\n", Map.empty),
+        Left(ConfigError.InvalidVoyageDimension), clues(dimension))
+    }
+    assert(AppConfig.fromConfig(defaultConfig + "VOYAGE_DIMENSION=1024\n", Map.empty).isRight)
   }
 
   test("LOG-03 logging booleans are strict with safe configuration keys") {
@@ -140,5 +224,12 @@ class AppConfigSpec extends FunSuite {
     assert(result.isRight)
     assert(!result.toString.contains("synthetic-secret"))
     assert(!result.toString.contains("mongodb://"))
+  }
+
+  private def resource(name: String): String = {
+    val stream = Option(getClass.getClassLoader.getResourceAsStream(name))
+      .getOrElse(throw new IllegalArgumentException(s"Missing resource $name"))
+    try new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+    finally stream.close()
   }
 }

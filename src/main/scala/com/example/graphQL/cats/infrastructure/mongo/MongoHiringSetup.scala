@@ -12,6 +12,7 @@ object MongoHiringSetup {
   val UsersAdminSingletonIndex = "users_adminSingleton_unique"
   val ApplicationsCandidateJobIndex = "applications_candidate_job_unique"
   val JobsRecruiterStatusCreatedIndex = "jobs_recruiter_status_created_id"
+  val JobsRecruiterCreatedIndex = "jobs_recruiter_created_id"
   val ApplicationsCandidateStatusCreatedIndex = "applications_candidate_status_created_id"
   val ApplicationsCandidateCreatedIndex = "applications_candidate_created_id"
   val ApplicationsJobStatusCreatedIndex = "applications_job_status_created_id"
@@ -20,9 +21,12 @@ object MongoHiringSetup {
   val JobsCreatedIndex = "jobs_created_id"
   val JobsOpenCreatedIndex = "jobs_open_created_id"
   val JobsOpenCityCreatedIndex = "jobs_open_city_created_id"
+  val JobsEmbeddingMetaIndex = "jobs_embedding_meta_filters"
+  val UsersEmbeddingMetaIndex = "users_embedding_meta_filters"
   val HiringDomainMongoMigrationId = "phase-2-domain-mongodb-v1"
   val HiringGraphQLSearchIndexMigrationId = "hiring-graphql-search-indexes-v1"
   val HiringAdminJobListingIndexMigrationId = "hiring-admin-job-listing-indexes-v1"
+  val HiringVectorSearchMigrationId = "hiring-vector-search-v1"
 
   def initialize(database: MongoDatabase): IO[Unit] =
     List(
@@ -37,6 +41,9 @@ object MongoHiringSetup {
       createIndex(database.getCollection("jobs"),
         Indexes.compoundIndex(Indexes.ascending("recruiterId", "status"), Indexes.descending("createdAt", "_id")),
         new IndexOptions().name(JobsRecruiterStatusCreatedIndex)),
+      createIndex(database.getCollection("jobs"),
+        Indexes.compoundIndex(Indexes.ascending("recruiterId"), Indexes.descending("createdAt", "_id")),
+        new IndexOptions().name(JobsRecruiterCreatedIndex)),
       createIndex(database.getCollection("applications"),
         Indexes.compoundIndex(Indexes.ascending("candidateId", "status"), Indexes.descending("createdAt", "_id")),
         new IndexOptions().name(ApplicationsCandidateStatusCreatedIndex)),
@@ -60,12 +67,19 @@ object MongoHiringSetup {
         new IndexOptions().name(JobsOpenCreatedIndex)),
       createIndex(database.getCollection("jobs"),
         Indexes.compoundIndex(Indexes.ascending("status", "location.city"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(JobsOpenCityCreatedIndex))
+        new IndexOptions().name(JobsOpenCityCreatedIndex)),
+      createIndex(database.getCollection("jobs"),
+        Indexes.ascending("embeddingMeta.model", "embeddingMeta.version", "status", "location.city", "recruiterId"),
+        new IndexOptions().name(JobsEmbeddingMetaIndex)),
+      createIndex(database.getCollection("users"),
+        Indexes.ascending("embeddingMeta.model", "embeddingMeta.version", "role"),
+        new IndexOptions().name(UsersEmbeddingMetaIndex))
     ).sequence_.flatMap { _ =>
       val migrations = database.getCollection("schema_migrations")
       recordMigration(migrations, HiringDomainMongoMigrationId, "Hiring domain MongoDB collections and indexes") *>
         recordMigration(migrations, HiringGraphQLSearchIndexMigrationId, "Hiring GraphQL job search indexes") *>
-        recordMigration(migrations, HiringAdminJobListingIndexMigrationId, "Hiring Admin job listing indexes")
+        recordMigration(migrations, HiringAdminJobListingIndexMigrationId, "Hiring Admin job listing indexes") *>
+        recordMigration(migrations, HiringVectorSearchMigrationId, "Hiring Vector Search metadata indexes")
     }
 
   private def recordMigration(

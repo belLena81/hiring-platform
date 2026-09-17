@@ -38,6 +38,40 @@ class JobServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("VHS-AC05 createJob and updateJob enqueue embedding work only after successful writes") {
+    val updatedInput = UpdateJobInput(
+      "Updated role",
+      "Build updated services",
+      List("Scala", "Cats Effect"),
+      Set("Scala", "MongoDB"),
+      Location("Cyprus", "Nicosia", remote = true)
+    )
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter, candidateId -> candidate))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      published <- Ref.of[IO, Vector[EmbeddingWork]](Vector.empty)
+      publisher = RecordingEmbeddingPublisher(published)
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs), publisher)
+      input = CreateJobInput(
+        "New role",
+        "Build services",
+        List("Scala"),
+        Set("Cats Effect"),
+        Location("Cyprus", "Nicosia", remote = true),
+        JobStatus.Open
+      )
+      created <- service.createJob(ActorContext(recruiterId, UserRole.Recruiter), input, now, jobId)
+      rejected <- service.createJob(ActorContext(candidateId, UserRole.Candidate), input, now, JobId(UUID.randomUUID()))
+      updated <- service.updateJob(ActorContext(recruiterId, UserRole.Recruiter), jobId, updatedInput, later)
+      work <- published.get
+    } yield {
+      assertEquals(created.map(_.id), Right(jobId))
+      assertEquals(rejected, Left(DomainError.Forbidden))
+      assertEquals(updated.map(_.id), Right(jobId))
+      assertEquals(work.toList, List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.JobChanged(jobId)))
+    }
+  }
+
   test("forged admin context is rejected unless the stored actor is an admin") {
     for {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](
@@ -122,4 +156,9 @@ class JobServiceSpec extends CatsEffectSuite {
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId)
     } yield assertEquals(result, Left(DomainError.Forbidden))
   }
+}
+
+private final case class RecordingEmbeddingPublisher(ref: Ref[IO, Vector[EmbeddingWork]]) extends EmbeddingWorkPublisher[IO] {
+  override def publish(work: EmbeddingWork): IO[Unit] =
+    ref.update(_ :+ work)
 }

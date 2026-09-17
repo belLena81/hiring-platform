@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.application.{ActorContext, AuthenticationError, HealthService, ProbeResult, UseCaseError}
+import com.example.graphQL.cats.application.{ActorContext, AuthenticationError, HealthService, ProbeResult, SearchError, UseCaseError}
 import com.example.graphQL.cats.application.port.*
 import com.example.graphQL.cats.application.service.{ActorAuthorization, CreateJobInput, JobService, UpdateJobInput}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
@@ -24,6 +24,13 @@ object HiringGraphQLSchema {
   private final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, errors: List[GraphQLError] = Nil)
   private final case class JobPayload(job: Option[Job], errors: List[GraphQLError])
   private final case class ApplicationPayload(application: Option[Application], errors: List[GraphQLError])
+  private final case class JobFilterGraphQLInput(city: Option[String], skills: Option[List[String]], createdAfter: Option[String])
+  private final case class CandidateMatchProfile(skills: Set[String], experienceSummary: Option[String])
+  private final case class CandidateMatchCandidate(id: String, name: String, profile: Option[CandidateMatchProfile])
+  private final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
+  private final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
+  private final case class RankedJobResults(results: List[RankedJobPayload], errors: List[GraphQLError])
+  private final case class RankedCandidateResults(results: List[RankedCandidatePayload], errors: List[GraphQLError])
   private final case class SubmitApplicationGraphQLInput(jobId: String)
   private final case class JobGraphQLInput(
       title: String,
@@ -54,6 +61,8 @@ object HiringGraphQLSchema {
     Decoder.forProduct2("applicationId", "feedback")(RejectApplicationGraphQLInput.apply)
   private given Decoder[DeclineApplicationGraphQLInput] =
     Decoder.forProduct2("applicationId", "reason")(DeclineApplicationGraphQLInput.apply)
+  private given Decoder[JobFilterGraphQLInput] =
+    Decoder.forProduct3("city", "skills", "createdAfter")(JobFilterGraphQLInput.apply)
 
   private val healthStatus = EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))
   private val readinessStatus = EnumType("ReadinessStatus", values = List(
@@ -62,9 +71,11 @@ object HiringGraphQLSchema {
   private val applicationStatus =
     EnumType("ApplicationStatus", values = ApplicationStatus.values.toList.map(status => EnumValue(status.toString, value = status)))
   private val userRole = EnumType("UserRole", values = UserRole.values.toList.map(role => EnumValue(role.toString, value = role)))
+  private val searchMode = EnumType("SearchMode", values = SearchMode.values.toList.map(mode => EnumValue(mode.toString, value = mode)))
 
   private val idArgument = Argument("id", IDType)
   private val jobIdArgument = Argument("jobId", IDType)
+  private val queryArgument = Argument("query", StringType)
   private val applicationIdArgument = Argument("applicationId", IDType)
   private val firstArgument = Argument("first", IntType)
   private val afterArgument = Argument("after", OptionInputType(StringType))
@@ -73,6 +84,12 @@ object HiringGraphQLSchema {
   private val createdAfterArgument = Argument("createdAfter", OptionInputType(StringType))
   private val jobStatusArgument = Argument("status", OptionInputType(jobStatus))
   private val applicationStatusArgument = Argument("status", OptionInputType(applicationStatus))
+  private val jobFilterInputType = InputObjectType[JobFilterGraphQLInput]("JobFilter", List(
+    InputField("city", OptionInputType(StringType)),
+    InputField("skills", OptionInputType(ListInputType(StringType))),
+    InputField("createdAfter", OptionInputType(StringType))
+  ))
+  private val jobFilterArgument = Argument("filter", OptionInputType(jobFilterInputType))
   private val submitApplicationInputType = InputObjectType[SubmitApplicationGraphQLInput]("SubmitApplicationInput", List(
     InputField("jobId", IDType)
   ))
@@ -130,6 +147,13 @@ object HiringGraphQLSchema {
     Field("skills", ListType(StringType), resolve = _.value.skills.toList.sorted),
     Field("experienceSummary", OptionType(StringType), resolve = _.value.experienceSummary),
     Field("resumeRef", OptionType(StringType), resolve = _.value.resumeRef)))
+  private val candidateMatchProfileType = ObjectType("CandidateMatchProfile", fields[RequestContext, CandidateMatchProfile](
+    Field("skills", ListType(StringType), resolve = _.value.skills.toList.sorted),
+    Field("experienceSummary", OptionType(StringType), resolve = _.value.experienceSummary)))
+  private val candidateMatchCandidateType = ObjectType("CandidateMatchCandidate", fields[RequestContext, CandidateMatchCandidate](
+    Field("id", IDType, resolve = _.value.id),
+    Field("name", StringType, resolve = _.value.name),
+    Field("profile", OptionType(candidateMatchProfileType), resolve = _.value.profile)))
   private lazy val userType: ObjectType[RequestContext, User] = ObjectType("User", fields[RequestContext, User](
     Field("id", IDType, resolve = _.value.id.value.toString),
     Field("email", StringType, resolve = _.value.email),
@@ -179,6 +203,26 @@ object HiringGraphQLSchema {
   private lazy val applicationPayloadType = ObjectType("ApplicationPayload", fields[RequestContext, ApplicationPayload](
     Field("application", OptionType(applicationType), resolve = _.value.application),
     Field("errors", ListType(errorType), resolve = _.value.errors)))
+  private lazy val rankedJobType = ObjectType("RankedJob", fields[RequestContext, RankedJobPayload](
+    Field("job", jobType, resolve = _.value.job),
+    Field("score", FloatType, resolve = _.value.score),
+    Field("searchMode", searchMode, resolve = _.value.searchMode),
+    Field("model", StringType, resolve = _.value.model),
+    Field("version", IntType, resolve = _.value.version),
+    Field("searchId", IDType, resolve = _.value.searchId)))
+  private lazy val rankedCandidateType = ObjectType("RankedCandidate", fields[RequestContext, RankedCandidatePayload](
+    Field("candidate", candidateMatchCandidateType, resolve = _.value.candidate),
+    Field("score", FloatType, resolve = _.value.score),
+    Field("searchMode", searchMode, resolve = _.value.searchMode),
+    Field("model", StringType, resolve = _.value.model),
+    Field("version", IntType, resolve = _.value.version),
+    Field("searchId", IDType, resolve = _.value.searchId)))
+  private lazy val rankedJobResultsType = ObjectType("RankedJobResults", fields[RequestContext, RankedJobResults](
+    Field("results", ListType(rankedJobType), resolve = _.value.results),
+    Field("errors", ListType(errorType), resolve = _.value.errors)))
+  private lazy val rankedCandidateResultsType = ObjectType("RankedCandidateResults", fields[RequestContext, RankedCandidateResults](
+    Field("results", ListType(rankedCandidateType), resolve = _.value.results),
+    Field("errors", ListType(errorType), resolve = _.value.errors)))
 
   val schema: Schema[RequestContext, Unit] = Schema(
     ObjectType("Query", fields[RequestContext, Unit](
@@ -187,6 +231,15 @@ object HiringGraphQLSchema {
       Field("jobs", jobConnectionType,
         arguments = firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(jobs(context))),
+      Field("semanticJobSearch", rankedJobResultsType,
+        arguments = queryArgument :: jobFilterArgument :: firstArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(semanticJobSearch(context))),
+      Field("recommendedJobs", rankedJobResultsType,
+        arguments = firstArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(recommendedJobs(context))),
+      Field("candidateMatches", rankedCandidateResultsType,
+        arguments = jobIdArgument :: firstArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(candidateMatches(context))),
       Field("job", OptionType(jobType), arguments = idArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(job(context))),
       Field("myJobs", jobConnectionType, arguments = firstArgument :: afterArgument :: jobStatusArgument :: Nil,
@@ -230,8 +283,14 @@ object HiringGraphQLSchema {
     case InvalidQuery, Internal
   }
 
-  def execute(request: GraphQLRequest, service: HealthService, requestId: String): IO[Either[Failure, Json]] =
-    RequestContext.resource(service.readiness(Some(requestId))).use { context =>
+  def execute(
+      request: GraphQLRequest,
+      service: HealthService,
+      requestId: String,
+      actor: Option[ActorContext] = None,
+      hiring: Option[HiringGraphQLServices] = None
+  ): IO[Either[Failure, Json]] =
+    RequestContext.resource(service.readiness(Some(requestId)), actor, hiring).use { context =>
       executeInContext(request, context)
     }
 
@@ -284,6 +343,54 @@ object HiringGraphQLSchema {
                 .map(_.fold(errorConnection[Job], jobConnection(_, requested)))
           }
       }
+    }
+
+  private def semanticJobSearch(context: Context[RequestContext, Unit]): IO[RankedJobResults] =
+    authenticatedSearch(context).flatMap {
+      case Left(error) => IO.pure(RankedJobResults(Nil, List(this.error(error))))
+      case Right((actor, _, service)) =>
+        pageSize(context.arg(firstArgument)).flatMap {
+          case Left(error) => IO.pure(RankedJobResults(Nil, List(error)))
+          case Right(size) =>
+            jobFilter(context.arg(jobFilterArgument)) match {
+              case Left(error) => IO.pure(RankedJobResults(Nil, List(error)))
+              case Right(filter) =>
+                IO.randomUUID.flatMap(searchId =>
+                  service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId)
+                    .flatTap(_.fold(_ => IO.unit, results => context.ctx.preloadUsers(results.map(_.job.recruiterId))))
+                    .map(_.fold(error => RankedJobResults(Nil, List(this.error(error))), rankedJobResults)))
+            }
+        }
+    }
+
+  private def recommendedJobs(context: Context[RequestContext, Unit]): IO[RankedJobResults] =
+    authenticatedSearch(context).flatMap {
+      case Left(error) => IO.pure(RankedJobResults(Nil, List(this.error(error))))
+      case Right((actor, _, service)) =>
+        pageSize(context.arg(firstArgument)).flatMap {
+          case Left(error) => IO.pure(RankedJobResults(Nil, List(error)))
+          case Right(size) =>
+            IO.randomUUID.flatMap(searchId =>
+              service.recommendedJobs(actor, size, searchId)
+                .flatTap(_.fold(_ => IO.unit, results => context.ctx.preloadUsers(results.map(_.job.recruiterId))))
+                .map(_.fold(error => RankedJobResults(Nil, List(this.error(error))), rankedJobResults)))
+        }
+    }
+
+  private def candidateMatches(context: Context[RequestContext, Unit]): IO[RankedCandidateResults] =
+    authenticatedSearch(context).flatMap {
+      case Left(error) => IO.pure(RankedCandidateResults(Nil, List(this.error(error))))
+      case Right((actor, _, service)) =>
+        (parseJobId(context.arg(jobIdArgument)), pageSize(context.arg(firstArgument))) match {
+          case (Some(jobId), pageIO) => pageIO.flatMap {
+            case Left(error) => IO.pure(RankedCandidateResults(Nil, List(error)))
+            case Right(size) =>
+              IO.randomUUID.flatMap(searchId =>
+                service.candidateMatches(actor, jobId, size, searchId)
+                  .map(_.fold(error => RankedCandidateResults(Nil, List(this.error(error))), rankedCandidateResults)))
+          }
+          case (None, _) => IO.pure(RankedCandidateResults(Nil, List(error(DomainError.NotFound("job")))))
+        }
     }
 
   private def job(context: Context[RequestContext, Unit]): IO[Option[Job]] =
@@ -429,6 +536,13 @@ object HiringGraphQLSchema {
   private def authenticated(context: Context[RequestContext, Unit]): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices)]] =
     IO.pure((context.ctx.actor, context.ctx.hiring).mapN((_, _)).toRight(AuthenticationError.Unauthorized: UseCaseError))
 
+  private def authenticatedSearch(
+      context: Context[RequestContext, Unit]
+  ): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.application.service.SemanticSearchService[IO])]] =
+    authenticated(context).map(_.flatMap { case (actor, hiring) =>
+      hiring.semanticSearchService.map(service => (actor, hiring, service)).toRight(SearchError.VectorSearchUnavailable: UseCaseError)
+    })
+
   private def authenticatedConnection[A](
       context: Context[RequestContext, Unit]
   )(action: (ActorContext, HiringGraphQLServices) => IO[Connection[A]]): IO[Connection[A]] =
@@ -469,6 +583,14 @@ object HiringGraphQLSchema {
 
   private def pageSize(first: Int): IO[Either[GraphQLError, PageSize]] =
     IO.pure(PageSize.fromInt(first).toEither.leftMap(error))
+
+  private def jobFilter(value: Option[JobFilterGraphQLInput]): Either[GraphQLError, JobSearchFilter] =
+    value match {
+      case None => Right(JobSearchFilter(None, Set.empty, None))
+      case Some(filter) =>
+        createdAfter(filter.createdAfter).map(createdAt =>
+          JobSearchFilter(filter.city, filter.skills.fold(Set.empty[String])(_.toSet), createdAt))
+    }
 
   private def validateCursor[A, B](
       after: Option[String],
@@ -553,6 +675,30 @@ object HiringGraphQLSchema {
     connection(values, requested)(event => CursorCodec.encodeEvent(ApplicationEventCursor(event.occurredAt, event.id)))
   }
 
+  private def rankedJobResults(values: List[RankedJob]): RankedJobResults =
+    RankedJobResults(values.map(value => RankedJobPayload(
+      value.job,
+      value.score,
+      value.mode,
+      value.meta.model,
+      value.meta.version,
+      value.searchId.toString
+    )), Nil)
+
+  private def rankedCandidateResults(values: List[RankedCandidate]): RankedCandidateResults =
+    RankedCandidateResults(values.map(value => RankedCandidatePayload(
+      CandidateMatchCandidate(
+        value.candidate.id.value.toString,
+        value.candidate.name,
+        value.candidate.profile.map(profile => CandidateMatchProfile(profile.skills, profile.experienceSummary))
+      ),
+      value.score,
+      value.mode,
+      value.meta.model,
+      value.meta.version,
+      value.searchId.toString
+    )), Nil)
+
   private def connection[A](values: List[A], requested: Int)(cursor: A => String): Connection[A] = {
     val nodes = values.take(requested)
     Connection(nodes.map(value => Edge(value, cursor(value))), PageInfo(values.size > requested, nodes.lastOption.map(cursor)))
@@ -593,6 +739,11 @@ object HiringGraphQLSchema {
       case RepositoryError.DuplicateApplication => GraphQLError("DUPLICATE_APPLICATION", "Application already exists")
       case RepositoryError.Conflict => GraphQLError("CONFLICT", "Conflict")
       case RepositoryError.Unavailable => GraphQLError("UNAVAILABLE", "Repository unavailable")
+      case SearchError.MissingEmbedding(entity) => GraphQLError("MISSING_EMBEDDING", s"$entity embedding is missing")
+      case SearchError.StaleEmbedding(entity) => GraphQLError("STALE_EMBEDDING", s"$entity embedding is stale")
+      case SearchError.InputTooLarge(field, maximum) => GraphQLError("INPUT_TOO_LARGE", s"$field must be at most $maximum characters")
+      case SearchError.ProviderUnavailable => GraphQLError("PROVIDER_UNAVAILABLE", "Embedding provider unavailable")
+      case SearchError.VectorSearchUnavailable => GraphQLError("VECTOR_SEARCH_UNAVAILABLE", "Vector search unavailable")
       case errors: cats.data.NonEmptyList[?] =>
         val fields = errors.toList.collect { case validation: DomainValidationError => validation }
           .map(validationErrorMessage).mkString(", ")

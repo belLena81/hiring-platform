@@ -2,15 +2,22 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.Kleisli
 import cats.effect.IO
-import com.example.graphQL.cats.api.graphql.{DiagnosticPayload, HiringGraphQLSchema, GraphQLRequest, InputBudget}
-import com.example.graphQL.cats.application.{Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.api.graphql.{DiagnosticPayload, HiringGraphQLSchema, GraphQLRequest, InputBudget, HiringGraphQLServices}
+import com.example.graphQL.cats.application.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
 import io.circe.Json
 import org.http4s.*
 import org.http4s.circe.*
 import org.typelevel.ci.CIString
 import scala.concurrent.duration.*
 
-final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, admission: Admission) {
+final class HiringApiRoutes(
+    service: HealthService,
+    diagnostics: Diagnostics,
+    admission: Admission,
+    hiring: Option[HiringGraphQLServices] = None,
+    authenticate: Request[IO] => IO[Option[ActorContext]] = (_: Request[IO]) => IO.pure(None),
+    ensureHiringReady: IO[Boolean] = IO.pure(true)
+) {
   private enum RejectionReason {
     case INVALID_REQUEST, INVALID_QUERY, UNSUPPORTED_MEDIA, NOT_ACCEPTABLE, PAYLOAD_TOO_LARGE,
       OVERLOADED, DEADLINE_EXCEEDED, INTERNAL_ERROR, METHOD_NOT_ALLOWED, NOT_FOUND
@@ -66,7 +73,12 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
       if (bytes.size > InputBudget.MaxBytes) rejected(Status.PayloadTooLarge, "Request body too large", requestId, RejectionReason.PAYLOAD_TOO_LARGE)
       else IO(GraphQLRequest.parseBody(new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8))).flatMap {
         case None => rejected(Status.BadRequest, "Invalid GraphQL request", requestId, RejectionReason.INVALID_REQUEST)
-        case Some(parsed) => HiringGraphQLSchema.execute(parsed, service, requestId).flatMap {
+        case Some(parsed) => authenticate(request).flatMap { actor =>
+          val ready = if (actor.nonEmpty && hiring.nonEmpty) ensureHiringReady else IO.pure(true)
+          ready.flatMap { available =>
+            HiringGraphQLSchema.execute(parsed, service, requestId, actor.filter(_ => available), hiring.filter(_ => available))
+          }
+        }.flatMap {
           case Right(result) => completedGraphQL(parsed, result, requestId)
           case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Status.BadRequest, "Invalid GraphQL query", requestId, RejectionReason.INVALID_QUERY)
           case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Status.InternalServerError, "Request failed", requestId, RejectionReason.INTERNAL_ERROR)

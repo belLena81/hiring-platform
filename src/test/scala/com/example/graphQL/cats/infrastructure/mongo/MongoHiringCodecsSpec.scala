@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{CandidateProfile, Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, User, UserRole}
 import java.time.Instant
 import java.util.{Date, UUID}
 import munit.FunSuite
@@ -62,6 +62,30 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     assertEquals(document.getDate("closedAt"), Date.from(later))
     assertEquals(result, job)
+  }
+
+  test("job codec preserves embedding metadata when present") {
+    val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", 1, "source-hash", later))
+    val job = Job(
+      jobId,
+      recruiterId,
+      "Senior Scala Developer",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect"),
+      Location("Cyprus", "Nicosia", remote = true),
+      JobStatus.Open,
+      now,
+      later,
+      embedding = Some(embedding)
+    )
+
+    val document = MongoHiringCodecs.job(job)
+    val result = MongoHiringCodecs.readJob(document)
+
+    assert(document.containsKey("embedding"))
+    assert(document.containsKey("embeddingMeta"))
+    assertEquals(result.embedding, Some(embedding))
   }
 
   test("job codec reads legacy documents without closedAt as absent close timestamp") {

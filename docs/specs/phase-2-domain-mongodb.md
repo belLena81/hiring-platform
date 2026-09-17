@@ -1,6 +1,6 @@
 # Phase 2 — Domain Model + MongoDB
 
-Status: ready — Architect, Data Engineer, and Security Engineer spec readiness reviews passed.
+Status: completed for planned development scope — implementation, local verification, and independent completion reviews passed.
 
 ## Identity and scope
 
@@ -60,6 +60,7 @@ Status: ready — Architect, Data Engineer, and Security Engineer spec readiness
   - application history separate from applications and append-only
 - Required list indexes:
   - `jobs_recruiter_status_created_id`: `{ recruiterId: 1, status: 1, createdAt: -1, _id: -1 }`
+  - `jobs_recruiter_created_id`: `{ recruiterId: 1, createdAt: -1, _id: -1 }`
   - `applications_candidate_status_created_id`: `{ candidateId: 1, status: 1, createdAt: -1, _id: -1 }`
   - `applications_candidate_created_id`: `{ candidateId: 1, createdAt: -1, _id: -1 }`
   - `applications_job_status_created_id`: `{ jobId: 1, status: 1, createdAt: -1, _id: -1 }`
@@ -125,16 +126,17 @@ Status: ready — Architect, Data Engineer, and Security Engineer spec readiness
 
 ## Checkpoint and review
 
-- Current status: in review. Domain/application service slice, standalone Mongo setup, replica-set transaction tests, fault-injection rollback, duplicate race handling, closed-job submit guard, and explain-backed application list indexes are implemented with full local evidence.
+- Current status: completed for planned development scope. Domain/application service slice, standalone Mongo setup, replica-set transaction tests, fault-injection rollback, duplicate race handling, closed-job submit guard, and explain-backed application/job/history list indexes are implemented with full local evidence.
 - Completed baseline: Phase 2A domain foundation and evidence remain recorded above.
 - Implementation checkpoint (2026-09-16): TDD red/green captured for `JobLifecycleSpec`; focused service red/green captured for missing `ActorContext`, union `UseCaseError`, services, and repository errors. Earlier local commands passed after review fixes: `sbt test 'IntegrationTest / test' && python3 scripts/check-skills.py && git diff --check` passed 113 unit tests, 30 integration tests, 8 skill validations, and whitespace check.
 - Refactor checkpoint (2026-09-16): application services now use shared `ActorAuthorization`, `EitherT`, and union-style typed `UseCaseError` without service-error remapping; Mongo adapters now use no-null codecs, explicit standalone/session transaction runners, optimistic job `version` guards, and stale application-status guards. Focused service and Mongo repository checks passed before the full local gate.
 - Phase 2 completion checkpoint (2026-09-16): focused red/green captured missing `rejectNextCreateWith`, `createForOpenJob`, no-status index constants, replica-set transaction resource, rollback tests, duplicate race test, and explain evidence before implementation. Focused command passed after security fixes: `sbt 'testOnly com.example.graphQL.cats.application.service.ApplicationServiceSpec' 'IntegrationTest / testOnly com.example.graphQL.cats.infrastructure.mongo.MongoHiringRepositoriesIntegrationSpec'` passed 7 service tests and 7 Mongo integration tests.
 - Final local gate checkpoint (2026-09-16): `sbt test 'IntegrationTest / test' && python3 scripts/check-skills.py && git diff --check` passed 114 unit tests, 35 integration tests, 8 skill validations, and whitespace check. The known bind-conflict trace appears inside `HiringPlatformServerSpec`, but the suite passed.
-- Next concrete action: obtain independent Code Reviewer, Security Engineer, and QA verdicts on the final state.
+- Latest refresh (2026-09-17): `sbt test` passed 169/169 unit tests; `sbt 'IntegrationTest / test'` passed 32/32 integration tests after adding served JWT/Mongo setup coverage and recruiter no-status job-list index evidence.
+- Next concrete action: served GraphQL production identity-provider/token issuance, real workload benchmarking, and deployment verification are separate future scopes.
 - Architect readiness verdict: PASS after adding explicit service contracts, actor validation, service errors, MongoDB contract details, and mandatory TDD evidence.
 - Data Engineer readiness verdict: PASS after adding document fields, named indexes, migration history, cursor/index predicates, and close-vs-submit `jobs.version` guard-write strategy.
 - Security Engineer readiness verdict: PASS after adding Admin actor resolution, forged/non-seeded Admin negative tests, client-controlled owner ID rules, and PII/safe-error requirements.
-- Code Reviewer verdict and scope: pending for Phase 2 completion implementation.
-- Security Engineer verdict and scope: pending for Phase 2 completion spec and final implementation.
-- Final independent QA verdict: pending.
+- Code Reviewer verdict and scope: PASS for Phase 2 completion implementation and GraphQL completion-path fixes.
+- Security Engineer verdict and scope: PASS for Phase 2 completion implementation, JWT auth integration, config sanitization, and final setup gate.
+- Final independent QA verdict: PASS for planned Phase 2 Domain/MongoDB + Hiring GraphQL API completion scope.

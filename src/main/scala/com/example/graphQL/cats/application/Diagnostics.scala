@@ -87,7 +87,14 @@ object LogFields {
     case LogField.HttpPort => value.toIntOption.exists(port => port >= 1 && port <= 65535)
     case LogField.Reason => reasons.contains(value)
     case LogField.Outcome => Set("COMPLETED", "CANCELLED", "FIELD_ERROR", "READY", "NOT_READY").contains(value)
-    case LogField.ConfigKey => Set("CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "MONGODB_URI", "MONGODB_DATABASE", "LOG_LEVEL", "LOG_MASK_SENSITIVE", "LOG_REQUEST_PAYLOADS").contains(value)
+    case LogField.ConfigKey => Set(
+      "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "MONGODB_URI", "MONGODB_DATABASE", "LOG_LEVEL",
+      "LOG_MASK_SENSITIVE", "LOG_REQUEST_PAYLOADS", "AUTH_JWT_HS256_SECRET", "AUTH_JWT_ISSUER",
+      "AUTH_JWT_AUDIENCE", "VECTOR_SEARCH_ENABLED", "VOYAGE_API_KEY", "VOYAGE_ENDPOINT",
+      "VOYAGE_MODEL", "VOYAGE_DIMENSION", "EMBEDDING_VERSION", "EMBEDDING_QUEUE_SIZE",
+      "EMBEDDING_PARALLELISM", "EMBEDDING_TIMEOUT_MS", "JOB_VECTOR_INDEX",
+      "CANDIDATE_VECTOR_INDEX", "VECTOR_NUM_CANDIDATES"
+    ).contains(value)
     case LogField.ErrorType => errorTypes.contains(value) || value == "OtherException"
     case LogField.ErrorLocation => value == "unavailable" || locations.values.exists { file =>
       value.startsWith(s"$file:") && value.drop(file.length + 1).matches("[1-9][0-9]{0,5}")

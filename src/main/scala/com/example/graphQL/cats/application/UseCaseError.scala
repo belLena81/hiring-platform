@@ -10,7 +10,15 @@ enum AuthenticationError {
   case SingletonAdminViolation
 }
 
-type UseCaseError = DomainError | RepositoryError | AuthenticationError | NonEmptyList[DomainValidationError]
+enum SearchError {
+  case MissingEmbedding(entity: String)
+  case StaleEmbedding(entity: String)
+  case InputTooLarge(field: String, maximum: Int)
+  case ProviderUnavailable
+  case VectorSearchUnavailable
+}
+
+type UseCaseError = DomainError | RepositoryError | AuthenticationError | SearchError | NonEmptyList[DomainValidationError]
 
 object UseCaseError {
   extension [E <: UseCaseError, A](value: Either[E, A]) def widenUseCase: Either[UseCaseError, A] =

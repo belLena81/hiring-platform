@@ -4,7 +4,7 @@ import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import com.example.graphQL.cats.application.{ActorContext, ProbeResult}
 import com.example.graphQL.cats.application.port.{ApplicationRepository, JobRepository, UserRepository}
-import com.example.graphQL.cats.application.service.{ApplicationService, JobService}
+import com.example.graphQL.cats.application.service.{ApplicationService, JobService, SemanticSearchService}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
 import scala.concurrent.Future
@@ -14,7 +14,8 @@ final case class HiringGraphQLServices(
     jobs: JobRepository[IO],
     applications: ApplicationRepository[IO],
     jobService: JobService[IO],
-    applicationService: ApplicationService[IO]
+    applicationService: ApplicationService[IO],
+    semanticSearchService: Option[SemanticSearchService[IO]] = None
 )
 
 final class RequestContext private (

@@ -2,26 +2,46 @@ package com.example.graphQL.cats.infrastructure.mongo
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes, JwtActorAuthenticator}
+import com.example.graphQL.cats.application.{Diagnostics, HealthService}
 import com.example.graphQL.cats.application.port.{
   ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, JobSearchFilter, PageSize, RepositoryError
 }
+import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   Application, ApplicationEvent, ApplicationStatus, CandidateProfile, Job, JobStatus, Location, User, UserRole
 }
+import com.example.graphQL.cats.runtime.MongoHiringRuntime
+import io.circe.Json
 import com.mongodb.client.model.Filters
 import munit.CatsEffectSuite
 import org.bson.Document
+import org.http4s.{Header, Method, Request, Uri}
+import org.http4s.circe.*
+import org.typelevel.ci.CIString
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
 
+import java.nio.charset.StandardCharsets
 import java.time.{Duration, Instant}
-import java.util.{Date, UUID}
+import java.util.{Base64, Date, UUID}
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import scala.concurrent.duration.*
 
 class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
+
+  private final case class ExplainEvidence(
+      indexName: String,
+      executionTimeMillis: Int,
+      totalDocsExamined: Int,
+      totalKeysExamined: Int,
+      nReturned: Int,
+      fixtureSize: Int
+  )
 
   private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
 
@@ -66,6 +86,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
           adminJobListingMigration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.HiringAdminJobListingIndexMigrationId)))
+          vectorSearchMigration <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.HiringVectorSearchMigrationId)))
         } yield {
           assertEquals(MongoHiringSetup.HiringDomainMongoMigrationId, "phase-2-domain-mongodb-v1")
           assertIndex(users, MongoHiringSetup.UsersEmailIndex, new Document("emailCanonical", 1), unique = Some(true), partial = None)
@@ -73,6 +95,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             partial = Some(new Document("role", "Admin")))
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex,
             new Document("recruiterId", 1).append("status", 1).append("createdAt", -1).append("_id", -1), None, None)
+          assertIndex(jobs, MongoHiringSetup.JobsRecruiterCreatedIndex,
+            new Document("recruiterId", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(jobs, MongoHiringSetup.JobsOpenCreatedIndex,
             new Document("status", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(jobs, MongoHiringSetup.JobsOpenCityCreatedIndex,
@@ -91,6 +115,11 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             new Document("applicationId", 1).append("occurredAt", -1).append("_id", -1), None, None)
           assertIndex(jobs, MongoHiringSetup.JobsCreatedIndex,
             new Document("createdAt", -1).append("_id", -1), None, None)
+          assertIndex(jobs, MongoHiringSetup.JobsEmbeddingMetaIndex,
+            new Document("embeddingMeta.model", 1).append("embeddingMeta.version", 1).append("status", 1)
+              .append("location.city", 1).append("recruiterId", 1), None, None)
+          assertIndex(users, MongoHiringSetup.UsersEmbeddingMetaIndex,
+            new Document("embeddingMeta.model", 1).append("embeddingMeta.version", 1).append("role", 1), None, None)
           assert(migration.exists(_.getInteger("schemaVersion") == 1))
           assert(migration.exists(_.getDate("appliedAt") == existingAppliedAt))
           assert(migration.exists(_.getString("description") == "Previously applied hiring domain MongoDB collections and indexes"))
@@ -102,6 +131,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           )
           assert(graphqlPerformanceMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringGraphQLSearchIndexMigrationId))
           assert(adminJobListingMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringAdminJobListingIndexMigrationId))
+          assert(vectorSearchMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringVectorSearchMigrationId))
         }
       }
     }
@@ -339,18 +369,73 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           jobStatus <- explainIndex(database, "jobId", jobId.value.toString, statusPage)
           openJobSearch <- explainJobSearchIndex(database, city = None)
           openCityJobSearch <- explainJobSearchIndex(database, city = Some("Kyiv"))
+          recruiterJobs <- explainRecruiterJobListingIndex(database, status = None)
+          recruiterOpenJobs <- explainRecruiterJobListingIndex(database, status = Some(JobStatus.Open))
           allJobs <- explainJobListingIndex(database)
           historyIndex <- explainHistoryIndex(database)
         } yield {
           assertEquals(inconsistent, Left(RepositoryError.Conflict))
-          assertEquals(candidateNoStatus, Some(MongoHiringSetup.ApplicationsCandidateCreatedIndex))
-          assertEquals(candidateStatus, Some(MongoHiringSetup.ApplicationsCandidateStatusCreatedIndex))
-          assertEquals(jobNoStatus, Some(MongoHiringSetup.ApplicationsJobCreatedIndex))
-          assertEquals(jobStatus, Some(MongoHiringSetup.ApplicationsJobStatusCreatedIndex))
-          assertEquals(openJobSearch, Some(MongoHiringSetup.JobsOpenCreatedIndex))
-          assertEquals(openCityJobSearch, Some(MongoHiringSetup.JobsOpenCityCreatedIndex))
-          assertEquals(allJobs, Some(MongoHiringSetup.JobsCreatedIndex))
-          assertEquals(historyIndex, Some(MongoHiringSetup.ApplicationEventsApplicationCreatedIndex))
+          assertExplain(candidateNoStatus, MongoHiringSetup.ApplicationsCandidateCreatedIndex, fixtureSize = 1)
+          assertExplain(candidateStatus, MongoHiringSetup.ApplicationsCandidateStatusCreatedIndex, fixtureSize = 1)
+          assertExplain(jobNoStatus, MongoHiringSetup.ApplicationsJobCreatedIndex, fixtureSize = 1)
+          assertExplain(jobStatus, MongoHiringSetup.ApplicationsJobStatusCreatedIndex, fixtureSize = 1)
+          assertExplain(openJobSearch, MongoHiringSetup.JobsOpenCreatedIndex, fixtureSize = 2)
+          assertExplain(openCityJobSearch, MongoHiringSetup.JobsOpenCityCreatedIndex, fixtureSize = 2)
+          assertExplain(recruiterJobs, MongoHiringSetup.JobsRecruiterCreatedIndex, fixtureSize = 2)
+          assertExplain(recruiterOpenJobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex, fixtureSize = 2)
+          assertExplain(allJobs, MongoHiringSetup.JobsCreatedIndex, fixtureSize = 2)
+          assertExplain(historyIndex, MongoHiringSetup.ApplicationEventsApplicationCreatedIndex, fixtureSize = 1)
+        }
+      }
+    }
+  }
+
+  test("served JWT GraphQL submit initializes Mongo setup before the first hiring write") {
+    replicaSetContainer.use { uri =>
+      MongoHiringRuntime.resource(uri, "hiring_served_jwt", Diagnostics.noop).use { runtime =>
+        val jwt = JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api")
+        val candidateUser = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
+        val recruiterUser = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
+        for {
+          admission <- Admission.create
+          _ <- runtime.services.users.asInstanceOf[MongoUserRepository].insert(candidateUser)
+          _ <- runtime.services.users.asInstanceOf[MongoUserRepository].insert(recruiterUser)
+          _ <- runtime.services.jobs.create(jobFixture(jobId, JobStatus.Open))
+          authenticator = JwtActorAuthenticator(jwt, runtime.services.users, IO.pure(now))
+          http = HiringApiRoutes(
+            HealthService(runtime.probe, Diagnostics.noop),
+            Diagnostics.noop,
+            admission,
+            Some(runtime.services),
+            authenticator.authenticate,
+            runtime.ensureSetup
+          ).app
+          token = signedToken(candidateId, jwt)
+          submit = s"""mutation {
+                      |  submitApplication(input: { jobId: "${jobId.value}" }) {
+                      |    application { id status }
+                      |    errors { code }
+                      |  }
+                      |}""".stripMargin
+          first <- http(graphqlRequest(submit, token)).flatMap(_.as[Json])
+          duplicate <- http(graphqlRequest(submit, token)).flatMap(_.as[Json])
+          database <- MongoDatabaseProbe.clientResource(uri).use { client =>
+            val db = client.getDatabase("hiring_served_jwt")
+            for {
+              indexNames <- indexes(db.getCollection("applications")).map(_.keySet)
+              migration <- PublisherBridge.first(db.getCollection("schema_migrations")
+                .find(new Document("_id", MongoHiringSetup.HiringDomainMongoMigrationId)))
+            } yield (indexNames, migration)
+          }
+        } yield {
+          assertEquals(first.hcursor.downField("data").downField("submitApplication")
+            .downField("application").get[String]("status"), Right("Created"))
+          assertEquals(first.hcursor.downField("data").downField("submitApplication")
+            .downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+          assertEquals(duplicate.hcursor.downField("data").downField("submitApplication")
+            .downField("errors").downArray.get[String]("code"), Right("DUPLICATE_APPLICATION"))
+          assert(database._1.contains(MongoHiringSetup.ApplicationsCandidateJobIndex))
+          assert(database._2.exists(_.getString("checksum") == MongoHiringSetup.HiringDomainMongoMigrationId))
         }
       }
     }
@@ -412,6 +497,34 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   private def indexes(collection: com.mongodb.reactivestreams.client.MongoCollection[Document]): IO[Map[String, Document]] =
     PublisherBridge.all(collection.listIndexes()).map(_.map(index => index.getString("name") -> index).toMap)
 
+  private def graphqlRequest(query: String, token: String): Request[IO] =
+    Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+      .putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))
+      .withEntity(Json.obj("query" -> Json.fromString(query)))
+
+  private def signedToken(userId: UserId, jwt: JwtAuthConfig): String =
+    signedJwt(
+      Json.obj("alg" -> Json.fromString("HS256")).noSpaces,
+      Json.obj(
+        "sub" -> Json.fromString(userId.value.toString),
+        "iss" -> Json.fromString(jwt.issuer),
+        "aud" -> Json.fromString(jwt.audience),
+        "exp" -> Json.fromLong(now.plusSeconds(300).getEpochSecond),
+        "role" -> Json.fromString("Admin")
+      ).noSpaces,
+      jwt.hmacSecret.getOrElse(fail("Missing JWT test secret"))
+    )
+
+  private def signedJwt(header: String, payload: String, secret: String): String = {
+    val encoder = Base64.getUrlEncoder.withoutPadding()
+    val encodedHeader = encoder.encodeToString(header.getBytes(StandardCharsets.UTF_8))
+    val encodedPayload = encoder.encodeToString(payload.getBytes(StandardCharsets.UTF_8))
+    val signingInput = s"$encodedHeader.$encodedPayload"
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
+    s"$signingInput.${encoder.encodeToString(mac.doFinal(signingInput.getBytes(StandardCharsets.UTF_8)))}"
+  }
+
   private def assertIndex(
       actual: Map[String, Document],
       name: String,
@@ -444,7 +557,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
       field: String,
       id: String,
       page: ApplicationPageRequest
-  ): IO[Option[String]] = {
+  ): IO[Option[ExplainEvidence]] = {
     val filter = page.status
       .map(status => new Document(field, id).append("status", status.toString))
       .getOrElse(new Document(field, id))
@@ -454,10 +567,13 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         .append("sort", new Document("createdAt", -1).append("_id", -1))
         .append("limit", page.pageSize.value)
     ).append("verbosity", "executionStats")
-    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(explainEvidence(_, fixtureSize = 1)))
   }
 
-  private def explainJobSearchIndex(database: com.mongodb.reactivestreams.client.MongoDatabase, city: Option[String]): IO[Option[String]] = {
+  private def explainJobSearchIndex(
+      database: com.mongodb.reactivestreams.client.MongoDatabase,
+      city: Option[String]
+  ): IO[Option[ExplainEvidence]] = {
     val filter = city
       .map(value => new Document("status", JobStatus.Open.toString).append("location.city", value))
       .getOrElse(new Document("status", JobStatus.Open.toString))
@@ -467,28 +583,65 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         .append("sort", new Document("createdAt", -1).append("_id", -1))
         .append("limit", 10)
     ).append("verbosity", "executionStats")
-    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(explainEvidence(_, fixtureSize = 2)))
   }
 
-  private def explainJobListingIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[String]] = {
+  private def explainRecruiterJobListingIndex(
+      database: com.mongodb.reactivestreams.client.MongoDatabase,
+      status: Option[JobStatus]
+  ): IO[Option[ExplainEvidence]] = {
+    val filter = status
+      .map(value => new Document("recruiterId", recruiterId.value.toString).append("status", value.toString))
+      .getOrElse(new Document("recruiterId", recruiterId.value.toString))
+    val command = new Document("explain",
+      new Document("find", "jobs")
+        .append("filter", filter)
+        .append("sort", new Document("createdAt", -1).append("_id", -1))
+        .append("limit", 10)
+    ).append("verbosity", "executionStats")
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(explainEvidence(_, fixtureSize = 2)))
+  }
+
+  private def explainJobListingIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[ExplainEvidence]] = {
     val command = new Document("explain",
       new Document("find", "jobs")
         .append("filter", new Document())
         .append("sort", new Document("createdAt", -1).append("_id", -1))
         .append("limit", 10)
     ).append("verbosity", "executionStats")
-    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(explainEvidence(_, fixtureSize = 2)))
   }
 
-  private def explainHistoryIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[String]] = {
+  private def explainHistoryIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[ExplainEvidence]] = {
     val command = new Document("explain",
       new Document("find", "application_events")
         .append("filter", new Document("applicationId", applicationId.value.toString))
         .append("sort", new Document("occurredAt", -1).append("_id", -1))
         .append("limit", 10)
     ).append("verbosity", "executionStats")
-    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(explainEvidence(_, fixtureSize = 1)))
   }
+
+  private def assertExplain(actual: Option[ExplainEvidence], expectedIndex: String, fixtureSize: Int): Unit = {
+    val evidence = actual.getOrElse(fail(s"Missing explain evidence for $expectedIndex"))
+    assertEquals(evidence.indexName, expectedIndex)
+    assertEquals(evidence.fixtureSize, fixtureSize)
+    assert(evidence.executionTimeMillis >= 0)
+    assert(evidence.totalDocsExamined >= 0)
+    assert(evidence.totalKeysExamined >= 0)
+    assert(evidence.nReturned >= 0)
+    assert(evidence.nReturned <= fixtureSize)
+  }
+
+  private def explainEvidence(document: Document, fixtureSize: Int): Option[ExplainEvidence] =
+    for {
+      stats <- Option(document.get("executionStats", classOf[Document]))
+      indexName <- findIndexName(document)
+      executionTimeMillis <- Option(stats.get("executionTimeMillis", classOf[Number])).map(_.intValue)
+      totalDocsExamined <- Option(stats.get("totalDocsExamined", classOf[Number])).map(_.intValue)
+      totalKeysExamined <- Option(stats.get("totalKeysExamined", classOf[Number])).map(_.intValue)
+      nReturned <- Option(stats.get("nReturned", classOf[Number])).map(_.intValue)
+    } yield ExplainEvidence(indexName, executionTimeMillis, totalDocsExamined, totalKeysExamined, nReturned, fixtureSize)
 
   private def findIndexName(document: Document): Option[String] =
     Option(document.getString("indexName")).orElse(

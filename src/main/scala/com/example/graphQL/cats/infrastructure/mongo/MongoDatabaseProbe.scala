@@ -25,10 +25,10 @@ object MongoDatabaseProbe {
       }
       .build()
 
-  private[mongo] def clientResource(uri: String): Resource[IO, MongoClient] =
+  def clientResource(uri: String): Resource[IO, MongoClient] =
     Resource.make(IO.blocking(MongoClients.create(effectiveSettings(uri))))(client => IO.blocking(client.close()))
 
-  private[mongo] def connectionMetadata(uri: String, database: String): Map[LogField, String] =
+  def connectionMetadata(uri: String, database: String): Map[LogField, String] =
     Map(LogField.MongoHosts -> new ConnectionString(uri).getHosts.asScala.take(4).mkString(","),
       LogField.MongoDatabase -> database)
 

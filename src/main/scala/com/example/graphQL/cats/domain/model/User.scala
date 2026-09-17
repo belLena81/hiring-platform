@@ -37,7 +37,8 @@ final case class User(
   role: UserRole,
   profile: Option[CandidateProfile],
   createdAt: Instant,
-  adminSingleton: Boolean = false
+  adminSingleton: Boolean = false,
+  embedding: Option[EntityEmbedding] = None
 )
 
 object User {

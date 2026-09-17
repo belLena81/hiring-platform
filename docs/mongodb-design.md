@@ -636,6 +636,17 @@ Index:
 }
 ```
 
+When the optional status filter is present, use the paired status index:
+
+```javascript
+{
+  recruiterId: 1,
+  status: 1,
+  createdAt: -1,
+  _id: -1
+}
+```
+
 ---
 
 ## 26.2 Applications

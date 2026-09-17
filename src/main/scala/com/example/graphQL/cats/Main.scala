@@ -4,8 +4,7 @@ import cats.effect.{ExitCode, IO, IOApp}
 import com.example.graphQL.cats.application.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
-import com.example.graphQL.cats.infrastructure.mongo.MongoDatabaseProbe
-import com.example.graphQL.cats.runtime.HiringPlatformServer
+import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
 
 object Main extends IOApp {
   override protected def reportFailure(error: Throwable): IO[Unit] =
@@ -19,8 +18,16 @@ object Main extends IOApp {
         case Left(error) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
           fields = Map(LogField.ConfigKey -> error.key)).as(ExitCode.Error)
         case Right(config) => SafeDiagnostics.configure(config.logLevel, config.maskSensitive, config.requestPayloads).flatMap { diagnostics =>
-          MongoDatabaseProbe.resource(config.mongoUri, config.mongoDatabase, diagnostics = diagnostics)
-            .flatMap(probe => HiringPlatformServer.resource(config.host, config.port, probe, diagnostics))
+          MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics)
+            .flatMap(runtime => HiringPlatformServer.resource(
+              config.host,
+              config.port,
+              runtime.probe,
+              diagnostics,
+              Some(runtime.services),
+              Some(config.jwtAuth),
+              runtime.ensureSetup
+            ))
             .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
               LogField.HttpHost -> config.host,
               LogField.HttpPort -> config.port.toString

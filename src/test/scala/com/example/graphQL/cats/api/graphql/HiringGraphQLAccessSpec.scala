@@ -4,9 +4,9 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.application.{ActorContext, ProbeResult}
-import com.example.graphQL.cats.application.port.UserRepository
+import com.example.graphQL.cats.application.port.*
 import com.example.graphQL.cats.application.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
-import com.example.graphQL.cats.application.service.{ApplicationService, JobService}
+import com.example.graphQL.cats.application.service.{ApplicationService, JobService, SemanticSearchService}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import io.circe.Json
@@ -281,6 +281,52 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("submitApplication duplicate and closed-job failures stay in typed payloads") {
+    val duplicate =
+      s"""mutation {
+         |  submitApplication(input: { jobId: "${jobId.value}" }) {
+         |    application { id }
+         |    errors { code message }
+         |  }
+         |}""".stripMargin
+    val closed =
+      s"""mutation {
+         |  submitApplication(input: { jobId: "${closedJobId.value}" }) {
+         |    application { id }
+         |    errors { code message }
+         |  }
+         |}""".stripMargin
+
+    (execute(duplicate, Some(ActorContext(candidateId, UserRole.Candidate))),
+      execute(closed, Some(ActorContext(candidateId, UserRole.Candidate)))).mapN { (duplicateJson, closedJson) =>
+      val duplicatePayload = duplicateJson.hcursor.downField("data").downField("submitApplication")
+      val closedPayload = closedJson.hcursor.downField("data").downField("submitApplication")
+      assertEquals(duplicatePayload.downField("application").focus, Some(Json.Null))
+      assertEquals(duplicatePayload.downField("errors").downArray.get[String]("code"), Right("DUPLICATE_APPLICATION"))
+      assert(!duplicateJson.hcursor.downField("errors").succeeded)
+      assertEquals(closedPayload.downField("application").focus, Some(Json.Null))
+      assertEquals(closedPayload.downField("errors").downArray.get[String]("code"), Right("JOB_MUST_BE_OPEN"))
+      assert(!closedJson.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("application status mutation invalid transition stays in typed payloads") {
+    val query =
+      s"""mutation {
+         |  hireApplication(input: { applicationId: "${applicationId.value}" }) {
+         |    application { id }
+         |    errors { code message }
+         |  }
+         |}""".stripMargin
+
+    execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
+      val payload = json.hcursor.downField("data").downField("hireApplication")
+      assertEquals(payload.downField("application").focus, Some(Json.Null))
+      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("INVALID_STATUS_TRANSITION"))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
   test("candidate application history access resolves stored actor before ownership") {
     val query =
       s"""query {
@@ -345,8 +391,85 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("VHS-AC02 semantic job search returns ranked jobs with observable model metadata") {
+    val query =
+      """query {
+        |  semanticJobSearch(query: "scala backend", filter: { city: "Kyiv", skills: ["Scala"] }, first: 5) {
+        |    results {
+        |      job { id recruiter { id } }
+        |      score
+        |      searchMode
+        |      model
+        |      version
+        |      searchId
+        |    }
+        |    errors { code message }
+        |  }
+        |}""".stripMargin
+
+    executeWithSemanticSearch(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
+      val payload = json.hcursor.downField("data").downField("semanticJobSearch")
+      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assertEquals(payload.downField("results").downArray.downField("job").get[String]("id"), Right(jobId.value.toString))
+      assertEquals(payload.downField("results").downArray.get[String]("searchMode"), Right("HYBRID"))
+      assertEquals(payload.downField("results").downArray.get[String]("model"), Right("voyage-4-lite"))
+      assertEquals(payload.downField("results").downArray.get[Int]("version"), Right(1))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("VHS-AC04 candidateMatches projection does not expose email or resumeRef") {
+    val query =
+      s"""query {
+         |  candidateMatches(jobId: "${jobId.value}", first: 5) {
+         |    results {
+         |      candidate { id email profile { resumeRef } }
+         |    }
+         |  }
+         |}""".stripMargin
+
+    for {
+      request <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
+        new IllegalArgumentException("Invalid GraphQL test request"))
+      result <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(HiringGraphQLSchema.executeInContext(request, _))
+    } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+  }
+
   private def execute(query: String, actor: Option[ActorContext]): IO[Json] = {
     executeWithUsers(query, actor, List(candidate, recruiter))
+  }
+
+  private def executeWithSemanticSearch(query: String, actor: Option[ActorContext]): IO[Json] = {
+    val meta = EmbeddingMeta("voyage-4-lite", 1, "hash", now)
+    val embeddedJob = openJob.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), meta)))
+    for {
+      usersRef <- Ref.of[IO, Map[UserId, User]](List(candidate, recruiter).map(user => user.id -> user).toMap)
+      jobsRef <- Ref.of[IO, Map[JobId, Job]](Map(embeddedJob.id -> embeddedJob))
+      applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map.empty)
+      eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
+      nextCreateError <- Ref.of[IO, Option[RepositoryError]](None)
+      users = InMemoryUsers(usersRef)
+      jobs = InMemoryJobs(jobsRef)
+      applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
+      searchService = SemanticSearchService[IO](
+        users,
+        jobs,
+        FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))),
+        FakeSemanticSearchRepository(List(RankedJob(
+          embeddedJob,
+          0.98,
+          SearchMode.HYBRID,
+          meta,
+          UUID.fromString("10000000-0000-0000-0000-000000000099")
+        ))),
+        embeddingVersion = 1
+      )
+      services = HiringGraphQLServices(users, jobs, applications, JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications),
+        Some(searchService))
+      request <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
+        new IllegalArgumentException("Invalid GraphQL test request"))
+      result <- RequestContext.resource(IO.pure(ProbeResult.Ready), actor, Some(services)).use(HiringGraphQLSchema.executeInContext(request, _))
+    } yield result.fold(failure => fail(failure.toString), identity)
   }
 
   private def executeWithUsers(query: String, actor: Option[ActorContext], users: List[User]): IO[Json] = {
@@ -378,6 +501,33 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def findMany(ids: List[UserId]): IO[List[User]] =
       batches.update(_ :+ ids) *> ref.get.map(users => ids.distinct.flatMap(users.get))
+
+    override def updateEmbedding(
+        id: UserId,
+        embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
+    ): IO[Either[RepositoryError, Unit]] =
+      ref.modify { users =>
+        users.get(id) match {
+          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+          case None => (users, Left(RepositoryError.Conflict))
+        }
+      }
+  }
+
+  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService[IO] {
+    override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+      IO.pure(result)
+  }
+
+  private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository[IO] {
+    override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
+      IO.pure(Right(jobs))
+
+    override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
+      IO.pure(Right(jobs))
+
+    override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
+      IO.pure(Right(Nil))
   }
 
   private def job(id: JobId, status: JobStatus): Job =

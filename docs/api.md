@@ -17,7 +17,7 @@ An external GraphQL API client can load `/graphql` through introspection or impo
 
 The checked schema snapshot is [hiring.graphql](../src/test/resources/graphql/hiring.graphql). Backend contract tests compare it with the live schema definition, verify the download endpoint matches, and execute [health](../src/test/resources/graphql/health.graphql), [readiness](../src/test/resources/graphql/readiness.graphql), and [standard introspection](../src/test/resources/graphql/introspection.graphql) fixtures. Update schema and consumer fixtures together when contracts evolve; a schema diff alone does not establish compatible behavior.
 
-The schema now includes Hiring GraphQL API operations and typed payloads for jobs, applications, status transitions, cursor connections, and application history. HTTP does not yet include an authentication source that can build trusted `ActorContext`; hiring operations therefore return sanitized unauthorized payloads through the served endpoint until a separate auth slice is implemented. Resolver tests inject trusted actors below the HTTP boundary to verify the GraphQL contract against domain services.
+The schema now includes Hiring GraphQL API operations and typed payloads for jobs, applications, status transitions, cursor connections, and application history. Served hiring operations accept an HS256 bearer JWT when `AUTH_JWT_HS256_SECRET` is configured. The token `sub` must match a stored user, and authorization derives the actor role from that stored user rather than from role claims. Missing, invalid, expired, wrong issuer/audience, or unknown-user tokens return sanitized unauthorized payloads. This repository does not issue login tokens or integrate an external identity provider.
 
 ## Execute operations
 
