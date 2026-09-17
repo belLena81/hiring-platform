@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.application.{ActorContext, ProbeResult}
+import com.example.graphQL.cats.application.port.UserRepository
 import com.example.graphQL.cats.application.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
 import com.example.graphQL.cats.application.service.{ApplicationService, JobService}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
@@ -11,19 +12,22 @@ import com.example.graphQL.cats.domain.model.*
 import io.circe.Json
 import munit.CatsEffectSuite
 
+import java.nio.charset.StandardCharsets
 import java.time.Instant
-import java.util.UUID
+import java.util.{Base64, UUID}
 
 final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private val now = Instant.parse("2026-09-17T08:00:00Z")
   private val candidateId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000001"))
   private val recruiterId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000002"))
+  private val adminId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000006"))
   private val jobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000003"))
   private val closedJobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000004"))
   private val applicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000005"))
 
   private val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
   private val recruiter = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
+  private val admin = User(adminId, "admin@example.com", "Admin", UserRole.Admin, None, now, adminSingleton = true)
   private val openJob = job(jobId, JobStatus.Open)
   private val closedJob = job(closedJobId, JobStatus.Closed)
   private val application = Application.create(applicationId, candidateId, jobId, now)
@@ -58,6 +62,46 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       val applications = json.hcursor.downField("data").downField("myApplications")
       assertEquals(applications.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
       assertEquals(applications.downField("errors").downArray.get[String]("code"), Right("INVALID_CURSOR"))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("job search without ActorContext returns typed unauthorized connection") {
+    val query =
+      """query {
+        |  jobs(first: 10) {
+        |    edges { node { id } }
+        |    errors { code message }
+        |  }
+        |}""".stripMargin
+
+    execute(query, None).map { json =>
+      val jobs = json.hcursor.downField("data").downField("jobs")
+      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("job connection rejects a cursor with malformed fields as a typed error") {
+    val cursor = encodeCursor(Json.obj(
+      "kind" -> Json.fromString("job"),
+      "createdAt" -> Json.fromString("not-an-instant"),
+      "occurredAt" -> Json.Null,
+      "id" -> Json.fromString(jobId.value.toString)
+    ))
+    val query =
+      s"""query {
+         |  myJobs(first: 10, after: "$cursor") {
+         |    edges { node { id } }
+         |    errors { code message }
+         |  }
+         |}""".stripMargin
+
+    execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
+      val jobs = json.hcursor.downField("data").downField("myJobs")
+      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("INVALID_CURSOR"))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -103,6 +147,43 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("myJobs resolves stored actor before recruiter ownership lookup") {
+    val query =
+      """query {
+        |  myJobs(first: 10) {
+        |    edges { node { id } }
+        |    errors { code message }
+        |  }
+        |}""".stripMargin
+
+    execute(query, Some(ActorContext(recruiterId, UserRole.Candidate))).map { json =>
+      val jobs = json.hcursor.downField("data").downField("myJobs")
+      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("FORBIDDEN"))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("myJobs lists recruiter-owned jobs for singleton admin") {
+    val query =
+      """query {
+        |  myJobs(first: 10) {
+        |    edges { node { id } }
+        |    errors { code message }
+        |  }
+        |}""".stripMargin
+
+    executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(candidate, recruiter, admin)).map { json =>
+      val jobs = json.hcursor.downField("data").downField("myJobs")
+      val ids = jobs.downField("edges").focus.flatMap(_.asArray).getOrElse(Vector.empty)
+        .flatMap(_.hcursor.downField("node").get[String]("id").toOption)
+        .toSet
+      assertEquals(ids, Set(jobId.value.toString, closedJobId.value.toString))
+      assertEquals(jobs.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
   test("injected candidate context lists only the candidate applications") {
     val query =
       """query {
@@ -123,6 +204,80 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(node.get[String]("id"), Right(applicationId.value.toString))
       assertEquals(node.get[String]("status"), Right("Created"))
       assertEquals(node.downField("job").get[String]("id"), Right(jobId.value.toString))
+    }
+  }
+
+  test("application job recruiter nesting preloads recruiter users in one batch") {
+    val secondRecruiterId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000007"))
+    val secondJobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000008"))
+    val secondApplicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000009"))
+    val secondRecruiter = User(secondRecruiterId, "recruiter2@example.com", "Recruiter 2", UserRole.Recruiter, None, now)
+    val secondJob = openJob.copy(id = secondJobId, recruiterId = secondRecruiterId, title = "Platform Engineer")
+    val secondApplication = Application.create(secondApplicationId, candidateId, secondJobId, now.minusSeconds(60))
+    val query =
+      """query {
+        |  myApplications(first: 10) {
+        |    edges {
+        |      node {
+        |        candidate { id }
+        |        job { id recruiter { id } }
+        |      }
+        |    }
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+
+    for {
+      usersRef <- Ref.of[IO, Map[UserId, User]](
+        List(candidate, recruiter, secondRecruiter).map(user => user.id -> user).toMap)
+      userBatches <- Ref.of[IO, Vector[List[UserId]]](Vector.empty)
+      jobsRef <- Ref.of[IO, Map[JobId, Job]](List(openJob, secondJob).map(job => job.id -> job).toMap)
+      applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](
+        List(application, secondApplication).map(application => application.id -> application).toMap)
+      eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.application.port.RepositoryError]](None)
+      users = RecordingUsers(usersRef, userBatches)
+      jobs = InMemoryJobs(jobsRef)
+      applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
+      services = HiringGraphQLServices(users, jobs, applications, JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      request <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
+        new IllegalArgumentException("Invalid GraphQL test request"))
+      result <- RequestContext.resource(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)), Some(services))
+        .use(HiringGraphQLSchema.executeInContext(request, _))
+      batches <- userBatches.get
+    } yield {
+      val json = result.fold(failure => fail(failure.toString), identity)
+      val applications = json.hcursor.downField("data").downField("myApplications")
+      assertEquals(applications.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assert(batches.exists(_.toSet == Set(recruiterId, secondRecruiterId)))
+      assert(!batches.exists(batch => batch.size == 1 && Set(recruiterId, secondRecruiterId).contains(batch.head)))
+    }
+  }
+
+  test("createJob input publishes skills under the domain field name") {
+    val query =
+      """mutation {
+        |  createJob(input: {
+        |    title: "Staff Scala Developer"
+        |    description: "Build platform services"
+        |    requirements: ["Scala"]
+        |    skills: ["Scala", "Cats Effect"]
+        |    country: "Cyprus"
+        |    city: "Nicosia"
+        |    remote: true
+        |  }) {
+        |    job { title skills }
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+
+    execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
+      val payload = json.hcursor.downField("data").downField("createJob")
+      assertEquals(payload.downField("job").get[String]("title"), Right("Staff Scala Developer"))
+      assertEquals(payload.downField("job").downField("skills").focus.flatMap(_.asArray).map(_.flatMap(_.asString).toList),
+        Some(List("Cats Effect", "Scala")))
+      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assert(!json.hcursor.downField("errors").succeeded)
     }
   }
 
@@ -209,6 +364,20 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         new IllegalArgumentException("Invalid GraphQL test request"))
       result <- RequestContext.resource(IO.pure(ProbeResult.Ready), actor, Some(services)).use(HiringGraphQLSchema.executeInContext(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
+  }
+
+  private def encodeCursor(json: Json): String =
+    Base64.getUrlEncoder.withoutPadding().encodeToString(json.noSpaces.getBytes(StandardCharsets.UTF_8))
+
+  private final class RecordingUsers(
+      ref: Ref[IO, Map[UserId, User]],
+      batches: Ref[IO, Vector[List[UserId]]]
+  ) extends UserRepository[IO] {
+    override def find(id: UserId): IO[Option[User]] =
+      ref.get.map(_.get(id))
+
+    override def findMany(ids: List[UserId]): IO[List[User]] =
+      batches.update(_ :+ ids) *> ref.get.map(users => ids.distinct.flatMap(users.get))
   }
 
   private def job(id: JobId, status: JobStatus): Job =

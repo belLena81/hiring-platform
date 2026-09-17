@@ -112,7 +112,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           records <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
           diagnostics = new Diagnostics {
             def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
-              records.update(_ :+ ((event, id, fields)))
+              records.update(_ :+ (event, id, fields))
           }
           requestId = Some("fe211944-7015-4e73-8dc1-000000000001")
           result <- MongoDatabaseProbe.resource(invalid, "foundation", diagnostics).use(_.check(requestId))

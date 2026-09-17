@@ -29,7 +29,7 @@ object HiringGraphQLSchema {
       title: String,
       description: String,
       requirements: List[String],
-      inputSkills: List[String],
+      skills: List[String],
       country: String,
       city: Option[String],
       remote: Boolean
@@ -43,7 +43,7 @@ object HiringGraphQLSchema {
   private given Decoder[SubmitApplicationGraphQLInput] =
     Decoder.forProduct1("jobId")(SubmitApplicationGraphQLInput.apply)
   private given Decoder[JobGraphQLInput] =
-    Decoder.forProduct7("title", "description", "requirements", "inputSkills", "country", "city", "remote")(JobGraphQLInput.apply)
+    Decoder.forProduct7("title", "description", "requirements", "skills", "country", "city", "remote")(JobGraphQLInput.apply)
   private given Decoder[UpdateJobGraphQLInput] =
     Decoder.forProduct2("id", "patch")(UpdateJobGraphQLInput.apply)
   private given Decoder[JobActionGraphQLInput] =
@@ -80,7 +80,7 @@ object HiringGraphQLSchema {
     InputField("title", StringType),
     InputField("description", StringType),
     InputField("requirements", ListInputType(StringType)),
-    InputField("inputSkills", ListInputType(StringType)),
+    InputField("skills", ListInputType(StringType)),
     InputField("country", StringType),
     InputField("city", OptionInputType(StringType)),
     InputField("remote", BooleanType)
@@ -267,7 +267,7 @@ object HiringGraphQLSchema {
       Field("errors", ListType(errorType), resolve = _.value.errors)))
 
   private def jobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
-    withHiringConnection(context) { hiring =>
+    authenticatedConnection(context) { case (actor, hiring) =>
       page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob).flatMap {
         case Left(error) => IO.pure(graphQLErrorConnection(error))
         case Right((page, requested)) =>
@@ -279,7 +279,9 @@ object HiringGraphQLSchema {
                 context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
                 createdAfter
               )
-              hiring.jobs.findOpen(filter, page).flatTap(jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))).map(jobConnection(_, requested))
+              hiring.jobService.searchOpenJobs(actor, filter, page)
+                .flatTap(_.fold(_ => IO.unit, jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))))
+                .map(_.fold(errorConnection[Job], jobConnection(_, requested)))
           }
       }
     }
@@ -296,9 +298,9 @@ object HiringGraphQLSchema {
       page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob).flatMap {
         case Left(error) => IO.pure(graphQLErrorConnection(error))
         case Right((page, requested)) =>
-          hiring.jobs.findByRecruiter(actor.userId, page.copy(status = context.arg(jobStatusArgument)))
-            .flatTap(jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId)))
-            .map(jobConnection(_, requested))
+          hiring.jobService.myJobs(actor, page.copy(status = context.arg(jobStatusArgument)))
+            .flatTap(_.fold(_ => IO.unit, jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))))
+            .map(_.fold(errorConnection[Job], jobConnection(_, requested)))
       }
     }
 
@@ -352,7 +354,7 @@ object HiringGraphQLSchema {
             IO.randomUUID.flatMap(applicationId =>
               IO.randomUUID.flatMap(eventId =>
                 hiring.applicationService.submitApplication(actor, jobId, ApplicationId(applicationId), ApplicationEventId(eventId), now)
-                  .map(_.fold(error => ApplicationPayload(None, List(this.error(error))), application => ApplicationPayload(Some(application), Nil)))
+                  .map(applicationPayload)
               )
             )
           )
@@ -361,10 +363,10 @@ object HiringGraphQLSchema {
 
   private def createJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
-      jobInput(context.arg(createJobInputArgument), JobStatus.Open).fold(error => IO.pure(JobPayload(None, List(this.error(error)))), input =>
+      jobInput(context.arg(createJobInputArgument), JobStatus.Open).fold(error => IO.pure(jobErrorPayload(error)), input =>
         IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(jobId =>
           hiring.jobService.createJob(actor, input, now, JobId(jobId))
-            .map(_.fold(error => JobPayload(None, List(this.error(error))), job => JobPayload(Some(job), Nil)))))
+            .map(jobPayload)))
       )
     }
 
@@ -374,9 +376,9 @@ object HiringGraphQLSchema {
       (parseJobId(input.id), updateInput(input.patch)) match {
         case (Some(jobId), Right(input)) =>
           IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, jobId, input, now)
-            .map(_.fold(error => JobPayload(None, List(this.error(error))), job => JobPayload(Some(job), Nil))))
+            .map(jobPayload))
         case (None, _) => IO.pure(JobPayload(None, List(error(DomainError.NotFound("job")))))
-        case (_, Left(error)) => IO.pure(JobPayload(None, List(this.error(error))))
+        case (_, Left(error)) => IO.pure(jobErrorPayload(error))
       }
     }
 
@@ -388,7 +390,7 @@ object HiringGraphQLSchema {
       parseJobId(context.arg(jobActionInputArgument).jobId) match {
         case None => IO.pure(JobPayload(None, List(error(DomainError.NotFound("job")))))
         case Some(jobId) => IO.realTimeInstant.flatMap(now =>
-          method(hiring.jobService)(actor, jobId, now).map(_.fold(error => JobPayload(None, List(this.error(error))), job => JobPayload(Some(job), Nil))))
+          method(hiring.jobService)(actor, jobId, now).map(jobPayload))
       }
     }
 
@@ -410,7 +412,7 @@ object HiringGraphQLSchema {
         case Some(applicationId) =>
           IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(eventId =>
             hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
-              .map(_.fold(error => ApplicationPayload(None, List(this.error(error))), application => ApplicationPayload(Some(application), Nil)))))
+              .map(applicationPayload)))
       }
     }
 
@@ -423,9 +425,6 @@ object HiringGraphQLSchema {
     val input = context.arg(declineApplicationInputArgument)
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Declined, None, input.reason)
   }
-
-  private def withHiringConnection[A](context: Context[RequestContext, Unit])(action: HiringGraphQLServices => IO[Connection[A]]): IO[Connection[A]] =
-    context.ctx.hiring.fold(IO.pure(errorConnection[A](AuthenticationError.Unauthorized)))(action)
 
   private def authenticated(context: Context[RequestContext, Unit]): IO[Either[UseCaseError, (com.example.graphQL.cats.application.ActorContext, HiringGraphQLServices)]] =
     IO.pure((context.ctx.actor, context.ctx.hiring).mapN((_, _)).toRight(AuthenticationError.Unauthorized: UseCaseError))
@@ -491,7 +490,7 @@ object HiringGraphQLSchema {
       input.title,
       input.description,
       input.requirements,
-      input.inputSkills.toSet,
+      input.skills.toSet,
       location,
       status
     ))
@@ -501,7 +500,7 @@ object HiringGraphQLSchema {
       input.title,
       input.description,
       input.requirements,
-      input.inputSkills.toSet,
+      input.skills.toSet,
       location
     ))
 
@@ -537,7 +536,10 @@ object HiringGraphQLSchema {
     }
 
   private def preloadApplications(context: Context[RequestContext, Unit], applications: List[Application]): IO[Unit] =
-    context.ctx.preloadUsers(applications.map(_.candidateId)) *> context.ctx.preloadJobs(applications.map(_.jobId))
+    context.ctx.preloadUsers(applications.map(_.candidateId)) *>
+      context.ctx.preloadJobs(applications.map(_.jobId)) *>
+      applications.traverse(application => context.ctx.job(application.jobId)).flatMap(jobs =>
+        context.ctx.preloadUsers(jobs.flatten.map(_.recruiterId)))
 
   private def jobConnection(values: List[Job], requested: Int): Connection[Job] = {
     connection(values, requested)(job => CursorCodec.encodeJob(JobCursor(job.createdAt, job.id)))
@@ -561,6 +563,18 @@ object HiringGraphQLSchema {
 
   private def graphQLErrorConnection[A](error: GraphQLError): Connection[A] =
     Connection(Nil, PageInfo(false, None), List(error))
+
+  private def jobPayload(result: Either[UseCaseError, Job]): JobPayload =
+    result.fold(jobErrorPayload, job => JobPayload(Some(job), Nil))
+
+  private def jobErrorPayload(error: UseCaseError): JobPayload =
+    JobPayload(None, List(this.error(error)))
+
+  private def applicationPayload(result: Either[UseCaseError, Application]): ApplicationPayload =
+    result.fold(applicationErrorPayload, application => ApplicationPayload(Some(application), Nil))
+
+  private def applicationErrorPayload(error: UseCaseError): ApplicationPayload =
+    ApplicationPayload(None, List(this.error(error)))
 
   private def error(error: UseCaseError): GraphQLError =
     error match {

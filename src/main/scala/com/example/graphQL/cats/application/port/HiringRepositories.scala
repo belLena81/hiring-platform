@@ -23,6 +23,7 @@ trait JobRepository[F[_]] {
   def find(id: JobId): F[Option[Job]]
   def findMany(ids: List[JobId]): F[List[Job]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): F[List[Job]]
+  def findAll(page: JobPageRequest): F[List[Job]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[List[Job]]
   def create(job: Job): F[Either[RepositoryError, Unit]]
   def update(job: Job): F[Either[RepositoryError, Job]]

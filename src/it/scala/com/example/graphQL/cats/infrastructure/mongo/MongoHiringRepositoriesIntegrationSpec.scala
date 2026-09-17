@@ -17,7 +17,7 @@ import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
 
 import java.time.{Duration, Instant}
-import java.util.UUID
+import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 
 class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
@@ -43,18 +43,31 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
         val database = client.getDatabase("hiring_setup")
+        val migrations = database.getCollection("schema_migrations")
+        val existingAppliedAt = Date.from(Instant.parse("2026-09-16T00:00:00Z"))
+        val existingDomainMigration = new Document("_id", MongoHiringSetup.HiringDomainMongoMigrationId)
+          .append("schemaVersion", 1)
+          .append("appliedAt", existingAppliedAt)
+          .append("description", "Previously applied hiring domain MongoDB collections and indexes")
+          .append("checksum", MongoHiringSetup.HiringDomainMongoMigrationId)
         for {
+          _ <- PublisherBridge.first(migrations.insertOne(existingDomainMigration))
           _ <- MongoHiringSetup.initialize(database)
+          graphqlPerformanceMigrationAfterFirstRun <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
           _ <- MongoHiringSetup.initialize(database)
           users <- indexes(database.getCollection("users"))
           jobs <- indexes(database.getCollection("jobs"))
           applications <- indexes(database.getCollection("applications"))
           events <- indexes(database.getCollection("application_events"))
-          migration <- PublisherBridge.first(database.getCollection("schema_migrations")
+          migration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.HiringDomainMongoMigrationId)))
-          graphqlPerformanceMigration <- PublisherBridge.first(database.getCollection("schema_migrations")
+          graphqlPerformanceMigration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
+          adminJobListingMigration <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.HiringAdminJobListingIndexMigrationId)))
         } yield {
+          assertEquals(MongoHiringSetup.HiringDomainMongoMigrationId, "phase-2-domain-mongodb-v1")
           assertIndex(users, MongoHiringSetup.UsersEmailIndex, new Document("emailCanonical", 1), unique = Some(true), partial = None)
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
@@ -76,11 +89,19 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             new Document("jobId", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(events, MongoHiringSetup.ApplicationEventsApplicationCreatedIndex,
             new Document("applicationId", 1).append("occurredAt", -1).append("_id", -1), None, None)
+          assertIndex(jobs, MongoHiringSetup.JobsCreatedIndex,
+            new Document("createdAt", -1).append("_id", -1), None, None)
           assert(migration.exists(_.getInteger("schemaVersion") == 1))
-          assert(migration.exists(_.containsKey("appliedAt")))
-          assert(migration.exists(_.getString("description").nonEmpty))
+          assert(migration.exists(_.getDate("appliedAt") == existingAppliedAt))
+          assert(migration.exists(_.getString("description") == "Previously applied hiring domain MongoDB collections and indexes"))
           assert(migration.exists(_.getString("checksum") == MongoHiringSetup.HiringDomainMongoMigrationId))
+          assert(graphqlPerformanceMigrationAfterFirstRun.exists(_.containsKey("appliedAt")))
+          assertEquals(
+            graphqlPerformanceMigration.flatMap(migration => Option(migration.getDate("appliedAt"))),
+            graphqlPerformanceMigrationAfterFirstRun.flatMap(migration => Option(migration.getDate("appliedAt")))
+          )
           assert(graphqlPerformanceMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringGraphQLSearchIndexMigrationId))
+          assert(adminJobListingMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringAdminJobListingIndexMigrationId))
         }
       }
     }
@@ -144,6 +165,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           foundManyUsers <- users.findMany(List(candidateId, recruiterId))
           foundManyJobs <- jobs.findMany(List(jobId))
           openJobs <- jobs.findOpen(JobSearchFilter(Some("Kyiv"), Set("Scala"), None), jobPageRequest)
+          allJobs <- jobs.findAll(jobPageRequest)
           recruiterJobs <- jobs.findByRecruiter(recruiterId, jobPageRequest)
           candidatePage <- applications.findByCandidate(candidateId, page)
           jobPage <- applications.findByJob(jobId, page)
@@ -163,6 +185,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(foundManyUsers.map(_.id).toSet, Set(candidateId, recruiterId))
           assertEquals(foundManyJobs.map(_.id), List(jobId))
           assertEquals(openJobs.map(_.id), List(jobId))
+          assertEquals(allJobs.map(_.id), List(jobId))
           assertEquals(recruiterJobs.map(_.id), List(jobId))
           assertEquals(candidatePage.map(_.id), List(applicationId))
           assertEquals(jobPage.map(_.id), List(applicationId))
@@ -316,6 +339,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           jobStatus <- explainIndex(database, "jobId", jobId.value.toString, statusPage)
           openJobSearch <- explainJobSearchIndex(database, city = None)
           openCityJobSearch <- explainJobSearchIndex(database, city = Some("Kyiv"))
+          allJobs <- explainJobListingIndex(database)
           historyIndex <- explainHistoryIndex(database)
         } yield {
           assertEquals(inconsistent, Left(RepositoryError.Conflict))
@@ -325,6 +349,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(jobStatus, Some(MongoHiringSetup.ApplicationsJobStatusCreatedIndex))
           assertEquals(openJobSearch, Some(MongoHiringSetup.JobsOpenCreatedIndex))
           assertEquals(openCityJobSearch, Some(MongoHiringSetup.JobsOpenCityCreatedIndex))
+          assertEquals(allJobs, Some(MongoHiringSetup.JobsCreatedIndex))
           assertEquals(historyIndex, Some(MongoHiringSetup.ApplicationEventsApplicationCreatedIndex))
         }
       }
@@ -439,6 +464,16 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     val command = new Document("explain",
       new Document("find", "jobs")
         .append("filter", filter)
+        .append("sort", new Document("createdAt", -1).append("_id", -1))
+        .append("limit", 10)
+    ).append("verbosity", "executionStats")
+    PublisherBridge.first(database.runCommand(command)).map(_.flatMap(findIndexName))
+  }
+
+  private def explainJobListingIndex(database: com.mongodb.reactivestreams.client.MongoDatabase): IO[Option[String]] = {
+    val command = new Document("explain",
+      new Document("find", "jobs")
+        .append("filter", new Document())
         .append("sort", new Document("createdAt", -1).append("_id", -1))
         .append("limit", 10)
     ).append("verbosity", "executionStats")

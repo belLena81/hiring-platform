@@ -37,7 +37,7 @@ Status: in review / partially blocked - GraphQL contract, resolver tests, reposi
   - Input validation failures, duplicate applications, closed jobs, invalid transitions, missing rejection feedback, and missing decline reasons return typed payload errors without raw driver messages or stack traces.
 - Request-scoped batching:
   - Each GraphQL request owns user and job loaders for nested `job`, `candidate`, and `recruiter` fields.
-  - A page of applications with nested candidates/jobs must execute one applications query plus bounded batch user/job lookups, not one query per edge.
+  - A page of applications with nested candidates/jobs/recruiters must execute one applications query plus bounded batch user/job lookups, not one query per edge.
   - Loader diagnostics may record safe counts such as loader name, requested key count, returned count, cache hit count, and request ID; they must not log resume text, raw job descriptions, feedback/reason bodies, tokens, or raw filters.
 - Application and repository contracts:
   - Add application ports for structured open-job search, recruiter job listing, batched user lookup, batched job lookup, and application-event history listing. Domain models remain free of GraphQL, http4s, Circe, BSON, and MongoDB APIs.
@@ -48,11 +48,11 @@ Status: in review / partially blocked - GraphQL contract, resolver tests, reposi
 
 | Operation | Actor | MongoDB query shape | Required index or evidence |
 |---|---|---|---|
-| `jobs(filter, first, after)` | Candidate or unauthenticated public if later authorized | `status = Open`, optional `location.city`, optional `skills`, optional `createdAt`, sorted by `createdAt DESC, _id DESC` | `jobs_open_created_id` for status-only search and `jobs_open_city_created_id` for city-filtered search; avoid speculative indexes for every field |
+| `jobs(filter, first, after)` | Authenticated Candidate, Recruiter, or Admin | `status = Open`, optional `location.city`, optional `skills`, optional `createdAt`, sorted by `createdAt DESC, _id DESC` | `jobs_open_created_id` for status-only search and `jobs_open_city_created_id` for city-filtered search; avoid speculative indexes for every field |
 | `job(id)` | Candidate, owner Recruiter, Admin | `jobs._id = ?`; nested recruiter uses batched `users._id in [...]` | `_id` index plus request user loader evidence |
 | `myApplications` | Candidate | `candidateId = actor.userId`, optional `status`, cursor sort | Existing `applications_candidate_status_created_id` and `applications_candidate_created_id` explain evidence |
 | `jobApplications` | Owner Recruiter or Admin | authorized job lookup, then `jobId = ?`, optional `status`, cursor sort | Existing `applications_job_status_created_id` and `applications_job_created_id` explain evidence plus batch candidate evidence |
-| `myJobs` | Recruiter or Admin | `recruiterId = actor.userId`, optional `status`, sorted by `createdAt DESC, _id DESC` | Existing or added `jobs_recruiter_status_created_id` explain evidence |
+| `myJobs` | Recruiter or Admin | Recruiter: `recruiterId = actor.userId`, optional `status`; Admin: optional `status` across all jobs; both sorted by `createdAt DESC, _id DESC` | `jobs_recruiter_status_created_id` for recruiters and `jobs_created_id` for Admin all-job listing |
 | `applicationHistory` | Candidate owner, owner Recruiter, Admin | authorized application/job lookup, then `applicationId = ?`, sorted by `occurredAt DESC, _id DESC` | Existing `application_events_application_created_id` explain evidence |
 
 For each accepted performance-sensitive operation, record `executionTimeMillis`, `totalDocsExamined`, `totalKeysExamined`, `nReturned`, winning index name, fixture size, and whether the result demonstrates only local query-plan behavior rather than a production latency SLO.
@@ -68,9 +68,9 @@ For each accepted performance-sensitive operation, record `executionTimeMillis`,
 | HGQL-AC05 | Given a Candidate submits an application, when the job is Open and no duplicate exists, then the payload returns a Created application and domain-service transaction invariants persist application plus initial history | `HiringGraphQLSchema`; existing domain-service service/repository tests | `sbt test`; `sbt 'IntegrationTest / test'` | PARTIAL: mutation is wired to domain services, but successful served HTTP submission is blocked until auth provides `ActorContext` |
 | HGQL-AC06 | Given duplicate, closed-job, invalid-transition, missing-feedback, or missing-reason errors, when mutations are executed, then payloads expose stable typed error codes/messages and no raw driver/internal details | `HiringGraphQLSchema`; existing service/repository negative tests | `sbt test`; `sbt 'IntegrationTest / test'` | PARTIAL: typed mapping exists and domain-service negative paths pass; exhaustive GraphQL mutation negative matrix remains follow-up |
 | HGQL-AC07 | Given Candidate and Recruiter list operations, when optional status filters and cursors are used, then pagination is keyset-based, `hasNextPage` is derived with `first + 1`, and invalid cursors are rejected safely | Repository contracts; GraphQL connection tests | `sbt test`; `sbt 'IntegrationTest / test'` | PARTIAL: keyset repository contracts, `first + 1` connection wiring, malformed cursor handling, and cross-type cursor rejection pass; broader pagination matrix remains follow-up |
-| HGQL-AC08 | Given applications are queried with nested candidate/job/recruiter fields, when a page contains multiple edges, then request-scoped batching prevents N+1 queries and keeps caches request-local | `RequestContext`; `HiringGraphQLAccessSpec` | `sbt test` | PARTIAL: nested resolver boundary is covered with request context; true batched coalescing is represented by repository `findMany` ports but not yet used by all nested fields |
+| HGQL-AC08 | Given applications are queried with nested candidate/job/recruiter fields, when a page contains multiple edges, then request-scoped batching prevents N+1 queries and keeps caches request-local | `RequestContext`; `HiringGraphQLAccessSpec` | `sbt test` | PASS: application pages preload candidate users, jobs, and job recruiter users through request-scoped batch ports; focused GraphQL access tests assert a multi-recruiter user batch |
 | HGQL-AC09 | Given every major GraphQL read operation, when MongoDB integration tests run, then query shape, winning index, execution stats, and fixture limits are recorded in the spec checkpoint | `MongoHiringRepositoriesIntegrationSpec` | `sbt 'IntegrationTest / test'` | PASS: application list, job search, and application history winning indexes asserted in 31 integration tests |
-| HGQL-AC10 | Given Hiring GraphQL API implementation is complete, when local gates run, then skill validation, unit tests, integration tests, schema/fixture checks, diff check, Code Reviewer, Security Engineer, and final QA pass | Full local/review gate | `python3 scripts/check-skills.py`; `sbt test`; `sbt 'IntegrationTest / test'`; `git diff --check`; reviews | PARTIAL: `sbt test`, `IntegrationTest / test`, skill validation, and diff checks passed; independent review fixes are being reconciled |
+| HGQL-AC10 | Given Hiring GraphQL API implementation is complete, when local gates run, then skill validation, unit tests, integration tests, schema/fixture checks, diff check, Code Reviewer, Security Engineer, and final QA pass | Full local/review gate | `python3 scripts/check-skills.py`; `sbt test`; `sbt 'IntegrationTest / test'`; `git diff --check`; reviews | PASS: `sbt test`, `IntegrationTest / test`, skill validation, diff checks, Code Reviewer, Security Engineer, and final QA passed for this review-fix scope |
 
 ## Performance and cost
 
@@ -99,10 +99,10 @@ For each accepted performance-sensitive operation, record `executionTimeMillis`,
 
 - Current status: in review / partially blocked. GraphQL contract and MongoDB query/index slice are implemented; successful served HTTP hiring execution remains blocked by the no-auth-bridge decision.
 - Completed criteria and changed files: schema/context/cursor handling, repository ports/adapters, Hiring GraphQL API Mongo setup/indexes, SDL fixture, API docs, GraphQL unit tests, and Mongo integration coverage changed.
-- Latest commands/results and their scope: `sbt test` passed 135 unit tests; `sbt 'IntegrationTest / test'` passed 31 integration tests; `python3 scripts/check-skills.py`, `git diff --check`, and `git diff --cached --check` passed. The known bind-conflict trace appeared inside `HiringPlatformServerSpec`, but the integration suite passed.
-- Next concrete action: re-run review gates after the latest fixes, then authorize the separate authentication slice if served hiring workflows must execute over HTTP.
+- Latest commands/results and their scope: focused GraphQL tests passed 19/19; `sbt test` passed 145/145 unit tests; `sbt 'IntegrationTest / test'` passed 31/31 integration tests; `python3 scripts/check-skills.py`, `git diff --check`, and `git diff --cached --check` passed. The known bind-conflict trace appeared inside `HiringPlatformServerSpec`, but the integration suite passed.
+- Next concrete action: authorize the separate authentication slice if served hiring workflows must execute over HTTP.
 - Architect readiness verdict: pending.
 - Data Engineer readiness verdict: pending.
-- Security Engineer readiness verdict: pending.
-- Code Reviewer verdict and scope: pending.
-- Final independent QA verdict: pending.
+- Security Engineer readiness verdict: PASS for the latest authorization, public contract naming, batching, cursor, and Admin listing review-fix scope.
+- Code Reviewer verdict and scope: PASS for the latest authorization, public contract naming, batching, cursor, and Admin listing review-fix scope; minor nonblocking test-name drift noted for the Admin `myJobs` test.
+- Final independent QA verdict: PASS after checkpoint refresh; QA accepted the provided gate evidence and inspected the authorization, public contract naming, batching, and documentation fixes.

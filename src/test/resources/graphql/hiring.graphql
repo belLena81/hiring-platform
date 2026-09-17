@@ -108,7 +108,7 @@ input JobInput {
   title: String!
   description: String!
   requirements: [String!]!
-  inputSkills: [String!]!
+  skills: [String!]!
   country: String!
   city: String
   remote: Boolean!

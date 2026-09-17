@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.infrastructure.mongo
 
 import cats.effect.IO
-import com.mongodb.client.model.{Filters, IndexOptions, Indexes, ReplaceOptions}
+import com.mongodb.client.model.{Filters, IndexOptions, Indexes, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
 import java.time.Instant
@@ -17,10 +17,12 @@ object MongoHiringSetup {
   val ApplicationsJobStatusCreatedIndex = "applications_job_status_created_id"
   val ApplicationsJobCreatedIndex = "applications_job_created_id"
   val ApplicationEventsApplicationCreatedIndex = "application_events_application_created_id"
+  val JobsCreatedIndex = "jobs_created_id"
   val JobsOpenCreatedIndex = "jobs_open_created_id"
   val JobsOpenCityCreatedIndex = "jobs_open_city_created_id"
-  val HiringDomainMongoMigrationId = "hiring-domain-mongodb-v1"
+  val HiringDomainMongoMigrationId = "phase-2-domain-mongodb-v1"
   val HiringGraphQLSearchIndexMigrationId = "hiring-graphql-search-indexes-v1"
+  val HiringAdminJobListingIndexMigrationId = "hiring-admin-job-listing-indexes-v1"
 
   def initialize(database: MongoDatabase): IO[Unit] =
     List(
@@ -51,6 +53,9 @@ object MongoHiringSetup {
         Indexes.compoundIndex(Indexes.ascending("applicationId"), Indexes.descending("occurredAt", "_id")),
         new IndexOptions().name(ApplicationEventsApplicationCreatedIndex)),
       createIndex(database.getCollection("jobs"),
+        Indexes.descending("createdAt", "_id"),
+        new IndexOptions().name(JobsCreatedIndex)),
+      createIndex(database.getCollection("jobs"),
         Indexes.compoundIndex(Indexes.ascending("status"), Indexes.descending("createdAt", "_id")),
         new IndexOptions().name(JobsOpenCreatedIndex)),
       createIndex(database.getCollection("jobs"),
@@ -58,19 +63,27 @@ object MongoHiringSetup {
         new IndexOptions().name(JobsOpenCityCreatedIndex))
     ).sequence_.flatMap { _ =>
       val migrations = database.getCollection("schema_migrations")
-      val record = new Document("_id", HiringDomainMongoMigrationId)
-        .append("schemaVersion", 1)
-        .append("appliedAt", Date.from(Instant.now()))
-        .append("description", "Hiring domain MongoDB collections and indexes")
-        .append("checksum", HiringDomainMongoMigrationId)
-      val graphqlPerformanceRecord = new Document("_id", HiringGraphQLSearchIndexMigrationId)
-        .append("schemaVersion", 1)
-        .append("appliedAt", Date.from(Instant.now()))
-        .append("description", "Hiring GraphQL job search indexes")
-        .append("checksum", HiringGraphQLSearchIndexMigrationId)
-      PublisherBridge.first(migrations.replaceOne(Filters.eq("_id", HiringDomainMongoMigrationId), record, new ReplaceOptions().upsert(true))).void *>
-        PublisherBridge.first(migrations.replaceOne(Filters.eq("_id", HiringGraphQLSearchIndexMigrationId), graphqlPerformanceRecord, new ReplaceOptions().upsert(true))).void
+      recordMigration(migrations, HiringDomainMongoMigrationId, "Hiring domain MongoDB collections and indexes") *>
+        recordMigration(migrations, HiringGraphQLSearchIndexMigrationId, "Hiring GraphQL job search indexes") *>
+        recordMigration(migrations, HiringAdminJobListingIndexMigrationId, "Hiring Admin job listing indexes")
     }
+
+  private def recordMigration(
+      migrations: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      id: String,
+      description: String
+  ): IO[Unit] =
+    PublisherBridge.first(migrations.updateOne(
+      Filters.eq("_id", id),
+      Updates.combine(
+        Updates.setOnInsert("_id", id),
+        Updates.setOnInsert("schemaVersion", 1),
+        Updates.setOnInsert("appliedAt", Date.from(Instant.now())),
+        Updates.setOnInsert("description", description),
+        Updates.setOnInsert("checksum", id)
+      ),
+      new UpdateOptions().upsert(true)
+    )).void
 
   private def createIndex(
       collection: com.mongodb.reactivestreams.client.MongoCollection[Document],

@@ -4,7 +4,7 @@ import com.example.graphQL.cats.application.port.{ApplicationCursor, Application
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import io.circe.parser.decode
 import io.circe.syntax.*
-import io.circe.{Decoder, Encoder}
+import io.circe.{Decoder, DecodingFailure, Encoder}
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.{Base64, UUID}
@@ -32,10 +32,14 @@ private[graphql] object CursorCodec {
     (cursor.kind, cursor.createdAt.map(_.toString), cursor.occurredAt.map(_.toString), cursor.id.toString)
   )
 
-  private given Decoder[Cursor] = Decoder.forProduct4("kind", "createdAt", "occurredAt", "id")(
-    (kind: CursorKind, createdAt: Option[String], occurredAt: Option[String], id: String) =>
-      Cursor(kind, createdAt.map(Instant.parse), occurredAt.map(Instant.parse), UUID.fromString(id))
-  )
+  private given Decoder[Cursor] = Decoder.instance { cursor =>
+    for {
+      kind <- cursor.downField("kind").as[CursorKind]
+      createdAt <- cursor.downField("createdAt").as[Option[String]].flatMap(decodeInstant)
+      occurredAt <- cursor.downField("occurredAt").as[Option[String]].flatMap(decodeInstant)
+      id <- cursor.downField("id").as[String].flatMap(decodeUuid)
+    } yield Cursor(kind, createdAt, occurredAt, id)
+  }
 
   def encodeJob(cursor: JobCursor): String =
     encode(Cursor(CursorKind.Job, Some(cursor.createdAt), None, cursor.id.value))
@@ -69,4 +73,16 @@ private[graphql] object CursorCodec {
 
   private def decodeCursor(value: String): Option[Cursor] =
     Try(String(Base64.getUrlDecoder.decode(value), StandardCharsets.UTF_8)).toOption.flatMap(decode[Cursor](_).toOption)
+
+  private def decodeInstant(value: Option[String]): Decoder.Result[Option[Instant]] =
+    decodeOptional(value, Instant.parse, "Invalid cursor timestamp")
+
+  private def decodeUuid(value: String): Decoder.Result[UUID] =
+    Try(UUID.fromString(value)).toEither.left.map(_ => DecodingFailure("Invalid cursor id", Nil))
+
+  private def decodeOptional[A](value: Option[String], decode: String => A, message: String): Decoder.Result[Option[A]] =
+    value match {
+      case Some(raw) => Try(decode(raw)).toEither.left.map(_ => DecodingFailure(message, Nil)).map(Some(_))
+      case None => Right(None)
+    }
 }

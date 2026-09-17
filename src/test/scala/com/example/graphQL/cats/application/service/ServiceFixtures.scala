@@ -77,6 +77,12 @@ private[cats] object ServiceFixtures {
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
       }.toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
 
+    override def findAll(page: JobPageRequest): IO[List[Job]] =
+      ref.get.map(_.values.filter(job =>
+        matches(page)(job) &&
+          keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+
     override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[List[Job]] =
       ref.get.map(_.values.filter(job =>
         job.recruiterId == recruiterId &&

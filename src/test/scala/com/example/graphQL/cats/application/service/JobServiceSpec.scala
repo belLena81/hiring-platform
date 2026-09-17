@@ -4,14 +4,17 @@ import cats.effect.IO
 import cats.effect.Ref
 import com.example.graphQL.cats.application.ActorContext
 import com.example.graphQL.cats.application.AuthenticationError
+import com.example.graphQL.cats.application.port.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.application.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.Identifiers.JobId
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
 import java.util.UUID
 import munit.CatsEffectSuite
 
 class JobServiceSpec extends CatsEffectSuite {
+  private val page = JobPageRequest(None, None, PageSize.fromInt(10).toOption.get)
+
   test("createJob derives owner from ActorContext and rejects candidates") {
     for {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](Map.empty)
@@ -56,6 +59,39 @@ class JobServiceSpec extends CatsEffectSuite {
       service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.closeJob(ActorContext(adminId, UserRole.Admin), jobId, later)
     } yield assertEquals(result, Left(AuthenticationError.SingletonAdminViolation))
+  }
+
+  test("myJobs resolves stored actor before listing recruiter jobs") {
+    val otherRecruiterId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000006"))
+    val otherJobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000007"))
+    val otherJob = openJob.copy(id = otherJobId, recruiterId = otherRecruiterId)
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      result <- service.myJobs(ActorContext(recruiterId, UserRole.Recruiter), page)
+    } yield assertEquals(result.map(_.map(_.id)), Right(List(jobId)))
+  }
+
+  test("myJobs rejects mismatched actor role before repository ownership lookup") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      result <- service.myJobs(ActorContext(recruiterId, UserRole.Candidate), page)
+    } yield assertEquals(result, Left(DomainError.Forbidden))
+  }
+
+  test("myJobs lists all manageable jobs for singleton admin") {
+    val otherRecruiterId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000006"))
+    val otherJobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000007"))
+    val otherJob = openJob.copy(id = otherJobId, recruiterId = otherRecruiterId)
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(adminId -> admin))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      result <- service.myJobs(ActorContext(adminId, UserRole.Admin), page)
+    } yield assertEquals(result.map(_.map(_.id).toSet), Right(Set(jobId, otherJobId)))
   }
 
   test("closeJob records explicit close timestamp") {

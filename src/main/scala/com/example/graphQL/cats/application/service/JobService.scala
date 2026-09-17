@@ -6,10 +6,10 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.application.ActorContext
 import com.example.graphQL.cats.application.UseCaseError
 import com.example.graphQL.cats.application.UseCaseError.*
-import com.example.graphQL.cats.application.port.{JobRepository, UserRepository}
+import com.example.graphQL.cats.application.port.{JobPageRequest, JobRepository, JobSearchFilter, UserRepository}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
+import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
 import com.example.graphQL.cats.domain.service.JobLifecycle
 import java.time.Instant
 
@@ -76,6 +76,24 @@ final class JobService[F[_]: Monad](users: UserRepository[F], jobs: JobRepositor
       job <- EitherT.fromOptionF(jobs.find(jobId), DomainError.NotFound("job"): UseCaseError)
       _ <- EitherT.cond[F](authorization.canView(user, job), (), DomainError.Forbidden: UseCaseError)
     } yield job).value
+
+  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
+    (for {
+      _ <- EitherT(authorization.resolve(actor))
+      openJobs <- EitherT.liftF(jobs.findOpen(filter, page))
+    } yield openJobs).value
+
+  def myJobs(actor: ActorContext, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
+    (for {
+      user <- EitherT(authorization.resolve(actor))
+      manageableJobs <- {
+        user.role match {
+          case UserRole.Admin => EitherT.liftF(jobs.findAll(page))
+          case UserRole.Recruiter => EitherT.liftF(jobs.findByRecruiter(user.id, page))
+          case UserRole.Candidate => EitherT.leftT[F, List[Job]](DomainError.Forbidden: UseCaseError)
+        }
+      }
+    } yield manageableJobs).value
 
   private def validateNewJob(
       recruiterId: UserId,

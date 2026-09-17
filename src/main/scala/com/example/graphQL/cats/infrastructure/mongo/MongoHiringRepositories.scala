@@ -6,6 +6,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, 
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, JobStatus, User, UserRole}
 import com.mongodb.{MongoCommandException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
+import com.mongodb.client.result.InsertOneResult
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
 import org.bson.Document
 import org.bson.conversions.Bson
@@ -14,6 +15,27 @@ import java.time.Instant
 
 private[mongo] trait MongoTransactionRunner {
   def run(operation: Option[ClientSession] => IO[Either[RepositoryError, Unit]]): IO[Either[RepositoryError, Unit]]
+}
+
+private[mongo] trait MongoConflictWriteMapping {
+  protected final def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
+    error match {
+      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
+      case _ => Left(RepositoryError.Unavailable)
+    }
+}
+
+private[mongo] trait MongoApplicationEventInsertion {
+  protected final def insertApplicationEvent(
+      events: MongoCollection[Document],
+      session: Option[ClientSession],
+      event: ApplicationEvent
+  ): IO[Option[InsertOneResult]] =
+    session.fold(
+      PublisherBridge.first(events.insertOne(MongoHiringCodecs.event(event)))
+    ) { active =>
+      PublisherBridge.first(events.insertOne(active, MongoHiringCodecs.event(event)))
+    }
 }
 
 private[mongo] object MongoTransactionRunner {
@@ -73,7 +95,7 @@ private[mongo] object MongoKeysetPaging {
     )
 }
 
-final class MongoUserRepository(database: MongoDatabase) extends UserRepository[IO] {
+final class MongoUserRepository(database: MongoDatabase) extends UserRepository[IO] with MongoConflictWriteMapping {
   private val collection = database.getCollection("users")
 
   def insert(user: User): IO[Either[RepositoryError, Unit]] =
@@ -85,15 +107,9 @@ final class MongoUserRepository(database: MongoDatabase) extends UserRepository[
 
   override def findMany(ids: List[UserId]): IO[List[User]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
-
-  private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
-    error match {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
-    }
 }
 
-final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO] {
+final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO] with MongoConflictWriteMapping {
   private val collection = database.getCollection("jobs")
 
   override def find(id: JobId): IO[Option[Job]] =
@@ -104,6 +120,9 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
 
   override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[List[Job]] =
     findMany(baseSearchFilter(filter, page), page)
+
+  override def findAll(page: JobPageRequest): IO[List[Job]] =
+    findMany(baseJobFilter(List(page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
   override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[List[Job]] =
     findMany(baseJobFilter(List(Some(Filters.eq("recruiterId", recruiterId.value.toString)), page.status.map(status => Filters.eq("status", status.toString))), page), page)
@@ -123,12 +142,6 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
     }.handleError(mapWrite)
   }
 
-  private def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
-    error match {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
-    }
-
   private def findMany(filter: Bson, page: JobPageRequest): IO[List[Job]] =
     MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)
 
@@ -144,14 +157,15 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
     val cursorFilter = page.cursor.map(cursor =>
       MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString)
     )
-    MongoKeysetPaging.filter(filters :+ cursorFilter)
+    val activeFilters = (filters :+ cursorFilter).flatten
+    if (activeFilters.isEmpty) new Document() else Filters.and(activeFilters*)
   }
 }
 
 final class MongoApplicationRepository private (
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner
-) extends ApplicationRepository[IO] {
+) extends ApplicationRepository[IO] with MongoApplicationEventInsertion {
   private val collection = database.getCollection("applications")
   private val events = database.getCollection("application_events")
   private val jobs = database.getCollection("jobs")
@@ -187,11 +201,7 @@ final class MongoApplicationRepository private (
       }
       update.flatMap {
         case Some(result) if result.getMatchedCount == 1L =>
-          session.fold(
-            PublisherBridge.first(events.insertOne(MongoHiringCodecs.event(event)))
-          ) { active =>
-            PublisherBridge.first(events.insertOne(active, MongoHiringCodecs.event(event)))
-          }.attempt.map {
+          insertApplicationEvent(events, session, event).attempt.map {
             case Right(_) => Right(())
             case Left(error) => mapDuplicateAs(RepositoryError.Conflict)(error)
           }
@@ -274,11 +284,7 @@ final class MongoApplicationRepository private (
     ) { active =>
       PublisherBridge.first(collection.insertOne(active, MongoHiringCodecs.application(application)))
     }
-    val insertEvent = session.fold(
-      PublisherBridge.first(events.insertOne(MongoHiringCodecs.event(initialEvent)))
-    ) { active =>
-      PublisherBridge.first(events.insertOne(active, MongoHiringCodecs.event(initialEvent)))
-    }
+    val insertEvent = insertApplicationEvent(events, session, initialEvent)
     insertApplication.attempt.flatMap {
       case Left(error) => IO.pure(mapDuplicateAs(RepositoryError.DuplicateApplication)(error))
       case Right(_) =>
