@@ -133,7 +133,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           _ <- records.set(Vector.empty)
           _ <- MongoDatabaseProbe.resource(invalid, "foundation", diagnostics).use { rejected =>
             for {
-              admission <- Admission.create
+              admission <- Admission.create(16)
               http = new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, admission).app
               response <- http(Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
                 .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }"))))

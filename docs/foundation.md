@@ -34,6 +34,7 @@ cat > local.conf <<'EOF'
 http {
   host = "127.0.0.1"
   port = 8080
+  admission-permits = 16
 }
 mongo {
   uri = ${?MONGODB_URI}
@@ -42,7 +43,6 @@ mongo {
 logging {
   level = "INFO"
   mask-sensitive = true
-  request-payloads = false
 }
 EOF
 MONGODB_URI=mongodb://127.0.0.1:27017 sbt run
@@ -56,13 +56,12 @@ For persistent local settings, keep `local.conf` ignored and review it before ru
 |---|---|---|
 | HTTP_HOST | `local.conf` or environment | Numeric IPv4/IPv6 address |
 | HTTP_PORT | `local.conf` or environment | Integer 1..65535 |
+| HTTP_ADMISSION_PERMITS | `application.conf`/`local.conf` or environment | Integer 1..1024; default 16 |
 | MONGODB_URI | `local.conf` or environment | Valid Mongo connection string |
 | MONGODB_DATABASE | `application.conf`/`local.conf` | Valid nonempty database name |
 | LOG_LEVEL | `application.conf`, optional environment override | TRACE, DEBUG, INFO, WARN, ERROR |
 | LOG_MASK_SENSITIVE | `application.conf`/`local.conf` | false only with loopback HTTP binding |
-| LOG_REQUEST_PAYLOADS | `application.conf`/`local.conf` | true only with local loopback binding and masking disabled |
-
-Malformed configuration exits unsuccessfully with a safe category and configuration key. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default; local filtered payload capture requires a separate explicit opt-in. Framework/driver raw output remains suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).
+Malformed configuration exits unsuccessfully with a safe category and configuration key. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default. Framework/driver raw output and request payloads remain suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).
 
 ## HTTP contract and budgets
 
@@ -76,7 +75,7 @@ POST `/graphql` accepts JSON with required string `query`, optional object `vari
 | Oversized body / unsupported request media | 413 / 415 |
 | Unexpected server failure / admission full / deadline | 500 / 503 / 504 |
 
-The runtime admits sixteen GraphQL/readiness requests, with immediate overload rejection. GET `/health` bypasses this gate; GraphQL health does not. Request body maximum is 64 KiB streamed, with a five-second deadline starting before consumption. Parsing allows 4096 tokens/nesting 32; document/fragment work is bounded before schema validation. Selected operations allow field depth sixteen (root one), 1000 expanded field occurrences, and 32 expanded aliases. Fragment containers do not add field depth. These conservative local budgets include the standard introspection fixture and are not measured performance guarantees.
+The runtime admits `http.admission-permits` concurrent GraphQL/readiness requests, with immediate overload rejection. The checked-in default is sixteen permits and can be overridden with `HTTP_ADMISSION_PERMITS`. GET `/health` bypasses this gate; GraphQL health does not. Request body maximum is 64 KiB streamed, with a five-second deadline starting before consumption. Parsing allows 4096 tokens/nesting 32; document/fragment work is bounded before schema validation. Selected operations allow field depth sixteen (root one), 1000 expanded field occurrences, and 32 expanded aliases. Fragment containers do not add field depth. These conservative local budgets include the standard introspection fixture and are not measured performance guarantees.
 
 Each request owns its resolver effects. Resource release closes resolver submission before dispatcher teardown; submissions are rejected even while cancellation finalizers are still running. Resource release/caller cancellation cancels and joins the effects before returning its admission permit. The installed Ember transport awaits response computation before its next socket operation: a peer disconnect alone is not an immediate cancellation signal. Disconnected probes are bounded by the two-second probe deadline; stalled request bodies by the five-second request deadline. Finalizer and scheduler time follow those budgets. Real socket-reset tests check eventual cleanup and subsequent successful requests.
 

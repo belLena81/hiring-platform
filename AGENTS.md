@@ -64,6 +64,7 @@ No author approves their own work. Security and QA require separate verdicts eve
 - Prefer typed IDs, ADTs/enums, explicit validation, and `Either`/typed effect errors. Use UTC `Instant`. Keep GraphQL inputs separate from domain and persistence models separate when needed.
 - Keep domain functions pure and immutable: pass time/IDs as values, express absence with `Option`, and use typed failures rather than business exceptions, nulls, or partial operations. Services sequence effects; adapters isolate I/O and any necessary framework interop. See the quality guide for testing and effect-boundary rules.
 - Use Cats Effect `Resource` for clients/pools/servers, cancellation-safe ownership, bounded concurrency, and FS2 backpressure. Keep blocking work off compute threads and unsafe execution out of business logic.
+- Prefer standard library/framework capabilities over reimplementing existing parsing, validation, rendering, scheduling, or protocol behavior. Do not redefine standard functions unless a spec requires a concrete security, performance, or latency improvement that the built-in capability cannot provide.
 - Use design patterns for concrete problems; avoid speculative frameworks, microservices, event sourcing, caches, or denormalization.
 - Mutations use input types and meaningful typed payloads rather than raw booleans. Preserve action-oriented lifecycle operations and sanitized meaningful errors.
 - Batch nested relationships per request with authorization-safe caches. Bound pagination, depth, complexity, request size, and execution resources.

@@ -26,12 +26,10 @@ import org.typelevel.ci.CIString
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
+import pdi.jwt.JwtCirce
 
-import java.nio.charset.StandardCharsets
 import java.time.{Duration, Instant}
-import java.util.{Base64, Date, UUID}
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
+import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 
 class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
@@ -433,7 +431,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val candidateUser = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
         val recruiterUser = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
         for {
-          admission <- Admission.create
+          admission <- Admission.create(16)
           _ <- runtime.services.users.asInstanceOf[MongoUserRepository].insert(candidateUser)
           _ <- runtime.services.users.asInstanceOf[MongoUserRepository].insert(recruiterUser)
           _ <- runtime.services.jobs.create(jobFixture(jobId, JobStatus.Open))
@@ -569,27 +567,17 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
       .withEntity(Json.obj("query" -> Json.fromString(query)))
 
   private def signedToken(userId: UserId, jwt: JwtAuthConfig): String =
-    signedJwt(
-      Json.obj("alg" -> Json.fromString("HS256")).noSpaces,
+    JwtCirce.encode(
+      Json.obj("alg" -> Json.fromString("HS256")),
       Json.obj(
         "sub" -> Json.fromString(userId.value.toString),
         "iss" -> Json.fromString(jwt.issuer),
         "aud" -> Json.fromString(jwt.audience),
         "exp" -> Json.fromLong(now.plusSeconds(300).getEpochSecond),
         "role" -> Json.fromString("Admin")
-      ).noSpaces,
+      ),
       jwt.hmacSecret.getOrElse(fail("Missing JWT test secret"))
     )
-
-  private def signedJwt(header: String, payload: String, secret: String): String = {
-    val encoder = Base64.getUrlEncoder.withoutPadding()
-    val encodedHeader = encoder.encodeToString(header.getBytes(StandardCharsets.UTF_8))
-    val encodedPayload = encoder.encodeToString(payload.getBytes(StandardCharsets.UTF_8))
-    val signingInput = s"$encodedHeader.$encodedPayload"
-    val mac = Mac.getInstance("HmacSHA256")
-    mac.init(SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
-    s"$signingInput.${encoder.encodeToString(mac.doFinal(signingInput.getBytes(StandardCharsets.UTF_8)))}"
-  }
 
   private def assertIndex(
       actual: Map[String, Document],

@@ -14,13 +14,12 @@ enum ConfigError(val key: String) {
   case InvalidConfigFile extends ConfigError("CONFIG_FILE")
   case InvalidHost extends ConfigError("HTTP_HOST")
   case InvalidPort extends ConfigError("HTTP_PORT")
+  case InvalidAdmissionPermits extends ConfigError("HTTP_ADMISSION_PERMITS")
   case InvalidMongoUri extends ConfigError("MONGODB_URI")
   case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
   case InvalidLogLevel extends ConfigError("LOG_LEVEL")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
-  case InvalidRequestPayloads extends ConfigError("LOG_REQUEST_PAYLOADS")
   case UnsafeMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
-  case UnsafeRequestPayloads extends ConfigError("LOG_REQUEST_PAYLOADS")
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
@@ -62,11 +61,11 @@ final case class JwtAuthConfig(
 final case class AppConfig(
     host: String,
     port: Int,
+    admissionPermits: Int,
     mongoUri: String,
     mongoDatabase: String,
     logLevel: String,
     maskSensitive: Boolean,
-    requestPayloads: Boolean,
     jwtAuth: JwtAuthConfig,
     vectorSearch: VectorSearchConfig
 ) {
@@ -134,11 +133,11 @@ object AppConfig {
     for {
       host = raw.http.host
       port = raw.http.port
+      admissionPermits = raw.http.admissionPermits
       uri = raw.mongo.uri
       database = raw.mongo.database
       level = raw.logging.level
       maskSensitive = raw.logging.maskSensitive
-      requestPayloads = raw.logging.requestPayloads
       jwtSecret = raw.auth.jwt.hs256Secret.getOrElse("disabled")
       jwtIssuer = raw.auth.jwt.issuer
       jwtAudience = raw.auth.jwt.audience
@@ -158,6 +157,8 @@ object AppConfig {
         .toRight(ConfigError.InvalidHost)
       validPort <- port.toIntOption.filter(value => value >= 1 && value <= 65535)
         .filter(_ => port.matches("[0-9]+")).toRight(ConfigError.InvalidPort)
+      validAdmissionPermits <- admissionPermits.toIntOption.filter(value => value >= 1 && value <= 1024)
+        .filter(_ => admissionPermits.matches("[0-9]+")).toRight(ConfigError.InvalidAdmissionPermits)
       _ <- Try(new ConnectionString(uri)).toEither.left.map(_ => ConfigError.InvalidMongoUri)
       _ <- Either.cond(
         database.nonEmpty && database.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 64 &&
@@ -167,9 +168,7 @@ object AppConfig {
       )
       _ <- Either.cond(Set("TRACE", "DEBUG", "INFO", "WARN", "ERROR").contains(level), (), ConfigError.InvalidLogLevel)
       masking <- strictBoolean(maskSensitive, ConfigError.InvalidMaskSensitive)
-      payloads <- strictBoolean(requestPayloads, ConfigError.InvalidRequestPayloads)
       _ <- Either.cond(masking || address.isLoopback, (), ConfigError.UnsafeMaskSensitive)
-      _ <- Either.cond(!payloads || (!masking && address.isLoopback), (), ConfigError.UnsafeRequestPayloads)
       jwtSecretValue <- parseJwtSecret(jwtSecret)
       _ <- Either.cond(jwtIssuer.trim.nonEmpty && jwtIssuer.length <= 128, (), ConfigError.InvalidJwtIssuer)
       _ <- Either.cond(jwtAudience.trim.nonEmpty && jwtAudience.length <= 128, (), ConfigError.InvalidJwtAudience)
@@ -201,7 +200,7 @@ object AppConfig {
         candidates
       )
       jwtAuth = JwtAuthConfig(jwtSecretValue, jwtIssuer, jwtAudience)
-    } yield AppConfig(host, validPort, uri, database, level, masking, payloads, jwtAuth, vector)
+    } yield AppConfig(host, validPort, validAdmissionPermits, uri, database, level, masking, jwtAuth, vector)
   }
 
   private def rawToConfig(raw: String): Either[ConfigError, com.typesafe.config.Config] =
@@ -220,11 +219,11 @@ object AppConfig {
     path match {
       case "http.host" => Some(ConfigError.InvalidHost)
       case "http.port" => Some(ConfigError.InvalidPort)
+      case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
       case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
       case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
       case "logging.level" => Some(ConfigError.InvalidLogLevel)
       case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
-      case "logging.request-payloads" => Some(ConfigError.InvalidRequestPayloads)
       case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
       case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
       case "vector-search.enabled" => Some(ConfigError.InvalidVectorSearchEnabled)
@@ -246,6 +245,7 @@ object AppConfig {
       s"""http {
          |  host = "${config.host}"
          |  port = ${config.port}
+         |  admission-permits = ${config.admissionPermits}
          |}
          |mongo {
          |  uri = "${config.mongoUri}"
@@ -254,7 +254,6 @@ object AppConfig {
          |logging {
          |  level = "${config.logLevel}"
          |  mask-sensitive = ${config.maskSensitive}
-         |  request-payloads = ${config.requestPayloads}
          |}
          |auth.jwt {
          |  hs256-secret = "${config.jwtAuth.hmacSecret.getOrElse("disabled")}"
@@ -311,9 +310,9 @@ object AppConfig {
       vectorSearch: RawVectorSearchConfig
   )
 
-  private final case class RawHttpConfig(host: String, port: String)
+  private final case class RawHttpConfig(host: String, port: String, admissionPermits: String)
   private final case class RawMongoConfig(uri: String, database: String)
-  private final case class RawLoggingConfig(level: String, maskSensitive: String, requestPayloads: String)
+  private final case class RawLoggingConfig(level: String, maskSensitive: String)
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig)
   private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: String, audience: String)
   private final case class RawVectorSearchConfig(
@@ -338,11 +337,11 @@ object AppConfig {
   private given ConfigReader[RawAppConfig] =
     ConfigReader.forProduct5("http", "mongo", "logging", "auth", "vector-search")(RawAppConfig.apply)
   private given ConfigReader[RawHttpConfig] =
-    ConfigReader.forProduct2("host", "port")(RawHttpConfig.apply)
+    ConfigReader.forProduct3("host", "port", "admission-permits")(RawHttpConfig.apply)
   private given ConfigReader[RawMongoConfig] =
     ConfigReader.forProduct2("uri", "database")(RawMongoConfig.apply)
   private given ConfigReader[RawLoggingConfig] =
-    ConfigReader.forProduct3("level", "mask-sensitive", "request-payloads")(RawLoggingConfig.apply)
+    ConfigReader.forProduct2("level", "mask-sensitive")(RawLoggingConfig.apply)
   private given ConfigReader[RawAuthConfig] =
     ConfigReader.forProduct1("jwt")(RawAuthConfig.apply)
   private given ConfigReader[RawJwtAuthConfig] =

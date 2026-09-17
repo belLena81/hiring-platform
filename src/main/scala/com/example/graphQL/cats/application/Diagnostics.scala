@@ -14,10 +14,8 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case RequestCompleted extends LogEvent("REQUEST_COMPLETED", "HTTP", "Application response created", "INFO", 0)
   case RequestCancelled extends LogEvent("REQUEST_CANCELLED", "HTTP", "Request cancelled; cleanup finished", "INFO", 0)
   case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", "INFO", 0)
-  case RequestPayload extends LogEvent("REQUEST_PAYLOAD", "GRAPHQL", "Local filtered request payload", "INFO", 0)
   case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", "WARN", 1)
   case LocalUnmasked extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Local diagnostic metadata is unmasked; do not deploy", "WARN", 1)
-  case LocalPayloadsEnabled extends LogEvent("LOCAL_PAYLOADS_ENABLED", "SECURITY", "Local filtered payload capture enabled; treat logs as sensitive", "WARN", 1)
 
   def marker: String = s"HP.$component.$category"
 }
@@ -39,7 +37,6 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case MongoHosts extends LogField("mongoHosts", true)
   case MongoDatabase extends LogField("mongoDatabase", true)
   case HttpHost extends LogField("httpHost", true)
-  case RequestPayload extends LogField("requestPayload", true)
 }
 
 object LogFields {
@@ -88,8 +85,8 @@ object LogFields {
     case LogField.Reason => reasons.contains(value)
     case LogField.Outcome => Set("COMPLETED", "CANCELLED", "FIELD_ERROR", "READY", "NOT_READY").contains(value)
     case LogField.ConfigKey => Set(
-      "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "MONGODB_URI", "MONGODB_DATABASE", "LOG_LEVEL",
-      "LOG_MASK_SENSITIVE", "LOG_REQUEST_PAYLOADS", "AUTH_JWT_HS256_SECRET", "AUTH_JWT_ISSUER",
+      "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "HTTP_ADMISSION_PERMITS", "MONGODB_URI", "MONGODB_DATABASE", "LOG_LEVEL",
+      "LOG_MASK_SENSITIVE", "AUTH_JWT_HS256_SECRET", "AUTH_JWT_ISSUER",
       "AUTH_JWT_AUDIENCE", "VECTOR_SEARCH_ENABLED", "VOYAGE_API_KEY", "VOYAGE_ENDPOINT",
       "VOYAGE_MODEL", "VOYAGE_DIMENSION", "EMBEDDING_VERSION", "EMBEDDING_QUEUE_SIZE",
       "EMBEDDING_PARALLELISM", "EMBEDDING_TIMEOUT_MS", "JOB_VECTOR_INDEX",
@@ -105,7 +102,6 @@ object LogFields {
 }
 
 trait Diagnostics {
-  def payloadsEnabled: Boolean = false
   def event(event: LogEvent, requestId: Option[String] = None, fields: Map[LogField, String] = Map.empty): IO[Unit]
 }
 

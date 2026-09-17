@@ -462,6 +462,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           meta,
           UUID.fromString("10000000-0000-0000-0000-000000000099")
         ))),
+        embeddingModel = "voyage-4-lite",
         embeddingVersion = 1
       )
       services = HiringGraphQLServices(users, jobs, applications, JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications),

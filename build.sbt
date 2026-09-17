@@ -5,6 +5,7 @@ lazy val catsEffectVersion     = "3.7.1"
 lazy val circeVersion          = "0.14.16"
 lazy val fs2Version            = "3.14.0"
 lazy val http4sVersion         = "0.23.37"
+lazy val jwtScalaVersion       = "11.0.4"
 lazy val log4catsVersion       = "2.8.0"
 lazy val logbackVersion        = "1.6.3"
 lazy val mongoVersion          = "5.11.1"
@@ -46,6 +47,7 @@ lazy val root = (project in file("."))
       "org.http4s"          %% "http4s-circe"           % http4sVersion,
       "io.circe"            %% "circe-core"             % circeVersion,
       "io.circe"            %% "circe-parser"           % circeVersion,
+      "com.github.jwt-scala" %% "jwt-circe"             % jwtScalaVersion,
       "org.mongodb"         % "mongodb-driver-reactivestreams" % mongoVersion,
       "com.github.pureconfig" %% "pureconfig-core"       % pureConfigVersion,
       "org.typelevel"       %% "log4cats-slf4j"         % log4catsVersion,

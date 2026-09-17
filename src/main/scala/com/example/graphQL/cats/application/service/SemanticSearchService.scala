@@ -14,6 +14,7 @@ final class SemanticSearchService[F[_]: Monad](
     jobs: JobRepository[F],
     embeddings: EmbeddingService[F],
     search: SemanticSearchRepository[F],
+    embeddingModel: String,
     embeddingVersion: Int
 ) {
   private val authorization = ActorAuthorization(users)
@@ -37,7 +38,7 @@ final class SemanticSearchService[F[_]: Monad](
             filter,
             first,
             SearchMode.HYBRID,
-            vector.model,
+            embeddingModel,
             embeddingVersion,
             searchId
           )).map(_.leftMap(_ => SearchError.VectorSearchUnavailable: UseCaseError))
@@ -53,7 +54,8 @@ final class SemanticSearchService[F[_]: Monad](
       case Left(error) => error.asLeft[List[RankedJob]].pure[F]
       case Right(user) =>
         (user.profile, user.embedding) match {
-          case (Some(profile), Some(embedding)) if embedding.meta.version == embeddingVersion &&
+          case (Some(profile), Some(embedding)) if embedding.meta.model == embeddingModel &&
+              embedding.meta.version == embeddingVersion &&
               embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile)) =>
             val query = VectorSearchQuery(
               embedding.values,
@@ -89,7 +91,8 @@ final class SemanticSearchService[F[_]: Monad](
         DomainError.JobMustBeOpen.asLeft[List[RankedCandidate]].pure[F]
       case Some(job) =>
         job.embedding match {
-          case Some(embedding) if embedding.meta.version == embeddingVersion &&
+          case Some(embedding) if embedding.meta.model == embeddingModel &&
+              embedding.meta.version == embeddingVersion &&
               embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             val query = VectorSearchQuery(
               embedding.values,
@@ -120,7 +123,8 @@ object SemanticSearchService {
       jobs: JobRepository[F],
       embeddings: EmbeddingService[F],
       search: SemanticSearchRepository[F],
+      embeddingModel: String,
       embeddingVersion: Int
   ): SemanticSearchService[F] =
-    new SemanticSearchService(users, jobs, embeddings, search, embeddingVersion)
+    new SemanticSearchService(users, jobs, embeddings, search, embeddingModel, embeddingVersion)
 }

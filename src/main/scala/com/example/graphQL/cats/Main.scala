@@ -17,13 +17,14 @@ object Main extends IOApp {
       AppConfig.load.flatMap {
         case Left(error) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
           fields = Map(LogField.ConfigKey -> error.key)).as(ExitCode.Error)
-        case Right(config) => SafeDiagnostics.configure(config.logLevel, config.maskSensitive, config.requestPayloads).flatMap { diagnostics =>
+        case Right(config) => SafeDiagnostics.configure(config.logLevel, config.maskSensitive).flatMap { diagnostics =>
           MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch)
             .flatMap(runtime => HiringPlatformServer.resource(
               config.host,
               config.port,
               runtime.probe,
               diagnostics,
+              config.admissionPermits,
               Some(runtime.services),
               Some(config.jwtAuth),
               runtime.ensureSetup

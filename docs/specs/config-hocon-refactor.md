@@ -35,7 +35,6 @@ logging {
   level = "INFO"
   level = ${?LOG_LEVEL}
   mask-sensitive = true
-  request-payloads = false
 }
 
 auth.jwt {

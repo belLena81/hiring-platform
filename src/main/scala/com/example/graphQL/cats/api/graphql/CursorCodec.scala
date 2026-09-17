@@ -80,7 +80,10 @@ private[graphql] object CursorCodec {
   private def decodeUuid(value: String): Decoder.Result[UUID] =
     Try(UUID.fromString(value)).toEither.left.map(_ => DecodingFailure("Invalid cursor id", Nil))
 
-  private def decodeOptional[A](value: Option[String], decode: String => A, message: String): Decoder.Result[Option[A]] =
+  private def decodeOptional[A](
+                                 value: Option[String],
+                                 decode: String => A, message: String
+                               ): Decoder.Result[Option[A]] =
     value match {
       case Some(raw) => Try(decode(raw)).toEither.left.map(_ => DecodingFailure(message, Nil)).map(Some(_))
       case None => Right(None)

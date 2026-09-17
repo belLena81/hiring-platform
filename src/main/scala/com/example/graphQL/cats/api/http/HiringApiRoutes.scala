@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.Kleisli
 import cats.effect.IO
-import com.example.graphQL.cats.api.graphql.{DiagnosticPayload, HiringGraphQLSchema, GraphQLRequest, InputBudget, HiringGraphQLServices}
+import com.example.graphQL.cats.api.graphql.{HiringGraphQLSchema, GraphQLRequest, HiringGraphQLServices}
 import com.example.graphQL.cats.application.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
 import io.circe.Json
 import org.http4s.*
@@ -18,9 +18,11 @@ final class HiringApiRoutes(
     authenticate: Request[IO] => IO[Option[ActorContext]] = (_: Request[IO]) => IO.pure(None),
     ensureHiringReady: IO[Boolean] = IO.pure(true)
 ) {
+  private val MaxRequestBytes = 64 * 1024
+
   private enum RejectionReason {
     case INVALID_REQUEST, INVALID_QUERY, UNSUPPORTED_MEDIA, NOT_ACCEPTABLE, PAYLOAD_TOO_LARGE,
-      OVERLOADED, DEADLINE_EXCEEDED, INTERNAL_ERROR, METHOD_NOT_ALLOWED, NOT_FOUND
+      OVERLOADED, DEADLINE_EXCEEDED, INTERNAL_ERROR, METHOD_NOT_ALLOWED, NOT_FOUND, SERVICE_NOT_READY
   }
 
   private def json(status: Status, body: Json): Response[IO] = Response[IO](status).withEntity(body)
@@ -69,20 +71,26 @@ final class HiringApiRoutes(
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
       rejected(Status.UnsupportedMediaType, "Expected application/json", requestId, RejectionReason.UNSUPPORTED_MEDIA)
     else if (!acceptsJson(request)) rejected(Status.NotAcceptable, "Expected JSON response media", requestId, RejectionReason.NOT_ACCEPTABLE)
-    else request.body.take(InputBudget.MaxBytes.toLong + 1).compile.toVector.flatMap { bytes =>
-      if (bytes.size > InputBudget.MaxBytes) rejected(Status.PayloadTooLarge, "Request body too large", requestId, RejectionReason.PAYLOAD_TOO_LARGE)
+    else request.body.take(MaxRequestBytes.toLong + 1).compile.toVector.flatMap { bytes =>
+      if (bytes.size > MaxRequestBytes) rejected(Status.PayloadTooLarge, "Request body too large", requestId, RejectionReason.PAYLOAD_TOO_LARGE)
       else IO(GraphQLRequest.parseBody(new String(bytes.toArray, java.nio.charset.StandardCharsets.UTF_8))).flatMap {
         case None => rejected(Status.BadRequest, "Invalid GraphQL request", requestId, RejectionReason.INVALID_REQUEST)
-        case Some(parsed) => authenticate(request).flatMap { actor =>
-          val ready = if (actor.nonEmpty && hiring.nonEmpty) ensureHiringReady else IO.pure(true)
-          ready.flatMap { available =>
-            HiringGraphQLSchema.execute(parsed, service, requestId, actor.filter(_ => available), hiring.filter(_ => available))
+        case Some(parsed) =>
+          def execute(actor: Option[ActorContext], services: Option[HiringGraphQLServices]): IO[Response[IO]] =
+            HiringGraphQLSchema.execute(parsed, service, requestId, actor, services).flatMap {
+              case Right(result) => completedGraphQL(parsed, result, requestId)
+              case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Status.BadRequest, "Invalid GraphQL query", requestId, RejectionReason.INVALID_QUERY)
+              case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Status.InternalServerError, "Request failed", requestId, RejectionReason.INTERNAL_ERROR)
+            }
+
+          authenticate(request).flatMap { actor =>
+            if (actor.nonEmpty && hiring.nonEmpty) {
+              ensureHiringReady.flatMap {
+                case true => execute(actor, hiring)
+                case false => rejected(Status.ServiceUnavailable, "Service not ready", requestId, RejectionReason.SERVICE_NOT_READY)
+              }
+            } else execute(actor, hiring)
           }
-        }.flatMap {
-          case Right(result) => completedGraphQL(parsed, result, requestId)
-          case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Status.BadRequest, "Invalid GraphQL query", requestId, RejectionReason.INVALID_QUERY)
-          case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Status.InternalServerError, "Request failed", requestId, RejectionReason.INTERNAL_ERROR)
-        }
       }
     }
   }
@@ -94,18 +102,8 @@ final class HiringApiRoutes(
     val fields = Map(LogField.Outcome ->
       (if (result.hcursor.downField("errors").succeeded) "FIELD_ERROR" else "COMPLETED")) ++
       operationName.map(LogField.OperationName -> _)
-    (Diagnostics.emit(diagnostics, LogEvent.GraphQLCompleted, Some(requestId), fields) *>
-      capturePayload(parsed, requestId)).as(json(Status.Ok, result))
+    Diagnostics.emit(diagnostics, LogEvent.GraphQLCompleted, Some(requestId), fields).as(json(Status.Ok, result))
   }
-
-  private def capturePayload(parsed: GraphQLRequest, requestId: String): IO[Unit] = IO.defer {
-    if (diagnostics.payloadsEnabled) IO(DiagnosticPayload.capture(parsed)).flatMap {
-      case Some(payload) => Diagnostics.emit(diagnostics, LogEvent.RequestPayload, Some(requestId),
-        Map(LogField.RequestPayload -> payload))
-      case None => IO.unit
-    }
-    else IO.unit
-  }.handleError(_ => ())
 
   private def route(request: Request[IO], requestId: String): IO[Response[IO]] =
     (request.method, request.uri.path.renderString) match {

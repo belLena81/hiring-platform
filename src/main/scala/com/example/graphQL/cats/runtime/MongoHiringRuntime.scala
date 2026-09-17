@@ -92,7 +92,14 @@ object MongoHiringRuntime {
         ).map { queue =>
           val jobService = JobService[IO](users, jobs, queue)
           val applicationService = ApplicationService[IO](users, jobs, applications)
-          val semanticSearch = SemanticSearchService[IO](users, jobs, embeddings, search, vectorSearch.embeddingVersion)
+          val semanticSearch = SemanticSearchService[IO](
+            users,
+            jobs,
+            embeddings,
+            search,
+            vectorSearch.voyageModel,
+            vectorSearch.embeddingVersion
+          )
           val services = HiringGraphQLServices(
             users,
             jobs,

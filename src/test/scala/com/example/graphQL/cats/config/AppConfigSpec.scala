@@ -7,6 +7,7 @@ class AppConfigSpec extends FunSuite {
     """http {
       |  host = "127.0.0.1"
       |  port = 8080
+      |  admission-permits = 16
       |}
       |mongo {
       |  uri = "mongodb://127.0.0.1:27017"
@@ -15,7 +16,6 @@ class AppConfigSpec extends FunSuite {
       |logging {
       |  level = "INFO"
       |  mask-sensitive = true
-      |  request-payloads = false
       |}
       |auth.jwt {
       |  hs256-secret = "disabled"
@@ -67,6 +67,7 @@ class AppConfigSpec extends FunSuite {
       """http {
         |  host = "::1"
         |  port = 65535
+        |  admission-permits = 64
         |}
         |mongo {
         |  uri = ${MONGODB_URI}
@@ -75,7 +76,6 @@ class AppConfigSpec extends FunSuite {
         |logging {
         |  level = "WARN"
         |  mask-sensitive = true
-        |  request-payloads = false
         |}
         |auth.jwt {
         |  hs256-secret = ${AUTH_JWT_HS256_SECRET}
@@ -106,9 +106,9 @@ class AppConfigSpec extends FunSuite {
     assertEquals(AppConfig.fromConfig(config, Map(
       "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
-    )), Right(AppConfig("::1", 65535,
+    )), Right(AppConfig("::1", 65535, 64,
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
-      "hiring_test-2", "WARN", maskSensitive = true, requestPayloads = false,
+      "hiring_test-2", "WARN", maskSensitive = true,
       JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api"),
       defaultVectorSearch)))
   }
@@ -130,14 +130,15 @@ class AppConfigSpec extends FunSuite {
       """http {
         |  host = "127.0.0.1"
         |  port = 8080
+        |  admission-permits = 16
         |}
         |mongo {
         |  uri = "mongodb://127.0.0.1:27017"
         |}
         |""".stripMargin
     val result = AppConfig.fromRawConfig(raw, local, _ => None)
-    assertEquals(result.map(config => (config.host, config.port, config.mongoUri, config.logLevel)),
-      Right(("127.0.0.1", 8080, "mongodb://127.0.0.1:27017", "INFO")))
+    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri, config.logLevel)),
+      Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "INFO")))
   }
 
   test("VHS-AC08 packaged application config resolves cloud environment values at startup") {
@@ -145,12 +146,13 @@ class AppConfigSpec extends FunSuite {
     val result = AppConfig.fromConfig(raw, Map(
       "HTTP_HOST" -> "::1",
       "HTTP_PORT" -> "9090",
+      "HTTP_ADMISSION_PERMITS" -> "96",
       "MONGODB_URI" -> "mongodb://127.0.0.1:27018",
       "LOG_LEVEL" -> "WARN",
       "VOYAGE_MODEL" -> "voyage-4-lite"
     ))
-    assertEquals(result.map(config => (config.host, config.port, config.mongoUri, config.logLevel)),
-      Right(("::1", 9090, "mongodb://127.0.0.1:27018", "WARN")))
+    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri, config.logLevel)),
+      Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018", "WARN")))
   }
 
   test("CFG-AC02 injected env resolution ignores process system properties") {
@@ -191,6 +193,8 @@ class AppConfigSpec extends FunSuite {
         |  host = ${?HTTP_HOST}
         |  port = 8080
         |  port = ${?HTTP_PORT}
+        |  admission-permits = 16
+        |  admission-permits = ${?HTTP_ADMISSION_PERMITS}
         |}
         |mongo {
         |  uri = "mongodb://127.0.0.1:27017"
@@ -200,7 +204,6 @@ class AppConfigSpec extends FunSuite {
         |logging {
         |  level = "INFO"
         |  mask-sensitive = true
-        |  request-payloads = false
         |}
         |auth.jwt {
         |  hs256-secret = "disabled"
@@ -241,7 +244,8 @@ class AppConfigSpec extends FunSuite {
         |""".stripMargin
 
     assertEquals(AppConfig.fromRawConfig(defaults, local, _ => None).map(config =>
-      (config.host, config.port, config.mongoUri)), Right(("127.42.10.8", 9091, "mongodb://127.0.0.1:27018")))
+      (config.host, config.port, config.admissionPermits, config.mongoUri)),
+      Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018")))
   }
 
   test("P1-AC01 config text rejects malformed HOCON and missing required paths safely") {
@@ -260,6 +264,7 @@ class AppConfigSpec extends FunSuite {
     val invalid = List(
       ("http.host", List("localhost", "999.1.1.1"), ConfigError.InvalidHost),
       ("http.port", List("0", "65536", "-1", "+80", "2147483648"), ConfigError.InvalidPort),
+      ("http.admission-permits", List("0", "1025", "-1", "+16", "synthetic-secret"), ConfigError.InvalidAdmissionPermits),
       ("mongo.uri", List("https://synthetic-secret", "mongodb://", "mongodb://host:wrong"), ConfigError.InvalidMongoUri),
       ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase),
       ("logging.level", List("VERBOSE", "info", "synthetic-secret"), ConfigError.InvalidLogLevel)
@@ -279,6 +284,9 @@ class AppConfigSpec extends FunSuite {
         assert(AppConfig.fromConfig(defaultConfig + s"""http.port = $port\nlogging.level = "$level"\n""", Map.empty).isRight)
       }
     }
+    List("1", "1024").foreach { permits =>
+      assert(AppConfig.fromConfig(defaultConfig + s"http.admission-permits = $permits\n", Map.empty).isRight)
+    }
   }
 
   test("P1-AC01 config rendering never exposes a secret-bearing URI") {
@@ -292,19 +300,16 @@ class AppConfigSpec extends FunSuite {
 
   test("LOG-03 secure defaults come from application config") {
     val result = AppConfig.fromConfig(defaultConfig, Map.empty)
-    assertEquals(result.map(value => (value.maskSensitive, value.requestPayloads)), Right((true, false)))
+    assertEquals(result.map(_.maskSensitive), Right(true))
   }
 
-  test("LOG-03 explicit unmasking and payload opt-in accept parsed loopback addresses") {
+  test("LOG-03 explicit unmasking accepts parsed loopback addresses") {
     List("127.0.0.1", "127.0.0.0", "127.25.67.89", "127.255.255.255",
       "::1", "0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001",
       "::ffff:127.0.0.1").foreach { host =>
-      List("false", "true").foreach { payloads =>
-        val result = AppConfig.fromConfig(defaultConfig +
-          s"""http.host = "$host"\nlogging.mask-sensitive = false\nlogging.request-payloads = $payloads\n""", Map.empty)
-        assertEquals(result.map(value => (value.host, value.maskSensitive, value.requestPayloads)),
-          Right((host, false, payloads == "true")), clues(host))
-      }
+      val result = AppConfig.fromConfig(defaultConfig +
+        s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
+      assertEquals(result.map(value => (value.host, value.maskSensitive)), Right((host, false)), clues(host))
     }
   }
 
@@ -316,10 +321,8 @@ class AppConfigSpec extends FunSuite {
       assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
-      Right(AppConfig("127.0.0.1", 8080, "mongodb://127.0.0.1:27017", "hiring", "INFO",
-        maskSensitive = false, requestPayloads = false, defaultJwtAuth, defaultVectorSearch.copy(enabled = false))))
-    assertEquals(AppConfig.fromConfig(defaultConfig + "logging.request-payloads = true\n", Map.empty),
-      Left(ConfigError.UnsafeRequestPayloads))
+      Right(AppConfig("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "hiring", "INFO",
+        maskSensitive = false, defaultJwtAuth, defaultVectorSearch.copy(enabled = false))))
   }
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
@@ -350,24 +353,18 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("LOG-03 logging booleans are strict with safe configuration keys") {
-    List(
-      ("logging.mask-sensitive", List("TRUE", "0", "synthetic-secret"), ConfigError.InvalidMaskSensitive),
-      ("logging.request-payloads", List("FALSE", "1", "synthetic-secret"), ConfigError.InvalidRequestPayloads)
-    ).foreach { case (key, values, expected) =>
-      values.foreach { value =>
-        val result = AppConfig.fromConfig(defaultConfig + s"""$key = "$value"\n""", Map.empty)
-        assertEquals(result, Left(expected), clues(key))
-        assert(!result.toString.contains("synthetic-secret"))
-      }
+    List("TRUE", "0", "synthetic-secret").foreach { value =>
+      val result = AppConfig.fromConfig(defaultConfig + s"""logging.mask-sensitive = "$value"\n""", Map.empty)
+      assertEquals(result, Left(ConfigError.InvalidMaskSensitive))
+      assert(!result.toString.contains("synthetic-secret"))
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "http.host = \"localhost\"\nlogging.mask-sensitive = false\n", Map.empty),
       Left(ConfigError.InvalidHost))
   }
 
-  test("LOG-04 configuration remains redacted when local metadata and payload capture are enabled") {
+  test("LOG-04 configuration remains redacted when local metadata is enabled") {
     val result = AppConfig.fromConfig(defaultConfig +
       """logging.mask-sensitive = false
-        |logging.request-payloads = true
         |mongo.uri = "mongodb://user:synthetic-secret@127.0.0.1:1"
         |""".stripMargin,
       Map.empty)

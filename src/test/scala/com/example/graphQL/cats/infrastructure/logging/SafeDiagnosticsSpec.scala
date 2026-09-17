@@ -44,9 +44,8 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       _ <- LogEvent.values.toList.traverse_(event => diagnostics.event(event, Some(requestId)))
       lines <- emitted.get
     } yield {
-      val visible = LogEvent.values.filterNot(_ == LogEvent.RequestPayload)
-      assertEquals(lines.size, visible.length)
-      lines.zip(visible).foreach { case (line, event) =>
+      assertEquals(lines.size, LogEvent.values.length)
+      lines.zip(LogEvent.values).foreach { case (line, event) =>
         val json = parse(line).toOption.getOrElse(fail("Invalid log JSON"))
         assertEquals(json.hcursor.get[String]("category"), Right(event.category))
         assertEquals(json.hcursor.get[String]("requestId"), Right(requestId))
@@ -81,7 +80,6 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
            |logging {
            |  level = "INFO"
            |  mask-sensitive = true
-           |  request-payloads = false
            |}
            |""".stripMargin,
         Map.empty
@@ -103,7 +101,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   }
 
   test("P1-AC09 application thresholds suppress lower severity events") {
-    List("TRACE" -> 14, "DEBUG" -> 14, "INFO" -> 14, "WARN" -> 9, "ERROR" -> 5).traverse_ { case (level, count) =>
+    List("TRACE" -> 13, "DEBUG" -> 13, "INFO" -> 13, "WARN" -> 8, "ERROR" -> 4).traverse_ { case (level, count) =>
       for {
         emitted <- Ref.of[IO, Vector[String]](Vector.empty)
         diagnostics = SafeDiagnostics.withSink(level, line => emitted.update(_ :+ line))
@@ -156,9 +154,8 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   test("LOG-01 records have bounded details and cannot inject additional log lines") {
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-      diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line), maskSensitive = false, requestPayloads = true)
+      diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line), maskSensitive = false)
       _ <- diagnostics.event(LogEvent.Started, fields = LogField.values.map(_ -> ("\n\r\u2028\u202e💡" * 3000)).toMap)
-      _ <- diagnostics.event(LogEvent.RequestPayload, fields = Map(LogField.RequestPayload -> ("💡" * 4000)))
       _ <- diagnostics.event(LogEvent.GraphQLCompleted, fields = Map(LogField.OperationName -> ("💡" * 500)))
       lines <- emitted.get
     } yield {
@@ -171,22 +168,6 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       }
       assertEquals(parse(lines.last).flatMap(_.hcursor.downField("details").get[String]("operationName")),
         Right("💡" * 127 + "…"))
-    }
-  }
-
-  test("LOG-03 payload events and fields are dropped unless explicitly unmasked and opted in") {
-    List((true, false), (true, true), (false, false), (false, true)).traverse_ { case (masked, payloads) =>
-      for {
-        emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-        diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line), masked, payloads)
-        _ <- diagnostics.event(LogEvent.RequestPayload, fields = Map(LogField.RequestPayload -> "filtered-payload"))
-        _ <- diagnostics.event(LogEvent.GraphQLCompleted, fields = Map(LogField.RequestPayload -> "filtered-payload"))
-        lines <- emitted.get
-      } yield {
-        assertEquals(diagnostics.payloadsEnabled, !masked && payloads)
-        assertEquals(lines.exists(_.contains("filtered-payload")), !masked && payloads)
-        assertEquals(lines.size, if (!masked && payloads) 2 else 1)
-      }
     }
   }
 

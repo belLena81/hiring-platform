@@ -12,11 +12,18 @@ import munit.CatsEffectSuite
 import org.http4s.*
 import org.http4s.circe.*
 import org.typelevel.ci.CIString
+import pdi.jwt.JwtCirce
 import scala.concurrent.duration.*
 
 final class HiringApiRoutesSpec extends CatsEffectSuite {
-  private def app(effect: IO[ProbeResult], diagnostics: Diagnostics = Diagnostics.noop): IO[HttpApp[IO]] =
-    Admission.create.map { admission =>
+  private val DefaultAdmissionPermits = 16
+
+  private def app(
+      effect: IO[ProbeResult],
+      diagnostics: Diagnostics = Diagnostics.noop,
+      admissionPermits: Int = DefaultAdmissionPermits
+  ): IO[HttpApp[IO]] =
+    Admission.create(admissionPermits).map { admission =>
       val probe = new DatabaseProbe { def check: IO[ProbeResult] = effect }
       new HiringApiRoutes(new HealthService(probe, diagnostics), diagnostics, admission).app
     }
@@ -40,7 +47,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       userId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       forgedRole: UserRole
   ): String =
-    JwtActorAuthenticator.sign(
+    JwtCirce.encode(
       Json.obj("alg" -> Json.fromString("HS256")),
       Json.obj(
         "sub" -> Json.fromString(userId.value.toString),
@@ -77,7 +84,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.application.port.RepositoryError]](None)
-      admission <- Admission.create
+      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
@@ -101,6 +108,45 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("served GraphQL hiring setup failure returns service-not-ready instead of unauthorized") {
+    val mutation =
+      s"""mutation {
+         |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
+         |    application { id status }
+         |    errors { code }
+         |  }
+         |}""".stripMargin
+    for {
+      usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
+        Map(ServiceFixtures.candidateId -> ServiceFixtures.candidate)
+      )
+      jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](
+        Map(ServiceFixtures.jobId -> ServiceFixtures.openJob)
+      )
+      applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
+      eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.application.port.RepositoryError]](None)
+      admission <- Admission.create(16)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      users = ServiceFixtures.InMemoryUsers(usersRef)
+      jobs = ServiceFixtures.InMemoryJobs(jobsRef)
+      applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
+      services = HiringGraphQLServices(users, jobs, applications, JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      authenticator = JwtActorAuthenticator(jwtConfig, users, IO.pure(ServiceFixtures.now))
+      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        Some(services), authenticator.authenticate, ensureHiringReady = IO.pure(false)).app
+      token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
+      response <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
+      body <- response.as[Json]
+      applicationsAfter <- applicationsRef.get
+    } yield {
+      assertEquals(response.status, Status.ServiceUnavailable)
+      assertEquals(body.hcursor.downField("errors").downArray.get[String]("message"), Right("Service not ready"))
+      assert(!body.noSpaces.contains("UNAUTHORIZED"))
+      assertEquals(applicationsAfter, Map.empty)
+    }
+  }
+
   test("served GraphQL hiring operation without a valid token returns typed unauthorized payload") {
     val mutation =
       s"""mutation {
@@ -110,7 +156,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
          |  }
          |}""".stripMargin
     for {
-      admission <- Admission.create
+      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
       response <- http(request(mutation))
@@ -122,11 +168,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("validated Sangria field errors retain their response and emit correlated filtered payloads") {
+  test("validated Sangria field errors retain their response and emit correlated completion diagnostics") {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       sink = new Diagnostics {
-        override def payloadsEnabled: Boolean = true
         def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
           records.update(_ :+ ((event, id, fields)))
       }
@@ -138,7 +183,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       closed <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(IO.pure)
       execution <- HiringGraphQLSchema.executeInContext(parsed, closed)
       result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
-      admission <- Admission.create
+      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       routes = new HiringApiRoutes(new HealthService(probe, sink), sink, admission)
       id <- IO.randomUUID.map(_.toString)
@@ -149,16 +194,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(response.status, Status.Ok)
       assertEquals(body, result)
       assertEquals(body.hcursor.get[Json]("errors"), Right(Json.arr(Json.obj("message" -> Json.fromString("Execution failed")))))
-      assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted, LogEvent.RequestPayload))
+      assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted))
       assert(captured.forall(_._2.contains(id)))
       assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall(_._3.get(LogField.Outcome).contains("FIELD_ERROR")))
-      captured.filter(_._1 == LogEvent.RequestPayload).foreach { case (_, _, fields) =>
-        val serialized = fields.getOrElse(LogField.RequestPayload, fail("Missing field error payload"))
-        val payload = io.circe.parser.parse(serialized).getOrElse(fail("Invalid payload JSON"))
-        assertEquals(payload.hcursor.downField("variables").get[Boolean]("include"), Right(true))
-        assertEquals(payload.hcursor.downField("variables").get[String]("password"), Right("[REDACTED]"))
-        assert(!serialized.contains("synthetic-"))
-      }
       assert(!body.noSpaces.contains("Request context is closed"))
     }
   }
@@ -183,7 +221,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         entered <- Deferred[IO, Unit]
         finalizing <- Deferred[IO, Unit]
         finish <- Deferred[IO, Unit]
-        admission <- Admission.create
+        admission <- Admission.create(16)
         probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
         http = new HiringApiRoutes(new HealthService(probe, sink), sink, admission).app
         slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
@@ -218,90 +256,6 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
             }
         }
       } yield ()
-    }
-  }
-
-  test("payload policy is never consulted before envelope, schema, operation and variable validation succeed") {
-    val policyReads = new java.util.concurrent.atomic.AtomicInteger()
-    val variableQuery = "query Selected($include: Boolean!) { health @include(if: $include) { status } }"
-    val invalid = List(
-      health.withEntity("not-json").putHeaders(Header.Raw(CIString("Content-Type"), "application/json")),
-      request("{ invalidField }"),
-      request("{ health"),
-      health.withEntity(Json.obj("query" -> Json.fromString(variableQuery), "variables" -> Json.obj("include" -> Json.fromString("invalid")))),
-      health.withEntity(Json.obj("query" -> Json.fromString(variableQuery))),
-      health.withEntity(Json.obj("query" -> Json.fromString("query Named { health { status } }"),
-        "operationName" -> Json.fromString("Missing"))),
-      request("query One { health { status } } query Two { health { status } }"),
-      health.withEntity(Json.obj("query" -> Json.fromString("query Selected { health { status } } query Other { invalidField }"),
-        "operationName" -> Json.fromString("Selected")))
-    )
-    for {
-      records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
-      sink = new Diagnostics {
-        override def payloadsEnabled: Boolean = { val _ = policyReads.incrementAndGet(); true }
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
-          records.update(_ :+ ((event, id, fields)))
-      }
-      http <- app(IO.pure(ProbeResult.Ready), sink)
-      responses <- invalid.traverse(http.run)
-      captured <- records.get
-    } yield {
-      assert(responses.forall(_.status == Status.BadRequest))
-      assertEquals(policyReads.get(), 0)
-      assert(!captured.exists(_._1 == LogEvent.RequestPayload))
-    }
-  }
-
-  test("payload opt-in captures only filtered validated data and shares the generated request ID") {
-    List(false, true).traverse_ { enabled =>
-      for {
-        records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
-        sink = new Diagnostics {
-          override def payloadsEnabled: Boolean = enabled
-          def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
-            records.update(_ :+ ((event, id, fields)))
-        }
-        http <- app(IO.pure(ProbeResult.Ready), sink)
-        response <- http(health.withEntity(Json.obj(
-          "query" -> Json.fromString("query Selected($include: Boolean!) { health @include(if: $include) { status } } query Other { health { status } } # synthetic-comment-secret"),
-          "operationName" -> Json.fromString("Selected"),
-          "variables" -> Json.obj("include" -> Json.True, "password" -> Json.fromString("synthetic-variable-secret"))
-        )))
-        captured <- records.get
-      } yield {
-        assertEquals(response.status, Status.Ok)
-        val payloads = captured.filter(_._1 == LogEvent.RequestPayload)
-        assertEquals(payloads.size, if (enabled) 1 else 0)
-        payloads.foreach { case (_, id, fields) =>
-          assertEquals(id, response.headers.get(CIString("X-Request-ID")).map(_.head.value))
-          val serialized = fields.getOrElse(LogField.RequestPayload, fail("Missing filtered payload"))
-          val payload = io.circe.parser.parse(serialized).getOrElse(fail("Payload is not JSON"))
-          assertEquals(payload.hcursor.downField("variables").get[Boolean]("include"), Right(true))
-          assertEquals(payload.hcursor.downField("variables").get[String]("password"), Right("[REDACTED]"))
-          assert(!serialized.contains("synthetic-"))
-          assert(!serialized.contains("Other"))
-        }
-      }
-    }
-  }
-
-  test("throwing payload policy and payload sink leave a validated response unchanged") {
-    List(true, false).traverse_ { policyThrows =>
-      val sink = new Diagnostics {
-        override def payloadsEnabled: Boolean =
-          if (policyThrows) throw new IllegalStateException("synthetic-policy-secret") else true
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
-          if (event == LogEvent.RequestPayload) throw new IllegalStateException("synthetic-payload-sink-secret") else IO.unit
-      }
-      for {
-        http <- app(IO.pure(ProbeResult.Ready), sink)
-        response <- http(health)
-        body <- response.as[Json]
-      } yield {
-        assertEquals(response.status, Status.Ok)
-        assertEquals(body.hcursor.downField("data").downField("health").get[String]("status"), Right("UP"))
-      }
     }
   }
 
@@ -447,7 +401,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("GraphQL permit remains occupied until resolver cancellation finalizers finish") {
     for {
-      admission <- Admission.create
+      admission <- Admission.create(16)
       entered <- Deferred[IO, Unit]
       finalizing <- Deferred[IO, Unit]
       finishFinalizer <- Deferred[IO, Unit]
@@ -749,9 +703,31 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("configured admission permit count controls saturation threshold") {
+    for {
+      started <- Ref.of[IO, Int](0)
+      bothStarted <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      http <- app(IO.pure(ProbeResult.Ready), admissionPermits = 2)
+      slow = health.withBodyStream(fs2.Stream.eval(
+        started.updateAndGet(_ + 1).flatMap(count => if (count == 2) bothStarted.complete(()).void else IO.unit) *>
+          release.get).drain ++ health.body)
+      _ <- List.fill(2)(Resource.make(http(slow).start)(_.cancel)).sequence.use { fibers =>
+        (for {
+          _ <- bothStarted.get.timeout(2.seconds)
+          overflow <- http(health)
+          _ <- IO(assertEquals(overflow.status, Status.ServiceUnavailable))
+          _ <- release.complete(())
+          completed <- fibers.traverse(_.joinWithNever)
+          _ <- IO(assert(completed.forall(_.status == Status.Ok)))
+        } yield ()).guarantee(release.complete(()).void)
+      }
+    } yield ()
+  }
+
   test("UI and assets are absent, and closing admission preserves liveness") {
     for {
-      admission <- Admission.create
+      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
       ui <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql")))

@@ -98,7 +98,6 @@ class MainProcessSpec extends CatsEffectSuite {
        |logging {
        |  level = ${hoconString(value("LOG_LEVEL"))}
        |  mask-sensitive = ${values.getOrElse("LOG_MASK_SENSITIVE", "true")}
-       |  request-payloads = ${values.getOrElse("LOG_REQUEST_PAYLOADS", "false")}
        |}
        |auth.jwt {
        |  hs256-secret = ${hoconString(value("AUTH_JWT_HS256_SECRET"))}
@@ -200,8 +199,6 @@ class MainProcessSpec extends CatsEffectSuite {
       assert(categories.indexOf("STARTED") < categories.indexOf("RUNTIME_FAILED"))
       assert(!categories.contains("STARTUP_FAILED"))
       assert(!categories.contains("LOCAL_UNMASKED"))
-      assert(!categories.contains("LOCAL_PAYLOADS_ENABLED"))
-      assert(!categories.contains("REQUEST_PAYLOAD"))
       assert(events.forall(_.hcursor.get[String]("masking") == Right("enabled")))
       val started = events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
       assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right("[REDACTED]"))
@@ -210,12 +207,10 @@ class MainProcessSpec extends CatsEffectSuite {
   }
 
   List(
-    ("masked payload capture", Map("LOG_REQUEST_PAYLOADS" -> "true"), "LOG_REQUEST_PAYLOADS"),
     ("IPv4 wildcard unmasking", Map("HTTP_HOST" -> "0.0.0.0", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
     ("IPv6 wildcard unmasking", Map("HTTP_HOST" -> "::", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
     ("IPv6 nonloopback unmasking", Map("HTTP_HOST" -> "2001:db8::1", "LOG_MASK_SENSITIVE" -> "false"), "LOG_MASK_SENSITIVE"),
-    ("invalid masking flag", Map("LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE"),
-    ("invalid payload flag", Map("LOG_REQUEST_PAYLOADS" -> "synthetic-secret"), "LOG_REQUEST_PAYLOADS")
+    ("invalid masking flag", Map("LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE")
   ).foreach { case (label, environment, key) =>
     test(s"LOG-03 actual Main rejects $label before emitting local diagnostics") {
       runChild(mainClass, environment).map { result =>
@@ -242,8 +237,6 @@ class MainProcessSpec extends CatsEffectSuite {
         assertEquals(result.exitCode, 0)
         val events = assertSanitized(result, "RUNTIME_FAILED")
         assertEquals(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")), 1)
-        assert(!events.exists(_.hcursor.get[String]("category") == Right("LOCAL_PAYLOADS_ENABLED")))
-        assert(!events.exists(_.hcursor.get[String]("category") == Right("REQUEST_PAYLOAD")))
         events.foreach { event =>
           val runtimeFailure = event.hcursor.get[String]("category") == Right("RUNTIME_FAILED")
           assertEquals(event.hcursor.get[String]("masking"), Right(if (runtimeFailure) "enabled" else "disabled-local"))
@@ -256,44 +249,17 @@ class MainProcessSpec extends CatsEffectSuite {
     }
   }
 
-  List(false, true).foreach { payloads =>
-    test(s"LOG-03 local startup warnings bypass ERROR with payloads=$payloads and have no duplicates") {
-      listeningSocket().use { socket =>
-        runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString,
-          "LOG_MASK_SENSITIVE" -> "false", "LOG_REQUEST_PAYLOADS" -> payloads.toString)).map { result =>
-          assert(result.exitCode != 0)
-          val events = assertSanitized(result, "STARTUP_FAILED")
-          assertEquals(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")), 1)
-          assertEquals(events.count(_.hcursor.get[String]("category") == Right("LOCAL_PAYLOADS_ENABLED")), if (payloads) 1 else 0)
-          events.filter(_.hcursor.get[String]("category").exists(_.startsWith("LOCAL_"))).foreach { warning =>
-            assertEquals(warning.hcursor.get[String]("severity"), Right("WARN"))
-            assertEquals(warning.hcursor.get[String]("masking"), Right("disabled-local"))
-          }
-          assert(!events.exists(_.hcursor.get[String]("category") == Right("REQUEST_PAYLOAD")))
+  test("LOG-03 local unmasked warning bypasses ERROR and has no duplicates") {
+    listeningSocket().use { socket =>
+      runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString,
+        "LOG_MASK_SENSITIVE" -> "false")).map { result =>
+        assert(result.exitCode != 0)
+        val events = assertSanitized(result, "STARTUP_FAILED")
+        assertEquals(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")), 1)
+        events.filter(_.hcursor.get[String]("category").exists(_.startsWith("LOCAL_"))).foreach { warning =>
+          assertEquals(warning.hcursor.get[String]("severity"), Right("WARN"))
+          assertEquals(warning.hcursor.get[String]("masking"), Right("disabled-local"))
         }
-      }
-    }
-  }
-
-  test("LOG-04 actual local payload capture excludes literal values, credentials, comments and exception messages") {
-    for {
-      port <- listeningSocket().use(socket => IO.pure(socket.getLocalPort))
-      result <- runChild("com.example.graphQL.cats.runtime.MainReporterProcess", Map(
-        "HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO",
-        "LOG_MASK_SENSITIVE" -> "false", "LOG_REQUEST_PAYLOADS" -> "true"
-      ), List("--exercise-payload", "--test-http-host=127.0.0.1", s"--test-http-port=$port"))
-    } yield {
-      assertEquals(result.exitCode, 0)
-      val events = assertSanitized(result, "RUNTIME_FAILED")
-      assertEquals(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")), 1)
-      assertEquals(events.count(_.hcursor.get[String]("category") == Right("LOCAL_PAYLOADS_ENABLED")), 1)
-      val captured = events.filter(_.hcursor.get[String]("category") == Right("REQUEST_PAYLOAD"))
-      assertEquals(captured.size, 1)
-      captured.foreach { event =>
-        assertEquals(event.hcursor.get[String]("masking"), Right("disabled-local"))
-        val payload = event.hcursor.downField("details").get[String]("requestPayload").toOption.getOrElse(fail("Missing filtered payload"))
-        assert(parse(payload).isRight, "Filtered payload must be valid JSON")
-        assert(!payload.contains("synthetic-comment"))
       }
     }
   }

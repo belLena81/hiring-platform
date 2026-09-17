@@ -13,6 +13,7 @@ import java.util.UUID
 import munit.CatsEffectSuite
 import org.http4s.{Header, Method, Request, Uri}
 import org.typelevel.ci.CIString
+import pdi.jwt.JwtCirce
 
 final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   private val secret = "01234567890123456789012345678901"
@@ -44,7 +45,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
       Some("one.two"),
       Some("one.two.three.four"),
       Some(s"not-base64.${valid.split("\\.", -1)(1)}.${valid.split("\\.", -1)(2)}"),
-      Some(signedToken(candidateId, Json.obj(), Json.obj("alg" -> Json.fromString("none")))),
+      Some(unsignedToken(candidateId)),
       Some(signedToken(candidateId, Json.obj("aud" -> Json.fromString("other-api")))),
       Some(signedToken(candidateId, Json.obj("iss" -> Json.fromString("other-issuer")))),
       Some(signedToken(candidateId, Json.obj("exp" -> Json.fromLong(now.minusSeconds(1).getEpochSecond)))),
@@ -94,17 +95,23 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
 
   private def signedToken(
       userId: UserId,
-      overrideClaims: Json = Json.obj(),
-      header: Json = Json.obj("alg" -> Json.fromString("HS256"))
+      overrideClaims: Json = Json.obj()
   ): String = {
+    val payload = tokenPayload(userId, overrideClaims)
+    JwtCirce.encode(Json.obj("alg" -> Json.fromString("HS256")), payload, secret)
+  }
+
+  private def unsignedToken(userId: UserId): String =
+    JwtCirce.encode(tokenPayload(userId))
+
+  private def tokenPayload(userId: UserId, overrideClaims: Json = Json.obj()): Json = {
     val baseClaims = Json.obj(
       "sub" -> Json.fromString(userId.value.toString),
       "iss" -> Json.fromString(issuer),
       "aud" -> Json.fromString(audience),
       "exp" -> Json.fromLong(now.plusSeconds(300).getEpochSecond)
     )
-    val payload = overrideClaims.asObject.fold(baseClaims)(fields => baseClaims.deepMerge(Json.fromJsonObject(fields)))
-    JwtActorAuthenticator.sign(header, payload, secret)
+    overrideClaims.asObject.fold(baseClaims)(fields => baseClaims.deepMerge(Json.fromJsonObject(fields)))
   }
 
   private def users(values: Map[UserId, User]): UserRepository[IO] = new UserRepository[IO] {

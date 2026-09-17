@@ -9,16 +9,15 @@ import org.slf4j.{LoggerFactory, MarkerFactory}
 object SafeDiagnostics {
   private val loggerName = "hiring.foundation"
 
-  def configure(level: String, maskSensitive: Boolean = true, requestPayloads: Boolean = false): IO[Diagnostics] =
-    IO.delay(apply(level, maskSensitive, requestPayloads)).flatTap { diagnostics =>
+  def configure(level: String, maskSensitive: Boolean = true): IO[Diagnostics] =
+    IO.delay(apply(level, maskSensitive)).flatTap { diagnostics =>
       if (maskSensitive) IO.unit
-      else Diagnostics.emit(diagnostics, LogEvent.LocalUnmasked) *>
-        (if (requestPayloads) Diagnostics.emit(diagnostics, LogEvent.LocalPayloadsEnabled) else IO.unit)
+      else Diagnostics.emit(diagnostics, LogEvent.LocalUnmasked)
     }
 
-  def apply(level: String, maskSensitive: Boolean = true, requestPayloads: Boolean = false): Diagnostics = {
+  def apply(level: String, maskSensitive: Boolean = true): Diagnostics = {
     val logger = LoggerFactory.getLogger(loggerName)
-    withEventSink(level, maskSensitive, requestPayloads, (event, message) => IO.blocking {
+    withEventSink(level, maskSensitive, (event, message) => IO.blocking {
       val marker = MarkerFactory.getMarker(event.marker)
       event.severity match {
         case "ERROR" => logger.error(marker, message)
@@ -28,9 +27,8 @@ object SafeDiagnostics {
     })
   }
 
-  private[logging] def withSink(level: String, sink: String => IO[Unit], maskSensitive: Boolean = true,
-      requestPayloads: Boolean = false): Diagnostics =
-    withEventSink(level, maskSensitive, requestPayloads, (_, message) => sink(message))
+  private[logging] def withSink(level: String, sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =
+    withEventSink(level, maskSensitive, (_, message) => sink(message))
 
   private def bounded(value: String, limit: Int): String = {
     val count = value.codePointCount(0, value.length)
@@ -43,9 +41,7 @@ object SafeDiagnostics {
     if (clipped) normalized + "…" else normalized
   }
 
-  private def withEventSink(level: String, maskSensitive: Boolean, requestPayloads: Boolean,
-      sink: (LogEvent, String) => IO[Unit]): Diagnostics = new Diagnostics {
-    override val payloadsEnabled: Boolean = requestPayloads && !maskSensitive
+  private def withEventSink(level: String, maskSensitive: Boolean, sink: (LogEvent, String) => IO[Unit]): Diagnostics = new Diagnostics {
     private val threshold = level match {
       case "TRACE" | "DEBUG" => 0
       case "INFO" => 0
@@ -54,15 +50,13 @@ object SafeDiagnostics {
     }
 
     def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] = IO.defer {
-      val safetyWarning = event == LogEvent.LocalUnmasked || event == LogEvent.LocalPayloadsEnabled
-      if ((event.rank < threshold && !safetyWarning) || (event == LogEvent.RequestPayload && !payloadsEnabled)) IO.unit
+      val safetyWarning = event == LogEvent.LocalUnmasked
+      if (event.rank < threshold && !safetyWarning) IO.unit
       else IO.realTimeInstant.flatMap { timestamp =>
         val safeId = requestId.filter(_.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"))
-        val details = fields.toList.filter { case (field, _) => field != LogField.RequestPayload || payloadsEnabled }
-          .sortBy(_._1.ordinal).take(12).map { case (field, value) =>
+        val details = fields.toList.sortBy(_._1.ordinal).take(12).map { case (field, value) =>
             val rendered =
               if (field.sensitive && maskSensitive) "[REDACTED]"
-              else if (field == LogField.RequestPayload) bounded(value, 2048)
               else if (field.sensitive || LogFields.validPublic(field, value)) bounded(value, 128)
               else "[FILTERED]"
             field.key -> Json.fromString(rendered)

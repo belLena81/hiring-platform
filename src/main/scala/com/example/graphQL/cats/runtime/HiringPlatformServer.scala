@@ -19,6 +19,7 @@ object HiringPlatformServer {
       port: Int,
       probe: DatabaseProbe,
       diagnostics: Diagnostics,
+      admissionPermits: Int,
       hiring: Option[HiringGraphQLServices] = None,
       jwtAuth: Option[JwtAuthConfig] = None,
       ensureHiringReady: IO[Boolean] = IO.pure(true)
@@ -26,7 +27,7 @@ object HiringPlatformServer {
     for {
       address <- Resource.eval(IO.fromOption(Host.fromString(host))(new IllegalArgumentException("Invalid bind address")))
       bindPort <- Resource.eval(IO.fromOption(Port.fromInt(port))(new IllegalArgumentException("Invalid bind port")))
-      admission <- Resource.eval(Admission.create)
+      admission <- Resource.eval(Admission.create(admissionPermits))
       authenticate = (hiring, jwtAuth) match {
         case (Some(services), Some(config)) =>
           new JwtActorAuthenticator(config, services.users, IO.realTimeInstant).authenticate

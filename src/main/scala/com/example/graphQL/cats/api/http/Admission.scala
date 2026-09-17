@@ -12,9 +12,9 @@ final class Admission private (semaphore: Semaphore[IO], open: Ref[IO, Boolean])
 }
 
 object Admission {
-  def create: IO[Admission] =
+  def create(permits: Int): IO[Admission] =
     for {
-      semaphore <- Semaphore[IO](16)
+      semaphore <- Semaphore[IO](permits)
       open <- Ref.of[IO, Boolean](true)
     } yield new Admission(semaphore, open)
 }

@@ -19,6 +19,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   private val embedding = EntityEmbedding(List(0.1f, 0.2f), meta)
   private val jobEmbedding = EntityEmbedding(List(0.1f, 0.2f), jobMeta)
   private val pageSize = PageSize.fromInt(5).toOption.get
+  private val configuredModel = "voyage-4-lite"
 
   test("VHS-AC02 semantic job search requires a candidate actor and returns ranked open jobs") {
     for {
@@ -34,6 +35,26 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield {
       assertEquals(accepted.map(_.map(_.job.id)), Right(List(jobId)))
       assertEquals(rejected.left.toOption, Some(DomainError.CandidateRequired))
+    }
+  }
+
+  test("VHS-AC02 semantic job search filters with the configured model when provider returns a canonical model") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+      queries <- Ref.of[IO, Vector[VectorSearchQuery]](Vector.empty)
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite-2026-09", 2))),
+        RecordingSearchRepository(queries)
+      )
+      result <- service.semanticJobSearch(ActorContext(candidateId, UserRole.Candidate), "scala backend",
+        JobSearchFilter(None, Set.empty, None), pageSize, searchId)
+      recorded <- queries.get
+    } yield {
+      assertEquals(result, Right(Nil))
+      assertEquals(recorded.map(_.model), Vector(configuredModel))
     }
   }
 
@@ -81,17 +102,22 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   test("VHS-AC03 recommended jobs report missing and stale candidate embeddings") {
     val stale = embedding.copy(meta = meta.copy(sourceHash = "stale-hash"))
+    val staleModel = embedding.copy(meta = meta.copy(model = "voyage-4-lite-2026-09"))
     for {
       missingUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
       staleUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile.copy(embedding = Some(stale))))
+      staleModelUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile.copy(embedding = Some(staleModel))))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
       missingService = semanticService(new InMemoryUsers(missingUsers), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused, FakeSearchRepository())
       staleService = semanticService(new InMemoryUsers(staleUsers), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused, FakeSearchRepository())
+      staleModelService = semanticService(new InMemoryUsers(staleModelUsers), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused, FakeSearchRepository())
       missing <- missingService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
       staleResult <- staleService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
+      staleModelResult <- staleModelService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
     } yield {
       assertEquals(missing.left.toOption, Some(SearchError.MissingEmbedding("candidate")))
       assertEquals(staleResult.left.toOption, Some(SearchError.StaleEmbedding("candidate")))
+      assertEquals(staleModelResult.left.toOption, Some(SearchError.StaleEmbedding("candidate")))
     }
   }
 
@@ -116,15 +142,23 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("VHS-AC06 candidate matching reports same-version stale job embeddings by source hash") {
+  test("VHS-AC06 candidate matching reports same-version stale job embeddings by source hash or model") {
     val staleJob = openJob.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(sourceHash = "stale-job-hash"))))
+    val staleModelJob = openJob.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(model = "voyage-4-lite-2026-09"))))
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> staleJob))
+      staleModelJobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> staleModelJob))
       service = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused,
         FakeSearchRepository())
+      staleModelService = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(staleModelJobsRef), FakeEmbeddingService.unused,
+        FakeSearchRepository())
       result <- service.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
-    } yield assertEquals(result.left.toOption, Some(SearchError.StaleEmbedding("job")))
+      staleModelResult <- staleModelService.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+    } yield {
+      assertEquals(result.left.toOption, Some(SearchError.StaleEmbedding("job")))
+      assertEquals(staleModelResult.left.toOption, Some(SearchError.StaleEmbedding("job")))
+    }
   }
 
   private def semanticService(
@@ -133,7 +167,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       embeddings: EmbeddingService[IO],
       search: SemanticSearchRepository[IO]
   ): SemanticSearchService[IO] =
-    SemanticSearchService[IO](users, jobs, embeddings, search, embeddingVersion = 1)
+    SemanticSearchService[IO](users, jobs, embeddings, search, embeddingModel = configuredModel, embeddingVersion = 1)
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
@@ -161,5 +195,18 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
     override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
       IO.pure(Right(candidates))
+  }
+
+  private final case class RecordingSearchRepository(
+      queries: Ref[IO, Vector[VectorSearchQuery]]
+  ) extends SemanticSearchRepository[IO] {
+    override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
+      queries.update(_ :+ query).as(Right(Nil))
+
+    override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
+      queries.update(_ :+ query).as(Right(Nil))
+
+    override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
+      queries.update(_ :+ query).as(Right(Nil))
   }
 }

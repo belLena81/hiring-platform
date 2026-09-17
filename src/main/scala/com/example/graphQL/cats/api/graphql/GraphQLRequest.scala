@@ -10,7 +10,6 @@ final case class GraphQLRequest(document: Document, variables: Json, operationNa
 object GraphQLRequest {
   def parseBody(body: String): Option[GraphQLRequest] =
     for {
-      _ <- Option.when(InputBudget.lexical(body, graphql = false)) (())
       json <- parse(body).toOption
       envelope <- json.asObject
       query <- envelope("query").flatMap(_.asString)
@@ -22,8 +21,6 @@ object GraphQLRequest {
         case None => Some(None)
         case Some(value) => value.asString.map(Some(_))
       }
-      _ <- Option.when(InputBudget.lexical(query, graphql = true)) (())
       document <- QueryParser.parse(query).toOption
-      _ <- Option.when(InputBudget.document(document, operationName)) (())
     } yield GraphQLRequest(document, variables, operationName)
 }
