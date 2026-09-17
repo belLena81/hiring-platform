@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.application.{AuthenticationError, HealthService, ProbeResult, UseCaseError}
+import com.example.graphQL.cats.application.{ActorContext, AuthenticationError, HealthService, ProbeResult, UseCaseError}
 import com.example.graphQL.cats.application.port.*
 import com.example.graphQL.cats.application.service.{ActorAuthorization, CreateJobInput, JobService, UpdateJobInput}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
@@ -384,7 +384,7 @@ object HiringGraphQLSchema {
 
   private def changeJob(
       context: Context[RequestContext, Unit],
-      method: JobService[IO] => (com.example.graphQL.cats.application.ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
+      method: JobService[IO] => (ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
   ): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
       parseJobId(context.arg(jobActionInputArgument).jobId) match {
@@ -426,18 +426,18 @@ object HiringGraphQLSchema {
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Declined, None, input.reason)
   }
 
-  private def authenticated(context: Context[RequestContext, Unit]): IO[Either[UseCaseError, (com.example.graphQL.cats.application.ActorContext, HiringGraphQLServices)]] =
+  private def authenticated(context: Context[RequestContext, Unit]): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices)]] =
     IO.pure((context.ctx.actor, context.ctx.hiring).mapN((_, _)).toRight(AuthenticationError.Unauthorized: UseCaseError))
 
   private def authenticatedConnection[A](
       context: Context[RequestContext, Unit]
-  )(action: (com.example.graphQL.cats.application.ActorContext, HiringGraphQLServices) => IO[Connection[A]]): IO[Connection[A]] =
+  )(action: (ActorContext, HiringGraphQLServices) => IO[Connection[A]]): IO[Connection[A]] =
     authenticated(context).flatMap(_.fold(error => IO.pure(errorConnection[A](error)), action.tupled))
 
   private def authenticatedPayload[A](
       unauthenticated: List[GraphQLError] => A
   )(context: Context[RequestContext, Unit])(
-      action: (com.example.graphQL.cats.application.ActorContext, HiringGraphQLServices) => IO[A]
+      action: (ActorContext, HiringGraphQLServices) => IO[A]
   ): IO[A] =
     authenticated(context).flatMap(_.fold(error => IO.pure(unauthenticated(List(this.error(error)))), action.tupled))
 
@@ -514,7 +514,7 @@ object HiringGraphQLSchema {
     Either.catchNonFatal(ApplicationId(UUID.fromString(value))).toOption
 
   private def canViewApplication(
-      actor: com.example.graphQL.cats.application.ActorContext,
+      actor: ActorContext,
       hiring: HiringGraphQLServices,
       applicationId: ApplicationId
   ): IO[Either[UseCaseError, Unit]] =
