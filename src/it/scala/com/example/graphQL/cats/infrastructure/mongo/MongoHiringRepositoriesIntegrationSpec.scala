@@ -12,7 +12,8 @@ import com.example.graphQL.cats.application.service.{CreateJobInput, SourceHash}
 import com.example.graphQL.cats.config.{JwtAuthConfig, VectorSearchConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
-  Application, ApplicationEvent, ApplicationStatus, CandidateProfile, Job, JobStatus, Location, SearchableText, User, UserRole
+  Application, ApplicationEvent, ApplicationStatus, CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location,
+  SearchableText, User, UserRole
 }
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
 import io.circe.Json
@@ -223,6 +224,39 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(jobPage.map(_.id), List(applicationId))
           assertEquals(eventHistory.map(_.newStatus).toSet, Set(ApplicationStatus.Created, ApplicationStatus.Accepted))
           assertEquals(history.size, 2)
+        }
+      }
+    }
+  }
+
+  test("job embedding updates are guarded by observed job version") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_job_embedding_guard")
+        val jobs = MongoJobRepository(database)
+        val job = jobFixture(jobId, JobStatus.Open)
+        val currentHash = SourceHash.sha256(SearchableText.job(job.copy(title = "Principal Scala Developer", updatedAt = later)))
+        val currentEmbedding = EntityEmbedding(
+          List(0.1f, 0.2f),
+          EmbeddingMeta("voyage-4-lite", 1, currentHash, later)
+        )
+        val staleEmbedding = EntityEmbedding(
+          List(0.9f, 0.8f),
+          EmbeddingMeta("voyage-4-lite", 1, "stale-hash", later)
+        )
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          _ <- jobs.create(job)
+          updated <- jobs.update(job.copy(title = "Principal Scala Developer", updatedAt = later))
+          observed <- IO.fromEither(updated.leftMap(error => new AssertionError(s"job update failed: $error")))
+          freshResult <- jobs.updateEmbedding(jobId, observed.version, currentEmbedding)
+          staleResult <- jobs.updateEmbedding(jobId, 0L, staleEmbedding)
+          stored <- jobs.find(jobId)
+        } yield {
+          assertEquals(freshResult, Right(()))
+          assertEquals(staleResult, Left(RepositoryError.Conflict))
+          assertEquals(stored.flatMap(_.embedding).map(_.meta.sourceHash), Some(currentHash))
+          assertEquals(stored.flatMap(_.embedding).map(_.values), Some(List(0.1f, 0.2f)))
         }
       }
     }

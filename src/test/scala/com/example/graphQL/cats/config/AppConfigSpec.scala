@@ -153,6 +153,25 @@ class AppConfigSpec extends FunSuite {
       Right(("::1", 9090, "mongodb://127.0.0.1:27018", "WARN")))
   }
 
+  test("CFG-AC02 injected env resolution ignores process system properties") {
+    val previous = Option(System.getProperty("HTTP_HOST"))
+    System.setProperty("HTTP_HOST", "::1")
+    try {
+      val config =
+        defaultConfig.replace("host = \"127.0.0.1\"", "host = ${?HTTP_HOST}")
+      assertEquals(AppConfig.fromConfig(config, Map.empty), Left(ConfigError.InvalidHost))
+      assert(AppConfig.fromConfig(config, Map("HTTP_HOST" -> "::1")).isRight)
+    } finally {
+      previous.fold {
+        val _ = System.clearProperty("HTTP_HOST")
+        ()
+      } { value =>
+        val _ = System.setProperty("HTTP_HOST", value)
+        ()
+      }
+    }
+  }
+
   test("P1-AC01 local config overlays application config values") {
     val local =
       """http.port = 9090

@@ -106,11 +106,13 @@ private[cats] object ServiceFixtures {
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
 
-    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       ref.modify { jobs =>
         jobs.get(id) match {
-          case Some(job) => (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
+          case Some(job) if job.version == observedVersion =>
+            (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
           case None => (jobs, Left(RepositoryError.Conflict))
+          case Some(_) => (jobs, Left(RepositoryError.Conflict))
         }
       }
 

@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.application.service
 
 import cats.effect.std.Queue
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.application.port.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
@@ -16,9 +16,15 @@ enum EmbeddingWork {
   case CandidateProfileChanged(id: UserId)
 }
 
-final class EmbeddingWorkQueue private[service] (queue: Queue[IO, EmbeddingWork]) extends EmbeddingWorkPublisher[IO] {
-  def offer(work: EmbeddingWork): IO[Unit] = queue.offer(work)
-  override def publish(work: EmbeddingWork): IO[Unit] = offer(work)
+final class EmbeddingWorkQueue private[service] (
+    wakeups: Queue[IO, Unit],
+    pending: Ref[IO, Set[EmbeddingWork]]
+) extends EmbeddingWorkPublisher[IO] {
+  def offer(work: EmbeddingWork): IO[Unit] =
+    pending.update(_ + work) *> wakeups.tryOffer(()).void
+
+  override def publish(work: EmbeddingWork): IO[Unit] =
+    offer(work)
 }
 
 trait EmbeddingWorkPublisher[F[_]] {
@@ -32,11 +38,13 @@ object EmbeddingWorkPublisher {
 
 object EmbeddingWorkQueue {
   def bounded(capacity: Int): IO[EmbeddingWorkQueue] =
-    Queue.bounded[IO, EmbeddingWork](capacity).map(new EmbeddingWorkQueue(_))
+    (Queue.bounded[IO, Unit](capacity), Ref.of[IO, Set[EmbeddingWork]](Set.empty))
+      .mapN(new EmbeddingWorkQueue(_, _))
 }
 
 final class EmbeddingPipeline(
-    queue: Queue[IO, EmbeddingWork],
+    wakeups: Queue[IO, Unit],
+    pending: Ref[IO, Set[EmbeddingWork]],
     users: UserRepository[IO],
     jobs: JobRepository[IO],
     embeddings: EmbeddingService[IO],
@@ -46,7 +54,17 @@ final class EmbeddingPipeline(
     now: IO[Instant]
 ) {
   def stream: Stream[IO, Unit] =
-    Stream.fromQueueUnterminated(queue).parEvalMap(parallelism)(process)
+    Stream.fromQueueUnterminated(wakeups).parEvalMap(parallelism)(_ => drain)
+
+  private def drain: IO[Unit] =
+    nextWork.flatMap(_.fold(IO.unit)(work => process(work) *> drain))
+
+  private def nextWork: IO[Option[EmbeddingWork]] =
+    pending.modify { work =>
+      work.headOption.fold(work -> Option.empty[EmbeddingWork]) { next =>
+        (work - next) -> Some(next)
+      }
+    }
 
   private def process(work: EmbeddingWork): IO[Unit] =
     work match {
@@ -55,8 +73,8 @@ final class EmbeddingPipeline(
           case Some(job) =>
             val text = SearchableText.job(job)
             val hash = SourceHash.sha256(text)
-            if (job.embedding.exists(_.meta.sourceHash == hash)) IO.unit
-            else embedDocument(text).flatMap(_.traverse_(embedding => jobs.updateEmbedding(id, embedding).void))
+            if (job.embedding.exists(isCurrent(_, hash))) IO.unit
+            else embedDocument(text).flatMap(_.traverse_(embedding => jobs.updateEmbedding(id, job.version, embedding).void))
           case None => IO.unit
         }
       case EmbeddingWork.CandidateProfileChanged(id) =>
@@ -66,13 +84,16 @@ final class EmbeddingPipeline(
               case Some(profile) =>
                 val text = SearchableText.candidate(profile)
                 val hash = SourceHash.sha256(text)
-                if (user.embedding.exists(_.meta.sourceHash == hash)) IO.unit
+                if (user.embedding.exists(isCurrent(_, hash))) IO.unit
                 else embedDocument(text).flatMap(_.traverse_(embedding => users.updateEmbedding(id, embedding).void))
               case None => IO.unit
             }
           case None => IO.unit
         }
     }
+
+  private def isCurrent(embedding: EntityEmbedding, hash: String): Boolean =
+    embedding.meta.sourceHash == hash && embedding.meta.model == model && embedding.meta.version == version
 
   private def embedDocument(text: String): IO[Option[EntityEmbedding]] =
     if (text.length > SearchableText.DocumentMaxChars) IO.pure(None)
@@ -95,9 +116,21 @@ object EmbeddingPipeline {
       queueSize: Int,
       parallelism: Int
   ): Resource[IO, EmbeddingWorkQueue] =
-    Resource.eval(Queue.bounded[IO, EmbeddingWork](queueSize)).flatMap { queue =>
-      val pipeline = new EmbeddingPipeline(queue, users, jobs, embeddings, model, version, parallelism, IO.realTimeInstant)
-      Resource.make(pipeline.stream.compile.drain.start)(_.cancel).as(new EmbeddingWorkQueue(queue))
+    Resource.eval((Queue.bounded[IO, Unit](queueSize), Ref.of[IO, Set[EmbeddingWork]](Set.empty)).tupled).flatMap {
+      case (wakeups, pending) =>
+        val publisher = new EmbeddingWorkQueue(wakeups, pending)
+        val pipeline = new EmbeddingPipeline(
+          wakeups,
+          pending,
+          users,
+          jobs,
+          embeddings,
+          model,
+          version,
+          parallelism,
+          IO.realTimeInstant
+        )
+        Resource.make(pipeline.stream.compile.drain.start)(_.cancel).as(publisher)
     }
 }
 

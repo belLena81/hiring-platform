@@ -5,7 +5,7 @@ import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
 import com.example.graphQL.cats.application.port.EmbeddingService
-import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, ProbeResult}
+import com.example.graphQL.cats.application.{DatabaseProbe, Diagnostics, LogField, ProbeResult}
 import com.example.graphQL.cats.application.service.{ApplicationService, EmbeddingPipeline, JobService, SemanticSearchService}
 import com.example.graphQL.cats.config.VectorSearchConfig
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
@@ -48,7 +48,8 @@ object MongoHiringRuntime {
         val applications = MongoApplicationRepository.transactional(database, client)
         hiringServices(database, users, jobs, applications, vectorSearch, embeddingService).map { services =>
           val setup = ensureSetup(database, setupComplete, setupLock)
-          MongoHiringRuntime(probe(uri, databaseName, diagnostics, setup), services, setup)
+          val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
+          MongoHiringRuntime(probe(database, metadata, diagnostics, setup), services, setup)
         }
       }
     }
@@ -131,16 +132,18 @@ object MongoHiringRuntime {
     )
 
   private def probe(
-      uri: String,
-      databaseName: String,
+      database: MongoDatabase,
+      metadata: Map[LogField, String],
       diagnostics: Diagnostics,
       setup: IO[Boolean]
   ): DatabaseProbe = new DatabaseProbe {
+    private val delegate = MongoDatabaseProbe.fromDatabase(database, metadata, diagnostics)
+
     override def check: IO[ProbeResult] =
       check(None)
 
     override def check(requestId: Option[String]): IO[ProbeResult] =
-      MongoDatabaseProbe.resource(uri, databaseName, diagnostics).use(_.check(requestId)).flatMap {
+      delegate.check(requestId).flatMap {
         case ProbeResult.Ready => setup.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
         case other => IO.pure(other)
       }

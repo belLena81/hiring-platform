@@ -161,10 +161,10 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
     }.handleError(mapWrite)
   }
 
-  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge.first(collection.updateOne(
-      Filters.eq("_id", id.value.toString),
+      Filters.and(Filters.eq("_id", id.value.toString), Filters.eq("version", observedVersion)),
       Updates.combine(
         Updates.set("embedding", encoded.get("embedding")),
         Updates.set("embeddingMeta", encoded.get("embeddingMeta"))

@@ -29,7 +29,7 @@ trait JobRepository[F[_]] {
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[List[Job]]
   def create(job: Job): F[Either[RepositoryError, Unit]]
   def update(job: Job): F[Either[RepositoryError, Job]]
-  def updateEmbedding(id: JobId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
+  def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
 trait EmbeddingService[F[_]] {

@@ -94,7 +94,7 @@ object AppConfig {
   ): Either[ConfigError, AppConfig] =
     base.fold(fromRawConfig(raw, "", env)) { current =>
       for {
-        overrideConfig <- rawToConfig(raw, env)
+        overrideConfig <- rawToConfig(raw)
         baseConfig <- configToRaw(current)
         merged <- Try(overrideConfig.withFallback(baseConfig).resolve(resolveOptions(env))).toEither
           .left.map(_ => ConfigError.InvalidConfigFile)
@@ -108,8 +108,8 @@ object AppConfig {
       env: String => Option[String]
   ): Either[ConfigError, AppConfig] =
     for {
-      defaultConfig <- rawToConfig(defaults, env)
-      localConfig <- rawToConfig(local, env)
+      defaultConfig <- rawToConfig(defaults)
+      localConfig <- rawToConfig(local)
       merged <- Try(localConfig.withFallback(defaultConfig).resolve(resolveOptions(env))).toEither
         .left.map(_ => ConfigError.InvalidConfigFile)
       config <- readAppConfig(merged)
@@ -117,7 +117,7 @@ object AppConfig {
 
   private def fromSources(localConfig: Path, env: String => Option[String]): Either[ConfigError, AppConfig] =
     for {
-      defaults <- Try(ConfigFactory.load(DefaultConfigResource)).toEither.left.map(_ => ConfigError.InvalidConfigFile)
+      defaults <- Try(ConfigFactory.parseResources(DefaultConfigResource, parseOptions)).toEither.left.map(_ => ConfigError.InvalidConfigFile)
       local <- Try {
         if (Files.isRegularFile(localConfig)) ConfigFactory.parseFile(localConfig.toFile, parseOptions)
         else ConfigFactory.empty()
@@ -204,8 +204,8 @@ object AppConfig {
     } yield AppConfig(host, validPort, uri, database, level, masking, payloads, jwtAuth, vector)
   }
 
-  private def rawToConfig(raw: String, env: String => Option[String]): Either[ConfigError, com.typesafe.config.Config] =
-    Try(ConfigFactory.parseString(raw, parseOptions).resolve(resolveOptions(env))).toEither
+  private def rawToConfig(raw: String): Either[ConfigError, com.typesafe.config.Config] =
+    Try(ConfigFactory.parseString(raw, parseOptions)).toEither
       .left.map(_ => ConfigError.InvalidConfigFile)
 
   private def readError(failures: ConfigReaderFailures): ConfigError =
@@ -282,7 +282,6 @@ object AppConfig {
          |  num-candidates = ${config.vectorSearch.numCandidates}
          |}
          |""".stripMargin,
-      _ => None
     )
 
   private val parseOptions: ConfigParseOptions =
@@ -301,7 +300,7 @@ object AppConfig {
           this.withFallback(fallback.withFallback(next))
       }
     }
-    ConfigResolveOptions.defaults().appendResolver(resolver)
+    ConfigResolveOptions.noSystem().appendResolver(resolver)
   }
 
   private final case class RawAppConfig(
