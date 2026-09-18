@@ -30,9 +30,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private val closedJobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000004"))
   private val applicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000005"))
 
-  private val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
-  private val recruiter = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
-  private val admin = User(adminId, "admin@example.com", "Admin", UserRole.Admin, None, now, adminSingleton = true)
+  private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+  private val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now, recruiterProfile = Some(RecruiterProfile("Acme", None)))
+  private val admin = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
   private val openJob = job(jobId, JobStatus.Open)
   private val closedJob = job(closedJobId, JobStatus.Closed)
   private val application = Application.create(applicationId, candidateId, jobId, now)
@@ -135,6 +135,32 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("User profile resolves through the role-specific union") {
+    val query =
+      """query {
+        |  jobs(first: 10) {
+        |    edges {
+        |      node {
+        |        recruiter {
+        |          profile {
+        |            __typename
+        |            ... on RecruiterProfile { organizationName }
+        |          }
+        |        }
+        |      }
+        |    }
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+
+    execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
+      val profile = json.hcursor.downField("data").downField("jobs").downField("edges").downArray
+        .downField("node").downField("recruiter").downField("profile")
+      assertEquals(profile.get[String]("__typename"), Right("RecruiterProfile"))
+      assertEquals(profile.get[String]("organizationName"), Right("Acme"))
+    }
+  }
+
   test("job search rejects malformed createdAfter instead of widening results") {
     val query =
       """query {
@@ -216,7 +242,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val secondRecruiterId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000007"))
     val secondJobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000008"))
     val secondApplicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000009"))
-    val secondRecruiter = User(secondRecruiterId, "recruiter2@example.com", "Recruiter 2", UserRole.Recruiter, None, now)
+    val secondRecruiter = User(secondRecruiterId, Some("recruiter2@example.com"), "Recruiter 2", UserRole.Recruiter, None, now)
     val secondJob = openJob.copy(id = secondJobId, recruiterId = secondRecruiterId, title = "Platform Engineer")
     val secondApplication = Application.create(secondApplicationId, candidateId, secondJobId, now.minusSeconds(60))
     val query =

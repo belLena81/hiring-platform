@@ -14,7 +14,7 @@ class DomainValidationSpec extends FunSuite {
   private val location = Location("Ukraine", "Kyiv", remote = true)
 
   test("user validation accumulates independent field errors with ValidatedNel") {
-    val result = User.validate(userId, " ", "", UserRole.Candidate, None, now)
+    val result = User.validate(userId, Some(" "), "", UserRole.Candidate, None, now)
 
     assertEquals(result.leftMap(_.toList).toEither, Left(List(BlankField("email"), BlankField("name"))))
   }

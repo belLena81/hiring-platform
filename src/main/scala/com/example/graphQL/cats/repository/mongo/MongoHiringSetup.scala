@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
+import com.example.graphQL.cats.domain.model.AccountName
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
@@ -21,6 +22,9 @@ final case class AtlasSearchIndexConfig(
 
 object MongoHiringSetup {
   val UsersEmailIndex = "users_emailCanonical_unique"
+  val UsersNameIndex = "users_nameCanonical_unique"
+  val UsersStatusCreatedIndex = "users_accountStatus_created_id"
+  val UsersRoleStatusCreatedIndex = "users_role_accountStatus_created_id"
   val UsersAdminSingletonIndex = "users_adminSingleton_unique"
   val ApplicationsCandidateJobIndex = "applications_candidate_job_unique"
   val JobsRecruiterStatusCreatedIndex = "jobs_recruiter_status_created_id"
@@ -40,19 +44,29 @@ object MongoHiringSetup {
   val HiringAdminJobListingIndexMigrationId = "hiring-admin-job-listing-indexes-v1"
   val HiringVectorSearchMigrationId = "hiring-vector-search-v1"
   val HiringAtlasSearchIndexMigrationId = "hiring-atlas-search-indexes-v1"
+  val UserNameCanonicalMigrationId = "user-name-canonical-v1"
+  val UserAccountMigrationId = "user-account-management-v1"
 
   def initialize(database: MongoDatabase): IO[Unit] =
     initialize(database, None)
 
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    ordinaryIndexes(database).sequence_.flatMap { _ =>
+    backfillLegacyNames(database) *> (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_.flatMap { _ =>
       val atlasSetup = atlas.fold(IO.unit)(config => provisionAtlasIndexes(database, config))
       atlasSetup *> recordMigrations(database, atlas.isDefined)
     }
 
   private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
       createIndex(database.getCollection("users"),
-        Indexes.ascending("emailCanonical"), new IndexOptions().name(UsersEmailIndex).unique(true)),
+        Indexes.ascending("emailCanonical"), new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true)),
+      createIndex(database.getCollection("users"),
+        Indexes.ascending("nameCanonical"), new IndexOptions().name(UsersNameIndex).unique(true)),
+      createIndex(database.getCollection("users"),
+        Indexes.compoundIndex(Indexes.ascending("accountStatus"), Indexes.descending("createdAt", "_id")),
+        new IndexOptions().name(UsersStatusCreatedIndex)),
+      createIndex(database.getCollection("users"),
+        Indexes.compoundIndex(Indexes.ascending("role", "accountStatus"), Indexes.descending("createdAt", "_id")),
+        new IndexOptions().name(UsersRoleStatusCreatedIndex)),
       createIndex(database.getCollection("users"),
         Indexes.ascending("adminSingletonKey"),
         new IndexOptions().name(UsersAdminSingletonIndex).unique(true)
@@ -103,6 +117,10 @@ object MongoHiringSetup {
       recordMigration(migrations, HiringGraphQLSearchIndexMigrationId, "Hiring GraphQL job search indexes") *>
       recordMigration(migrations, HiringAdminJobListingIndexMigrationId, "Hiring Admin job listing indexes") *>
       recordMigration(migrations, HiringVectorSearchMigrationId, "Hiring Vector Search metadata indexes")
+      *>
+      recordMigration(migrations, UserNameCanonicalMigrationId, "Backfill canonical account names before the unique index")
+      *>
+      recordMigration(migrations, UserAccountMigrationId, "User account credentials, lifecycle, and query indexes")
     Option.when(atlasEnabled)(recordMigration(migrations, HiringAtlasSearchIndexMigrationId,
       "Hiring Atlas vector and lexical search indexes")).fold(base)(base *> _)
   }
@@ -212,4 +230,41 @@ object MongoHiringSetup {
       options: IndexOptions
   ): IO[Unit] =
     PublisherBridge.first(collection.createIndex(keys, options)).void
+
+  private def backfillLegacyNames(database: MongoDatabase): IO[Unit] = {
+    val users = database.getCollection("users")
+    PublisherBridge.all(users.find()).flatMap { documents =>
+      val resolved = documents.traverse { document =>
+        Option(document.getString("name")).filter(_.trim.nonEmpty) match {
+          case Some(name) => Right(document -> AccountName.canonical(name))
+          case None => Left(new IllegalStateException("users collection contains an account without a valid name"))
+        }
+      }
+      resolved match {
+        case Left(error) => IO.raiseError(error)
+        case Right(values) =>
+          val collisions = values.groupBy(_._2).collect { case (canonical, records) if records.size > 1 => canonical }.toList
+          if (collisions.nonEmpty)
+            IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names"))
+          else values.filterNot { case (document, _) => document.containsKey("nameCanonical") }.traverse_ {
+            case (document, canonical) =>
+              PublisherBridge.first(users.updateOne(
+                Filters.eq("_id", document.get("_id")),
+                Updates.set("nameCanonical", canonical)
+              )).void
+          }
+      }
+    }
+  }
+
+  private def ensureAccountRegistry(database: MongoDatabase): IO[Unit] =
+    PublisherBridge.first(database.getCollection("account_registry").updateOne(
+      Filters.eq("_id", "user-account-registry"),
+      Updates.combine(
+        Updates.setOnInsert("_id", "user-account-registry"),
+        Updates.setOnInsert("schemaVersion", 1),
+        Updates.setOnInsert("state", "Uninitialized")
+      ),
+      new UpdateOptions().upsert(true)
+    )).void
 }

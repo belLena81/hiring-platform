@@ -34,6 +34,7 @@ import pdi.jwt.JwtCirce
 
 import java.time.{Duration, Instant}
 import java.util.{Date, UUID}
+import scala.jdk.CollectionConverters.*
 import scala.concurrent.duration.*
 
 class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
@@ -64,6 +65,53 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   private val secondEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000108"))
   private val thirdEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000109"))
 
+  test("setup backfills legacy canonical names before creating the unique index") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_legacy_names")
+        val users = database.getCollection("users")
+        val legacyCandidate = new Document("_id", "legacy-user-1")
+          .append("name", "Legacy Candidate")
+          .append("role", "Candidate")
+          .append("createdAt", Date.from(now))
+        val legacyRecruiter = new Document("_id", "legacy-user-2")
+          .append("name", "Legacy Recruiter")
+          .append("role", "Recruiter")
+          .append("createdAt", Date.from(now))
+        for {
+          _ <- PublisherBridge.first(users.insertMany(List(legacyCandidate, legacyRecruiter).asJava))
+          _ <- MongoHiringSetup.initialize(database)
+          candidate <- PublisherBridge.first(users.find(Filters.eq("_id", "legacy-user-1")))
+          recruiter <- PublisherBridge.first(users.find(Filters.eq("_id", "legacy-user-2")))
+          indexes <- indexes(users)
+        } yield {
+          assertEquals(candidate.map(_.getString("nameCanonical")), Some("legacy candidate"))
+          assertEquals(recruiter.map(_.getString("nameCanonical")), Some("legacy recruiter"))
+          assert(indexes.contains(MongoHiringSetup.UsersNameIndex))
+        }
+      }
+    }
+  }
+
+  test("setup fails closed for legacy canonical-name collisions") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_legacy_name_collision")
+        val users = database.getCollection("users")
+        val first = new Document("_id", "legacy-user-1").append("name", "Same Name").append("role", "Candidate").append("createdAt", Date.from(now))
+        val second = new Document("_id", "legacy-user-2").append("name", " same name ").append("role", "Recruiter").append("createdAt", Date.from(now))
+        for {
+          _ <- PublisherBridge.first(users.insertMany(List(first, second).asJava))
+          result <- MongoHiringSetup.initialize(database).attempt
+          indexes <- indexes(users)
+        } yield {
+          assert(result.left.toOption.exists(_.getMessage.contains("duplicate canonical account names")))
+          assert(!indexes.contains(MongoHiringSetup.UsersNameIndex))
+        }
+      }
+    }
+  }
+
   test("setup is idempotent and creates named indexes plus migration record") {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
@@ -93,11 +141,22 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             .find(new Document("_id", MongoHiringSetup.HiringAdminJobListingIndexMigrationId)))
           vectorSearchMigration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.HiringVectorSearchMigrationId)))
+          userAccountMigration <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.UserAccountMigrationId)))
+          accountRegistry <- PublisherBridge.first(database.getCollection("account_registry")
+            .find(new Document("_id", "user-account-registry")))
         } yield {
           assertEquals(MongoHiringSetup.HiringDomainMongoMigrationId, "phase-2-domain-mongodb-v1")
           assertIndex(users, MongoHiringSetup.UsersEmailIndex, new Document("emailCanonical", 1), unique = Some(true), partial = None)
+          assertIndex(users, MongoHiringSetup.UsersNameIndex, new Document("nameCanonical", 1), unique = Some(true), partial = None)
+          assertIndex(users, MongoHiringSetup.UsersStatusCreatedIndex,
+            new Document("accountStatus", 1).append("createdAt", -1).append("_id", -1), None, None)
+          assertIndex(users, MongoHiringSetup.UsersRoleStatusCreatedIndex,
+            new Document("role", 1).append("accountStatus", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
+          assertEquals(userAccountMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserAccountMigrationId))
+          assertEquals(accountRegistry.map(_.getString("state")), Some("Uninitialized"))
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex,
             new Document("recruiterId", 1).append("status", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterCreatedIndex,
@@ -157,11 +216,11 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           Some("Builds backend services"),
           Some("resume://candidate-101")
         )
-        val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, Some(candidateProfile), now)
-        val recruiter = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
-        val admin = User(adminId, "admin@example.com", "Admin", UserRole.Admin, None, now, adminSingleton = true)
+        val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, Some(candidateProfile), now)
+        val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
+        val admin = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
         val unseededAdmin =
-          User(UserId(UUID.fromString("00000000-0000-0000-0000-000000000111")), "admin2@example.com", "Admin 2", UserRole.Admin, None, now)
+          User(UserId(UUID.fromString("00000000-0000-0000-0000-000000000111")), Some("admin2@example.com"), "Admin 2", UserRole.Admin, None, now)
         val job = Job(
           jobId,
           recruiterId,
@@ -210,7 +269,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(rejectedAdmin, Left(RepositoryError.Conflict))
           assertEquals(staleJob, Left(RepositoryError.Conflict))
           assertEquals(staleStatus, Left(RepositoryError.Conflict))
-          assertEquals(foundCandidate.map(_.email), Some("candidate@example.com"))
+          assertEquals(foundCandidate.flatMap(_.email), Some("candidate@example.com"))
           assertEquals(foundCandidate.flatMap(_.profile), Some(candidateProfile))
           assertEquals(foundAdmin.map(_.adminSingleton), Some(true))
           assertEquals(updatedJob.map(_.version), Right(1L))
@@ -432,8 +491,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     replicaSetContainer.use { uri =>
       MongoHiringRuntime.resource(uri, "hiring_served_jwt", Diagnostics.noop).use { runtime =>
         val jwt = JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api")
-        val candidateUser = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
-        val recruiterUser = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
+        val candidateUser = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+        val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
         for {
           admission <- Admission.create(16)
           _ <- MongoDatabaseProbe.clientResource(uri).use { client =>
@@ -486,7 +545,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     replicaSetContainer.use { uri =>
       MongoHiringRuntime.resource(uri, "hiring_vector_runtime", Diagnostics.noop, vectorConfig,
         (config, _) => FakeEmbeddingService(config)).use { runtime =>
-        val recruiterUser = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
+        val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
         val create = CreateJobInput(
           "Vector Scala Developer",
           "Build semantic search services",

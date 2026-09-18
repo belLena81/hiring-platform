@@ -8,36 +8,47 @@ import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 
 private[mongo] object MongoHiringCodecs {
-  def user(user: User): Document =
-    appendOptionalEmbedding(
-      appendOptionalDocument(
-        appendOptionalString(new Document("_id", user.id.value.toString)
-          .append("schemaVersion", 1)
-          .append("email", user.email)
-          .append("emailCanonical", user.email.toLowerCase)
-          .append("name", user.name)
-          .append("role", user.role.toString)
-          .append("createdAt", Date.from(user.createdAt)),
-          "adminSingletonKey",
-          Option.when(user.role == UserRole.Admin && user.adminSingleton)("singleton-admin")
-        ),
-        "profile",
-        user.profile.map(profile)
-      ),
-      user.embedding
-    )
+  def userWithPassword(value: User, passwordHash: String): Document =
+    user(value).append("passwordHash", passwordHash)
+
+  def user(value: User): Document = {
+    val document = new Document("_id", value.id.value.toString)
+      .append("schemaVersion", 2)
+      .append("name", value.name)
+      .append("nameCanonical", AccountName.canonical(value.name))
+      .append("role", value.role.toString)
+      .append("accountStatus", value.accountStatus.toString)
+      .append("version", java.lang.Long.valueOf(value.version))
+      .append("createdAt", Date.from(value.createdAt))
+    value.email.foreach(email => document.append("email", email).append("emailCanonical", AccountName.canonical(email)))
+    if (value.role == UserRole.Admin && value.adminSingleton) {
+      document.append("adminSingletonKey", "singleton-admin")
+      ()
+    }
+    value.profile.foreach(profileValue => document.append("profile", profile(profileValue)))
+    value.recruiterProfile.foreach(profileValue => document.append("recruiterProfile", recruiterProfile(profileValue)))
+    value.deletedAt.foreach(deletedAt => document.append("deletedAt", Date.from(deletedAt)))
+    appendOptionalEmbedding(document, value.embedding)
+  }
 
   def readUser(document: Document): User =
     User(
       UserId(UUID.fromString(document.getString("_id"))),
-      document.getString("email"),
+      Option(document.getString("email")),
       document.getString("name"),
       UserRole.valueOf(document.getString("role")),
       Option(document.get("profile", classOf[Document])).map(readProfile),
       instant(document, "createdAt"),
       Option(document.getString("adminSingletonKey")).contains("singleton-admin"),
-      readEmbedding(document)
+      readEmbedding(document),
+      Option(document.get("recruiterProfile", classOf[Document])).map(readRecruiterProfile),
+      Option(document.getString("accountStatus")).map(AccountStatus.valueOf).getOrElse(AccountStatus.Active),
+      Option(document.getDate("deletedAt")).map(_.toInstant),
+      Option(document.get("version", classOf[Number])).fold(0L)(_.longValue)
     )
+
+  def readCredentials(document: Document): Option[AccountCredentials] =
+    Option(document.getString("passwordHash")).map(hash => AccountCredentials(readUser(document), hash))
 
   def job(job: Job): Document =
     appendOptionalEmbedding(
@@ -146,6 +157,12 @@ private[mongo] object MongoHiringCodecs {
       Option(document.getString("resumeRef"))
     )
 
+  private def recruiterProfile(profile: RecruiterProfile): Document =
+    appendOptionalString(new Document("organizationName", profile.organizationName), "jobTitle", profile.jobTitle)
+
+  private def readRecruiterProfile(document: Document): RecruiterProfile =
+    RecruiterProfile(document.getString("organizationName"), Option(document.getString("jobTitle")))
+
   def embeddingDocument(embedding: EntityEmbedding): Document =
     new Document("embedding", embedding.values.map(float => java.lang.Double.valueOf(float.toDouble)).asJava)
       .append("embeddingMeta", embeddingMeta(embedding.meta))
@@ -183,11 +200,6 @@ private[mongo] object MongoHiringCodecs {
 
   private def appendOptionalDate(document: Document, field: String, value: Option[Instant]): Document = {
     value.foreach(instant => document.append(field, Date.from(instant)))
-    document
-  }
-
-  private def appendOptionalDocument(document: Document, field: String, value: Option[Document]): Document = {
-    value.foreach(document.append(field, _))
     document
   }
 

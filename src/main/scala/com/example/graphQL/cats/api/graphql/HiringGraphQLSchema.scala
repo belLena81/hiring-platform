@@ -2,12 +2,12 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, AvailabilityError, HealthService, ProbeResult, RepositoryError, SearchError, TraceContext, UseCaseError}
+import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, HealthService, ProbeResult, RepositoryError, SearchError, TraceContext, UseCaseError}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
-import com.example.graphQL.cats.service.protocol.{JobUseCases, SearchUseCases}
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, BootstrapAdminInput, LoginInput, SignUpInput, JobUseCases, SearchUseCases}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
 import io.circe.{Decoder, Json}
@@ -18,6 +18,7 @@ import sangria.schema.*
 
 import java.time.Instant
 import java.util.UUID
+import java.util.Locale
 
 object HiringGraphQLSchema {
   private val MaxQueryDepth = 16
@@ -34,6 +35,9 @@ object HiringGraphQLSchema {
   private final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, errors: List[GraphQLError] = Nil)
   private final case class JobPayload(job: Option[Job], errors: List[GraphQLError])
   private final case class ApplicationPayload(application: Option[Application], errors: List[GraphQLError])
+  private final case class AccountPayload(user: Option[User], accessToken: Option[String], expiresAt: Option[String], errors: List[GraphQLError])
+  private final case class UserPayload(user: Option[User], errors: List[GraphQLError])
+  private final case class DeleteAccountPayload(deleted: Boolean, errors: List[GraphQLError])
   private final case class JobFilterGraphQLInput(city: Option[String], skills: Option[List[String]], createdAfter: Option[String])
   private final case class CandidateMatchProfile(skills: Set[String], experienceSummary: Option[String])
   private final case class CandidateMatchCandidate(id: String, name: String, profile: Option[CandidateMatchProfile])
@@ -56,6 +60,10 @@ object HiringGraphQLSchema {
   private final case class ApplicationActionGraphQLInput(applicationId: String)
   private final case class RejectApplicationGraphQLInput(applicationId: String, feedback: Option[String])
   private final case class DeclineApplicationGraphQLInput(applicationId: String, reason: Option[String])
+  private final case class SignUpGraphQLInput(name: String, role: String, password: String, skills: Option[List[String]], experienceSummary: Option[String], resumeRef: Option[String], organizationName: Option[String], jobTitle: Option[String])
+  private final case class BootstrapAdminGraphQLInput(name: String, password: String)
+  private final case class LoginGraphQLInput(name: String, password: String)
+  private final case class UpdateProfileGraphQLInput(skills: Option[List[String]], experienceSummary: Option[String], resumeRef: Option[String], organizationName: Option[String], jobTitle: Option[String])
 
   private given Decoder[SubmitApplicationGraphQLInput] =
     Decoder.forProduct1("jobId")(SubmitApplicationGraphQLInput.apply)
@@ -73,6 +81,14 @@ object HiringGraphQLSchema {
     Decoder.forProduct2("applicationId", "reason")(DeclineApplicationGraphQLInput.apply)
   private given Decoder[JobFilterGraphQLInput] =
     Decoder.forProduct3("city", "skills", "createdAfter")(JobFilterGraphQLInput.apply)
+  private given Decoder[SignUpGraphQLInput] =
+    Decoder.forProduct8("name", "role", "password", "skills", "experienceSummary", "resumeRef", "organizationName", "jobTitle")(SignUpGraphQLInput.apply)
+  private given Decoder[BootstrapAdminGraphQLInput] =
+    Decoder.forProduct2("name", "password")(BootstrapAdminGraphQLInput.apply)
+  private given Decoder[LoginGraphQLInput] =
+    Decoder.forProduct2("name", "password")(LoginGraphQLInput.apply)
+  private given Decoder[UpdateProfileGraphQLInput] =
+    Decoder.forProduct5("skills", "experienceSummary", "resumeRef", "organizationName", "jobTitle")(UpdateProfileGraphQLInput.apply)
 
   private val healthStatus = EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))
   private val readinessStatus = EnumType("ReadinessStatus", values = List(
@@ -81,6 +97,7 @@ object HiringGraphQLSchema {
   private val applicationStatus =
     EnumType("ApplicationStatus", values = ApplicationStatus.values.toList.map(status => EnumValue(status.toString, value = status)))
   private val userRole = EnumType("UserRole", values = UserRole.values.toList.map(role => EnumValue(role.toString, value = role)))
+  private val userStatus = EnumType("UserStatus", values = AccountStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
   private val searchMode = EnumType("SearchMode", values = SearchMode.values.toList.map(mode => EnumValue(mode.toString, value = mode)))
 
   private val idArgument = Argument("id", IDType)
@@ -94,6 +111,8 @@ object HiringGraphQLSchema {
   private val createdAfterArgument = Argument("createdAfter", OptionInputType(StringType))
   private val jobStatusArgument = Argument("status", OptionInputType(jobStatus))
   private val applicationStatusArgument = Argument("status", OptionInputType(applicationStatus))
+  private val userRoleArgument = Argument("role", OptionInputType(userRole))
+  private val userStatusArgument = Argument("status", OptionInputType(userStatus))
   private val jobFilterInputType = InputObjectType[JobFilterGraphQLInput]("JobFilter", List(
     InputField("city", OptionInputType(StringType)),
     InputField("skills", OptionInputType(ListInputType(StringType))),
@@ -137,6 +156,21 @@ object HiringGraphQLSchema {
   private val applicationActionInputArgument = Argument("input", applicationActionInputType)
   private val rejectApplicationInputArgument = Argument("input", rejectApplicationInputType)
   private val declineApplicationInputArgument = Argument("input", declineApplicationInputType)
+  private val signUpInputType = InputObjectType[SignUpGraphQLInput]("SignUpInput", List(
+    InputField("name", StringType), InputField("role", userRole), InputField("password", StringType),
+    InputField("skills", OptionInputType(ListInputType(StringType))), InputField("experienceSummary", OptionInputType(StringType)),
+    InputField("resumeRef", OptionInputType(StringType)), InputField("organizationName", OptionInputType(StringType)),
+    InputField("jobTitle", OptionInputType(StringType))))
+  private val bootstrapAdminInputType = InputObjectType[BootstrapAdminGraphQLInput]("BootstrapAdminInput", List(InputField("name", StringType), InputField("password", StringType)))
+  private val loginInputType = InputObjectType[LoginGraphQLInput]("LoginInput", List(InputField("name", StringType), InputField("password", StringType)))
+  private val updateProfileInputType = InputObjectType[UpdateProfileGraphQLInput]("UpdateMyProfileInput", List(
+    InputField("skills", OptionInputType(ListInputType(StringType))), InputField("experienceSummary", OptionInputType(StringType)),
+    InputField("resumeRef", OptionInputType(StringType)), InputField("organizationName", OptionInputType(StringType)),
+    InputField("jobTitle", OptionInputType(StringType))))
+  private val signUpInputArgument = Argument("input", signUpInputType)
+  private val bootstrapAdminInputArgument = Argument("input", bootstrapAdminInputType)
+  private val loginInputArgument = Argument("input", loginInputType)
+  private val updateProfileInputArgument = Argument("input", updateProfileInputType)
 
   private val healthType = ObjectType("Health", fields[RequestContext, Unit](
     Field("status", healthStatus, resolve = _ => "UP")))
@@ -164,13 +198,20 @@ object HiringGraphQLSchema {
     Field("id", IDType, resolve = _.value.id),
     Field("name", StringType, resolve = _.value.name),
     Field("profile", OptionType(candidateMatchProfileType), resolve = _.value.profile)))
+  private lazy val userProfileType: OutputType[User] =
+    UnionType[RequestContext]("UserProfile", List(candidateProfileType, recruiterProfileType))
+      .mapValue[User](user => user.profile.orElse(user.recruiterProfile).orNull)
   private lazy val userType: ObjectType[RequestContext, User] = ObjectType("User", fields[RequestContext, User](
     Field("id", IDType, resolve = _.value.id.value.toString),
-    Field("email", StringType, resolve = _.value.email),
+    Field("email", OptionType(StringType), resolve = _.value.email),
     Field("name", StringType, resolve = _.value.name),
     Field("role", userRole, resolve = _.value.role),
-    Field("profile", OptionType(candidateProfileType), resolve = _.value.profile),
+    Field("status", userStatus, resolve = _.value.accountStatus),
+    Field("profile", OptionType(userProfileType), resolve = _.value),
     Field("createdAt", StringType, resolve = _.value.createdAt.toString)))
+  private lazy val recruiterProfileType: ObjectType[RequestContext, RecruiterProfile] = ObjectType("RecruiterProfile", fields[RequestContext, RecruiterProfile](
+      Field("organizationName", StringType, resolve = _.value.organizationName),
+      Field("jobTitle", OptionType(StringType), resolve = _.value.jobTitle)))
   private lazy val jobType: ObjectType[RequestContext, Job] = ObjectType("Job", fields[RequestContext, Job](
     Field("id", IDType, resolve = _.value.id.value.toString),
     Field("title", StringType, resolve = _.value.title),
@@ -207,6 +248,15 @@ object HiringGraphQLSchema {
   private lazy val jobConnectionType = connectionType("JobConnection", jobEdgeType)
   private lazy val applicationConnectionType = connectionType("ApplicationConnection", applicationEdgeType)
   private lazy val applicationEventConnectionType = connectionType("ApplicationEventConnection", applicationEventEdgeType)
+  private lazy val userEdgeType = edgeType("UserEdge", userType)
+  private lazy val userConnectionType = connectionType("UserConnection", userEdgeType)
+  private lazy val accountPayloadType = ObjectType("AuthPayload", fields[RequestContext, AccountPayload](
+    Field("user", OptionType(userType), resolve = _.value.user), Field("accessToken", OptionType(StringType), resolve = _.value.accessToken),
+    Field("expiresAt", OptionType(StringType), resolve = _.value.expiresAt), Field("errors", ListType(errorType), resolve = _.value.errors)))
+  private lazy val userPayloadType = ObjectType("UserPayload", fields[RequestContext, UserPayload](
+    Field("user", OptionType(userType), resolve = _.value.user), Field("errors", ListType(errorType), resolve = _.value.errors)))
+  private lazy val deleteAccountPayloadType = ObjectType("DeleteAccountPayload", fields[RequestContext, DeleteAccountPayload](
+    Field("deleted", BooleanType, resolve = _.value.deleted), Field("errors", ListType(errorType), resolve = _.value.errors)))
   private lazy val jobPayloadType = ObjectType("JobPayload", fields[RequestContext, JobPayload](
     Field("job", OptionType(jobType), resolve = _.value.job),
     Field("errors", ListType(errorType), resolve = _.value.errors)))
@@ -238,6 +288,9 @@ object HiringGraphQLSchema {
     ObjectType("Query", fields[RequestContext, Unit](
       Field("health", healthType, resolve = _ => ()),
       Field("readiness", readinessType, resolve = context => context.ctx.readiness),
+      Field("me", OptionType(userType), resolve = context => context.ctx.unsafeToFuture(accountMe(context))),
+      Field("users", userConnectionType, arguments = firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil,
+        resolve = context => context.ctx.unsafeToFuture(users(context))),
       Field("jobs", jobConnectionType,
         arguments = firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(jobs(context))),
@@ -284,6 +337,11 @@ object HiringGraphQLSchema {
         resolve = context => context.ctx.unsafeToFuture(rejectApplication(context))),
       Field("declineApplication", applicationPayloadType, arguments = declineApplicationInputArgument :: Nil,
         resolve = context => context.ctx.unsafeToFuture(declineApplication(context)))
+      ,Field("signUp", accountPayloadType, arguments = signUpInputArgument :: Nil, resolve = context => context.ctx.unsafeToFuture(signUp(context)))
+      ,Field("login", accountPayloadType, arguments = loginInputArgument :: Nil, resolve = context => context.ctx.unsafeToFuture(login(context)))
+      ,Field("bootstrapAdmin", accountPayloadType, arguments = bootstrapAdminInputArgument :: Nil, resolve = context => context.ctx.unsafeToFuture(bootstrapAdmin(context)))
+      ,Field("updateMyProfile", userPayloadType, arguments = updateProfileInputArgument :: Nil, resolve = context => context.ctx.unsafeToFuture(updateMyProfile(context)))
+      ,Field("deleteMyAccount", deleteAccountPayloadType, resolve = context => context.ctx.unsafeToFuture(deleteMyAccount(context)))
     )))
   )
 
@@ -546,6 +604,76 @@ object HiringGraphQLSchema {
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Declined, None, input.reason)
   }
 
+  private def accountService(context: Context[RequestContext, Unit]): Either[UseCaseError, AccountUseCases[IO]] =
+    context.ctx.hiring.flatMap(_.accountService).toRight(AvailabilityError.ServiceNotReady: UseCaseError)
+
+  private def accountMe(context: Context[RequestContext, Unit]): IO[Option[User]] =
+    (context.ctx.actor, accountService(context)) match {
+      case (Some(actor), Right(service)) => service.me(actor).map(_.toOption)
+      case _ => IO.pure(None)
+    }
+
+  private def signUp(context: Context[RequestContext, Unit]): IO[AccountPayload] = {
+    val input = context.arg(signUpInputArgument)
+    (for {
+      role <- UserRole.values.find(_.toString.equalsIgnoreCase(input.role)).toRight[UseCaseError](AccountError.ProfileRoleMismatch)
+      service <- accountService(context)
+      candidateProfile = Option.when(role == UserRole.Candidate)(CandidateProfile(input.skills.getOrElse(Nil).toSet, input.experienceSummary, input.resumeRef))
+      recruiterProfile = Option.when(role == UserRole.Recruiter)(RecruiterProfile(input.organizationName.getOrElse(""), input.jobTitle))
+    } yield (service, SignUpInput(input.name, role, input.password, candidateProfile, recruiterProfile))).fold(
+      error => IO.pure(accountErrorPayload(error)),
+      { case (service, request) => IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(id => service.signUp(request, now, Identifiers.UserId(id)))).map(accountPayload) }
+    )
+  }
+
+  private def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[AccountPayload] =
+    accountService(context).fold(
+      error => IO.pure(accountErrorPayload(error)),
+      service => {
+        val input = context.arg(bootstrapAdminInputArgument)
+        IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(id => service.bootstrapAdmin(BootstrapAdminInput(input.name, input.password), now, Identifiers.UserId(id)))).map(accountPayload)
+      }
+    )
+
+  private def login(context: Context[RequestContext, Unit]): IO[AccountPayload] =
+    accountService(context).fold(
+      error => IO.pure(accountErrorPayload(error)),
+      service => {
+        val input = context.arg(loginInputArgument)
+        IO.realTimeInstant.flatMap(now => service.login(LoginInput(input.name, input.password), now)).map(accountPayload)
+      }
+    )
+
+  private def updateMyProfile(context: Context[RequestContext, Unit]): IO[UserPayload] =
+    (context.ctx.actor, accountService(context)) match {
+      case (Some(actor), Right(service)) =>
+        val input = context.arg(updateProfileInputArgument)
+        val candidate = input.skills.map(skills => CandidateProfile(skills.toSet, input.experienceSummary, input.resumeRef))
+        val recruiter = input.organizationName.map(name => RecruiterProfile(name, input.jobTitle))
+        service.updateMyProfile(actor, AccountProfileInput(candidate, recruiter)).map(_.fold(error => UserPayload(None, List(this.error(error))), user => UserPayload(Some(user), Nil)))
+      case _ => IO.pure(UserPayload(None, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
+    }
+
+  private def deleteMyAccount(context: Context[RequestContext, Unit]): IO[DeleteAccountPayload] =
+    (context.ctx.actor, accountService(context)) match {
+      case (Some(actor), Right(service)) => IO.realTimeInstant.flatMap(now => service.deleteMyAccount(actor, now)).map(_.fold(error => DeleteAccountPayload(false, List(this.error(error))), _ => DeleteAccountPayload(true, Nil)))
+      case _ => IO.pure(DeleteAccountPayload(false, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
+    }
+
+  private def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =
+    (context.ctx.actor, accountService(context)) match {
+      case (Some(actor), Right(service)) =>
+        val requested = context.arg(firstArgument)
+        val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
+        val role = context.arg(userRoleArgument)
+        userPage(requested, context.arg(afterArgument), status, role).flatMap {
+          case Left(validationError) => IO.pure(graphQLErrorConnection(validationError))
+          case Right((request, pageSize)) =>
+            service.listUsers(actor, request).map(_.fold(errorConnection[User], values => userConnection(values, pageSize)))
+        }
+      case _ => IO.pure(errorConnection(AuthenticationError.Unauthorized))
+    }
+
   private def authenticated(context: Context[RequestContext, Unit]): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices)]] =
     (context.ctx.actor, context.ctx.hiring) match {
       case (Some(actor), Some(hiring)) =>
@@ -591,6 +719,14 @@ object HiringGraphQLSchema {
       status: Option[ApplicationStatus]
   ): IO[Either[GraphQLError, (ApplicationPageRequest, Int)]] =
     cursorPage(first, after, CursorCodec.decodeApplication)((cursor, size) => ApplicationPageRequest(status, cursor, size))
+
+  private def userPage(
+      first: Int,
+      after: Option[String],
+      status: AccountStatus,
+      role: Option[UserRole]
+  ): IO[Either[GraphQLError, (UserPageRequest, Int)]] =
+    cursorPage(first, after, CursorCodec.decodeUser)((cursor, size) => UserPageRequest(status, role, cursor, size.value))
 
   private def cursorPage[A, B](
       first: Int,
@@ -727,10 +863,28 @@ object HiringGraphQLSchema {
   private def applicationErrorPayload(error: UseCaseError): ApplicationPayload =
     ApplicationPayload(None, List(this.error(error)))
 
+  private def accountPayload(result: Either[UseCaseError, (User, AccountToken)]): AccountPayload =
+    result.fold(accountErrorPayload, { case (user, token) => AccountPayload(Some(user), Some(token.value), Some(token.expiresAt.toString), Nil) })
+
+  private def accountErrorPayload(error: UseCaseError): AccountPayload =
+    AccountPayload(None, None, None, List(this.error(error)))
+
+  private def userConnection(values: List[User], requested: Int): Connection[User] =
+    connection(values, requested)(user => CursorCodec.encodeUser(UserCursor(user.createdAt, user.id)))
+
   private def error(error: UseCaseError): GraphQLError =
     error match {
       case AuthenticationError.Unauthorized => GraphQLError("UNAUTHORIZED", "Authentication required")
       case AuthenticationError.SingletonAdminViolation => GraphQLError("FORBIDDEN", "Forbidden")
+      case AccountError.BootstrapRequired => GraphQLError("ADMIN_BOOTSTRAP_REQUIRED", "The first Admin must be bootstrapped")
+      case AccountError.AlreadyBootstrapped => GraphQLError("ADMIN_ALREADY_BOOTSTRAPPED", "Admin bootstrap is already complete")
+      case AccountError.NameTaken => GraphQLError("NAME_TAKEN", "Name is already in use")
+      case AccountError.InvalidCredentials => GraphQLError("INVALID_CREDENTIALS", "Invalid credentials")
+      case AccountError.DeletedAccount => GraphQLError("UNAUTHORIZED", "Authentication required")
+      case AccountError.ProfileRoleMismatch => GraphQLError("PROFILE_ROLE_MISMATCH", "Profile does not match the selected role")
+      case AccountError.PasswordPolicyViolation => GraphQLError("INVALID_PASSWORD", "Password does not meet policy")
+      case AccountError.AccountAlreadyDeleted => GraphQLError("ACCOUNT_ALREADY_DELETED", "Account is already deleted")
+      case AccountError.AdminSignupForbidden => GraphQLError("ADMIN_BOOTSTRAP_ONLY", "Admin accounts can only be created through bootstrap")
       case AvailabilityError.ServiceNotReady => GraphQLError("SERVICE_NOT_READY", "Service not ready")
       case DomainError.Forbidden => GraphQLError("FORBIDDEN", "Forbidden")
       case DomainError.NotFound(entity) => GraphQLError("NOT_FOUND", s"$entity not found")

@@ -653,7 +653,9 @@ query JobApplications(
           id
           name
           profile {
-            skills
+            ... on CandidateProfile {
+              skills
+            }
           }
         }
 

@@ -497,7 +497,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(response.status, Status.Ok)
       assertEquals(schema, HiringGraphQLSchema.sdl)
-      assert(!schema.contains("users"))
+      assert(schema.contains("users(first: Int!"))
     }
   }
 

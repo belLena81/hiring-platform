@@ -21,7 +21,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       Some("Builds backend services"),
       Some("resume://candidate-201")
     )
-    val user = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, Some(profile), now)
+    val user = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, Some(profile), now)
 
     val result = MongoHiringCodecs.readUser(MongoHiringCodecs.user(user))
 

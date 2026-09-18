@@ -9,6 +9,18 @@ enum AuthenticationError {
   case SingletonAdminViolation
 }
 
+enum AccountError {
+  case BootstrapRequired
+  case AlreadyBootstrapped
+  case NameTaken
+  case InvalidCredentials
+  case DeletedAccount
+  case ProfileRoleMismatch
+  case PasswordPolicyViolation
+  case AccountAlreadyDeleted
+  case AdminSignupForbidden
+}
+
 enum SearchError {
   case MissingEmbedding(entity: String)
   case StaleEmbedding(entity: String)
@@ -27,7 +39,7 @@ enum RepositoryError {
   case Unavailable
 }
 
-type UseCaseError = DomainError | RepositoryError | AuthenticationError | SearchError | AvailabilityError | NonEmptyList[DomainValidationError]
+type UseCaseError = DomainError | RepositoryError | AuthenticationError | AccountError | SearchError | AvailabilityError | NonEmptyList[DomainValidationError]
 
 object UseCaseError {
   extension [E <: UseCaseError, A](value: Either[E, A]) def widenUseCase: Either[UseCaseError, A] =

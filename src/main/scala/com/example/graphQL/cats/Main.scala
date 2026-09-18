@@ -19,7 +19,9 @@ object Main extends IOApp {
           case Left(errors) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
             fields = Map(LogField.ConfigKey -> errors.head.key)).as(ExitCode.Error)
           case Right(config) => SafeDiagnostics.configure(config.maskSensitive).flatMap { diagnostics =>
-            MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch)
+            MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
+              (vector, apiKey) => new com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService(
+                apiKey, vector.voyageEndpoint, vector.voyageModel, vector.voyageDimension, vector.timeoutMillis), config.jwtAuth)
               .flatMap(runtime => HiringPlatformServer.resource(
                 config.host,
                 config.port,

@@ -8,9 +8,7 @@ import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{
-  Application, ApplicationEvent, ApplicationStatus, EntityEmbedding, Job, JobStatus, SearchMode, SearchableText, User, UserRole
-}
+import com.example.graphQL.cats.domain.model.*
 import com.mongodb.{MongoCommandException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
 import com.mongodb.client.result.InsertOneResult
@@ -19,6 +17,7 @@ import org.bson.Document
 import org.bson.conversions.Bson
 
 import java.time.Instant
+import java.util.Date
 import scala.jdk.CollectionConverters.*
 
 private[mongo] trait MongoTransactionRunner {
@@ -103,8 +102,12 @@ private[mongo] object MongoKeysetPaging {
     )
 }
 
-final class MongoUserRepository(database: MongoDatabase) extends UserRepository[IO] with MongoConflictWriteMapping {
+final class MongoUserRepository(
+    database: MongoDatabase,
+    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction
+) extends UserRepository[IO] with UserAccountRepository[IO] with MongoConflictWriteMapping {
   private val collection = database.getCollection("users")
+  private val registry = database.getCollection("account_registry")
 
   def insert(user: User): IO[Either[RepositoryError, Unit]] =
     if (user.role == UserRole.Admin && !user.adminSingleton) IO.pure(Left(RepositoryError.Conflict))
@@ -130,6 +133,104 @@ final class MongoUserRepository(database: MongoDatabase) extends UserRepository[
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
   }
+
+  override def initialized: IO[Boolean] =
+    PublisherBridge.first(registry.find(Filters.eq("_id", "user-account-registry"))).map(_.exists(_.getString("state", "") == "Initialized"))
+
+  override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
+    transactionRunner.run { session =>
+      val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Uninitialized"))
+      val findRegistry = session.fold(PublisherBridge.first(registry.find(stateFilter)))(active => PublisherBridge.first(registry.find(active, stateFilter)))
+      val findAnyUser = session.fold(PublisherBridge.first(collection.find().first()))(active => PublisherBridge.first(collection.find(active).first()))
+      findRegistry.flatMap {
+        case None => IO.pure(Left(RepositoryError.Conflict))
+        case Some(_) => findAnyUser.flatMap {
+          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+          case None =>
+            val insert = session.fold(PublisherBridge.first(collection.insertOne(MongoHiringCodecs.userWithPassword(user, passwordHash))))(active => PublisherBridge.first(collection.insertOne(active, MongoHiringCodecs.userWithPassword(user, passwordHash))))
+            insert *> session.fold(
+              PublisherBridge.first(registry.updateOne(stateFilter, Updates.combine(Updates.set("state", "Initialized"), Updates.set("adminId", user.id.value.toString)))).void
+            )(active => PublisherBridge.first(registry.updateOne(active, stateFilter, Updates.combine(Updates.set("state", "Initialized"), Updates.set("adminId", user.id.value.toString)))).void).as(Right(()))
+        }
+      }
+    }.handleError(mapWrite)
+
+  override def createAccount(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
+    transactionRunner.run { session =>
+      val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Initialized"))
+      val registryReady = session.fold(PublisherBridge.first(registry.find(stateFilter)))(active => PublisherBridge.first(registry.find(active, stateFilter)))
+      registryReady.flatMap {
+        case None => IO.pure(Left(RepositoryError.Conflict))
+        case Some(_) =>
+          val insert = session match {
+            case None => PublisherBridge.first(collection.insertOne(MongoHiringCodecs.userWithPassword(user, passwordHash)))
+            case Some(active) => PublisherBridge.first(collection.insertOne(active, MongoHiringCodecs.userWithPassword(user, passwordHash)))
+          }
+          insert.as(Right(())).handleError(mapWrite)
+      }
+    }.handleError(mapWrite)
+
+  override def findByCanonicalName(nameCanonical: String): IO[Option[AccountCredentials]] =
+    PublisherBridge.first(collection.find(Filters.eq("nameCanonical", nameCanonical))).map(_.flatMap(MongoHiringCodecs.readCredentials))
+
+  override def updateProfile(
+      userId: UserId,
+      profile: Option[CandidateProfile],
+      recruiterProfile: Option[RecruiterProfile]
+  ): IO[Either[RepositoryError, User]] =
+    PublisherBridge.first(collection.updateOne(
+      Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString)),
+      Updates.combine(
+        profile.fold(Updates.unset("profile"))(value => Updates.set("profile", MongoHiringCodecs.user(User(userId, None, "", UserRole.Candidate, Some(value), Instant.EPOCH)).get("profile"))),
+        recruiterProfile.fold(Updates.unset("recruiterProfile"))(value => Updates.set("recruiterProfile", MongoHiringCodecs.user(User(userId, None, "", UserRole.Recruiter, None, Instant.EPOCH, recruiterProfile = Some(value))).get("recruiterProfile"))),
+        Updates.inc("version", 1L),
+        Updates.set("updatedAt", Date.from(Instant.now()))
+      )
+    )).flatMap {
+      case Some(result) if result.getMatchedCount == 1L => find(userId).map(_.toRight(RepositoryError.Unavailable))
+      case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+      case None => IO.pure(Left(RepositoryError.Unavailable))
+    }.handleError(mapWrite)
+
+  override def listAccounts(page: UserPageRequest): IO[List[User]] = {
+    val filters = List(
+      Some(Filters.eq("accountStatus", page.status.toString)),
+      page.role.map(role => Filters.eq("role", role.toString)),
+      page.cursor.map(cursor => MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString))
+    ).flatten
+    val filter = Filters.and(filters*)
+    PublisherBridge.all(collection.find(filter).sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id"))).limit(page.pageSize)).map(_.map(MongoHiringCodecs.readUser))
+  }
+
+  override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] =
+    transactionRunner.run { session =>
+      val userFilter = Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString))
+      val userUpdate = Updates.combine(
+        Updates.set("accountStatus", AccountStatus.Deleted.toString),
+        Updates.set("deletedAt", Date.from(now)),
+        Updates.set("name", tombstone),
+        Updates.set("nameCanonical", AccountName.canonical(tombstone)),
+        Updates.inc("version", 1L),
+        Updates.unset("passwordHash"), Updates.unset("profile"), Updates.unset("recruiterProfile"), Updates.unset("email"), Updates.unset("emailCanonical")
+      )
+      val userWrite = session.fold(PublisherBridge.first(collection.updateOne(userFilter, userUpdate)))(active => PublisherBridge.first(collection.updateOne(active, userFilter, userUpdate)))
+      userWrite.flatMap {
+        case Some(result) if result.getMatchedCount == 1L =>
+          val jobFilter = Filters.and(Filters.eq("recruiterId", userId.value.toString), Filters.eq("status", JobStatus.Open.toString))
+          val jobUpdate = Updates.combine(Updates.set("status", JobStatus.Closed.toString), Updates.set("closedAt", Date.from(now)), Updates.set("updatedAt", Date.from(now)), Updates.inc("version", 1L))
+          session.fold(PublisherBridge.first(database.getCollection("jobs").updateMany(jobFilter, jobUpdate)))(active => PublisherBridge.first(database.getCollection("jobs").updateMany(active, jobFilter, jobUpdate))).as(Right(()))
+        case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+        case None => IO.pure(Left(RepositoryError.Unavailable))
+      }
+    }.handleError(mapWrite)
+}
+
+object MongoUserRepository {
+  def standalone(database: MongoDatabase): MongoUserRepository =
+    new MongoUserRepository(database)
+
+  def transactional(database: MongoDatabase, client: MongoClient): MongoUserRepository =
+    new MongoUserRepository(database, MongoTransactionRunner.sessions(client))
 }
 
 final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO] with MongoConflictWriteMapping {

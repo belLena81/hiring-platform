@@ -52,7 +52,7 @@ final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[Strin
     timeoutMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
     indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
 
-final case class JwtAuthConfig(hmacSecret: Option[String], issuer: String, audience: String)
+final case class JwtAuthConfig(hmacSecret: Option[String], issuer: String, audience: String, accessTokenSeconds: Long = 900L)
 
 type Port = Int :| Interval.Closed[1, 65535]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]

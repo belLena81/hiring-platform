@@ -129,7 +129,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   test("VHS-AC04 candidate matching requires recruiter ownership before exposing candidates") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val otherRecruiter = Identifiers.UserId(UUID.fromString("00000000-0000-0000-0000-000000000088"))
-    val otherRecruiterUser = recruiter.copy(id = otherRecruiter, email = "other-recruiter@example.com")
+    val otherRecruiterUser = recruiter.copy(id = otherRecruiter, email = Some("other-recruiter@example.com"))
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(
         candidateId -> candidateWithProfile.copy(embedding = Some(embedding)),

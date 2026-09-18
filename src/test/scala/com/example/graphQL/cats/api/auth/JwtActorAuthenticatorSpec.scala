@@ -25,7 +25,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   private val audience = "hiring-graphql-api"
   private val now = Instant.parse("2026-09-17T12:00:00Z")
   private val candidateId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000201"))
-  private val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate,
+  private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
     Some(CandidateProfile(Set("scala"), None, None)), now)
   private val recruiter = candidate.copy(role = UserRole.Recruiter)
 

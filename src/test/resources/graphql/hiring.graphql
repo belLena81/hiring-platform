@@ -57,6 +57,18 @@ enum ApplicationStatus {
   Rejected
 }
 
+type AuthPayload {
+  user: User
+  accessToken: String
+  expiresAt: String
+  errors: [PayloadError!]!
+}
+
+input BootstrapAdminInput {
+  name: String!
+  password: String!
+}
+
 type CandidateMatchCandidate {
   id: ID!
   name: String!
@@ -77,6 +89,11 @@ type CandidateProfile {
 input DeclineApplicationInput {
   applicationId: ID!
   reason: String
+}
+
+type DeleteAccountPayload {
+  deleted: Boolean!
+  errors: [PayloadError!]!
 }
 
 type Health {
@@ -148,6 +165,11 @@ type Location {
   remote: Boolean!
 }
 
+input LoginInput {
+  name: String!
+  password: String!
+}
+
 type Mutation {
   submitApplication(input: SubmitApplicationInput!): ApplicationPayload!
   createJob(input: JobInput!): JobPayload!
@@ -159,6 +181,11 @@ type Mutation {
   hireApplication(input: ApplicationActionInput!): ApplicationPayload!
   rejectApplication(input: RejectApplicationInput!): ApplicationPayload!
   declineApplication(input: DeclineApplicationInput!): ApplicationPayload!
+  signUp(input: SignUpInput!): AuthPayload!
+  login(input: LoginInput!): AuthPayload!
+  bootstrapAdmin(input: BootstrapAdminInput!): AuthPayload!
+  updateMyProfile(input: UpdateMyProfileInput!): UserPayload!
+  deleteMyAccount: DeleteAccountPayload!
 }
 
 type PageInfo {
@@ -174,6 +201,8 @@ type PayloadError {
 type Query {
   health: Health!
   readiness: Readiness!
+  me: User
+  users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: String): JobConnection!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!): RankedJobResults!
   recommendedJobs(first: Int!): RankedJobResults!
@@ -222,6 +251,11 @@ enum ReadinessStatus {
   NOT_READY
 }
 
+type RecruiterProfile {
+  organizationName: String!
+  jobTitle: String
+}
+
 input RejectApplicationInput {
   applicationId: ID!
   feedback: String
@@ -233,6 +267,17 @@ enum SearchMode {
   HYBRID
 }
 
+input SignUpInput {
+  name: String!
+  role: UserRole!
+  password: String!
+  skills: [String!]
+  experienceSummary: String
+  resumeRef: String
+  organizationName: String
+  jobTitle: String
+}
+
 input SubmitApplicationInput {
   jobId: ID!
 }
@@ -242,17 +287,49 @@ input UpdateJobInput {
   patch: JobInput!
 }
 
+input UpdateMyProfileInput {
+  skills: [String!]
+  experienceSummary: String
+  resumeRef: String
+  organizationName: String
+  jobTitle: String
+}
+
 type User {
   id: ID!
-  email: String!
+  email: String
   name: String!
   role: UserRole!
-  profile: CandidateProfile
+  status: UserStatus!
+  profile: UserProfile
   createdAt: String!
 }
+
+type UserConnection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+  errors: [PayloadError!]!
+}
+
+type UserEdge {
+  node: User!
+  cursor: String!
+}
+
+type UserPayload {
+  user: User
+  errors: [PayloadError!]!
+}
+
+union UserProfile = CandidateProfile | RecruiterProfile
 
 enum UserRole {
   Candidate
   Recruiter
   Admin
+}
+
+enum UserStatus {
+  ACTIVE
+  DELETED
 }

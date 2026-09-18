@@ -20,9 +20,9 @@ private[cats] object ServiceFixtures {
   val jobId: JobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000004"))
   val applicationId: ApplicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000005"))
 
-  val candidate: User = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
-  val recruiter: User = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
-  val admin: User = User(adminId, "admin@example.com", "Admin", UserRole.Admin, None, now, adminSingleton = true)
+  val candidate: User = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+  val recruiter: User = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
+  val admin: User = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
   val openJob: Job = Job(
     jobId,
     recruiterId,

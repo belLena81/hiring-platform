@@ -6,11 +6,12 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogField, ProbeResult}
 import com.example.graphQL.cats.service.application.ApplicationService
-import com.example.graphQL.cats.service.auth.UserAuthenticationService
+import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.service.search.{EmbeddingPipeline, SemanticSearchService}
 import com.example.graphQL.cats.config.VectorSearchConfig
+import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
@@ -59,14 +60,15 @@ object MongoHiringRuntime {
       databaseName: String,
       diagnostics: Diagnostics,
       vectorSearch: VectorSearchConfig,
-      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO]
+      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
+      jwtAuth: JwtAuthConfig = JwtAuthConfig(None, "hiring-platform-local", "hiring-graphql-api")
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
-      val users = new MongoUserRepository(database)
+      val users = MongoUserRepository.transactional(database, client)
       val jobs = new MongoJobRepository(database)
       val applications = MongoApplicationRepository.transactional(database, client)
-      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics).flatMap { services =>
+      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, vectorSearch)).map { setup =>
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
           MongoHiringRuntime(
@@ -86,14 +88,17 @@ object MongoHiringRuntime {
       applications: MongoApplicationRepository,
       vectorSearch: VectorSearchConfig,
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      jwtAuth: JwtAuthConfig
   ): Resource[IO, HiringGraphQLServices] =
     if (!vectorSearch.enabled) {
       val readModel = HiringReadService[IO](users, jobs, applications)
+      val account = UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth)
       Resource.pure(HiringGraphQLServices(
         TracedHiringServices.readModel(readModel, diagnostics),
         TracedHiringServices.jobs(JobService[IO](users, jobs), diagnostics),
         TracedHiringServices.applications(ApplicationService[IO](users, jobs, applications), diagnostics)
+        , accountService = Some(account)
       ))
     } else {
       Resource.eval(IO.fromOption(vectorSearch.voyageApiKey)(
@@ -131,7 +136,8 @@ object MongoHiringRuntime {
             TracedHiringServices.readModel(readModel, diagnostics),
             TracedHiringServices.jobs(jobService, diagnostics),
             TracedHiringServices.applications(applicationService, diagnostics),
-            Some(TracedHiringServices.search(semanticSearch, diagnostics))
+            Some(TracedHiringServices.search(semanticSearch, diagnostics)),
+            Some(UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth))
           )
           services
         }

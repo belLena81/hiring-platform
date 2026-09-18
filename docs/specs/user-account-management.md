@@ -1,6 +1,6 @@
 # User Account Management
 
-Status: ready for implementation planning; no Phase 4.5 implementation is included in this document change.
+Status: implemented in the current checkout; live Mongo transaction and explain-plan evidence remains environment-dependent.
 
 ## Identity and Scope
 
@@ -11,9 +11,9 @@ Status: ready for implementation planning; no Phase 4.5 implementation is includ
 
 ## Verified Current Facts
 
-- The served schema has no user signup, login, user listing, profile update, or account deletion operation.
-- Current HTTP authentication accepts an HS256 bearer token whose `sub` maps to a stored user; the application does not issue tokens.
-- Current MongoDB setup has a `users` collection and a singleton Admin index, but no credential fields or account-deletion state.
+- The served schema now exposes signup, login, bootstrap, `me`, bounded Admin user listing, profile update, and self-delete operations.
+- HTTP authentication accepts HS256 bearer tokens whose `sub` maps to a currently Active stored user; the account service issues short-lived tokens.
+- MongoDB setup now adds additive credential/lifecycle fields, a bootstrap registry, the unique canonical-name index, and status/list indexes.
 - Existing hiring records reference user IDs, so physical user deletion would orphan recruiter, candidate, or event references.
 
 ## Public Contract
@@ -37,9 +37,9 @@ updateMyProfile(input: UpdateMyProfileInput!): UserPayload!
 deleteMyAccount: DeleteAccountPayload!
 ```
 
-`SignUpInput` contains `name`, `role`, and `password`; ordinary signup accepts only Candidate or Recruiter and returns `ADMIN_BOOTSTRAP_REQUIRED` until the first Admin exists. `BootstrapAdminInput` contains `name` and `password` and is accepted only while the user registry is empty. `LoginInput` contains `name` and `password`.
+`SignUpInput` contains `name`, `role`, and `password`; ordinary signup accepts only Candidate or Recruiter and returns `ADMIN_BOOTSTRAP_REQUIRED` until the first Admin exists. Admin signup is rejected with `ADMIN_BOOTSTRAP_ONLY`. `BootstrapAdminInput` contains `name` and `password` and is accepted only while the user registry is empty. `LoginInput` contains `name` and `password`.
 
-Profile inputs are role-specific and optional at signup. Existing Candidate profile fields are `skills`, `experienceSummary`, and `resumeRef`; the Recruiter profile contract must be defined from recruiter use cases before implementation, without making credentials or email mandatory.
+Profile inputs are role-specific at signup. Candidate fields are `skills`, `experienceSummary`, and `resumeRef`; Recruiter fields are required `organizationName` plus optional `jobTitle`. Email remains optional for legacy compatibility and is not a login identity.
 
 ### Authentication Contract
 
@@ -78,6 +78,8 @@ users(role, accountStatus, createdAt DESC, _id DESC)
 
 Use a singleton bootstrap coordination record, such as `account_registry`, to serialize first-account creation and gate ordinary signup until bootstrap completes. The setup record and migration history must be versioned and restartable. Existing legacy users without password hashes require explicit credential enrollment or a local reset; do not derive passwords or invent names from existing fields.
 
+Before creating the unique `nameCanonical` index, setup runs the idempotent `user-name-canonical-v1` migration. It backfills missing canonical names using the shared Unicode normalization policy, fails closed on invalid names or canonical collisions, and never invents replacement identities.
+
 ## Transaction and Concurrency Rules
 
 ### First Admin
@@ -108,16 +110,16 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 
 | ID | Given / When / Then | Evidence |
 |---|---|---|
-| UAM-AC01 | Given an empty user registry, when the first Admin bootstrap succeeds, then exactly one singleton Admin and one bootstrap record exist | Domain unit test plus Mongo transaction integration test |
-| UAM-AC02 | Given concurrent bootstrap and signup requests against an empty registry, when both race, then exactly one Admin is committed and signup is rejected until bootstrap completes | Replica-set concurrency integration test |
-| UAM-AC03 | Given a valid Candidate or Recruiter signup, when the request succeeds, then a password hash and Active user are stored and no plaintext credential is persisted | Service, codec, and security tests |
-| UAM-AC04 | Given duplicate names with different case, when signup races or repeats, then one succeeds and the other returns `NAME_TAKEN` | Unique-index integration test |
-| UAM-AC05 | Given valid and invalid credentials, when login is called, then only the matching Active user receives a signed token and failures are indistinguishable | Auth unit/API tests |
-| UAM-AC06 | Given a valid token, when `me` or profile update is called, then only the authenticated user's data changes | GraphQL authorization tests |
-| UAM-AC07 | Given an Admin, when `users` is queried, then results are bounded, paginated, role/status-filterable, and credential-free | GraphQL contract and access tests |
-| UAM-AC08 | Given any authenticated user, when `deleteMyAccount` is called, then only that account is logically deleted and its token no longer authorizes | Transaction integration test |
-| UAM-AC09 | Given a Recruiter with open jobs and applications, when the account is deleted, then open jobs close atomically while applications and history remain consistent | Replica-set transaction and read-model integration tests |
-| UAM-AC10 | Given a deleted user or a client-supplied Admin role claim, when a protected operation is called, then authorization fails closed | Security/API tests |
+| UAM-AC01 | Given an empty user registry, when the first Admin bootstrap succeeds, then exactly one singleton Admin and one bootstrap record exist | `UserAccountService`; Mongo setup/transaction integration (live run pending) |
+| UAM-AC02 | Given concurrent bootstrap and signup requests against an empty registry, when both race, then exactly one Admin is committed and signup is rejected until bootstrap completes | Transaction repository implementation; replica-set concurrency test pending |
+| UAM-AC03 | Given a valid Candidate or Recruiter signup, when the request succeeds, then a password hash and Active user are stored and no plaintext credential is persisted | Argon2 adapter, account service, BSON codec, GraphQL contract |
+| UAM-AC04 | Given duplicate names with different case, when signup races or repeats, then one succeeds and the other returns `NAME_TAKEN` | Unique `nameCanonical` index and repository conflict mapping; live integration pending |
+| UAM-AC05 | Given valid and invalid credentials, when login is called, then only the matching Active user receives a signed token and failures are indistinguishable | JWT/auth tests and sanitized payload mapping |
+| UAM-AC06 | Given a valid token, when `me` or profile update is called, then only the authenticated user's data changes | GraphQL access tests; service wiring |
+| UAM-AC07 | Given an Admin, when `users` is queried, then results are bounded, paginated, role/status-filterable, and credential-free | SDL fixture, resolver, cursor codec, account list port |
+| UAM-AC08 | Given any authenticated user, when `deleteMyAccount` is called, then only that account is logically deleted and its token no longer authorizes | Transaction repository implementation; live transaction test pending |
+| UAM-AC09 | Given a Recruiter with open jobs and applications, when the account is deleted, then open jobs close atomically while applications and history remain consistent | Delete transaction implementation; live integration pending |
+| UAM-AC10 | Given a deleted user or a client-supplied Admin role claim, when a protected operation is called, then authorization fails closed | Active-user reload and existing JWT access tests |
 
 ## Migration, Recovery, and Risks
 
@@ -126,6 +128,13 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 - Test transaction failure after user update and after job closure; verify retry/idempotency and that no partial account deletion is visible.
 - Preserve applications and application events because they are operational history. A later retention/anonymization policy must be separately specified.
 - Do not claim password security, token revocation, or deletion recovery beyond the selected hasher, token expiry, transaction tests, and backup/restore evidence.
+
+## Implementation Checkpoint
+
+- Source: `UserAccountService`, `Argon2PasswordHasher`, `JwtActorAuthenticator`, `MongoUserRepository`, `MongoHiringSetup`, and `HiringGraphQLSchema` implement the contract.
+- Contracts: `src/test/resources/graphql/hiring.graphql` and the route/schema tests cover the additive API shape.
+- Local evidence: clean compilation and Docker-independent unit tests pass when run serialized with `Test / fork := false`; live Mongo/Testcontainers transaction and explain-plan checks were not yet executed in this environment.
+- Query analysis: the account access patterns use canonical-name lookup, status/createdAt keyset listing, and role/status filtering. The new indexes are recorded by the repeatable setup migration; no latency or production SLO claim is made.
 
 ## Non-Functional Assumptions
 

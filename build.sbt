@@ -6,6 +6,7 @@ lazy val circeVersion          = "0.14.16"
 lazy val fs2Version            = "3.14.0"
 lazy val http4sVersion         = "0.23.37"
 lazy val jwtScalaVersion       = "11.0.4"
+lazy val argon2Version         = "2.12"
 lazy val log4catsVersion       = "2.8.0"
 lazy val logbackVersion        = "1.6.3"
 lazy val mongoVersion          = "5.11.1"
@@ -49,6 +50,7 @@ lazy val root = (project in file("."))
       "io.circe"            %% "circe-core"             % circeVersion,
       "io.circe"            %% "circe-parser"           % circeVersion,
       "com.github.jwt-scala" %% "jwt-circe"             % jwtScalaVersion,
+      "de.mkammerer"         % "argon2-jvm"              % argon2Version,
       "org.mongodb"         % "mongodb-driver-reactivestreams" % mongoVersion,
       "com.github.pureconfig" %% "pureconfig-core"       % pureConfigVersion,
       "io.github.iltotore"    %% "iron"                  % ironVersion,

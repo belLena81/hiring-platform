@@ -11,6 +11,10 @@ enum UserRole {
   case Candidate, Recruiter, Admin
 }
 
+enum AccountStatus {
+  case Active, Deleted
+}
+
 final case class CandidateProfile(
   skills: Set[String],
   experienceSummary: Option[String],
@@ -30,28 +34,45 @@ object CandidateProfile {
     ).mapN(CandidateProfile.apply)
 }
 
+final case class RecruiterProfile(organizationName: String, jobTitle: Option[String])
+
+object RecruiterProfile {
+  def validate(
+      organizationName: String,
+      jobTitle: Option[String]
+  ): ValidatedNel[DomainValidationError, RecruiterProfile] =
+    (
+      validateText("organizationName", organizationName),
+      validateOptionalText("jobTitle", jobTitle)
+    ).mapN(RecruiterProfile.apply)
+}
+
 final case class User(
   id: UserId,
-  email: String,
+  email: Option[String],
   name: String,
   role: UserRole,
   profile: Option[CandidateProfile],
   createdAt: Instant,
   adminSingleton: Boolean = false,
-  embedding: Option[EntityEmbedding] = None
+  embedding: Option[EntityEmbedding] = None,
+  recruiterProfile: Option[RecruiterProfile] = None,
+  accountStatus: AccountStatus = AccountStatus.Active,
+  deletedAt: Option[Instant] = None,
+  version: Long = 0L
 )
 
 object User {
   def validate(
       id: UserId,
-      email: String,
+      email: Option[String],
       name: String,
       role: UserRole,
       profile: Option[CandidateProfile],
       createdAt: Instant
   ): ValidatedNel[DomainValidationError, User] =
     (
-      validateText("email", email),
+      email.traverse(value => validateText("email", value)),
       validateText("name", name)
     ).mapN((validEmail, validName) => User(id, validEmail, validName, role, profile, createdAt))
 }

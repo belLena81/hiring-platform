@@ -15,8 +15,8 @@ class ApplicationSubmissionSpec extends FunSuite {
   private val jobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000003"))
   private val applicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000004"))
 
-  private val candidate = User(candidateId, "candidate@example.com", "Candidate", UserRole.Candidate, None, now)
-  private val recruiter = User(recruiterId, "recruiter@example.com", "Recruiter", UserRole.Recruiter, None, now)
+  private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+  private val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
   private val openJob = Job(
     jobId,
     recruiterId,

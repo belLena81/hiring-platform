@@ -5,7 +5,7 @@ import cats.effect.std.Dispatcher
 import com.example.graphQL.cats.service.{ActorContext, ProbeResult, TraceContext}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
-import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, JobUseCases, SearchUseCases}
+import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, JobUseCases, SearchUseCases}
 import scala.concurrent.Future
 
 final case class HiringGraphQLServices(
@@ -13,6 +13,7 @@ final case class HiringGraphQLServices(
     jobService: JobUseCases[IO],
     applicationService: ApplicationUseCases[IO],
     semanticSearchService: Option[SearchUseCases[IO]] = None,
+    accountService: Option[AccountUseCases[IO]] = None,
     private[graphql] traceServices: Option[TraceContext => HiringGraphQLServices] = None
 ) {
   private[graphql] def forTrace(trace: TraceContext): HiringGraphQLServices =

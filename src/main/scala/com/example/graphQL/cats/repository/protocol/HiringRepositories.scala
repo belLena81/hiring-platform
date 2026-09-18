@@ -1,15 +1,26 @@
 package com.example.graphQL.cats.repository.protocol
 
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, EntityEmbedding, Job, User}
+import com.example.graphQL.cats.domain.model.{AccountCredentials, Application, ApplicationEvent, CandidateProfile, EntityEmbedding, Job, RecruiterProfile, User, UserPageRequest}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
+import java.time.Instant
 
 trait UserRepository[F[_]] {
   def find(id: UserId): F[Option[User]]
   def findMany(ids: List[UserId]): F[List[User]]
   def updateEmbedding(id: UserId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
+}
+
+trait UserAccountRepository[F[_]] {
+  def bootstrap(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
+  def initialized: F[Boolean]
+  def createAccount(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
+  def findByCanonicalName(nameCanonical: String): F[Option[AccountCredentials]]
+  def updateProfile(userId: UserId, profile: Option[CandidateProfile], recruiterProfile: Option[RecruiterProfile]): F[Either[RepositoryError, User]]
+  def listAccounts(page: UserPageRequest): F[List[User]]
+  def deleteAccount(userId: UserId, now: Instant, tombstone: String): F[Either[RepositoryError, Unit]]
 }
 
 trait JobRepository[F[_]] {

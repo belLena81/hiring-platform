@@ -9,6 +9,7 @@ import java.time.{Clock, Instant, ZoneOffset}
 import org.http4s.Request
 import org.typelevel.ci.CIString
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
+import io.circe.Json
 import scala.util.Try
 
 final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]) {
@@ -41,6 +42,23 @@ object JwtActorAuthenticator {
 
   def apply(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]): JwtActorAuthenticator =
     new JwtActorAuthenticator(config, users, now)
+
+  def issue(config: JwtAuthConfig, userId: UserId, now: Instant): Option[(String, Instant)] =
+    config.hmacSecret.map { secret =>
+      val expiresAt = now.plusSeconds(config.accessTokenSeconds)
+      val token = JwtCirce.encode(
+        Json.obj("alg" -> Json.fromString("HS256")),
+        Json.obj(
+          "sub" -> Json.fromString(userId.value.toString),
+          "iss" -> Json.fromString(config.issuer),
+          "aud" -> Json.fromString(config.audience),
+          "iat" -> Json.fromLong(now.getEpochSecond),
+          "exp" -> Json.fromLong(expiresAt.getEpochSecond)
+        ),
+        secret
+      )
+      token -> expiresAt
+    }
 
   def verify(token: String, secret: String, issuer: String, audience: String, now: IO[Instant]): IO[Option[UserId]] =
     now.map { instant =>

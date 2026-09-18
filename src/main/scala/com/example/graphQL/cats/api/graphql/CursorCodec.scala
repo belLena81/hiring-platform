@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.api.graphql
 
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.model.{UserCursor}
 import io.circe.parser.decode
 import io.circe.syntax.*
 import io.circe.{Decoder, DecodingFailure, Encoder}
@@ -15,6 +16,7 @@ private[graphql] object CursorCodec {
     case Job extends CursorKind("job")
     case Application extends CursorKind("application")
     case ApplicationEvent extends CursorKind("applicationEvent")
+    case User extends CursorKind("user")
   }
 
   private final case class Cursor(kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
@@ -25,6 +27,7 @@ private[graphql] object CursorCodec {
     case CursorKind.Job.value => Right(CursorKind.Job)
     case CursorKind.Application.value => Right(CursorKind.Application)
     case CursorKind.ApplicationEvent.value => Right(CursorKind.ApplicationEvent)
+    case CursorKind.User.value => Right(CursorKind.User)
     case other => Left(s"Unknown cursor kind: $other")
   }
 
@@ -50,6 +53,9 @@ private[graphql] object CursorCodec {
   def encodeEvent(cursor: ApplicationEventCursor): String =
     encode(Cursor(CursorKind.ApplicationEvent, None, Some(cursor.occurredAt), cursor.id.value))
 
+  def encodeUser(cursor: UserCursor): String =
+    encode(Cursor(CursorKind.User, Some(cursor.createdAt), None, cursor.id.value))
+
   def decodeJob(value: String): Option[JobCursor] =
     decodeCursor(value).flatMap {
       case Cursor(CursorKind.Job, Some(createdAt), None, id) => Some(JobCursor(createdAt, JobId(id)))
@@ -65,6 +71,12 @@ private[graphql] object CursorCodec {
   def decodeEvent(value: String): Option[ApplicationEventCursor] =
     decodeCursor(value).flatMap {
       case Cursor(CursorKind.ApplicationEvent, None, Some(occurredAt), id) => Some(ApplicationEventCursor(occurredAt, ApplicationEventId(id)))
+      case _ => None
+    }
+
+  def decodeUser(value: String): Option[UserCursor] =
+    decodeCursor(value).flatMap {
+      case Cursor(CursorKind.User, Some(createdAt), None, id) => Some(UserCursor(createdAt, UserId(id)))
       case _ => None
     }
 
