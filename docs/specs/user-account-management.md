@@ -39,7 +39,7 @@ deleteMyAccount: DeleteAccountPayload!
 
 `SignUpInput` contains `name`, `role`, and `password`; ordinary signup accepts only Candidate or Recruiter and returns `ADMIN_BOOTSTRAP_REQUIRED` until the first Admin exists. Admin signup is rejected with `ADMIN_BOOTSTRAP_ONLY`. `BootstrapAdminInput` contains `name` and `password` and is accepted only while the user registry is empty. `LoginInput` contains `name` and `password`.
 
-Profile inputs are role-specific at signup. A Candidate must provide a valid `CandidateProfile`; a Recruiter must provide a valid `RecruiterProfile`; exactly one profile variant is accepted. Admin signup is unavailable and the singleton Admin has no profile. Email remains optional for legacy compatibility and is not a login identity.
+Profile inputs are role-specific at signup. A Candidate must provide a valid `CandidateProfile`; a Recruiter must provide a valid `RecruiterProfile`; exactly one profile variant is accepted. Admin signup is unavailable and the singleton Admin has no profile. `updateMyProfile` supports Candidate and Recruiter accounts only; an Admin receives `PROFILE_UNSUPPORTED_FOR_ROLE`. Invalid Candidate/Recruiter profile variants use `PROFILE_ROLE_MISMATCH`. Email remains optional for legacy compatibility and is not a login identity.
 
 ### Authentication Contract
 
@@ -92,7 +92,7 @@ Signup validates input, requires exactly one role-matching profile for Candidate
 
 ### Profile Update
 
-`updateMyProfile` derives the target from the authenticated actor. It may update only the actor's role-specific profile and safe display fields. It cannot change role, name uniqueness identity, password, or another user's profile. Password change belongs to a separate future contract.
+`updateMyProfile` derives the target from the authenticated actor. It may update only the actor's role-specific profile and safe display fields. It cannot change role, name uniqueness identity, password, or another user's profile. Admin accounts are profile-less and return `PROFILE_UNSUPPORTED_FOR_ROLE`; `PROFILE_ROLE_MISMATCH` is reserved for profile data whose variant does not match a Candidate or Recruiter role. Password change belongs to a separate future contract.
 
 ### Account Deletion
 
@@ -113,7 +113,7 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 | UAM-AC01 | Given an empty user registry, when the first Admin bootstrap succeeds, then exactly one singleton Admin and one bootstrap record exist | `UserAccountService`; Mongo setup/transaction integration (live run pending) |
 | UAM-AC02 | Given concurrent bootstrap and signup requests against an empty registry, when both race, then exactly one Admin is committed and signup is rejected until bootstrap completes | Transaction repository implementation; replica-set concurrency test pending |
 | UAM-AC03 | Given a valid Candidate or Recruiter signup with exactly one matching profile, when the request succeeds, then a password hash and Active user are stored and no plaintext credential is persisted | Argon2 adapter, account service, BSON codec, GraphQL contract |
-| UAM-AC04 | Given duplicate names with different case, when signup races or repeats, then one succeeds and the other returns `NAME_TAKEN` | Unique `nameCanonical` index and repository conflict mapping; live integration pending |
+| UAM-AC04 | Given duplicate names with different case, when signup races or repeats, then one succeeds and the other returns `NAME_TAKEN` | Unique `nameCanonical` index, transactional repository conflict mapping, and account-service error translation |
 | UAM-AC05 | Given valid and invalid credentials, when login is called, then only the matching Active user receives a signed token and failures are indistinguishable | JWT/auth tests and sanitized payload mapping |
 | UAM-AC06 | Given a valid token, when `me` or profile update is called, then only the authenticated user's data changes | GraphQL access tests; service wiring |
 | UAM-AC07 | Given an Admin, when `users` is queried, then results are bounded, paginated, role/status-filterable, and credential-free | SDL fixture, resolver, cursor codec, account list port |
@@ -134,7 +134,7 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 
 - Source: `UserAccountService`, `Argon2PasswordHasher`, `JwtActorAuthenticator`, `MongoUserRepository`, `MongoHiringSetup`, and `HiringGraphQLSchema` implement the contract.
 - Contracts: `src/test/resources/graphql/hiring.graphql` and the route/schema tests cover the additive API shape.
-- Local evidence: `sbt test` passed 180 unit tests; `IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec` passed 12 Mongo/Testcontainers tests, including tagged-profile backfill, fail-closed setup, sparse email-index replacement, transactional application behavior, and explain-plan checks. Account lifecycle transaction/concurrency criteria remain separately identified where their dedicated integration coverage is still pending.
+- Local evidence: focused account-service tests passed 8/8; `IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec` passed 14 Mongo/Testcontainers tests, including fresh-database setup, tagged-profile backfill, fail-closed setup, sparse email-index replacement, transactional account-name conflict mapping, transactional application behavior, and explain-plan checks. Account lifecycle transaction/concurrency criteria remain separately identified where their dedicated integration coverage is still pending.
 - Query analysis: the account access patterns use canonical-name lookup, status/createdAt keyset listing, and role/status filtering. The new indexes are recorded by the repeatable setup migration; no latency or production SLO claim is made.
 
 ## Non-Functional Assumptions

@@ -12,6 +12,13 @@ import java.util.{Base64, UUID}
 import scala.util.Try
 
 private[graphql] object CursorCodec {
+  private val CurrentVersion = 1
+
+  enum CursorError {
+    case Malformed(message: String)
+    case WrongKind(expected: String)
+  }
+
   private enum CursorKind(val value: String) {
     case Job extends CursorKind("job")
     case Application extends CursorKind("application")
@@ -19,72 +26,77 @@ private[graphql] object CursorCodec {
     case User extends CursorKind("user")
   }
 
-  private final case class Cursor(kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
+  private final case class Cursor(version: Int, kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
 
   private given Encoder[CursorKind] = Encoder.encodeString.contramap(_.value)
 
   private given Decoder[CursorKind] = Decoder.decodeString.emap {
-    case CursorKind.Job.value => Right(CursorKind.Job)
-    case CursorKind.Application.value => Right(CursorKind.Application)
-    case CursorKind.ApplicationEvent.value => Right(CursorKind.ApplicationEvent)
-    case CursorKind.User.value => Right(CursorKind.User)
-    case other => Left(s"Unknown cursor kind: $other")
+    CursorKind.values.find(_.value == raw).toRight(s"Unknown cursor kind: $raw")
   }
 
-  private given Encoder[Cursor] = Encoder.forProduct4("kind", "createdAt", "occurredAt", "id")(cursor =>
-    (cursor.kind, cursor.createdAt.map(_.toString), cursor.occurredAt.map(_.toString), cursor.id.toString)
+  private given Encoder[Cursor] = Encoder.forProduct5("v", "kind", "createdAt", "occurredAt", "id")(cursor =>
+    (cursor.version, cursor.kind, cursor.createdAt.map(_.toString), cursor.occurredAt.map(_.toString), cursor.id.toString)
   )
 
   private given Decoder[Cursor] = Decoder.instance { cursor =>
     for {
+      version <- cursor.downField("v").as[Int]
+      _ <- Either.cond(version == CurrentVersion, (), s"Unsupported cursor version: $version")
       kind <- cursor.downField("kind").as[CursorKind]
       createdAt <- cursor.downField("createdAt").as[Option[String]].flatMap(decodeInstant)
       occurredAt <- cursor.downField("occurredAt").as[Option[String]].flatMap(decodeInstant)
       id <- cursor.downField("id").as[String].flatMap(decodeUuid)
-    } yield Cursor(kind, createdAt, occurredAt, id)
+    } yield Cursor(version, kind, createdAt, occurredAt, id)
   }
 
   def encodeJob(cursor: JobCursor): String =
-    encode(Cursor(CursorKind.Job, Some(cursor.createdAt), None, cursor.id.value))
+    encode(Cursor(CurrentVersion, CursorKind.Job, Some(cursor.createdAt), None, cursor.id.value))
 
   def encodeApplication(cursor: ApplicationCursor): String =
-    encode(Cursor(CursorKind.Application, Some(cursor.createdAt), None, cursor.id.value))
+    encode(Cursor(CurrentVersion, CursorKind.Application, Some(cursor.createdAt), None, cursor.id.value))
 
   def encodeEvent(cursor: ApplicationEventCursor): String =
-    encode(Cursor(CursorKind.ApplicationEvent, None, Some(cursor.occurredAt), cursor.id.value))
+    encode(Cursor(CurrentVersion, CursorKind.ApplicationEvent, None, Some(cursor.occurredAt), cursor.id.value))
 
   def encodeUser(cursor: UserCursor): String =
-    encode(Cursor(CursorKind.User, Some(cursor.createdAt), None, cursor.id.value))
+    encode(Cursor(CurrentVersion, CursorKind.User, Some(cursor.createdAt), None, cursor.id.value))
 
-  def decodeJob(value: String): Option[JobCursor] =
+  def decodeJob(value: String): Either[CursorError, JobCursor] =
     decodeCursor(value).flatMap {
-      case Cursor(CursorKind.Job, Some(createdAt), None, id) => Some(JobCursor(createdAt, JobId(id)))
-      case _ => None
+      case Cursor(_, CursorKind.Job, Some(createdAt), None, id) => Right(JobCursor(createdAt, JobId(id)))
+      case Cursor(_, CursorKind.Job, _, _, _) => Left(CursorError.Malformed("Invalid job cursor shape"))
+      case Cursor(_, kind, _, _, _) => Left(CursorError.WrongKind(kind.value))
     }
 
-  def decodeApplication(value: String): Option[ApplicationCursor] =
+  def decodeApplication(value: String): Either[CursorError, ApplicationCursor] =
     decodeCursor(value).flatMap {
-      case Cursor(CursorKind.Application, Some(createdAt), None, id) => Some(ApplicationCursor(createdAt, ApplicationId(id)))
-      case _ => None
+      case Cursor(_, CursorKind.Application, Some(createdAt), None, id) => Right(ApplicationCursor(createdAt, ApplicationId(id)))
+      case Cursor(_, CursorKind.Application, _, _, _) => Left(CursorError.Malformed("Invalid application cursor shape"))
+      case Cursor(_, kind, _, _, _) => Left(CursorError.WrongKind(kind.value))
     }
 
-  def decodeEvent(value: String): Option[ApplicationEventCursor] =
+  def decodeEvent(value: String): Either[CursorError, ApplicationEventCursor] =
     decodeCursor(value).flatMap {
-      case Cursor(CursorKind.ApplicationEvent, None, Some(occurredAt), id) => Some(ApplicationEventCursor(occurredAt, ApplicationEventId(id)))
-      case _ => None
+      case Cursor(_, CursorKind.ApplicationEvent, None, Some(occurredAt), id) => Right(ApplicationEventCursor(occurredAt, ApplicationEventId(id)))
+      case Cursor(_, CursorKind.ApplicationEvent, _, _, _) => Left(CursorError.Malformed("Invalid event cursor shape"))
+      case Cursor(_, kind, _, _, _) => Left(CursorError.WrongKind(kind.value))
     }
 
-  def decodeUser(value: String): Option[UserCursor] =
+  def decodeUser(value: String): Either[CursorError, UserCursor] =
     decodeCursor(value).flatMap {
-      case Cursor(CursorKind.User, Some(createdAt), None, id) => Some(UserCursor(createdAt, UserId(id)))
-      case _ => None
+      case Cursor(_, CursorKind.User, Some(createdAt), None, id) => Right(UserCursor(createdAt, UserId(id)))
+      case Cursor(_, CursorKind.User, _, _, _) => Left(CursorError.Malformed("Invalid user cursor shape"))
+      case Cursor(_, kind, _, _, _) => Left(CursorError.WrongKind(kind.value))
     }
 
   private def encode(cursor: Cursor): String =
     Base64.getUrlEncoder.withoutPadding().encodeToString(cursor.asJson.noSpaces.getBytes(StandardCharsets.UTF_8))
 
-  private def decodeCursor(value: String): Option[Cursor] =
-    Try(String(Base64.getUrlDecoder.decode(value), StandardCharsets.UTF_8)).toOption.flatMap(decode[Cursor](_).toOption)
+  private def decodeCursor(value: String): Either[CursorError, Cursor] =
+    for {
+      bytes <- Try(Base64.getUrlDecoder.decode(value)).toEither.left.map(error => CursorError.Malformed(error.getMessage))
+      cursor <- decode[Cursor](String(bytes, StandardCharsets.UTF_8)).left.map(error => CursorError.Malformed(error.getMessage))
+    } yield cursor
 
   private def decodeInstant(value: Option[String]): Decoder.Result[Option[Instant]] =
     decodeOptional(value, Instant.parse, "Invalid cursor timestamp")

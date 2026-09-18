@@ -29,7 +29,7 @@ object HiringPlatformServer {
     for {
       address <- Resource.eval(IO.fromOption(Host.fromString(host))(new IllegalArgumentException("Invalid bind address")))
       bindPort <- Resource.eval(IO.fromOption(Port.fromInt(port))(new IllegalArgumentException("Invalid bind port")))
-      admission <- Resource.eval(Admission.create(admissionPermits))
+      admission <- Admission.resource(admissionPermits)
       authenticate = (userAuthenticator, jwtAuth) match {
         case (Some(users), Some(config)) =>
           new JwtActorAuthenticator(config, users, IO.realTimeInstant).authenticate
@@ -52,6 +52,6 @@ object HiringPlatformServer {
           .withOnWriteFailure((_, _, _) => IO.unit)
           .withConnectionErrorHandler { case _ => IO.unit }
           .build.allocated
-      ) { case (_, release) => admission.close *> release }
+      ) { case (_, release) => release }
     } yield server._1
 }

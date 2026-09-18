@@ -16,6 +16,7 @@ enum AccountError {
   case InvalidCredentials
   case DeletedAccount
   case ProfileRoleMismatch
+  case ProfileUnsupportedForRole
   case PasswordPolicyViolation
   case AccountAlreadyDeleted
   case AdminSignupForbidden

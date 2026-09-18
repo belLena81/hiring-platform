@@ -65,6 +65,24 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   private val secondEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000108"))
   private val thirdEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000109"))
 
+  test("setup initializes an empty database before inspecting user indexes") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_fresh_setup")
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          collections <- PublisherBridge.all(database.listCollectionNames())
+          userIndexes <- indexes(database.getCollection("users"))
+          _ <- MongoHiringSetup.initialize(database)
+        } yield {
+          assert(collections.contains("users"))
+          assert(userIndexes.contains(MongoHiringSetup.UsersEmailIndex))
+          assert(userIndexes.contains(MongoHiringSetup.UsersNameIndex))
+        }
+      }
+    }
+  }
+
   test("setup backfills legacy canonical names before creating the unique index") {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
@@ -88,11 +106,13 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           indexes <- indexes(users)
         } yield {
           assertEquals(candidate.map(_.getString("nameCanonical")), Some("legacy candidate"))
+          assertEquals(candidate.map(_.getString("accountStatus")), Some("Active"))
           assertEquals(candidate.flatMap(_.get("profile") match {
             case value: Document => Some(value)
             case _ => None
           }).map(_.getString("kind")), Some("Candidate"))
           assertEquals(recruiter.map(_.getString("nameCanonical")), Some("legacy recruiter"))
+          assertEquals(recruiter.map(_.getString("accountStatus")), Some("Active"))
           assertEquals(recruiter.flatMap(_.get("profile") match {
             case value: Document => Some(value)
             case _ => None
@@ -160,6 +180,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             .find(new Document("_id", MongoHiringSetup.HiringVectorSearchMigrationId)))
           userAccountMigration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.UserAccountMigrationId)))
+          userAccountStatusMigration <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.UserAccountStatusMigrationId)))
           profileMigration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.UserProfileOneOfMigrationId)))
           emailIndexMigration <- PublisherBridge.first(migrations
@@ -178,6 +200,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
           assertEquals(userAccountMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserAccountMigrationId))
+          assertEquals(userAccountStatusMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserAccountStatusMigrationId))
           assertEquals(profileMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserProfileOneOfMigrationId))
           assertEquals(emailIndexMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserEmailSparseIndexMigrationId))
           assertEquals(accountRegistry.map(_.getString("state")), Some("Uninitialized"))
@@ -220,6 +243,30 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(graphqlPerformanceMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringGraphQLSearchIndexMigrationId))
           assert(adminJobListingMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringAdminJobListingIndexMigrationId))
           assert(vectorSearchMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringVectorSearchMigrationId))
+        }
+      }
+    }
+  }
+
+  test("transactional account name conflicts remain repository conflicts") {
+    replicaSetContainer.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_account_name_conflict")
+        val users = MongoUserRepository.transactional(database, client)
+        val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+        val first = User(candidateId, None, "Same Name", UserRole.Candidate,
+          Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)
+        val duplicate = User(recruiterId, None, " same name ", UserRole.Recruiter,
+          Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          bootstrapped <- users.bootstrap(admin, "hash")
+          created <- users.createAccount(first, "hash")
+          conflict <- users.createAccount(duplicate, "hash")
+        } yield {
+          assertEquals(bootstrapped, Right(()))
+          assertEquals(created, Right(()))
+          assertEquals(conflict, Left(RepositoryError.Conflict))
         }
       }
     }

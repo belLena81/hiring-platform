@@ -49,7 +49,7 @@ private[mongo] object MongoTransactionRunner {
   val noTransaction: MongoTransactionRunner =
     operation => operation(None)
 
-  def sessions(client: MongoClient): MongoTransactionRunner =
+  def sessions(client: MongoClient, duplicateKeyError: RepositoryError): MongoTransactionRunner =
     operation =>
       Resource.make(PublisherBridge.first(client.startSession()).flatMap {
         case Some(session) => IO.pure(session)
@@ -57,19 +57,19 @@ private[mongo] object MongoTransactionRunner {
       })(session => IO.blocking(session.close())).use { session =>
         IO.delay(session.startTransaction()) *> operation(Some(session)).attempt.flatMap {
           case Left(error) =>
-            PublisherBridge.first(session.abortTransaction()).attempt.as(mapWrite(error))
+            PublisherBridge.first(session.abortTransaction()).attempt.as(mapWrite(error, duplicateKeyError))
           case Right(Left(error)) =>
             PublisherBridge.first(session.abortTransaction()).attempt.as(Left(error))
           case Right(Right(())) =>
             PublisherBridge.first(session.commitTransaction()).as(Right(())).handleErrorWith { error =>
-              PublisherBridge.first(session.abortTransaction()).attempt.as(mapWrite(error))
+              PublisherBridge.first(session.abortTransaction()).attempt.as(mapWrite(error, duplicateKeyError))
             }
         }
       }
 
-  private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
+  private def mapWrite(error: Throwable, duplicateKeyError: RepositoryError): Either[RepositoryError, Unit] =
     error match {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.DuplicateApplication)
+      case write: MongoWriteException if write.getError.getCode == 11000 => Left(duplicateKeyError)
       case command: MongoCommandException if isWriteConflict(command) => Left(RepositoryError.Conflict)
       case _ => Left(RepositoryError.Unavailable)
     }
@@ -230,7 +230,7 @@ object MongoUserRepository {
     new MongoUserRepository(database)
 
   def transactional(database: MongoDatabase, client: MongoClient): MongoUserRepository =
-    new MongoUserRepository(database, MongoTransactionRunner.sessions(client))
+    new MongoUserRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict))
 }
 
 final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO] with MongoConflictWriteMapping {
@@ -581,5 +581,5 @@ object MongoApplicationRepository {
     new MongoApplicationRepository(database, MongoTransactionRunner.noTransaction)
 
   def transactional(database: MongoDatabase, client: MongoClient): MongoApplicationRepository =
-    new MongoApplicationRepository(database, MongoTransactionRunner.sessions(client))
+    new MongoApplicationRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.DuplicateApplication))
 }

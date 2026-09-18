@@ -609,13 +609,21 @@ object HiringGraphQLSchema {
     (context.ctx.actor, accountService(context)) match {
       case (Some(actor), Right(service)) =>
         val input = context.arg(updateProfileInputArgument)
-        val profile = actor.role match {
-          case UserRole.Candidate => UserProfile.Candidate(CandidateProfile(input.skills.getOrElse(Nil).toSet, input.experienceSummary, input.resumeRef))
-          case UserRole.Recruiter => UserProfile.Recruiter(RecruiterProfile(input.organizationName.getOrElse(""), input.jobTitle))
-          case UserRole.Admin => UserProfile.Candidate(CandidateProfile(Set.empty, None, None))
-        }
-        service.updateMyProfile(actor, AccountProfileInput(profile)).map(_.fold(error => UserPayload(None, List(toGraphQLError(error))), user => UserPayload(Some(user), Nil)))
+        updateProfileInput(actor.role, input).fold(
+          error => IO.pure(UserPayload(None, List(toGraphQLError(error)))),
+          profile => service.updateMyProfile(actor, profile).map(_.fold(error => UserPayload(None, List(toGraphQLError(error))), user => UserPayload(Some(user), Nil)))
+        )
       case _ => IO.pure(UserPayload(None, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
+    }
+
+  private def updateProfileInput(role: UserRole, input: UpdateProfileGraphQLInput): Either[UseCaseError, AccountProfileInput] =
+    role match {
+      case UserRole.Candidate =>
+        Right(AccountProfileInput(UserProfile.Candidate(CandidateProfile(input.skills.getOrElse(Nil).toSet, input.experienceSummary, input.resumeRef))))
+      case UserRole.Recruiter =>
+        Right(AccountProfileInput(UserProfile.Recruiter(RecruiterProfile(input.organizationName.getOrElse(""), input.jobTitle))))
+      case UserRole.Admin =>
+        Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole))
     }
 
   private def deleteMyAccount(context: Context[RequestContext, Unit]): IO[DeleteAccountPayload] =
@@ -665,7 +673,7 @@ object HiringGraphQLSchema {
   private def page(
       first: Int,
       after: Option[String],
-      decode: String => Option[JobCursor]
+      decode: String => Either[CursorCodec.CursorError, JobCursor]
   ): IO[Either[GraphQLError, (JobPageRequest, Int)]] =
     cursorPage(first, after, decode)((cursor, size) => JobPageRequest(None, cursor, size))
 
@@ -690,7 +698,7 @@ object HiringGraphQLSchema {
   private def cursorPage[A, B](
       first: Int,
       after: Option[String],
-      decode: String => Option[A]
+      decode: String => Either[CursorCodec.CursorError, A]
   )(build: (Option[A], PageSize) => B): IO[Either[GraphQLError, (B, Int)]] =
     pageSize(first).map(_.map { size =>
       build(after.flatMap(decode), PageSize.next(size)) -> size.value
@@ -709,10 +717,10 @@ object HiringGraphQLSchema {
 
   private def validateCursor[A, B](
       after: Option[String],
-      decode: String => Option[A]
+      decode: String => Either[CursorCodec.CursorError, A]
   )(page: Either[GraphQLError, (B, Int)]): Either[GraphQLError, (B, Int)] =
     after match {
-      case Some(raw) if decode(raw).isEmpty => Left(GraphQLError("INVALID_CURSOR", "Invalid cursor"))
+      case Some(raw) if decode(raw).isLeft => Left(GraphQLError("INVALID_CURSOR", "Invalid cursor"))
       case _ => page
     }
 
@@ -842,6 +850,7 @@ object HiringGraphQLSchema {
       case UseCaseError.Account(AccountError.InvalidCredentials) => GraphQLError("INVALID_CREDENTIALS", "Invalid credentials")
       case UseCaseError.Account(AccountError.DeletedAccount) => GraphQLError("UNAUTHORIZED", "Authentication required")
       case UseCaseError.Account(AccountError.ProfileRoleMismatch) => GraphQLError("PROFILE_ROLE_MISMATCH", "Profile does not match the selected role")
+      case UseCaseError.Account(AccountError.ProfileUnsupportedForRole) => GraphQLError("PROFILE_UNSUPPORTED_FOR_ROLE", "This role does not support a profile")
       case UseCaseError.Account(AccountError.PasswordPolicyViolation) => GraphQLError("INVALID_PASSWORD", "Password does not meet policy")
       case UseCaseError.Account(AccountError.AccountAlreadyDeleted) => GraphQLError("ACCOUNT_ALREADY_DELETED", "Account is already deleted")
       case UseCaseError.Account(AccountError.AdminSignupForbidden) => GraphQLError("ADMIN_BOOTSTRAP_ONLY", "Admin accounts can only be created through bootstrap")

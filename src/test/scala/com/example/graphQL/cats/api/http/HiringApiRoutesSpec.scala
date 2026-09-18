@@ -307,11 +307,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       http <- app(IO.pure(ProbeResult.Ready), capture(records))
       response <- http(Request[IO](Method.fromString("SYNTHETIC").getOrElse(fail("Invalid test method")),
         Uri.unsafeFromString("/synthetic-path-secret?password=synthetic-query-secret")))
+      body <- response.as[Json]
       captured <- records.get
     } yield {
       val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
       val completions = captured.filter(_._1 == LogEvent.RequestCompleted)
       assertEquals(response.status, Status.NotFound)
+      assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Not found")))))
       assertEquals(completions.size, 1)
       assert(captured.forall(_._2 == id))
       assert(captured.exists(record => record._1 == LogEvent.RequestRejected &&
@@ -406,24 +408,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("Accept uses the most specific range and highest quality only among equal specificity") {
+  test("Accept requires the GraphQL response media type") {
     val cases = List(
-      "*/*" -> Status.Ok,
-      "application/*" -> Status.Ok,
-      "application/json;q=0, */*;q=1" -> Status.NotAcceptable,
-      "*/*;q=1, application/json;q=0" -> Status.NotAcceptable,
-      "application/*;q=0, */*;q=1" -> Status.NotAcceptable,
-      "application/json;q=0.001, application/*;q=0" -> Status.Ok,
-      "application/json;q=0, application/json;q=0.5" -> Status.Ok,
-      "application/json;q=0.5, application/json;q=0" -> Status.Ok,
-      "application/json;q=0, application/json" -> Status.Ok,
-      "application/*;q=0, application/*;q=0.2" -> Status.Ok,
-      "text/html;q=1, */*;q=0.1" -> Status.Ok,
-      "application/json;q=1.000" -> Status.Ok,
-      "application/json;q=0.000" -> Status.NotAcceptable,
-      "application/json;q=1." -> Status.Ok,
-      "application/json;q=0." -> Status.NotAcceptable,
-      "APPLICATION/JSON; Q = 0.5" -> Status.Ok
+      "application/graphql-response+json" -> Status.Ok,
+      "application/graphql-response+json;q=0.5" -> Status.Ok,
+      "application/json" -> Status.NotAcceptable,
+      "text/html, application/json;q=1" -> Status.NotAcceptable
     )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
       cases.traverse_ { case (accept, expected) =>
@@ -433,14 +423,20 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("malformed or duplicate Accept quality parameters reject the whole header") {
-    val invalid = List("-0.1", "1.001", "2", "0.0001", "1.0000", ".5", "01", "NaN", "Infinity", "1e0", "", "\"0.5\"")
-      .map(value => s"application/json;q=$value, */*;q=1") ++ List(
-        "application/json;q=0;q=1", "application/json;q=1;Q=1", "application/json;q",
-        "application/json, text/html;q=invalid"
-      )
+  test("malformed Accept segments are ignored independently") {
+    val accepted = List(
+      "text/html;q=invalid, application/graphql-response+json",
+      "application/graphql-response+json, text/html;q=invalid"
+    )
+    val rejected = List(
+      "application/graphql-response+json;q=0;q=1",
+      "text/html;q=invalid"
+    )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
-      invalid.traverse_ { accept =>
+      accepted.traverse_ { accept =>
+        http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
+          .map(response => assertEquals(response.status, Status.Ok, accept))
+      } *> rejected.traverse_ { accept =>
         http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
           .map(response => assertEquals(response.status, Status.NotAcceptable, accept))
       }
@@ -638,7 +634,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("rejection diagnostics match the generated response request ID without synthetic secrets") {
+  test("rejection diagnostics match the sanitized response request ID without synthetic secrets") {
     val secret = "synthetic-rejection-secret"
     for {
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)

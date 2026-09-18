@@ -1,0 +1,43 @@
+package com.example.graphQL.cats.service.auth
+
+import cats.effect.IO
+import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
+import com.example.graphQL.cats.repository.protocol.UserRepository
+import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, RepositoryError, ServiceFixtures, UseCaseError}
+import munit.CatsEffectSuite
+
+final class ActorAuthorizationSpec extends CatsEffectSuite {
+  private val activeUser = ServiceFixtures.recruiter
+  private val deletedUser = activeUser.copy(accountStatus = AccountStatus.Deleted, profile = None)
+
+  test("resolve rejects a deleted user even when the actor role matches") {
+    val authorization = ActorAuthorization[IO](repository(Map(deletedUser.id -> deletedUser)))
+
+    authorization.resolve(ActorContext(deletedUser.id, UserRole.Recruiter)).map { result =>
+      assertEquals(result, Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
+    }
+  }
+
+  test("resolve accepts an active user with a matching actor role") {
+    val authorization = ActorAuthorization[IO](repository(Map(activeUser.id -> activeUser)))
+
+    authorization.resolve(ActorContext(activeUser.id, UserRole.Recruiter)).map { result =>
+      assertEquals(result, Right(activeUser))
+    }
+  }
+
+  private def repository(values: Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]): UserRepository[IO] =
+    new UserRepository[IO] {
+      override def find(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): IO[Option[User]] =
+        IO.pure(values.get(id))
+
+      override def findMany(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): IO[List[User]] =
+        IO.pure(ids.flatMap(values.get))
+
+      override def updateEmbedding(
+          id: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+          embedding: EntityEmbedding
+      ): IO[Either[RepositoryError, Unit]] =
+        IO.pure(Right(()))
+    }
+}

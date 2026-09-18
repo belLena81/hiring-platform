@@ -4,12 +4,13 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContext}
-import com.example.graphQL.cats.service.{ActorContext, HiringReadService, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, HiringReadService, ProbeResult, UseCaseError}
 import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector, SemanticSearchRepository, UserRepository}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.job.JobService
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, BootstrapAdminInput, LoginInput, SignUpInput}
 import com.example.graphQL.cats.service.search.SemanticSearchService
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
@@ -214,6 +215,27 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(ids, Set(jobId.value.toString, closedJobId.value.toString))
       assertEquals(jobs.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
       assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("Admin profile update is rejected before constructing a candidate profile") {
+    for {
+      updateCalls <- Ref.of[IO, Int](0)
+      accountService = new RecordingAccountService(updateCalls)
+      query =
+        """mutation {
+          |  updateMyProfile(input: { skills: ["Scala"] }) {
+          |    user { profile { __typename } }
+          |    errors { code }
+          |  }
+          |}""".stripMargin
+      json <- executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), Some(accountService))
+      calls <- updateCalls.get
+    } yield {
+      val payload = json.hcursor.downField("data").downField("updateMyProfile")
+      assert(payload.downField("user").focus.contains(Json.Null))
+      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("PROFILE_UNSUPPORTED_FOR_ROLE"))
+      assertEquals(calls, 0)
     }
   }
 
@@ -556,7 +578,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     } yield result.fold(failure => fail(failure.toString), identity)
   }
 
-  private def executeWithUsers(query: String, actor: Option[ActorContext], users: List[User]): IO[Json] = {
+  private def executeWithUsers(
+      query: String,
+      actor: Option[ActorContext],
+      users: List[User],
+      accountService: Option[AccountUseCases[IO]] = None
+  ): IO[Json] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
       jobsRef <- Ref.of[IO, Map[JobId, Job]](List(openJob, closedJob).map(job => job.id -> job).toMap)
@@ -566,7 +593,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
-      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), accountService = accountService)
       request <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
         new IllegalArgumentException("Invalid GraphQL test request"))
       result <- RequestContext.resource(IO.pure(ProbeResult.Ready), actor, Some(services)).use(HiringGraphQLSchema.executeInContext(request, _))
@@ -612,6 +639,31 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
       IO.pure(Right(Nil))
+  }
+
+  private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases[IO] {
+    private val unsupported: UseCaseError = UseCaseError.account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
+
+    override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+      IO.pure(Left(unsupported))
+
+    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+      IO.pure(Left(unsupported))
+
+    override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
+      IO.pure(Left(unsupported))
+
+    override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
+      IO.pure(Left(unsupported))
+
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput): IO[Either[UseCaseError, User]] =
+      updateCalls.update(_ + 1).as(Left(unsupported))
+
+    override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
+      IO.pure(Left(unsupported))
+
+    override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =
+      IO.pure(Left(unsupported))
   }
 
   private def job(id: JobId, status: JobStatus): Job =

@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.AccountName
+import com.mongodb.MongoCommandException
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
@@ -47,6 +48,7 @@ object MongoHiringSetup {
   val HiringAtlasSearchIndexMigrationId = "hiring-atlas-search-indexes-v1"
   val UserNameCanonicalMigrationId = "user-name-canonical-v1"
   val UserAccountMigrationId = "user-account-management-v1"
+  val UserAccountStatusMigrationId = "user-account-status-v1"
   val UserProfileOneOfMigrationId = "user-profile-one-of-v1"
   val UserEmailSparseIndexMigrationId = "user-email-canonical-sparse-v1"
 
@@ -54,7 +56,9 @@ object MongoHiringSetup {
     initialize(database, None)
 
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    backfillLegacyNames(database) *>
+    ensureUsersCollection(database) *>
+      backfillLegacyNames(database) *>
+      backfillLegacyAccountStatus(database) *>
       migrateUserProfiles(database) *>
       replaceEmailIndex(database) *>
       (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
@@ -125,6 +129,8 @@ object MongoHiringSetup {
       recordMigration(migrations, UserNameCanonicalMigrationId, "Backfill canonical account names before the unique index")
       *>
       recordMigration(migrations, UserAccountMigrationId, "User account credentials, lifecycle, and query indexes")
+      *>
+      recordMigration(migrations, UserAccountStatusMigrationId, "Backfill active status for legacy user accounts")
       *>
       recordMigration(migrations, UserProfileOneOfMigrationId, "Normalize active user profiles to one role-specific MongoDB profile")
       *>
@@ -239,6 +245,11 @@ object MongoHiringSetup {
   ): IO[Unit] =
     PublisherBridge.first(collection.createIndex(keys, options)).void
 
+  private def ensureUsersCollection(database: MongoDatabase): IO[Unit] =
+    PublisherBridge.first(database.createCollection("users")).void.handleErrorWith {
+      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
+    }
+
   private def replaceEmailIndex(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
     PublisherBridge.all(users.listIndexes()).flatMap { indexes =>
@@ -269,6 +280,14 @@ object MongoHiringSetup {
         }
       }
     }
+  }
+
+  private def backfillLegacyAccountStatus(database: MongoDatabase): IO[Unit] = {
+    val users = database.getCollection("users")
+    PublisherBridge.first(users.updateMany(
+      Filters.exists("accountStatus", false),
+      Updates.set("accountStatus", "Active")
+    )).void
   }
 
   private def profileMigrationUpdates(document: Document): IO[List[Bson]] =

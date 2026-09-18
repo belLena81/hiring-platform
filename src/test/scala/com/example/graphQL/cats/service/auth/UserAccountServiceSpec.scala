@@ -18,6 +18,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   private val recruiterId = UserId(UUID.fromString("20000000-0000-0000-0000-000000000002"))
   private val recruiter = User(recruiterId, None, "Recruiter", UserRole.Recruiter,
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
+  private val admin = User(userId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
   private val deletedRecruiter = recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None, deletedAt = Some(now))
 
   test("ordinary signup cannot create an Admin") {
@@ -81,6 +82,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
   }
 
+  test("profile update rejects the profile-less Admin role") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = new UserAccountService(new TestUsers(Map(admin.id -> admin)), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      result <- service.updateMyProfile(
+        ActorContext(admin.id, UserRole.Admin),
+        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+      )
+    } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
+  }
+
   test("valid recruiter signup remains supported") {
     for {
       accounts <- TestAccounts.create(initialized = true)
@@ -92,6 +104,28 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
       ), now, userId)
     } yield assert(result.isRight)
+  }
+
+  test("signup maps a canonical-name conflict to NameTaken") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      first <- service.signUp(SignUpInput(
+        "Candidate Name",
+        UserRole.Candidate,
+        "password-password",
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+      ), now, userId)
+      duplicate <- service.signUp(SignUpInput(
+        " candidate name ",
+        UserRole.Candidate,
+        "password-password",
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+      ), now, recruiterId)
+    } yield {
+      assert(first.isRight)
+      assertEquals(duplicate, Left(UseCaseError.account(AccountError.NameTaken)))
+    }
   }
 
   test("deleting an already deleted account is idempotent") {

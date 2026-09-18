@@ -80,6 +80,7 @@ final class UserAccountService(
     users.find(actor.userId).flatMap {
       case None => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
       case Some(user) if user.accountStatus != AccountStatus.Active => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
+      case Some(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
       case Some(user) =>
         if (!profileShapeValid(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
         else validateProfile(user.role, Some(input.profile)).fold(

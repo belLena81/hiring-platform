@@ -110,7 +110,7 @@ object LogFields {
     case LogField.DurationMs | LogField.BodyBytes => value.toLongOption.exists(_ >= 0)
     case LogField.HttpPort => value.toIntOption.exists(port => port >= 1 && port <= 65535)
     case LogField.Reason => reasons.contains(value)
-    case LogField.Outcome => Set("COMPLETED", "CANCELLED", "FIELD_ERROR", "READY", "NOT_READY").contains(value)
+    case LogField.Outcome => Set("COMPLETED", "REJECTED", "CANCELLED", "FIELD_ERROR", "READY", "NOT_READY").contains(value)
     case LogField.ConfigKey => Set(
       "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "HTTP_ADMISSION_PERMITS", "MONGODB_URI", "MONGODB_DATABASE",
       "LOG_MASK_SENSITIVE", "AUTH_JWT_HS256_SECRET", "AUTH_JWT_ISSUER",
