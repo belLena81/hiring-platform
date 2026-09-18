@@ -76,6 +76,22 @@ Can:
 - analyze time-to-hire
 - analyze skill demand and trends
 
+Account lifecycle and access management are defined in Phase 4.5: the first account is an atomic singleton Admin bootstrap, later accounts sign up as Candidate or Recruiter, and every authenticated user can delete only their own account.
+
+## User Account Management Capability
+
+The account flow is intentionally separate from hiring-domain profile completion:
+
+- the first account is created through a one-time Admin bootstrap; ordinary signup opens only after bootstrap completes
+- signup requires only a unique name, role, and password
+- email confirmation is out of scope for the initial flow
+- Candidate and Recruiter profile fields are completed after signup through an authenticated self-service mutation
+- login returns a short-lived signed access token; stored user data, not token role claims, determines authorization
+- an Admin may query bounded non-secret user summaries but cannot delete another user
+- account deletion is a transactional logical deletion that removes credentials and profile data, closes owned open jobs, preserves applications/history, and prevents future authentication
+
+The detailed contracts, query shapes, MongoDB indexes, concurrency cases, and acceptance criteria are maintained in [Phase 4.5 User Account Management](docs/specs/user-account-management.md).
+
 ---
 
 # 3. Core Application Lifecycle

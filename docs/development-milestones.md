@@ -15,6 +15,8 @@ GraphQL + Performance
     ↓
 Vector / Hybrid Search
     ↓
+User Account Management
+    ↓
 Event Architecture
     ↓
 Lakehouse
@@ -344,6 +346,80 @@ The same job-search request can be executed through lexical/structured and seman
 - vector queries support metadata filtering
 - search model/version is observable
 - integration tests cover vector-search behavior
+
+---
+
+## Phase 4.5 — User Account Management
+
+The [User Account Management specification](specs/user-account-management.md) records the account lifecycle, authentication contract, profile completion, authorization boundaries, deletion transaction, and acceptance evidence for this phase.
+
+### Goal
+
+Complete the local user lifecycle needed to use the hiring workflow without direct MongoDB seeding, while keeping Admin creation fail-closed and account deletion ownership-safe.
+
+### Implement
+
+Public GraphQL operations:
+
+```text
+signUp
+login
+bootstrapAdmin
+me
+updateMyProfile
+deleteMyAccount
+```
+
+Admin-only query:
+
+```text
+users
+```
+
+The `users` query returns bounded, non-secret account summaries. No operation may return password hashes or permit an Admin to delete or impersonate another user.
+
+### Account Rules
+
+- The first account is created only through the unauthenticated `bootstrapAdmin` operation while the `users` collection is empty.
+- Ordinary signup is unavailable until bootstrap completes; concurrent signup cannot bypass or race the first Admin creation.
+- Subsequent signup roles are limited to Candidate and Recruiter; clients cannot self-assign Admin.
+- Signup requires only a unique case-insensitive `name`, role, and password. Email confirmation is out of scope.
+- Passwords are stored only as a strong password hash. Plaintext passwords never enter MongoDB or diagnostics.
+- Login resolves the normalized name, verifies the password, and returns a short-lived HS256 access token. The token role is never trusted; authorization reloads the user from MongoDB.
+- Candidate and Recruiter profiles are optional at signup and are completed through the authenticated user's own profile mutation.
+- Every user may delete only their own account. There is no delete-other-user operation, including for Admin.
+
+### Deletion Transaction
+
+Account deletion is a transactional logical deletion, not a cascading physical delete:
+
+```text
+active user
+    ↓ transaction
+disable authentication + remove password/profile data
+close the user's open jobs when applicable
+retain applications and immutable application history
+write deletedAt and a unique non-identifying tombstone name
+    ↓
+deleted account cannot authenticate
+```
+
+The transaction must be idempotent, use the authenticated actor ID rather than a client-supplied user ID, and preserve references required by applications, jobs, and history. Existing account records are not silently converted into credentials; a credential-enrollment/backfill policy is required for any non-empty legacy database.
+
+### Milestone
+
+Users can bootstrap the first Admin, sign up as Candidate or Recruiter, log in, complete their own role-specific profile, inspect permitted account summaries as Admin, and delete only their own account without orphaning hiring data.
+
+### Done When
+
+- password hashing, login, signup, and JWT issuance have focused unit tests
+- first-user Admin bootstrap is atomic under concurrent bootstrap/signup attempts, with signup rejected until bootstrap completes
+- name uniqueness is case-insensitive and enforced by MongoDB
+- Admin role cannot be claimed through ordinary signup or JWT claims
+- profile updates enforce the authenticated user's role and ownership
+- `deleteMyAccount` cannot target another user and is transaction-tested with replica-set MongoDB
+- deleted users cannot authenticate and retained jobs/applications/history remain query-consistent
+- GraphQL schema, API fixtures, migration/setup records, and security documentation are updated
 
 ---
 
