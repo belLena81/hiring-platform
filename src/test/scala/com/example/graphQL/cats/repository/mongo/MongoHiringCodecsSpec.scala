@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
 import java.time.Instant
 import java.util.{Date, UUID}
 import munit.FunSuite
@@ -21,11 +21,31 @@ class MongoHiringCodecsSpec extends FunSuite {
       Some("Builds backend services"),
       Some("resume://candidate-201")
     )
-    val user = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, Some(profile), now)
+    val user = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
+      Some(UserProfile.Candidate(profile)), now)
 
     val result = MongoHiringCodecs.readUser(MongoHiringCodecs.user(user))
 
     assertEquals(result, user)
+    assertEquals(MongoHiringCodecs.user(user).get("profile", classOf[Document]).getString("kind"), "Candidate")
+    assert(!MongoHiringCodecs.user(user).containsKey("recruiterProfile"))
+  }
+
+  test("user codec preserves recruiter profile as the single tagged profile") {
+    val user = User(
+      UserId(UUID.fromString("00000000-0000-0000-0000-000000000204")),
+      None,
+      "Recruiter",
+      UserRole.Recruiter,
+      Some(UserProfile.Recruiter(RecruiterProfile("Acme", Some("Hiring Manager")))),
+      now
+    )
+
+    val document = MongoHiringCodecs.user(user)
+
+    assertEquals(MongoHiringCodecs.readUser(document), user)
+    assertEquals(document.get("profile", classOf[Document]).getString("kind"), "Recruiter")
+    assert(!document.containsKey("recruiterProfile"))
   }
 
   test("user codec reads legacy documents without profile as absent profile") {

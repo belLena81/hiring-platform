@@ -4,10 +4,10 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import java.time.Instant
 
-final case class SignUpInput(name: String, role: UserRole, password: String, candidateProfile: Option[CandidateProfile], recruiterProfile: Option[RecruiterProfile])
+final case class SignUpInput(name: String, role: UserRole, password: String, profile: Option[UserProfile])
 final case class BootstrapAdminInput(name: String, password: String)
 final case class LoginInput(name: String, password: String)
-final case class AccountProfileInput(candidateProfile: Option[CandidateProfile], recruiterProfile: Option[RecruiterProfile])
+final case class AccountProfileInput(profile: UserProfile)
 
 trait AccountUseCases[F[_]] {
   def signUp(input: SignUpInput, now: Instant, userId: Identifiers.UserId): F[Either[UseCaseError, (User, AccountToken)]]

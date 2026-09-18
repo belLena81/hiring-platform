@@ -386,7 +386,7 @@ The `users` query returns bounded, non-secret account summaries. No operation ma
 - Signup requires only a unique case-insensitive `name`, role, and password. Email confirmation is out of scope.
 - Passwords are stored only as a strong password hash. Plaintext passwords never enter MongoDB or diagnostics.
 - Login resolves the normalized name, verifies the password, and returns a short-lived HS256 access token. The token role is never trusted; authorization reloads the user from MongoDB.
-- Candidate and Recruiter profiles are optional at signup and are completed through the authenticated user's own profile mutation.
+- Candidate and Recruiter signup requires exactly one matching role-specific profile; Admin is the only active role without a profile. Profile updates remain restricted to the authenticated user's own matching profile.
 - Every user may delete only their own account. There is no delete-other-user operation, including for Admin.
 
 ### Deletion Transaction

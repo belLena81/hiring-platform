@@ -17,11 +17,11 @@ import com.example.graphQL.cats.config.{JwtAuthConfig, VectorSearchConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   Application, ApplicationEvent, ApplicationStatus, CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location,
-  SearchableText, User, UserRole
+  RecruiterProfile, SearchableText, User, UserProfile, UserRole
 }
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
 import io.circe.Json
-import com.mongodb.client.model.Filters
+import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
 import munit.CatsEffectSuite
 import org.bson.Document
 import org.http4s.{Header, Method, Request, Uri}
@@ -73,10 +73,12 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val legacyCandidate = new Document("_id", "legacy-user-1")
           .append("name", "Legacy Candidate")
           .append("role", "Candidate")
+          .append("profile", new Document("skills", List("Scala").asJava))
           .append("createdAt", Date.from(now))
         val legacyRecruiter = new Document("_id", "legacy-user-2")
           .append("name", "Legacy Recruiter")
           .append("role", "Recruiter")
+          .append("recruiterProfile", new Document("organizationName", "Acme"))
           .append("createdAt", Date.from(now))
         for {
           _ <- PublisherBridge.first(users.insertMany(List(legacyCandidate, legacyRecruiter).asJava))
@@ -86,7 +88,16 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           indexes <- indexes(users)
         } yield {
           assertEquals(candidate.map(_.getString("nameCanonical")), Some("legacy candidate"))
+          assertEquals(candidate.flatMap(_.get("profile") match {
+            case value: Document => Some(value)
+            case _ => None
+          }).map(_.getString("kind")), Some("Candidate"))
           assertEquals(recruiter.map(_.getString("nameCanonical")), Some("legacy recruiter"))
+          assertEquals(recruiter.flatMap(_.get("profile") match {
+            case value: Document => Some(value)
+            case _ => None
+          }).map(_.getString("kind")), Some("Recruiter"))
+          assert(recruiter.forall(!_.containsKey("recruiterProfile")))
           assert(indexes.contains(MongoHiringSetup.UsersNameIndex))
         }
       }
@@ -98,8 +109,10 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
       MongoDatabaseProbe.clientResource(uri).use { client =>
         val database = client.getDatabase("hiring_legacy_name_collision")
         val users = database.getCollection("users")
-        val first = new Document("_id", "legacy-user-1").append("name", "Same Name").append("role", "Candidate").append("createdAt", Date.from(now))
-        val second = new Document("_id", "legacy-user-2").append("name", " same name ").append("role", "Recruiter").append("createdAt", Date.from(now))
+        val first = new Document("_id", "legacy-user-1").append("name", "Same Name").append("role", "Candidate")
+          .append("profile", new Document("skills", List("Scala").asJava)).append("createdAt", Date.from(now))
+        val second = new Document("_id", "legacy-user-2").append("name", " same name ").append("role", "Recruiter")
+          .append("recruiterProfile", new Document("organizationName", "Acme")).append("createdAt", Date.from(now))
         for {
           _ <- PublisherBridge.first(users.insertMany(List(first, second).asJava))
           result <- MongoHiringSetup.initialize(database).attempt
@@ -125,6 +138,10 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           .append("checksum", MongoHiringSetup.HiringDomainMongoMigrationId)
         for {
           _ <- PublisherBridge.first(migrations.insertOne(existingDomainMigration))
+          _ <- PublisherBridge.first(database.getCollection("users").createIndex(
+            Indexes.ascending("emailCanonical"),
+            new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true)
+          ))
           _ <- MongoHiringSetup.initialize(database)
           graphqlPerformanceMigrationAfterFirstRun <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
@@ -143,11 +160,16 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             .find(new Document("_id", MongoHiringSetup.HiringVectorSearchMigrationId)))
           userAccountMigration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.UserAccountMigrationId)))
+          profileMigration <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.UserProfileOneOfMigrationId)))
+          emailIndexMigration <- PublisherBridge.first(migrations
+            .find(new Document("_id", MongoHiringSetup.UserEmailSparseIndexMigrationId)))
           accountRegistry <- PublisherBridge.first(database.getCollection("account_registry")
             .find(new Document("_id", "user-account-registry")))
         } yield {
           assertEquals(MongoHiringSetup.HiringDomainMongoMigrationId, "phase-2-domain-mongodb-v1")
           assertIndex(users, MongoHiringSetup.UsersEmailIndex, new Document("emailCanonical", 1), unique = Some(true), partial = None)
+          assert(users(MongoHiringSetup.UsersEmailIndex).getBoolean("sparse", false))
           assertIndex(users, MongoHiringSetup.UsersNameIndex, new Document("nameCanonical", 1), unique = Some(true), partial = None)
           assertIndex(users, MongoHiringSetup.UsersStatusCreatedIndex,
             new Document("accountStatus", 1).append("createdAt", -1).append("_id", -1), None, None)
@@ -156,6 +178,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
           assertEquals(userAccountMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserAccountMigrationId))
+          assertEquals(profileMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserProfileOneOfMigrationId))
+          assertEquals(emailIndexMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserEmailSparseIndexMigrationId))
           assertEquals(accountRegistry.map(_.getString("state")), Some("Uninitialized"))
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex,
             new Document("recruiterId", 1).append("status", 1).append("createdAt", -1).append("_id", -1), None, None)
@@ -216,8 +240,10 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           Some("Builds backend services"),
           Some("resume://candidate-101")
         )
-        val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, Some(candidateProfile), now)
-        val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
+        val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
+          Some(UserProfile.Candidate(candidateProfile)), now)
+        val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
+          Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
         val admin = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
         val unseededAdmin =
           User(UserId(UUID.fromString("00000000-0000-0000-0000-000000000111")), Some("admin2@example.com"), "Admin 2", UserRole.Admin, None, now)
@@ -270,7 +296,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(staleJob, Left(RepositoryError.Conflict))
           assertEquals(staleStatus, Left(RepositoryError.Conflict))
           assertEquals(foundCandidate.flatMap(_.email), Some("candidate@example.com"))
-          assertEquals(foundCandidate.flatMap(_.profile), Some(candidateProfile))
+          assertEquals(foundCandidate.flatMap(_.profile), Some(UserProfile.Candidate(candidateProfile)))
           assertEquals(foundAdmin.map(_.adminSingleton), Some(true))
           assertEquals(updatedJob.map(_.version), Right(1L))
           assertEquals(foundJob.map(_.title), Some("Principal Scala Developer"))
@@ -491,8 +517,10 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     replicaSetContainer.use { uri =>
       MongoHiringRuntime.resource(uri, "hiring_served_jwt", Diagnostics.noop).use { runtime =>
         val jwt = JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api")
-        val candidateUser = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
-        val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
+        val candidateUser = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
+          Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)
+        val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
+          Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
         for {
           admission <- Admission.create(16)
           _ <- MongoDatabaseProbe.clientResource(uri).use { client =>
@@ -545,7 +573,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     replicaSetContainer.use { uri =>
       MongoHiringRuntime.resource(uri, "hiring_vector_runtime", Diagnostics.noop, vectorConfig,
         (config, _) => FakeEmbeddingService(config)).use { runtime =>
-        val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
+        val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
+          Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
         val create = CreateJobInput(
           "Vector Scala Developer",
           "Build semantic search services",

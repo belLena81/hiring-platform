@@ -79,7 +79,7 @@ final class EmbeddingPipeline(
       case EmbeddingWork.CandidateProfileChanged(id) =>
         users.find(id).flatMap {
           case Some(user) =>
-            user.profile match {
+            user.candidateProfile match {
               case Some(profile) =>
                 val text = SearchableText.candidate(profile)
                 val hash = SourceHash.sha256(text)

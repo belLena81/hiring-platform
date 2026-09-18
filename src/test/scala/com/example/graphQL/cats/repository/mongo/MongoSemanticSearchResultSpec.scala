@@ -5,7 +5,7 @@ import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate,
 import com.example.graphQL.cats.service.ServiceFixtures;
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.model.{
-  CandidateProfile, EmbeddingMeta, EntityEmbedding, SearchMode, SearchableText
+  CandidateProfile, EmbeddingMeta, EntityEmbedding, SearchMode, SearchableText, UserProfile
 }
 import munit.FunSuite
 import org.bson.Document
@@ -44,7 +44,7 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
   test("fresh candidate vector hit is returned and stale candidate hit is omitted") {
     val profile = CandidateProfile(Set("Scala"), Some("Backend engineer"), Some("resume-ref"))
-    val fresh = ServiceFixtures.candidate.copy(profile = Some(profile),
+    val fresh = ServiceFixtures.candidate.copy(profile = Some(UserProfile.Candidate(profile)),
       embedding = Some(candidateEmbedding(profile, "voyage-4-lite", 1)))
     val stale = fresh.copy(embedding = Some(candidateEmbedding(profile, "voyage-4-lite", 1)
       .copy(meta = candidateEmbedding(profile, "voyage-4-lite", 1).meta.copy(sourceHash = "stale"))))

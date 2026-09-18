@@ -30,8 +30,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private val closedJobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000004"))
   private val applicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000005"))
 
-  private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
-  private val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now, recruiterProfile = Some(RecruiterProfile("Acme", None)))
+  private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
+    Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)
+  private val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
+    Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
   private val admin = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
   private val openJob = job(jobId, JobStatus.Open)
   private val closedJob = job(closedJobId, JobStatus.Closed)
@@ -242,7 +244,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val secondRecruiterId = UserId(UUID.fromString("10000000-0000-0000-0000-000000000007"))
     val secondJobId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000008"))
     val secondApplicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000009"))
-    val secondRecruiter = User(secondRecruiterId, Some("recruiter2@example.com"), "Recruiter 2", UserRole.Recruiter, None, now)
+    val secondRecruiter = User(secondRecruiterId, Some("recruiter2@example.com"), "Recruiter 2", UserRole.Recruiter,
+      Some(UserProfile.Recruiter(RecruiterProfile("Acme 2", None))), now)
     val secondJob = openJob.copy(id = secondJobId, recruiterId = secondRecruiterId, title = "Platform Engineer")
     val secondApplication = Application.create(secondApplicationId, candidateId, secondJobId, now.minusSeconds(60))
     val query =
@@ -308,6 +311,31 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(payload.downField("job").downField("skills").focus.flatMap(_.asArray).map(_.flatMap(_.asString).toList),
         Some(List("Cats Effect", "Scala")))
       assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
+  }
+
+  test("createJob validation failures use the named validation error case") {
+    val query =
+      """mutation {
+        |  createJob(input: {
+        |    title: "Staff Scala Developer"
+        |    description: "Build platform services"
+        |    requirements: ["Scala"]
+        |    skills: ["Scala"]
+        |    country: ""
+        |    remote: true
+        |  }) {
+        |    job { id }
+        |    errors { code message }
+        |  }
+        |}""".stripMargin
+
+    execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
+      val payload = json.hcursor.downField("data").downField("createJob")
+      assertEquals(payload.downField("job").focus, Some(Json.Null))
+      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("VALIDATION_FAILED"))
+      assertEquals(payload.downField("errors").downArray.get[String]("message"), Right("country is required, city is required"))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -464,6 +492,30 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         new IllegalArgumentException("Invalid GraphQL test request"))
       result <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(HiringGraphQLSchema.executeInContext(request, _))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+  }
+
+  test("VHS-AC04 documented candidateMatches profile fragment remains executable") {
+    val query =
+      s"""query CandidateMatches {
+         |  candidateMatches(jobId: "${jobId.value}", first: 5) {
+         |    results {
+         |      candidate {
+         |        id
+         |        name
+         |        profile {
+         |          ... on CandidateMatchProfile { skills }
+         |        }
+         |      }
+         |    }
+         |    errors { code }
+         |  }
+         |}""".stripMargin
+
+    executeWithSemanticSearch(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
+      val payload = json.hcursor.downField("data").downField("candidateMatches")
+      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("STALE_EMBEDDING"))
+      assert(!json.hcursor.downField("errors").succeeded)
+    }
   }
 
   private def execute(query: String, actor: Option[ActorContext]): IO[Json] = {

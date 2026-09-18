@@ -6,6 +6,7 @@ import com.example.graphQL.cats.domain.model.AccountName
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
+import org.bson.conversions.Bson
 import java.time.Instant
 import java.util.Date
 import scala.concurrent.duration.*
@@ -46,19 +47,22 @@ object MongoHiringSetup {
   val HiringAtlasSearchIndexMigrationId = "hiring-atlas-search-indexes-v1"
   val UserNameCanonicalMigrationId = "user-name-canonical-v1"
   val UserAccountMigrationId = "user-account-management-v1"
+  val UserProfileOneOfMigrationId = "user-profile-one-of-v1"
+  val UserEmailSparseIndexMigrationId = "user-email-canonical-sparse-v1"
 
   def initialize(database: MongoDatabase): IO[Unit] =
     initialize(database, None)
 
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    backfillLegacyNames(database) *> (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_.flatMap { _ =>
-      val atlasSetup = atlas.fold(IO.unit)(config => provisionAtlasIndexes(database, config))
-      atlasSetup *> recordMigrations(database, atlas.isDefined)
-    }
+    backfillLegacyNames(database) *>
+      migrateUserProfiles(database) *>
+      replaceEmailIndex(database) *>
+      (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
+      ensureUserProfileValidator(database) *>
+      recordMigrations(database, atlas.isDefined) *>
+      atlas.fold(IO.unit)(config => provisionAtlasIndexes(database, config))
 
   private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
-      createIndex(database.getCollection("users"),
-        Indexes.ascending("emailCanonical"), new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true)),
       createIndex(database.getCollection("users"),
         Indexes.ascending("nameCanonical"), new IndexOptions().name(UsersNameIndex).unique(true)),
       createIndex(database.getCollection("users"),
@@ -121,6 +125,10 @@ object MongoHiringSetup {
       recordMigration(migrations, UserNameCanonicalMigrationId, "Backfill canonical account names before the unique index")
       *>
       recordMigration(migrations, UserAccountMigrationId, "User account credentials, lifecycle, and query indexes")
+      *>
+      recordMigration(migrations, UserProfileOneOfMigrationId, "Normalize active user profiles to one role-specific MongoDB profile")
+      *>
+      recordMigration(migrations, UserEmailSparseIndexMigrationId, "Replace the legacy email index with a sparse unique index")
     Option.when(atlasEnabled)(recordMigration(migrations, HiringAtlasSearchIndexMigrationId,
       "Hiring Atlas vector and lexical search indexes")).fold(base)(base *> _)
   }
@@ -230,6 +238,144 @@ object MongoHiringSetup {
       options: IndexOptions
   ): IO[Unit] =
     PublisherBridge.first(collection.createIndex(keys, options)).void
+
+  private def replaceEmailIndex(database: MongoDatabase): IO[Unit] = {
+    val users = database.getCollection("users")
+    PublisherBridge.all(users.listIndexes()).flatMap { indexes =>
+      indexes.find(_.getString("name") == UsersEmailIndex) match {
+        case Some(index) if index.getBoolean("unique", false) && index.getBoolean("sparse", false) =>
+          IO.unit
+        case Some(_) =>
+          PublisherBridge.first(users.dropIndex(UsersEmailIndex)).void *>
+            createIndex(users, Indexes.ascending("emailCanonical"),
+              new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true))
+        case None =>
+          createIndex(users, Indexes.ascending("emailCanonical"),
+            new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true))
+      }
+    }
+  }
+
+  private def migrateUserProfiles(database: MongoDatabase): IO[Unit] = {
+    val users = database.getCollection("users")
+    PublisherBridge.all(users.find()).flatMap { documents =>
+      documents.traverse(profileMigrationUpdates).flatMap { plans =>
+        documents.zip(plans).traverse_ { case (document, updates) =>
+          if (updates.isEmpty) IO.unit
+          else PublisherBridge.first(users.updateOne(
+            Filters.eq("_id", document.getString("_id")),
+            Updates.combine(updates*)
+          )).void
+        }
+      }
+    }
+  }
+
+  private def profileMigrationUpdates(document: Document): IO[List[Bson]] =
+    IO.fromEither {
+      val role = Option(document.getString("role"))
+        .toRight(new IllegalStateException("users collection contains an account without a role"))
+      val status = Option(document.getString("accountStatus")).getOrElse("Active")
+      val profile = Option(document.get("profile", classOf[Document]))
+      val legacyRecruiter = Option(document.get("recruiterProfile", classOf[Document]))
+
+      role.flatMap {
+        case "Admin" if status == "Active" =>
+          if (Option(document.getString("adminSingletonKey")).contains("singleton-admin") &&
+              profile.isEmpty && legacyRecruiter.isEmpty)
+            Right(List(Updates.set("schemaVersion", 3)))
+          else Left(new IllegalStateException("active Admin must be the singleton account without a profile"))
+
+        case "Candidate" if status == "Active" =>
+          if (legacyRecruiter.nonEmpty)
+            Left(new IllegalStateException("Candidate account contains a recruiter profile"))
+          else profile match {
+            case None => Left(new IllegalStateException("active Candidate account is missing its profile"))
+            case Some(value) if Option(value.getString("kind")).exists(_ != "Candidate") =>
+              Left(new IllegalStateException("Candidate account contains a non-Candidate profile"))
+            case Some(_) =>
+              Right(List(Updates.set("profile.kind", "Candidate"), Updates.set("schemaVersion", 3)))
+          }
+
+        case "Recruiter" if status == "Active" =>
+          profile match {
+            case Some(_) if legacyRecruiter.nonEmpty =>
+              Left(new IllegalStateException("Recruiter account contains duplicate profiles"))
+            case Some(value) if Option(value.getString("kind")).exists(_ != "Recruiter") =>
+              Left(new IllegalStateException("Recruiter account contains a non-Recruiter profile"))
+            case Some(_) =>
+              Right(List(Updates.set("profile.kind", "Recruiter"), Updates.set("schemaVersion", 3)))
+            case None => legacyRecruiter match {
+              case None => Left(new IllegalStateException("active Recruiter account is missing its profile"))
+              case Some(value) =>
+                val migrated = new Document()
+                migrated.putAll(value)
+                migrated.put("kind", "Recruiter")
+                Right(List(
+                  Updates.set("profile", migrated),
+                  Updates.unset("recruiterProfile"),
+                  Updates.set("schemaVersion", 3)
+                ))
+            }
+          }
+
+        case _ if status == "Deleted" =>
+          Right(List(
+            Updates.unset("profile"),
+            Updates.unset("recruiterProfile"),
+            Updates.set("schemaVersion", 3)
+          ))
+
+        case other =>
+          Left(new IllegalStateException(s"unsupported user role '$other' in active account"))
+      }
+    }
+
+  private def ensureUserProfileValidator(database: MongoDatabase): IO[Unit] = {
+    val candidateProfile = new Document("bsonType", "object")
+      .append("required", List("kind", "skills").asJava)
+      .append("properties", new Document("kind", new Document("enum", List("Candidate").asJava))
+        .append("skills", new Document("bsonType", "array").append("minItems", 1)))
+    val recruiterProfile = new Document("bsonType", "object")
+      .append("required", List("kind", "organizationName").asJava)
+      .append("properties", new Document("kind", new Document("enum", List("Recruiter").asJava))
+        .append("organizationName", new Document("bsonType", "string")))
+    val noProfile = new Document("anyOf", List(
+      new Document("required", List("profile").asJava),
+      new Document("required", List("recruiterProfile").asJava)
+    ).asJava)
+    val deleted = new Document("properties", new Document("accountStatus", new Document("enum", List("Deleted").asJava)))
+      .append("not", noProfile)
+    val admin = new Document("required", List("adminSingletonKey").asJava)
+      .append("properties", new Document("accountStatus", new Document("enum", List("Active").asJava))
+        .append("role", new Document("enum", List("Admin").asJava))
+        .append("adminSingletonKey", new Document("enum", List("singleton-admin").asJava)))
+      .append("not", noProfile)
+    val candidate = new Document("required", List("profile").asJava)
+      .append("properties", new Document("accountStatus", new Document("enum", List("Active").asJava))
+        .append("role", new Document("enum", List("Candidate").asJava))
+        .append("profile", candidateProfile))
+      .append("not", new Document("anyOf", List(
+        new Document("required", List("recruiterProfile").asJava),
+        new Document("required", List("adminSingletonKey").asJava)
+      ).asJava))
+    val recruiter = new Document("required", List("profile").asJava)
+      .append("properties", new Document("accountStatus", new Document("enum", List("Active").asJava))
+        .append("role", new Document("enum", List("Recruiter").asJava))
+        .append("profile", recruiterProfile))
+      .append("not", new Document("anyOf", List(
+        new Document("required", List("recruiterProfile").asJava),
+        new Document("required", List("adminSingletonKey").asJava)
+      ).asJava))
+    val schema = new Document("bsonType", "object")
+      .append("required", List("role", "accountStatus").asJava)
+      .append("oneOf", List(deleted, admin, candidate, recruiter).asJava)
+    val command = new Document("collMod", "users")
+      .append("validator", new Document("$jsonSchema", schema))
+      .append("validationLevel", "strict")
+      .append("validationAction", "error")
+    PublisherBridge.first(database.runCommand(command)).void
+  }
 
   private def backfillLegacyNames(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")

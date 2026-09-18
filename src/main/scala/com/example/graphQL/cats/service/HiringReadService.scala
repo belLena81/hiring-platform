@@ -37,7 +37,7 @@ final class HiringReadService[F[_]: Monad](
       case Left(error) => error.asLeft[Unit].pure[F]
       case Right(user) =>
         applications.find(applicationId).flatMap {
-          case None => DomainError.NotFound("application").asLeft[Unit].pure[F]
+          case None => UseCaseError.domain(DomainError.NotFound("application")).asLeft[Unit].pure[F]
           case Some(application) if application.candidateId == user.id && user.role == UserRole.Candidate =>
             ().asRight[UseCaseError].pure[F]
           case Some(_) if user.role == UserRole.Admin && user.adminSingleton =>
@@ -45,10 +45,10 @@ final class HiringReadService[F[_]: Monad](
           case Some(application) if user.role == UserRole.Recruiter =>
             jobs.find(application.jobId).map {
               case Some(job) if job.recruiterId == user.id => Right(())
-              case Some(_) => Left(DomainError.Forbidden)
-              case None => Left(DomainError.NotFound("job"))
+              case Some(_) => Left(UseCaseError.domain(DomainError.Forbidden))
+              case None => Left(UseCaseError.domain(DomainError.NotFound("job")))
             }
-          case Some(_) => DomainError.Forbidden.asLeft[Unit].pure[F]
+          case Some(_) => UseCaseError.domain(DomainError.Forbidden).asLeft[Unit].pure[F]
         }
     }
 

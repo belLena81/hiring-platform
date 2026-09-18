@@ -9,7 +9,7 @@ import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.repository.protocol.UserRepository
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.domain.model.{CandidateProfile, EntityEmbedding, User, UserRole}
+import com.example.graphQL.cats.domain.model.{CandidateProfile, EntityEmbedding, User, UserProfile, UserRole}
 import io.circe.Json
 
 import java.time.Instant
@@ -26,7 +26,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   private val now = Instant.parse("2026-09-17T12:00:00Z")
   private val candidateId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000201"))
   private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
-    Some(CandidateProfile(Set("scala"), None, None)), now)
+    Some(UserProfile.Candidate(CandidateProfile(Set("scala"), None, None))), now)
   private val recruiter = candidate.copy(role = UserRole.Recruiter)
 
   test("valid signed bearer token authenticates the user role stored in Mongo-backed users") {

@@ -220,14 +220,31 @@ It also allows one database constraint:
 
 ```javascript
 db.users.createIndex(
-  { email: 1 },
-  { unique: true }
+  { emailCanonical: 1 },
+  { name: "users_emailCanonical_unique", unique: true, sparse: true }
 )
 ```
 
 instead of coordinating uniqueness across several collections.
 
-Role-specific data can remain optional embedded structures where appropriate.
+Role-specific data can remain optional embedded structures where appropriate. For this account contract, the active role determines whether the single `profile` document is a Candidate or Recruiter variant; only the singleton Admin is profile-less.
+
+For hiring accounts, the role-specific profile is a discriminated one-of embedded in the `users` document:
+
+```javascript
+{
+  role: "Candidate",
+  accountStatus: "Active",
+  profile: {
+    kind: "Candidate",
+    skills: ["Scala"],
+    experienceSummary: "...",
+    resumeRef: "..."
+  }
+}
+```
+
+Recruiters use `kind: "Recruiter"` with `organizationName` and optional `jobTitle`. Active Admin accounts have no `profile` and carry the unique `adminSingletonKey: "singleton-admin"`. Deleted accounts are profile-less. The MongoDB validator and the versioned `user-profile-one-of-v1` migration enforce this shape; invalid legacy documents fail closed rather than receiving invented profile data.
 
 ---
 

@@ -13,7 +13,7 @@ Status: implemented in the current checkout; live Mongo transaction and explain-
 
 - The served schema now exposes signup, login, bootstrap, `me`, bounded Admin user listing, profile update, and self-delete operations.
 - HTTP authentication accepts HS256 bearer tokens whose `sub` maps to a currently Active stored user; the account service issues short-lived tokens.
-- MongoDB setup now adds additive credential/lifecycle fields, a bootstrap registry, the unique canonical-name index, and status/list indexes.
+- MongoDB setup now adds additive credential/lifecycle fields, a bootstrap registry, the unique canonical-name index, status/list indexes, and the role-specific profile validator.
 - Existing hiring records reference user IDs, so physical user deletion would orphan recruiter, candidate, or event references.
 
 ## Public Contract
@@ -39,7 +39,7 @@ deleteMyAccount: DeleteAccountPayload!
 
 `SignUpInput` contains `name`, `role`, and `password`; ordinary signup accepts only Candidate or Recruiter and returns `ADMIN_BOOTSTRAP_REQUIRED` until the first Admin exists. Admin signup is rejected with `ADMIN_BOOTSTRAP_ONLY`. `BootstrapAdminInput` contains `name` and `password` and is accepted only while the user registry is empty. `LoginInput` contains `name` and `password`.
 
-Profile inputs are role-specific at signup. Candidate fields are `skills`, `experienceSummary`, and `resumeRef`; Recruiter fields are required `organizationName` plus optional `jobTitle`. Email remains optional for legacy compatibility and is not a login identity.
+Profile inputs are role-specific at signup. A Candidate must provide a valid `CandidateProfile`; a Recruiter must provide a valid `RecruiterProfile`; exactly one profile variant is accepted. Admin signup is unavailable and the singleton Admin has no profile. Email remains optional for legacy compatibility and is not a login identity.
 
 ### Authentication Contract
 
@@ -62,7 +62,7 @@ nameCanonical
 role
 passwordHash
 accountStatus: Active | Deleted
-profile: optional role-specific profile
+profile: optional tagged role-specific profile
 createdAt
 updatedAt
 deletedAt: optional
@@ -76,7 +76,7 @@ users(accountStatus, createdAt DESC, _id DESC)
 users(role, accountStatus, createdAt DESC, _id DESC)
 ```
 
-Use a singleton bootstrap coordination record, such as `account_registry`, to serialize first-account creation and gate ordinary signup until bootstrap completes. The setup record and migration history must be versioned and restartable. Existing legacy users without password hashes require explicit credential enrollment or a local reset; do not derive passwords or invent names from existing fields.
+`profile` is one embedded document with `kind: Candidate` or `kind: Recruiter`; an Active Candidate or Recruiter must have the matching kind, while an Active Admin must have no profile. Deleted accounts are profile-less after deletion. Use a singleton bootstrap coordination record, such as `account_registry`, to serialize first-account creation and gate ordinary signup until bootstrap completes. The setup record and migration history must be versioned and restartable. Existing legacy users without password hashes require explicit credential enrollment or a local reset; do not derive passwords or invent names from existing fields.
 
 Before creating the unique `nameCanonical` index, setup runs the idempotent `user-name-canonical-v1` migration. It backfills missing canonical names using the shared Unicode normalization policy, fails closed on invalid names or canonical collisions, and never invents replacement identities.
 
@@ -84,11 +84,11 @@ Before creating the unique `nameCanonical` index, setup runs the idempotent `use
 
 ### First Admin
 
-`bootstrapAdmin` runs in a MongoDB transaction that acquires the bootstrap coordination record, verifies that `users` is empty, inserts exactly one Admin with the singleton marker, and records bootstrap completion. Concurrent bootstrap attempts produce one committed first account and a typed already-initialized result for losers. Signup attempts observed before bootstrap completion return `ADMIN_BOOTSTRAP_REQUIRED` and do not insert a user.
+`bootstrapAdmin` runs in a MongoDB transaction that acquires the bootstrap coordination record, verifies that `users` is empty, inserts exactly one Admin with the singleton marker, and records bootstrap completion permanently. Concurrent or later bootstrap attempts produce a typed already-initialized result; the singleton Admin cannot be recreated. Signup attempts observed before bootstrap completion return `ADMIN_BOOTSTRAP_REQUIRED` and do not insert a user.
 
 ### Signup
 
-Signup validates input, hashes the password outside the database transaction, verifies the bootstrap registry is initialized, and then inserts the Active user. The unique name index is authoritative for concurrent same-name signup; duplicate-key failures become sanitized `NAME_TAKEN` errors.
+Signup validates input, requires exactly one role-matching profile for Candidate or Recruiter, hashes the password outside the database transaction, obtains a JWT before persistence, verifies the bootstrap registry is initialized, and then inserts the Active user. The unique name index is authoritative for concurrent same-name signup; duplicate-key failures become sanitized `NAME_TAKEN` errors.
 
 ### Profile Update
 
@@ -112,7 +112,7 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 |---|---|---|
 | UAM-AC01 | Given an empty user registry, when the first Admin bootstrap succeeds, then exactly one singleton Admin and one bootstrap record exist | `UserAccountService`; Mongo setup/transaction integration (live run pending) |
 | UAM-AC02 | Given concurrent bootstrap and signup requests against an empty registry, when both race, then exactly one Admin is committed and signup is rejected until bootstrap completes | Transaction repository implementation; replica-set concurrency test pending |
-| UAM-AC03 | Given a valid Candidate or Recruiter signup, when the request succeeds, then a password hash and Active user are stored and no plaintext credential is persisted | Argon2 adapter, account service, BSON codec, GraphQL contract |
+| UAM-AC03 | Given a valid Candidate or Recruiter signup with exactly one matching profile, when the request succeeds, then a password hash and Active user are stored and no plaintext credential is persisted | Argon2 adapter, account service, BSON codec, GraphQL contract |
 | UAM-AC04 | Given duplicate names with different case, when signup races or repeats, then one succeeds and the other returns `NAME_TAKEN` | Unique `nameCanonical` index and repository conflict mapping; live integration pending |
 | UAM-AC05 | Given valid and invalid credentials, when login is called, then only the matching Active user receives a signed token and failures are indistinguishable | JWT/auth tests and sanitized payload mapping |
 | UAM-AC06 | Given a valid token, when `me` or profile update is called, then only the authenticated user's data changes | GraphQL access tests; service wiring |
@@ -120,10 +120,11 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 | UAM-AC08 | Given any authenticated user, when `deleteMyAccount` is called, then only that account is logically deleted and its token no longer authorizes | Transaction repository implementation; live transaction test pending |
 | UAM-AC09 | Given a Recruiter with open jobs and applications, when the account is deleted, then open jobs close atomically while applications and history remain consistent | Delete transaction implementation; live integration pending |
 | UAM-AC10 | Given a deleted user or a client-supplied Admin role claim, when a protected operation is called, then authorization fails closed | Active-user reload and existing JWT access tests |
+| UAM-AC11 | Given a Candidate, Recruiter, Admin, or deleted account document, when it is written or decoded, then the role/profile one-of and singleton invariants are preserved | `UserProfile`, Mongo codec, Mongo validator, profile migration integration |
 
 ## Migration, Recovery, and Risks
 
-- Expand readers/codecs before requiring new fields; support legacy users as credential-incomplete until an explicit enrollment policy is implemented.
+- Expand readers/codecs before requiring the tagged profile shape. The versioned profile migration converts legacy Candidate and Recruiter documents and fails closed for missing or contradictory active profiles.
 - Backfill no passwords and no guessed unique names. For a disposable empty local database, deterministic setup may create the registry and indexes directly.
 - Test transaction failure after user update and after job closure; verify retry/idempotency and that no partial account deletion is visible.
 - Preserve applications and application events because they are operational history. A later retention/anonymization policy must be separately specified.
@@ -133,7 +134,7 @@ The operation is idempotent for an already-deleted actor and cannot match a diff
 
 - Source: `UserAccountService`, `Argon2PasswordHasher`, `JwtActorAuthenticator`, `MongoUserRepository`, `MongoHiringSetup`, and `HiringGraphQLSchema` implement the contract.
 - Contracts: `src/test/resources/graphql/hiring.graphql` and the route/schema tests cover the additive API shape.
-- Local evidence: clean compilation and Docker-independent unit tests pass when run serialized with `Test / fork := false`; live Mongo/Testcontainers transaction and explain-plan checks were not yet executed in this environment.
+- Local evidence: `sbt test` passed 180 unit tests; `IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec` passed 12 Mongo/Testcontainers tests, including tagged-profile backfill, fail-closed setup, sparse email-index replacement, transactional application behavior, and explain-plan checks. Account lifecycle transaction/concurrency criteria remain separately identified where their dedicated integration coverage is still pending.
 - Query analysis: the account access patterns use canonical-name lookup, status/createdAt keyset listing, and role/status filtering. The new indexes are recorded by the repeatable setup migration; no latency or production SLO claim is made.
 
 ## Non-Functional Assumptions

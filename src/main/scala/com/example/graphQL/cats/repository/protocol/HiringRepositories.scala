@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.protocol
 
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{AccountCredentials, Application, ApplicationEvent, CandidateProfile, EntityEmbedding, Job, RecruiterProfile, User, UserPageRequest}
+import com.example.graphQL.cats.domain.model.{AccountCredentials, Application, ApplicationEvent, EntityEmbedding, Job, User, UserPageRequest, UserProfile}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
@@ -18,7 +18,7 @@ trait UserAccountRepository[F[_]] {
   def initialized: F[Boolean]
   def createAccount(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
   def findByCanonicalName(nameCanonical: String): F[Option[AccountCredentials]]
-  def updateProfile(userId: UserId, profile: Option[CandidateProfile], recruiterProfile: Option[RecruiterProfile]): F[Either[RepositoryError, User]]
+  def updateProfile(userId: UserId, profile: UserProfile): F[Either[RepositoryError, User]]
   def listAccounts(page: UserPageRequest): F[List[User]]
   def deleteAccount(userId: UserId, now: Instant, tombstone: String): F[Either[RepositoryError, Unit]]
 }

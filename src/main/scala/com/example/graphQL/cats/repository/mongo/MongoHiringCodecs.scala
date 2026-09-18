@@ -13,7 +13,7 @@ private[mongo] object MongoHiringCodecs {
 
   def user(value: User): Document = {
     val document = new Document("_id", value.id.value.toString)
-      .append("schemaVersion", 2)
+      .append("schemaVersion", 3)
       .append("name", value.name)
       .append("nameCanonical", AccountName.canonical(value.name))
       .append("role", value.role.toString)
@@ -26,7 +26,6 @@ private[mongo] object MongoHiringCodecs {
       ()
     }
     value.profile.foreach(profileValue => document.append("profile", profile(profileValue)))
-    value.recruiterProfile.foreach(profileValue => document.append("recruiterProfile", recruiterProfile(profileValue)))
     value.deletedAt.foreach(deletedAt => document.append("deletedAt", Date.from(deletedAt)))
     appendOptionalEmbedding(document, value.embedding)
   }
@@ -37,11 +36,10 @@ private[mongo] object MongoHiringCodecs {
       Option(document.getString("email")),
       document.getString("name"),
       UserRole.valueOf(document.getString("role")),
-      Option(document.get("profile", classOf[Document])).map(readProfile),
+      readUserProfile(document),
       instant(document, "createdAt"),
       Option(document.getString("adminSingletonKey")).contains("singleton-admin"),
       readEmbedding(document),
-      Option(document.get("recruiterProfile", classOf[Document])).map(readRecruiterProfile),
       Option(document.getString("accountStatus")).map(AccountStatus.valueOf).getOrElse(AccountStatus.Active),
       Option(document.getDate("deletedAt")).map(_.toInstant),
       Option(document.get("version", classOf[Number])).fold(0L)(_.longValue)
@@ -143,22 +141,42 @@ private[mongo] object MongoHiringCodecs {
   private def readLocation(document: Document): Location =
     Location(document.getString("country"), document.getString("city"), document.getBoolean("remote"))
 
-  private def profile(profile: CandidateProfile): Document =
-    appendOptionalString(
-      appendOptionalString(new Document("skills", profile.skills.toList.sorted.asJava), "experienceSummary", profile.experienceSummary),
-      "resumeRef",
-      profile.resumeRef
-    )
+  private def readUserProfile(document: Document): Option[UserProfile] = {
+    val current = Option(document.get("profile", classOf[Document])).map(readProfile)
+    val legacyRecruiter = Option(document.get("recruiterProfile", classOf[Document])).map(readRecruiterProfile)
+    (current, legacyRecruiter) match {
+      case (Some(profileValue), None) => Some(profileValue)
+      case (None, Some(profileValue)) => Some(UserProfile.Recruiter(profileValue))
+      case (None, None) => None
+      case (Some(_), Some(_)) => throw new IllegalArgumentException("User document contains multiple profiles")
+    }
+  }
 
-  private def readProfile(document: Document): CandidateProfile =
-    CandidateProfile(
-      stringList(document, "skills").toSet,
-      Option(document.getString("experienceSummary")),
-      Option(document.getString("resumeRef"))
-    )
+  private[mongo] def profile(profile: UserProfile): Document =
+    profile match {
+      case UserProfile.Candidate(value) =>
+        appendOptionalString(
+          appendOptionalString(new Document("kind", "Candidate").append("skills", value.skills.toList.sorted.asJava), "experienceSummary", value.experienceSummary),
+          "resumeRef",
+          value.resumeRef
+        )
+      case UserProfile.Recruiter(value) =>
+        appendOptionalString(new Document("kind", "Recruiter").append("organizationName", value.organizationName), "jobTitle", value.jobTitle)
+    }
 
-  private def recruiterProfile(profile: RecruiterProfile): Document =
-    appendOptionalString(new Document("organizationName", profile.organizationName), "jobTitle", profile.jobTitle)
+  private def readProfile(document: Document): UserProfile =
+    Option(document.getString("kind")) match {
+      case Some("Candidate") => UserProfile.Candidate(CandidateProfile(
+        stringList(document, "skills").toSet,
+        Option(document.getString("experienceSummary")),
+        Option(document.getString("resumeRef"))))
+      case Some("Recruiter") => UserProfile.Recruiter(readRecruiterProfile(document))
+      case Some(kind) => throw new IllegalArgumentException(s"Unknown user profile kind: $kind")
+      case None => UserProfile.Candidate(CandidateProfile(
+        stringList(document, "skills").toSet,
+        Option(document.getString("experienceSummary")),
+        Option(document.getString("resumeRef"))))
+    }
 
   private def readRecruiterProfile(document: Document): RecruiterProfile =
     RecruiterProfile(document.getString("organizationName"), Option(document.getString("jobTitle")))

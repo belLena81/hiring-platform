@@ -5,7 +5,7 @@ import cats.effect.Ref
 import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, EntityEmbedding, Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, CandidateProfile, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import java.time.Instant
@@ -20,8 +20,10 @@ private[cats] object ServiceFixtures {
   val jobId: JobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000004"))
   val applicationId: ApplicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000005"))
 
-  val candidate: User = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
-  val recruiter: User = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter, None, now)
+  val candidate: User = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
+    Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)
+  val recruiter: User = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
+    Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
   val admin: User = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
   val openJob: Job = Job(
     jobId,

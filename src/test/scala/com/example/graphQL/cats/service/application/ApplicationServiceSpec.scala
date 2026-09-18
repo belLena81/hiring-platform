@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service.application
 
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.service.ActorContext
+import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.shared.pagination.{ApplicationPageRequest, PageSize}
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
@@ -35,7 +35,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         result <- service.submitApplication(ActorContext(candidateId, UserRole.Candidate), jobId, applicationId, eventId, now)
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(DomainError.JobMustBeOpen))
+        assertEquals(result, Left(UseCaseError.domain(DomainError.JobMustBeOpen)))
         assertEquals(events, Vector.empty)
       }
     }
@@ -48,7 +48,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         result <- service.submitApplication(ActorContext(candidateId, UserRole.Candidate), jobId, applicationId, eventId, now)
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(RepositoryError.Conflict))
+        assertEquals(result, Left(UseCaseError.repository(RepositoryError.Conflict)))
         assertEquals(events, Vector.empty)
       }
     }
@@ -89,7 +89,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         )
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(DomainError.InvalidStatusTransition(ApplicationStatus.Created, ApplicationStatus.Hired)))
+        assertEquals(result, Left(UseCaseError.domain(DomainError.InvalidStatusTransition(ApplicationStatus.Created, ApplicationStatus.Hired))))
         assertEquals(events, Vector.empty)
       }
     }
@@ -109,7 +109,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         )
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(DomainError.RejectionFeedbackRequired))
+        assertEquals(result, Left(UseCaseError.domain(DomainError.RejectionFeedbackRequired)))
         assertEquals(events, Vector.empty)
       }
     }

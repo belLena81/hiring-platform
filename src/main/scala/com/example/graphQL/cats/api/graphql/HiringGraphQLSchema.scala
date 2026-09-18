@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, HealthService, ProbeResult, RepositoryError, SearchError, TraceContext, UseCaseError}
@@ -10,7 +11,8 @@ import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, BootstrapAdminInput, LoginInput, SignUpInput, JobUseCases, SearchUseCases}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
-import io.circe.{Decoder, Json}
+import io.circe.Json
+import io.circe.derivation.{ConfiguredDecoder, Configuration}
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError, QueryReducer}
 import sangria.marshalling.circe.*
 import sangria.renderer.SchemaRenderer
@@ -21,6 +23,7 @@ import java.util.UUID
 import java.util.Locale
 
 object HiringGraphQLSchema {
+  private given Configuration = Configuration.default
   private val MaxQueryDepth = 16
   private val MaxQueryComplexity = 1000d
   private val QueryReducers = List(
@@ -38,14 +41,15 @@ object HiringGraphQLSchema {
   private final case class AccountPayload(user: Option[User], accessToken: Option[String], expiresAt: Option[String], errors: List[GraphQLError])
   private final case class UserPayload(user: Option[User], errors: List[GraphQLError])
   private final case class DeleteAccountPayload(deleted: Boolean, errors: List[GraphQLError])
-  private final case class JobFilterGraphQLInput(city: Option[String], skills: Option[List[String]], createdAfter: Option[String])
+  private final case class JobFilterGraphQLInput(city: Option[String], skills: Option[List[String]], createdAfter: Option[String]) derives ConfiguredDecoder
   private final case class CandidateMatchProfile(skills: Set[String], experienceSummary: Option[String])
   private final case class CandidateMatchCandidate(id: String, name: String, profile: Option[CandidateMatchProfile])
   private final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
   private final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
   private final case class RankedJobResults(results: List[RankedJobPayload], errors: List[GraphQLError])
   private final case class RankedCandidateResults(results: List[RankedCandidatePayload], errors: List[GraphQLError])
-  private final case class SubmitApplicationGraphQLInput(jobId: String)
+  private type GraphQLStep[A] = EitherT[IO, GraphQLError, A]
+  private final case class SubmitApplicationGraphQLInput(jobId: String) derives ConfiguredDecoder
   private final case class JobGraphQLInput(
       title: String,
       description: String,
@@ -54,41 +58,19 @@ object HiringGraphQLSchema {
       country: String,
       city: Option[String],
       remote: Boolean
-  )
-  private final case class UpdateJobGraphQLInput(id: String, patch: JobGraphQLInput)
-  private final case class JobActionGraphQLInput(jobId: String)
-  private final case class ApplicationActionGraphQLInput(applicationId: String)
-  private final case class RejectApplicationGraphQLInput(applicationId: String, feedback: Option[String])
-  private final case class DeclineApplicationGraphQLInput(applicationId: String, reason: Option[String])
-  private final case class SignUpGraphQLInput(name: String, role: String, password: String, skills: Option[List[String]], experienceSummary: Option[String], resumeRef: Option[String], organizationName: Option[String], jobTitle: Option[String])
-  private final case class BootstrapAdminGraphQLInput(name: String, password: String)
-  private final case class LoginGraphQLInput(name: String, password: String)
-  private final case class UpdateProfileGraphQLInput(skills: Option[List[String]], experienceSummary: Option[String], resumeRef: Option[String], organizationName: Option[String], jobTitle: Option[String])
+  ) derives ConfiguredDecoder
+  private final case class UpdateJobGraphQLInput(id: String, patch: JobGraphQLInput) derives ConfiguredDecoder
+  private final case class JobActionGraphQLInput(jobId: String) derives ConfiguredDecoder
+  private final case class ApplicationActionGraphQLInput(applicationId: String) derives ConfiguredDecoder
+  private final case class RejectApplicationGraphQLInput(applicationId: String, feedback: Option[String]) derives ConfiguredDecoder
+  private final case class DeclineApplicationGraphQLInput(applicationId: String, reason: Option[String]) derives ConfiguredDecoder
+  private final case class SignUpGraphQLInput(name: String, role: String, password: String, skills: Option[List[String]], experienceSummary: Option[String], resumeRef: Option[String], organizationName: Option[String], jobTitle: Option[String]) derives ConfiguredDecoder
+  private final case class BootstrapAdminGraphQLInput(name: String, password: String) derives ConfiguredDecoder
+  private final case class LoginGraphQLInput(name: String, password: String) derives ConfiguredDecoder
+  private final case class UpdateProfileGraphQLInput(skills: Option[List[String]], experienceSummary: Option[String], resumeRef: Option[String], organizationName: Option[String], jobTitle: Option[String]) derives ConfiguredDecoder
 
-  private given Decoder[SubmitApplicationGraphQLInput] =
-    Decoder.forProduct1("jobId")(SubmitApplicationGraphQLInput.apply)
-  private given Decoder[JobGraphQLInput] =
-    Decoder.forProduct7("title", "description", "requirements", "skills", "country", "city", "remote")(JobGraphQLInput.apply)
-  private given Decoder[UpdateJobGraphQLInput] =
-    Decoder.forProduct2("id", "patch")(UpdateJobGraphQLInput.apply)
-  private given Decoder[JobActionGraphQLInput] =
-    Decoder.forProduct1("jobId")(JobActionGraphQLInput.apply)
-  private given Decoder[ApplicationActionGraphQLInput] =
-    Decoder.forProduct1("applicationId")(ApplicationActionGraphQLInput.apply)
-  private given Decoder[RejectApplicationGraphQLInput] =
-    Decoder.forProduct2("applicationId", "feedback")(RejectApplicationGraphQLInput.apply)
-  private given Decoder[DeclineApplicationGraphQLInput] =
-    Decoder.forProduct2("applicationId", "reason")(DeclineApplicationGraphQLInput.apply)
-  private given Decoder[JobFilterGraphQLInput] =
-    Decoder.forProduct3("city", "skills", "createdAfter")(JobFilterGraphQLInput.apply)
-  private given Decoder[SignUpGraphQLInput] =
-    Decoder.forProduct8("name", "role", "password", "skills", "experienceSummary", "resumeRef", "organizationName", "jobTitle")(SignUpGraphQLInput.apply)
-  private given Decoder[BootstrapAdminGraphQLInput] =
-    Decoder.forProduct2("name", "password")(BootstrapAdminGraphQLInput.apply)
-  private given Decoder[LoginGraphQLInput] =
-    Decoder.forProduct2("name", "password")(LoginGraphQLInput.apply)
-  private given Decoder[UpdateProfileGraphQLInput] =
-    Decoder.forProduct5("skills", "experienceSummary", "resumeRef", "organizationName", "jobTitle")(UpdateProfileGraphQLInput.apply)
+  private def instantField[A](name: String, resolve: A => Instant): Field[RequestContext, A] =
+    Field(name, StringType, resolve = context => resolve(context.value).toString)
 
   private val healthStatus = EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))
   private val readinessStatus = EnumType("ReadinessStatus", values = List(
@@ -200,7 +182,11 @@ object HiringGraphQLSchema {
     Field("profile", OptionType(candidateMatchProfileType), resolve = _.value.profile)))
   private lazy val userProfileType: OutputType[User] =
     UnionType[RequestContext]("UserProfile", List(candidateProfileType, recruiterProfileType))
-      .mapValue[User](user => user.profile.orElse(user.recruiterProfile).orNull)
+      // Sangria's UnionType.mapValue accepts Any, so absent profiles must be represented as null.
+      .mapValue[User](user => user.profile.map {
+        case UserProfile.Candidate(profile) => profile
+        case UserProfile.Recruiter(profile) => profile
+      }.orNull)
   private lazy val userType: ObjectType[RequestContext, User] = ObjectType("User", fields[RequestContext, User](
     Field("id", IDType, resolve = _.value.id.value.toString),
     Field("email", OptionType(StringType), resolve = _.value.email),
@@ -208,7 +194,7 @@ object HiringGraphQLSchema {
     Field("role", userRole, resolve = _.value.role),
     Field("status", userStatus, resolve = _.value.accountStatus),
     Field("profile", OptionType(userProfileType), resolve = _.value),
-    Field("createdAt", StringType, resolve = _.value.createdAt.toString)))
+    instantField("createdAt", _.createdAt)))
   private lazy val recruiterProfileType: ObjectType[RequestContext, RecruiterProfile] = ObjectType("RecruiterProfile", fields[RequestContext, RecruiterProfile](
       Field("organizationName", StringType, resolve = _.value.organizationName),
       Field("jobTitle", OptionType(StringType), resolve = _.value.jobTitle)))
@@ -220,15 +206,15 @@ object HiringGraphQLSchema {
     Field("skills", ListType(StringType), resolve = _.value.skills.toList.sorted),
     Field("location", locationType, resolve = _.value.location),
     Field("status", jobStatus, resolve = _.value.status),
-    Field("createdAt", StringType, resolve = _.value.createdAt.toString),
-    Field("updatedAt", StringType, resolve = _.value.updatedAt.toString),
+    instantField("createdAt", _.createdAt),
+    instantField("updatedAt", _.updatedAt),
     Field("recruiter", OptionType(userType), resolve = context =>
       context.ctx.unsafeToFuture(context.ctx.user(context.value.recruiterId)))))
   private lazy val applicationType: ObjectType[RequestContext, Application] = ObjectType("Application", fields[RequestContext, Application](
     Field("id", IDType, resolve = _.value.id.value.toString),
     Field("status", applicationStatus, resolve = _.value.status),
-    Field("createdAt", StringType, resolve = _.value.createdAt.toString),
-    Field("updatedAt", StringType, resolve = _.value.updatedAt.toString),
+    instantField("createdAt", _.createdAt),
+    instantField("updatedAt", _.updatedAt),
     Field("candidate", OptionType(userType), resolve = context =>
       context.ctx.unsafeToFuture(context.ctx.user(context.value.candidateId))),
     Field("job", OptionType(jobType), resolve = context =>
@@ -238,7 +224,7 @@ object HiringGraphQLSchema {
     Field("previousStatus", OptionType(applicationStatus), resolve = _.value.previousStatus),
     Field("newStatus", applicationStatus, resolve = _.value.newStatus),
     Field("actorId", IDType, resolve = _.value.actorId.value.toString),
-    Field("occurredAt", StringType, resolve = _.value.occurredAt.toString),
+    instantField("occurredAt", _.occurredAt),
     Field("feedback", OptionType(StringType), resolve = _.value.feedback),
     Field("reason", OptionType(StringType), resolve = _.value.reason)))
 
@@ -396,73 +382,58 @@ object HiringGraphQLSchema {
       Field("pageInfo", pageInfoType, resolve = _.value.pageInfo),
       Field("errors", ListType(errorType), resolve = _.value.errors)))
 
+  private def liftUseCase[A](value: IO[Either[UseCaseError, A]]): GraphQLStep[A] =
+    EitherT(value.map(_.leftMap(toGraphQLError)))
+
+  private def complete[A](value: GraphQLStep[A], onError: GraphQLError => A): IO[A] =
+    value.value.map(_.fold(onError, identity))
+
+  private def authenticatedStep[A](
+      context: Context[RequestContext, Unit]
+  )(action: (ActorContext, HiringGraphQLServices) => GraphQLStep[A]): GraphQLStep[A] =
+    EitherT(authenticated(context).map(_.leftMap(toGraphQLError))).flatMap(action.tupled)
+
   private def jobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
-    authenticatedConnection(context) { case (actor, hiring) =>
-      page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob).flatMap {
-        case Left(error) => IO.pure(graphQLErrorConnection(error))
-        case Right((page, requested)) =>
-          createdAfter(context.arg(createdAfterArgument)) match {
-            case Left(error) => IO.pure(graphQLErrorConnection(error))
-            case Right(createdAfter) =>
-              val filter = JobSearchFilter(
-                context.arg(cityArgument),
-                context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
-                createdAfter
-              )
-              hiring.jobService.searchOpenJobs(actor, filter, page)
-                .flatTap(_.fold(_ => IO.unit, jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))))
-                .map(_.fold(errorConnection[Job], jobConnection(_, requested)))
-          }
-      }
-    }
+    complete(authenticatedStep(context) { case (actor, hiring) =>
+      for {
+        (page, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob))
+        createdAfter      <- EitherT.fromEither[IO](createdAfter(context.arg(createdAfterArgument)))
+        values            <- liftUseCase(hiring.jobService.searchOpenJobs(actor, JobSearchFilter(
+          context.arg(cityArgument), context.arg(skillsArgument).fold(Set.empty[String])(_.toSet), createdAfter), page))
+        _                 <- EitherT.liftF[IO, GraphQLError, Unit](context.ctx.preloadUsers(values.map(_.recruiterId)))
+      } yield jobConnection(values, requested)
+    }, graphQLErrorConnection[Job])
 
   private def semanticJobSearch(context: Context[RequestContext, Unit]): IO[RankedJobResults] =
-    authenticatedSearch(context).flatMap {
-      case Left(error) => IO.pure(RankedJobResults(Nil, List(this.error(error))))
-      case Right((actor, _, service)) =>
-        pageSize(context.arg(firstArgument)).flatMap {
-          case Left(error) => IO.pure(RankedJobResults(Nil, List(error)))
-          case Right(size) =>
-            jobFilter(context.arg(jobFilterArgument)) match {
-              case Left(error) => IO.pure(RankedJobResults(Nil, List(error)))
-              case Right(filter) =>
-                IO.randomUUID.flatMap(searchId =>
-                  service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId)
-                    .flatTap(_.fold(_ => IO.unit, results => context.ctx.preloadUsers(results.map(_.job.recruiterId))))
-                    .map(_.fold(error => RankedJobResults(Nil, List(this.error(error))), rankedJobResults)))
-            }
-        }
-    }
+    complete(EitherT(authenticatedSearch(context).map(_.leftMap(toGraphQLError))).flatMap { case (actor, _, service) =>
+      for {
+        size     <- EitherT(pageSize(context.arg(firstArgument)))
+        filter   <- EitherT.fromEither[IO](jobFilter(context.arg(jobFilterArgument)))
+        searchId <- EitherT.liftF[IO, GraphQLError, UUID](IO.randomUUID)
+        results  <- liftUseCase(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
+        _        <- EitherT.liftF[IO, GraphQLError, Unit](context.ctx.preloadUsers(results.map(_.job.recruiterId)))
+      } yield rankedJobResults(results)
+    }, error => RankedJobResults(Nil, List(error)))
 
   private def recommendedJobs(context: Context[RequestContext, Unit]): IO[RankedJobResults] =
-    authenticatedSearch(context).flatMap {
-      case Left(error) => IO.pure(RankedJobResults(Nil, List(this.error(error))))
-      case Right((actor, _, service)) =>
-        pageSize(context.arg(firstArgument)).flatMap {
-          case Left(error) => IO.pure(RankedJobResults(Nil, List(error)))
-          case Right(size) =>
-            IO.randomUUID.flatMap(searchId =>
-              service.recommendedJobs(actor, size, searchId)
-                .flatTap(_.fold(_ => IO.unit, results => context.ctx.preloadUsers(results.map(_.job.recruiterId))))
-                .map(_.fold(error => RankedJobResults(Nil, List(this.error(error))), rankedJobResults)))
-        }
-    }
+    complete(EitherT(authenticatedSearch(context).map(_.leftMap(toGraphQLError))).flatMap { case (actor, _, service) =>
+      for {
+        size     <- EitherT(pageSize(context.arg(firstArgument)))
+        searchId <- EitherT.liftF[IO, GraphQLError, UUID](IO.randomUUID)
+        results  <- liftUseCase(service.recommendedJobs(actor, size, searchId))
+        _        <- EitherT.liftF[IO, GraphQLError, Unit](context.ctx.preloadUsers(results.map(_.job.recruiterId)))
+      } yield rankedJobResults(results)
+    }, error => RankedJobResults(Nil, List(error)))
 
   private def candidateMatches(context: Context[RequestContext, Unit]): IO[RankedCandidateResults] =
-    authenticatedSearch(context).flatMap {
-      case Left(error) => IO.pure(RankedCandidateResults(Nil, List(this.error(error))))
-      case Right((actor, _, service)) =>
-        (parseJobId(context.arg(jobIdArgument)), pageSize(context.arg(firstArgument))) match {
-          case (Some(jobId), pageIO) => pageIO.flatMap {
-            case Left(error) => IO.pure(RankedCandidateResults(Nil, List(error)))
-            case Right(size) =>
-              IO.randomUUID.flatMap(searchId =>
-                service.candidateMatches(actor, jobId, size, searchId)
-                  .map(_.fold(error => RankedCandidateResults(Nil, List(this.error(error))), rankedCandidateResults)))
-          }
-          case (None, _) => IO.pure(RankedCandidateResults(Nil, List(error(DomainError.NotFound("job")))))
-        }
-    }
+    complete(EitherT(authenticatedSearch(context).map(_.leftMap(toGraphQLError))).flatMap { case (actor, _, service) =>
+      for {
+        jobId    <- EitherT.fromOption[IO](parseJobId(context.arg(jobIdArgument)), toGraphQLError(UseCaseError.domain(DomainError.NotFound("job"))))
+        size     <- EitherT(pageSize(context.arg(firstArgument)))
+        searchId <- EitherT.liftF[IO, GraphQLError, UUID](IO.randomUUID)
+        results  <- liftUseCase(service.candidateMatches(actor, jobId, size, searchId))
+      } yield rankedCandidateResults(results)
+    }, error => RankedCandidateResults(Nil, List(error)))
 
   private def job(context: Context[RequestContext, Unit]): IO[Option[Job]] =
     authenticated(context).flatMap {
@@ -472,79 +443,60 @@ object HiringGraphQLSchema {
     }
 
   private def myJobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
-    authenticatedConnection(context) { case (actor, hiring) =>
-      page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob).flatMap {
-        case Left(error) => IO.pure(graphQLErrorConnection(error))
-        case Right((page, requested)) =>
-          hiring.jobService.myJobs(actor, page.copy(status = context.arg(jobStatusArgument)))
-            .flatTap(_.fold(_ => IO.unit, jobs => context.ctx.preloadUsers(jobs.map(_.recruiterId))))
-            .map(_.fold(errorConnection[Job], jobConnection(_, requested)))
-      }
-    }
+    complete(authenticatedStep(context) { case (actor, hiring) =>
+      for {
+        (page, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decodeJob))
+        values            <- liftUseCase(hiring.jobService.myJobs(actor, page.copy(status = context.arg(jobStatusArgument))))
+        _                 <- EitherT.liftF[IO, GraphQLError, Unit](context.ctx.preloadUsers(values.map(_.recruiterId)))
+      } yield jobConnection(values, requested)
+    }, graphQLErrorConnection[Job])
 
   private def myApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
-    authenticatedConnection(context) { case (actor, hiring) =>
-      applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument)).flatMap {
-        case Left(error) => IO.pure(graphQLErrorConnection(error))
-        case Right((page, requested)) =>
-          hiring.applicationService.myApplications(actor, page)
-            .flatTap(_.fold(_ => IO.unit, applications => preloadApplications(context, applications)))
-            .map(_.fold(errorConnection[Application], applicationConnection(_, requested)))
-      }
-    }
+    complete(authenticatedStep(context) { case (actor, hiring) =>
+      for {
+        (page, requested) <- EitherT(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument)))
+        values            <- liftUseCase(hiring.applicationService.myApplications(actor, page))
+        _                 <- EitherT.liftF[IO, GraphQLError, Unit](preloadApplications(context, values))
+      } yield applicationConnection(values, requested)
+    }, graphQLErrorConnection[Application])
 
   private def jobApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
-    authenticatedConnection(context) { case (actor, hiring) =>
-      (parseJobId(context.arg(jobIdArgument)), applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument))) match {
-        case (Some(jobId), pageIO) => pageIO.flatMap {
-          case Left(error) => IO.pure(graphQLErrorConnection(error))
-          case Right((page, requested)) =>
-            hiring.applicationService.jobApplications(actor, jobId, page)
-              .flatTap(_.fold(_ => IO.unit, applications => preloadApplications(context, applications)))
-              .map(_.fold(errorConnection[Application], applicationConnection(_, requested)))
-        }
-        case _ => IO.pure(errorConnection(DomainError.NotFound("job")))
-      }
-    }
+    complete(authenticatedStep(context) { case (actor, hiring) =>
+      for {
+        jobId              <- EitherT.fromOption[IO](parseJobId(context.arg(jobIdArgument)), toGraphQLError(UseCaseError.domain(DomainError.NotFound("job"))))
+        (page, requested)  <- EitherT(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument)))
+        values             <- liftUseCase(hiring.applicationService.jobApplications(actor, jobId, page))
+        _                  <- EitherT.liftF[IO, GraphQLError, Unit](preloadApplications(context, values))
+      } yield applicationConnection(values, requested)
+    }, graphQLErrorConnection[Application])
 
   private def applicationHistory(context: Context[RequestContext, Unit]): IO[Connection[ApplicationEvent]] =
-    authenticatedConnection(context) { case (actor, hiring) =>
-      parseApplicationId(context.arg(applicationIdArgument)) match {
-        case None => IO.pure(errorConnection(DomainError.NotFound("application")))
-        case Some(applicationId) =>
-          pageEvent(context.arg(firstArgument), context.arg(afterArgument)).flatMap {
-            case Left(error) => IO.pure(graphQLErrorConnection(error))
-            case Right((page, requested)) =>
-              canViewApplication(actor, hiring, applicationId).flatMap {
-                case Left(error) => IO.pure(errorConnection(error))
-                case Right(()) => hiring.readModel.applicationHistory(applicationId, page).map(eventConnection(_, requested))
-              }
-          }
-      }
-    }
+    complete(authenticatedStep(context) { case (actor, hiring) =>
+      for {
+        applicationId      <- EitherT.fromOption[IO](parseApplicationId(context.arg(applicationIdArgument)), toGraphQLError(UseCaseError.domain(DomainError.NotFound("application"))))
+        (page, requested)  <- EitherT(pageEvent(context.arg(firstArgument), context.arg(afterArgument)))
+        _                  <- liftUseCase(canViewApplication(actor, hiring, applicationId))
+        values             <- EitherT.liftF[IO, GraphQLError, List[ApplicationEvent]](hiring.readModel.applicationHistory(applicationId, page))
+      } yield eventConnection(values, requested)
+    }, graphQLErrorConnection[ApplicationEvent])
 
   private def submitApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] =
     authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
       parseJobId(context.arg(submitApplicationInputArgument).jobId) match {
-        case None => IO.pure(ApplicationPayload(None, List(error(DomainError.NotFound("job")))))
+        case None => IO.pure(ApplicationPayload(None, List(toGraphQLError(UseCaseError.domain(DomainError.NotFound("job"))))))
         case Some(jobId) =>
-          IO.realTimeInstant.flatMap(now =>
-            IO.randomUUID.flatMap(applicationId =>
-              IO.randomUUID.flatMap(eventId =>
-                hiring.applicationService.submitApplication(actor, jobId, ApplicationId(applicationId), ApplicationEventId(eventId), now)
-                  .map(applicationPayload)
-              )
-            )
-          )
+          (IO.realTimeInstant, IO.randomUUID, IO.randomUUID).mapN { (now, applicationId, eventId) =>
+            hiring.applicationService.submitApplication(actor, jobId, ApplicationId(applicationId), ApplicationEventId(eventId), now)
+          }.flatten.map(applicationPayload)
       }
     }
 
   private def createJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
       jobInput(context.arg(createJobInputArgument), JobStatus.Open).fold(error => IO.pure(jobErrorPayload(error)), input =>
-        IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(jobId =>
+        (IO.realTimeInstant, IO.randomUUID).mapN { (now, jobId) =>
           hiring.jobService.createJob(actor, input, now, JobId(jobId))
-            .map(jobPayload)))
+        }.flatten.map(jobPayload)
       )
     }
 
@@ -555,7 +507,7 @@ object HiringGraphQLSchema {
         case (Some(jobId), Right(input)) =>
           IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, jobId, input, now)
             .map(jobPayload))
-        case (None, _) => IO.pure(JobPayload(None, List(error(DomainError.NotFound("job")))))
+        case (None, _) => IO.pure(JobPayload(None, List(toGraphQLError(UseCaseError.domain(DomainError.NotFound("job"))))))
         case (_, Left(error)) => IO.pure(jobErrorPayload(error))
       }
     }
@@ -566,7 +518,7 @@ object HiringGraphQLSchema {
   ): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
       parseJobId(context.arg(jobActionInputArgument).jobId) match {
-        case None => IO.pure(JobPayload(None, List(error(DomainError.NotFound("job")))))
+        case None => IO.pure(JobPayload(None, List(toGraphQLError(UseCaseError.domain(DomainError.NotFound("job"))))))
         case Some(jobId) => IO.realTimeInstant.flatMap(now =>
           method(hiring.jobService)(actor, jobId, now).map(jobPayload))
       }
@@ -586,11 +538,11 @@ object HiringGraphQLSchema {
   ): IO[ApplicationPayload] =
     authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
       parseApplicationId(applicationIdValue) match {
-        case None => IO.pure(ApplicationPayload(None, List(error(DomainError.NotFound("application")))))
+        case None => IO.pure(ApplicationPayload(None, List(toGraphQLError(UseCaseError.domain(DomainError.NotFound("application"))))))
         case Some(applicationId) =>
-          IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(eventId =>
+          (IO.realTimeInstant, IO.randomUUID).mapN { (now, eventId) =>
             hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
-              .map(applicationPayload)))
+          }.flatten.map(applicationPayload)
       }
     }
 
@@ -605,7 +557,7 @@ object HiringGraphQLSchema {
   }
 
   private def accountService(context: Context[RequestContext, Unit]): Either[UseCaseError, AccountUseCases[IO]] =
-    context.ctx.hiring.flatMap(_.accountService).toRight(AvailabilityError.ServiceNotReady: UseCaseError)
+    context.ctx.hiring.flatMap(_.accountService).toRight(UseCaseError.availability(AvailabilityError.ServiceNotReady))
 
   private def accountMe(context: Context[RequestContext, Unit]): IO[Option[User]] =
     (context.ctx.actor, accountService(context)) match {
@@ -616,13 +568,20 @@ object HiringGraphQLSchema {
   private def signUp(context: Context[RequestContext, Unit]): IO[AccountPayload] = {
     val input = context.arg(signUpInputArgument)
     (for {
-      role <- UserRole.values.find(_.toString.equalsIgnoreCase(input.role)).toRight[UseCaseError](AccountError.ProfileRoleMismatch)
+      role <- UserRole.values.find(_.toString.equalsIgnoreCase(input.role)).toRight(UseCaseError.account(AccountError.ProfileRoleMismatch))
       service <- accountService(context)
-      candidateProfile = Option.when(role == UserRole.Candidate)(CandidateProfile(input.skills.getOrElse(Nil).toSet, input.experienceSummary, input.resumeRef))
-      recruiterProfile = Option.when(role == UserRole.Recruiter)(RecruiterProfile(input.organizationName.getOrElse(""), input.jobTitle))
-    } yield (service, SignUpInput(input.name, role, input.password, candidateProfile, recruiterProfile))).fold(
+      profile = role match {
+        case UserRole.Candidate => Some(UserProfile.Candidate(CandidateProfile(input.skills.getOrElse(Nil).toSet, input.experienceSummary, input.resumeRef)))
+        case UserRole.Recruiter => Some(UserProfile.Recruiter(RecruiterProfile(input.organizationName.getOrElse(""), input.jobTitle)))
+        case UserRole.Admin => None
+      }
+    } yield (service, SignUpInput(input.name, role, input.password, profile))).fold(
       error => IO.pure(accountErrorPayload(error)),
-      { case (service, request) => IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(id => service.signUp(request, now, Identifiers.UserId(id)))).map(accountPayload) }
+      { case (service, request) =>
+        (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
+          service.signUp(request, now, Identifiers.UserId(id))
+        }.flatten.map(accountPayload)
+      }
     )
   }
 
@@ -631,7 +590,9 @@ object HiringGraphQLSchema {
       error => IO.pure(accountErrorPayload(error)),
       service => {
         val input = context.arg(bootstrapAdminInputArgument)
-        IO.realTimeInstant.flatMap(now => IO.randomUUID.flatMap(id => service.bootstrapAdmin(BootstrapAdminInput(input.name, input.password), now, Identifiers.UserId(id)))).map(accountPayload)
+        (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
+          service.bootstrapAdmin(BootstrapAdminInput(input.name, input.password), now, Identifiers.UserId(id))
+        }.flatten.map(accountPayload)
       }
     )
 
@@ -648,15 +609,18 @@ object HiringGraphQLSchema {
     (context.ctx.actor, accountService(context)) match {
       case (Some(actor), Right(service)) =>
         val input = context.arg(updateProfileInputArgument)
-        val candidate = input.skills.map(skills => CandidateProfile(skills.toSet, input.experienceSummary, input.resumeRef))
-        val recruiter = input.organizationName.map(name => RecruiterProfile(name, input.jobTitle))
-        service.updateMyProfile(actor, AccountProfileInput(candidate, recruiter)).map(_.fold(error => UserPayload(None, List(this.error(error))), user => UserPayload(Some(user), Nil)))
+        val profile = actor.role match {
+          case UserRole.Candidate => UserProfile.Candidate(CandidateProfile(input.skills.getOrElse(Nil).toSet, input.experienceSummary, input.resumeRef))
+          case UserRole.Recruiter => UserProfile.Recruiter(RecruiterProfile(input.organizationName.getOrElse(""), input.jobTitle))
+          case UserRole.Admin => UserProfile.Candidate(CandidateProfile(Set.empty, None, None))
+        }
+        service.updateMyProfile(actor, AccountProfileInput(profile)).map(_.fold(error => UserPayload(None, List(toGraphQLError(error))), user => UserPayload(Some(user), Nil)))
       case _ => IO.pure(UserPayload(None, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
     }
 
   private def deleteMyAccount(context: Context[RequestContext, Unit]): IO[DeleteAccountPayload] =
     (context.ctx.actor, accountService(context)) match {
-      case (Some(actor), Right(service)) => IO.realTimeInstant.flatMap(now => service.deleteMyAccount(actor, now)).map(_.fold(error => DeleteAccountPayload(false, List(this.error(error))), _ => DeleteAccountPayload(true, Nil)))
+      case (Some(actor), Right(service)) => IO.realTimeInstant.flatMap(now => service.deleteMyAccount(actor, now)).map(_.fold(error => DeleteAccountPayload(false, List(toGraphQLError(error))), _ => DeleteAccountPayload(true, Nil)))
       case _ => IO.pure(DeleteAccountPayload(false, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
     }
 
@@ -671,7 +635,7 @@ object HiringGraphQLSchema {
           case Right((request, pageSize)) =>
             service.listUsers(actor, request).map(_.fold(errorConnection[User], values => userConnection(values, pageSize)))
         }
-      case _ => IO.pure(errorConnection(AuthenticationError.Unauthorized))
+      case _ => IO.pure(errorConnection(UseCaseError.authentication(AuthenticationError.Unauthorized)))
     }
 
   private def authenticated(context: Context[RequestContext, Unit]): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices)]] =
@@ -679,29 +643,24 @@ object HiringGraphQLSchema {
       case (Some(actor), Some(hiring)) =>
         context.ctx.hiringAvailable.map { ready =>
           if (ready) Right((actor, hiring))
-          else Left(AvailabilityError.ServiceNotReady: UseCaseError)
+          else Left(UseCaseError.availability(AvailabilityError.ServiceNotReady))
         }
-      case _ => IO.pure(Left(AuthenticationError.Unauthorized: UseCaseError))
+      case _ => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
     }
 
   private def authenticatedSearch(
       context: Context[RequestContext, Unit]
   ): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices, SearchUseCases[IO])]] =
     authenticated(context).map(_.flatMap { case (actor, hiring) =>
-      hiring.semanticSearchService.map(service => (actor, hiring, service)).toRight(SearchError.VectorSearchUnavailable: UseCaseError)
+      hiring.semanticSearchService.map(service => (actor, hiring, service)).toRight(UseCaseError.search(SearchError.VectorSearchUnavailable))
     })
-
-  private def authenticatedConnection[A](
-      context: Context[RequestContext, Unit]
-  )(action: (ActorContext, HiringGraphQLServices) => IO[Connection[A]]): IO[Connection[A]] =
-    authenticated(context).flatMap(_.fold(error => IO.pure(errorConnection[A](error)), action.tupled))
 
   private def authenticatedPayload[A](
       unauthenticated: List[GraphQLError] => A
   )(context: Context[RequestContext, Unit])(
       action: (ActorContext, HiringGraphQLServices) => IO[A]
   ): IO[A] =
-    authenticated(context).flatMap(_.fold(error => IO.pure(unauthenticated(List(this.error(error)))), action.tupled))
+    authenticated(context).flatMap(_.fold(error => IO.pure(unauthenticated(List(toGraphQLError(error)))), action.tupled))
 
   private def page(
       first: Int,
@@ -738,7 +697,7 @@ object HiringGraphQLSchema {
     }).map(validateCursor(after, decode))
 
   private def pageSize(first: Int): IO[Either[GraphQLError, PageSize]] =
-    IO.pure(PageSize.fromInt(first).toEither.leftMap(error))
+    IO.pure(PageSize.fromInt(first).toEither.leftMap(errors => toGraphQLError(UseCaseError.ValidationFailed(errors))))
 
   private def jobFilter(value: Option[JobFilterGraphQLInput]): Either[GraphQLError, JobSearchFilter] =
     value match {
@@ -783,7 +742,8 @@ object HiringGraphQLSchema {
     ))
 
   private def location(input: JobGraphQLInput): Either[UseCaseError, Location] =
-    Location.validate(input.country, input.city.getOrElse(""), input.remote).toEither.leftMap(identity)
+    // Location currently models city as a required string; preserve the empty sentinel for absent GraphQL input.
+    Location.validate(input.country, input.city.getOrElse(""), input.remote).toEither.leftMap(UseCaseError.ValidationFailed.apply)
 
   private def parseJobId(value: String): Option[JobId] =
     Either.catchNonFatal(JobId(UUID.fromString(value))).toOption
@@ -831,7 +791,7 @@ object HiringGraphQLSchema {
       CandidateMatchCandidate(
         value.candidate.id.value.toString,
         value.candidate.name,
-        value.candidate.profile.map(profile => CandidateMatchProfile(profile.skills, profile.experienceSummary))
+        value.candidate.candidateProfile.map(profile => CandidateMatchProfile(profile.skills, profile.experienceSummary))
       ),
       value.score,
       value.mode,
@@ -846,7 +806,7 @@ object HiringGraphQLSchema {
   }
 
   private def errorConnection[A](error: UseCaseError): Connection[A] =
-    Connection(Nil, PageInfo(false, None), List(this.error(error)))
+    Connection(Nil, PageInfo(false, None), List(toGraphQLError(error)))
 
   private def graphQLErrorConnection[A](error: GraphQLError): Connection[A] =
     Connection(Nil, PageInfo(false, None), List(error))
@@ -855,58 +815,57 @@ object HiringGraphQLSchema {
     result.fold(jobErrorPayload, job => JobPayload(Some(job), Nil))
 
   private def jobErrorPayload(error: UseCaseError): JobPayload =
-    JobPayload(None, List(this.error(error)))
+    JobPayload(None, List(toGraphQLError(error)))
 
   private def applicationPayload(result: Either[UseCaseError, Application]): ApplicationPayload =
     result.fold(applicationErrorPayload, application => ApplicationPayload(Some(application), Nil))
 
   private def applicationErrorPayload(error: UseCaseError): ApplicationPayload =
-    ApplicationPayload(None, List(this.error(error)))
+    ApplicationPayload(None, List(toGraphQLError(error)))
 
   private def accountPayload(result: Either[UseCaseError, (User, AccountToken)]): AccountPayload =
     result.fold(accountErrorPayload, { case (user, token) => AccountPayload(Some(user), Some(token.value), Some(token.expiresAt.toString), Nil) })
 
   private def accountErrorPayload(error: UseCaseError): AccountPayload =
-    AccountPayload(None, None, None, List(this.error(error)))
+    AccountPayload(None, None, None, List(toGraphQLError(error)))
 
   private def userConnection(values: List[User], requested: Int): Connection[User] =
     connection(values, requested)(user => CursorCodec.encodeUser(UserCursor(user.createdAt, user.id)))
 
-  private def error(error: UseCaseError): GraphQLError =
+  private def toGraphQLError(error: UseCaseError): GraphQLError =
     error match {
-      case AuthenticationError.Unauthorized => GraphQLError("UNAUTHORIZED", "Authentication required")
-      case AuthenticationError.SingletonAdminViolation => GraphQLError("FORBIDDEN", "Forbidden")
-      case AccountError.BootstrapRequired => GraphQLError("ADMIN_BOOTSTRAP_REQUIRED", "The first Admin must be bootstrapped")
-      case AccountError.AlreadyBootstrapped => GraphQLError("ADMIN_ALREADY_BOOTSTRAPPED", "Admin bootstrap is already complete")
-      case AccountError.NameTaken => GraphQLError("NAME_TAKEN", "Name is already in use")
-      case AccountError.InvalidCredentials => GraphQLError("INVALID_CREDENTIALS", "Invalid credentials")
-      case AccountError.DeletedAccount => GraphQLError("UNAUTHORIZED", "Authentication required")
-      case AccountError.ProfileRoleMismatch => GraphQLError("PROFILE_ROLE_MISMATCH", "Profile does not match the selected role")
-      case AccountError.PasswordPolicyViolation => GraphQLError("INVALID_PASSWORD", "Password does not meet policy")
-      case AccountError.AccountAlreadyDeleted => GraphQLError("ACCOUNT_ALREADY_DELETED", "Account is already deleted")
-      case AccountError.AdminSignupForbidden => GraphQLError("ADMIN_BOOTSTRAP_ONLY", "Admin accounts can only be created through bootstrap")
-      case AvailabilityError.ServiceNotReady => GraphQLError("SERVICE_NOT_READY", "Service not ready")
-      case DomainError.Forbidden => GraphQLError("FORBIDDEN", "Forbidden")
-      case DomainError.NotFound(entity) => GraphQLError("NOT_FOUND", s"$entity not found")
-      case DomainError.DuplicateApplication => GraphQLError("DUPLICATE_APPLICATION", "Application already exists")
-      case DomainError.JobMustBeOpen => GraphQLError("JOB_MUST_BE_OPEN", "Job must be open")
-      case DomainError.CandidateRequired => GraphQLError("CANDIDATE_REQUIRED", "Candidate role required")
-      case DomainError.RecruiterRequired => GraphQLError("RECRUITER_REQUIRED", "Recruiter role required")
-      case DomainError.InvalidJobTransition(_, _) => GraphQLError("INVALID_JOB_TRANSITION", "Invalid job transition")
-      case DomainError.InvalidStatusTransition(_, _) => GraphQLError("INVALID_STATUS_TRANSITION", "Invalid application status transition")
-      case DomainError.RejectionFeedbackRequired => GraphQLError("REJECTION_FEEDBACK_REQUIRED", "Rejection feedback is required")
-      case DomainError.DeclineReasonRequired => GraphQLError("DECLINE_REASON_REQUIRED", "Decline reason is required")
-      case RepositoryError.DuplicateApplication => GraphQLError("DUPLICATE_APPLICATION", "Application already exists")
-      case RepositoryError.Conflict => GraphQLError("CONFLICT", "Conflict")
-      case RepositoryError.Unavailable => GraphQLError("UNAVAILABLE", "Repository unavailable")
-      case SearchError.MissingEmbedding(entity) => GraphQLError("MISSING_EMBEDDING", s"$entity embedding is missing")
-      case SearchError.StaleEmbedding(entity) => GraphQLError("STALE_EMBEDDING", s"$entity embedding is stale")
-      case SearchError.InputTooLarge(field, maximum) => GraphQLError("INPUT_TOO_LARGE", s"$field must be at most $maximum characters")
-      case SearchError.ProviderUnavailable => GraphQLError("PROVIDER_UNAVAILABLE", "Embedding provider unavailable")
-      case SearchError.VectorSearchUnavailable => GraphQLError("VECTOR_SEARCH_UNAVAILABLE", "Vector search unavailable")
-      case errors: cats.data.NonEmptyList[?] =>
-        val fields = errors.toList.collect { case validation: DomainValidationError => validation }
-          .map(validationErrorMessage).mkString(", ")
+      case UseCaseError.Authentication(AuthenticationError.Unauthorized) => GraphQLError("UNAUTHORIZED", "Authentication required")
+      case UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation) => GraphQLError("FORBIDDEN", "Forbidden")
+      case UseCaseError.Account(AccountError.BootstrapRequired) => GraphQLError("ADMIN_BOOTSTRAP_REQUIRED", "The first Admin must be bootstrapped")
+      case UseCaseError.Account(AccountError.AlreadyBootstrapped) => GraphQLError("ADMIN_ALREADY_BOOTSTRAPPED", "Admin bootstrap is already complete")
+      case UseCaseError.Account(AccountError.NameTaken) => GraphQLError("NAME_TAKEN", "Name is already in use")
+      case UseCaseError.Account(AccountError.InvalidCredentials) => GraphQLError("INVALID_CREDENTIALS", "Invalid credentials")
+      case UseCaseError.Account(AccountError.DeletedAccount) => GraphQLError("UNAUTHORIZED", "Authentication required")
+      case UseCaseError.Account(AccountError.ProfileRoleMismatch) => GraphQLError("PROFILE_ROLE_MISMATCH", "Profile does not match the selected role")
+      case UseCaseError.Account(AccountError.PasswordPolicyViolation) => GraphQLError("INVALID_PASSWORD", "Password does not meet policy")
+      case UseCaseError.Account(AccountError.AccountAlreadyDeleted) => GraphQLError("ACCOUNT_ALREADY_DELETED", "Account is already deleted")
+      case UseCaseError.Account(AccountError.AdminSignupForbidden) => GraphQLError("ADMIN_BOOTSTRAP_ONLY", "Admin accounts can only be created through bootstrap")
+      case UseCaseError.Availability(AvailabilityError.ServiceNotReady) => GraphQLError("SERVICE_NOT_READY", "Service not ready")
+      case UseCaseError.Domain(DomainError.Forbidden) => GraphQLError("FORBIDDEN", "Forbidden")
+      case UseCaseError.Domain(DomainError.NotFound(entity)) => GraphQLError("NOT_FOUND", s"$entity not found")
+      case UseCaseError.Domain(DomainError.DuplicateApplication) => GraphQLError("DUPLICATE_APPLICATION", "Application already exists")
+      case UseCaseError.Domain(DomainError.JobMustBeOpen) => GraphQLError("JOB_MUST_BE_OPEN", "Job must be open")
+      case UseCaseError.Domain(DomainError.CandidateRequired) => GraphQLError("CANDIDATE_REQUIRED", "Candidate role required")
+      case UseCaseError.Domain(DomainError.RecruiterRequired) => GraphQLError("RECRUITER_REQUIRED", "Recruiter role required")
+      case UseCaseError.Domain(DomainError.InvalidJobTransition(_, _)) => GraphQLError("INVALID_JOB_TRANSITION", "Invalid job transition")
+      case UseCaseError.Domain(DomainError.InvalidStatusTransition(_, _)) => GraphQLError("INVALID_STATUS_TRANSITION", "Invalid application status transition")
+      case UseCaseError.Domain(DomainError.RejectionFeedbackRequired) => GraphQLError("REJECTION_FEEDBACK_REQUIRED", "Rejection feedback is required")
+      case UseCaseError.Domain(DomainError.DeclineReasonRequired) => GraphQLError("DECLINE_REASON_REQUIRED", "Decline reason is required")
+      case UseCaseError.Repository(RepositoryError.DuplicateApplication) => GraphQLError("DUPLICATE_APPLICATION", "Application already exists")
+      case UseCaseError.Repository(RepositoryError.Conflict) => GraphQLError("CONFLICT", "Conflict")
+      case UseCaseError.Repository(RepositoryError.Unavailable) => GraphQLError("UNAVAILABLE", "Repository unavailable")
+      case UseCaseError.Search(SearchError.MissingEmbedding(entity)) => GraphQLError("MISSING_EMBEDDING", s"$entity embedding is missing")
+      case UseCaseError.Search(SearchError.StaleEmbedding(entity)) => GraphQLError("STALE_EMBEDDING", s"$entity embedding is stale")
+      case UseCaseError.Search(SearchError.InputTooLarge(field, maximum)) => GraphQLError("INPUT_TOO_LARGE", s"$field must be at most $maximum characters")
+      case UseCaseError.Search(SearchError.ProviderUnavailable) => GraphQLError("PROVIDER_UNAVAILABLE", "Embedding provider unavailable")
+      case UseCaseError.Search(SearchError.VectorSearchUnavailable) => GraphQLError("VECTOR_SEARCH_UNAVAILABLE", "Vector search unavailable")
+      case UseCaseError.ValidationFailed(errors) =>
+        val fields = errors.toList.map(validationErrorMessage).mkString(", ")
         GraphQLError("VALIDATION_FAILED", if (fields.isEmpty) "Validation failed" else fields)
     }
 

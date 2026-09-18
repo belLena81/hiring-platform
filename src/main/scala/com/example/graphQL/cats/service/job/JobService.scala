@@ -50,7 +50,7 @@ final class JobService[F[_]: Monad](
   ): F[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](authorization.canManageJobs(user), (), DomainError.Forbidden: UseCaseError)
+      _ <- EitherT.cond[F](authorization.canManageJobs(user), (), UseCaseError.domain(DomainError.Forbidden))
       job <- EitherT.fromEither[F](validateNewJob(user.id, input, now, jobId))
       created <- EitherT(persistCreatedJob(JobLifecycle.create(job).runA(job).value.widenUseCase))
     } yield created).value
@@ -81,8 +81,8 @@ final class JobService[F[_]: Monad](
   def viewJob(actor: ActorContext, jobId: JobId): F[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      job <- EitherT.fromOptionF(jobs.find(jobId), DomainError.NotFound("job"): UseCaseError)
-      _ <- EitherT.cond[F](authorization.canView(user, job), (), DomainError.Forbidden: UseCaseError)
+      job <- EitherT.fromOptionF(jobs.find(jobId), UseCaseError.domain(DomainError.NotFound("job")))
+      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.domain(DomainError.Forbidden))
     } yield job).value
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
@@ -98,7 +98,7 @@ final class JobService[F[_]: Monad](
         user.role match {
           case UserRole.Admin => EitherT.liftF(jobs.findAll(page))
           case UserRole.Recruiter => EitherT.liftF(jobs.findByRecruiter(user.id, page))
-          case UserRole.Candidate => EitherT.leftT[F, List[Job]](DomainError.Forbidden: UseCaseError)
+          case UserRole.Candidate => EitherT.leftT[F, List[Job]](UseCaseError.domain(DomainError.Forbidden))
         }
       }
     } yield manageableJobs).value
@@ -109,7 +109,7 @@ final class JobService[F[_]: Monad](
       now: Instant,
       jobId: JobId
   ): Either[UseCaseError, Job] =
-    if (input.status == JobStatus.Closed) DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed).asLeft
+    if (input.status == JobStatus.Closed) UseCaseError.domain(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed)).asLeft
     else {
       Job
         .validate(

@@ -110,7 +110,7 @@ final class MongoUserRepository(
   private val registry = database.getCollection("account_registry")
 
   def insert(user: User): IO[Either[RepositoryError, Unit]] =
-    if (user.role == UserRole.Admin && !user.adminSingleton) IO.pure(Left(RepositoryError.Conflict))
+    if (!user.roleProfileIsValid) IO.pure(Left(RepositoryError.Conflict))
     else PublisherBridge.first(collection.insertOne(MongoHiringCodecs.user(user))).as(Right(())).handleError(mapWrite)
 
   override def find(id: UserId): IO[Option[User]] =
@@ -138,7 +138,8 @@ final class MongoUserRepository(
     PublisherBridge.first(registry.find(Filters.eq("_id", "user-account-registry"))).map(_.exists(_.getString("state", "") == "Initialized"))
 
   override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
-    transactionRunner.run { session =>
+    if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton) IO.pure(Left(RepositoryError.Conflict))
+    else transactionRunner.run { session =>
       val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Uninitialized"))
       val findRegistry = session.fold(PublisherBridge.first(registry.find(stateFilter)))(active => PublisherBridge.first(registry.find(active, stateFilter)))
       val findAnyUser = session.fold(PublisherBridge.first(collection.find().first()))(active => PublisherBridge.first(collection.find(active).first()))
@@ -156,7 +157,8 @@ final class MongoUserRepository(
     }.handleError(mapWrite)
 
   override def createAccount(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
-    transactionRunner.run { session =>
+    if (!user.roleProfileIsValid || user.role == UserRole.Admin) IO.pure(Left(RepositoryError.Conflict))
+    else transactionRunner.run { session =>
       val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Initialized"))
       val registryReady = session.fold(PublisherBridge.first(registry.find(stateFilter)))(active => PublisherBridge.first(registry.find(active, stateFilter)))
       registryReady.flatMap {
@@ -175,14 +177,12 @@ final class MongoUserRepository(
 
   override def updateProfile(
       userId: UserId,
-      profile: Option[CandidateProfile],
-      recruiterProfile: Option[RecruiterProfile]
+      profile: UserProfile
   ): IO[Either[RepositoryError, User]] =
     PublisherBridge.first(collection.updateOne(
       Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString)),
       Updates.combine(
-        profile.fold(Updates.unset("profile"))(value => Updates.set("profile", MongoHiringCodecs.user(User(userId, None, "", UserRole.Candidate, Some(value), Instant.EPOCH)).get("profile"))),
-        recruiterProfile.fold(Updates.unset("recruiterProfile"))(value => Updates.set("recruiterProfile", MongoHiringCodecs.user(User(userId, None, "", UserRole.Recruiter, None, Instant.EPOCH, recruiterProfile = Some(value))).get("recruiterProfile"))),
+        Updates.set("profile", MongoHiringCodecs.profile(profile)),
         Updates.inc("version", 1L),
         Updates.set("updatedAt", Date.from(Instant.now()))
       )
@@ -413,7 +413,7 @@ private[mongo] object MongoSemanticSearchResult {
   def rankedCandidate(document: Document, query: VectorSearchQuery): Option[RankedCandidate] = {
     val candidate = MongoHiringCodecs.readUser(document)
     for {
-      profile <- candidate.profile
+      profile <- candidate.candidateProfile
       embedding <- candidate.embedding
       if embedding.meta.model == query.model
       if embedding.meta.version == query.version

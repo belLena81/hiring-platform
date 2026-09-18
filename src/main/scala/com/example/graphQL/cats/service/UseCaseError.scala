@@ -39,9 +39,60 @@ enum RepositoryError {
   case Unavailable
 }
 
-type UseCaseError = DomainError | RepositoryError | AuthenticationError | AccountError | SearchError | AvailabilityError | NonEmptyList[DomainValidationError]
+sealed trait UseCaseError
 
 object UseCaseError {
-  extension [E <: UseCaseError, A](value: Either[E, A]) def widenUseCase: Either[UseCaseError, A] =
-    value.leftMap(error => error: UseCaseError)
+  final case class Domain(error: DomainError) extends UseCaseError
+  final case class Repository(error: RepositoryError) extends UseCaseError
+  final case class Authentication(error: AuthenticationError) extends UseCaseError
+  final case class Account(error: AccountError) extends UseCaseError
+  final case class Search(error: SearchError) extends UseCaseError
+  final case class Availability(error: AvailabilityError) extends UseCaseError
+  final case class ValidationFailed(errors: NonEmptyList[DomainValidationError]) extends UseCaseError
+
+  trait Widen[-E] {
+    def apply(error: E): UseCaseError
+  }
+
+  given Widen[UseCaseError] with {
+    def apply(error: UseCaseError): UseCaseError = error
+  }
+
+  given Widen[DomainError] with {
+    def apply(error: DomainError): UseCaseError = Domain(error)
+  }
+
+  given Widen[RepositoryError] with {
+    def apply(error: RepositoryError): UseCaseError = Repository(error)
+  }
+
+  given Widen[AuthenticationError] with {
+    def apply(error: AuthenticationError): UseCaseError = Authentication(error)
+  }
+
+  given Widen[AccountError] with {
+    def apply(error: AccountError): UseCaseError = Account(error)
+  }
+
+  given Widen[SearchError] with {
+    def apply(error: SearchError): UseCaseError = Search(error)
+  }
+
+  given Widen[AvailabilityError] with {
+    def apply(error: AvailabilityError): UseCaseError = Availability(error)
+  }
+
+  given Widen[NonEmptyList[DomainValidationError]] with {
+    def apply(error: NonEmptyList[DomainValidationError]): UseCaseError = ValidationFailed(error)
+  }
+
+  extension [E, A](value: Either[E, A])(using widen: Widen[E])
+    def widenUseCase: Either[UseCaseError, A] = value.leftMap(widen.apply)
+
+  def domain(error: DomainError): UseCaseError = Domain(error)
+  def repository(error: RepositoryError): UseCaseError = Repository(error)
+  def authentication(error: AuthenticationError): UseCaseError = Authentication(error)
+  def account(error: AccountError): UseCaseError = Account(error)
+  def search(error: SearchError): UseCaseError = Search(error)
+  def availability(error: AvailabilityError): UseCaseError = Availability(error)
 }

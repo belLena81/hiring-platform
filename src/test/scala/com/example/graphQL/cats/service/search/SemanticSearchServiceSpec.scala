@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service.search
 
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError}
+import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError, UseCaseError}
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
@@ -16,7 +16,7 @@ import java.util.UUID
 final class SemanticSearchServiceSpec extends CatsEffectSuite {
   private val searchId = UUID.fromString("00000000-0000-0000-0000-000000000099")
   private val profile = CandidateProfile(Set("Scala"), Some("Backend engineer"), Some("resume://candidate"))
-  private val candidateWithProfile = candidate.copy(profile = Some(profile))
+  private val candidateWithProfile = candidate.copy(profile = Some(UserProfile.Candidate(profile)))
   private val meta = EmbeddingMeta("voyage-4-lite", 1, SourceHash.sha256(SearchableText.candidate(profile)), now)
   private val jobMeta = EmbeddingMeta("voyage-4-lite", 1, SourceHash.sha256(SearchableText.job(openJob)), now)
   private val embedding = EntityEmbedding(List(0.1f, 0.2f), meta)
@@ -37,7 +37,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         JobSearchFilter(None, Set.empty, None), pageSize, searchId)
     } yield {
       assertEquals(accepted.map(_.map(_.job.id)), Right(List(jobId)))
-      assertEquals(rejected.left.toOption, Some(DomainError.CandidateRequired))
+      assertEquals(rejected.left.toOption, Some(UseCaseError.domain(DomainError.CandidateRequired)))
     }
   }
 
@@ -75,7 +75,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         JobSearchFilter(None, Set.empty, None), pageSize, searchId)
       callCount <- calls.get
     } yield {
-      assertEquals(result.left.toOption, Some(DomainError.Forbidden))
+      assertEquals(result.left.toOption, Some(UseCaseError.domain(DomainError.Forbidden)))
       assertEquals(callCount, 0)
     }
   }
@@ -92,7 +92,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         JobSearchFilter(None, Set.empty, None), pageSize, searchId)
       callCount <- calls.get
     } yield {
-      assertEquals(result.left.toOption, Some(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars)))
+      assertEquals(result.left.toOption, Some(UseCaseError.search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))))
       assertEquals(callCount, 0)
     }
   }
@@ -120,9 +120,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       staleResult <- staleService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
       staleModelResult <- staleModelService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
     } yield {
-      assertEquals(missing.left.toOption, Some(SearchError.MissingEmbedding("candidate")))
-      assertEquals(staleResult.left.toOption, Some(SearchError.StaleEmbedding("candidate")))
-      assertEquals(staleModelResult.left.toOption, Some(SearchError.StaleEmbedding("candidate")))
+      assertEquals(missing.left.toOption, Some(UseCaseError.search(SearchError.MissingEmbedding("candidate"))))
+      assertEquals(staleResult.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("candidate"))))
+      assertEquals(staleModelResult.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("candidate"))))
     }
   }
 
@@ -143,7 +143,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       rejected <- service.candidateMatches(ActorContext(otherRecruiter, UserRole.Recruiter), jobId, pageSize, searchId)
     } yield {
       assertEquals(accepted.map(_.map(_.candidate.id)), Right(List(candidateId)))
-      assertEquals(rejected.left.toOption, Some(DomainError.Forbidden))
+      assertEquals(rejected.left.toOption, Some(UseCaseError.domain(DomainError.Forbidden)))
     }
   }
 
@@ -161,8 +161,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       result <- service.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
       staleModelResult <- staleModelService.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
     } yield {
-      assertEquals(result.left.toOption, Some(SearchError.StaleEmbedding("job")))
-      assertEquals(staleModelResult.left.toOption, Some(SearchError.StaleEmbedding("job")))
+      assertEquals(result.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("job"))))
+      assertEquals(staleModelResult.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("job"))))
     }
   }
 

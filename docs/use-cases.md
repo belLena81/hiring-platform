@@ -818,7 +818,9 @@ query CandidateMatches(
       id
       name
       profile {
-        skills
+        ... on CandidateMatchProfile {
+          skills
+        }
       }
     }
 
