@@ -3,7 +3,7 @@ package com.example.graphQL.cats.transport.http
 import cats.data.Kleisli
 import cats.effect.IO
 import com.example.graphQL.cats.transport.graphql.{HiringGraphQLSchema, GraphQLRequest, HiringGraphQLServices}
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult, TraceContext}
 import io.circe.Json
 import org.http4s.*
 import org.http4s.circe.*
@@ -67,7 +67,7 @@ final class HiringApiRoutes(
         .exists(_._2 > 0)
     }
 
-  private def graphql(request: Request[IO], requestId: String): IO[Response[IO]] = admitted(requestId) {
+  private def graphql(request: Request[IO], requestId: String, trace: TraceContext): IO[Response[IO]] = admitted(requestId) {
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
       rejected(Status.UnsupportedMediaType, "Expected application/json", requestId, RejectionReason.UNSUPPORTED_MEDIA)
     else if (!acceptsJson(request)) rejected(Status.NotAcceptable, "Expected JSON response media", requestId, RejectionReason.NOT_ACCEPTABLE)
@@ -77,7 +77,7 @@ final class HiringApiRoutes(
         case None => rejected(Status.BadRequest, "Invalid GraphQL request", requestId, RejectionReason.INVALID_REQUEST)
         case Some(parsed) =>
           def execute(actor: Option[ActorContext], services: Option[HiringGraphQLServices]): IO[Response[IO]] =
-            HiringGraphQLSchema.execute(parsed, service, requestId, actor, services, ensureHiringReady).flatMap {
+            HiringGraphQLSchema.execute(parsed, service, requestId, actor, services, ensureHiringReady, Some(trace)).flatMap {
               case Right(result) => completedGraphQL(parsed, result, requestId)
               case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Status.BadRequest, "Invalid GraphQL query", requestId, RejectionReason.INVALID_QUERY)
               case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Status.InternalServerError, "Request failed", requestId, RejectionReason.INTERNAL_ERROR)
@@ -98,7 +98,7 @@ final class HiringApiRoutes(
     Diagnostics.emit(diagnostics, LogEvent.GraphQLCompleted, Some(requestId), fields).as(json(Status.Ok, result))
   }
 
-  private def route(request: Request[IO], requestId: String): IO[Response[IO]] =
+  private def route(request: Request[IO], requestId: String, trace: TraceContext): IO[Response[IO]] =
     (request.method, request.uri.path.renderString) match {
       case (Method.GET, "/health") => IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
       case (Method.GET, "/schema.graphql") => IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl))
@@ -109,7 +109,7 @@ final class HiringApiRoutes(
             Json.obj("status" -> Json.fromString(if (ready) "READY" else "NOT_READY")))
         }
       }
-      case (Method.POST, "/graphql") => graphql(request, requestId)
+      case (Method.POST, "/graphql") => graphql(request, requestId, trace)
       case (_, "/graphql") => rejected(Status.MethodNotAllowed, "Use POST", requestId, RejectionReason.METHOD_NOT_ALLOWED)
         .map(_.putHeaders(Header.Raw(CIString("Allow"), "POST")))
       case _ => Diagnostics.emit(diagnostics, LogEvent.RequestRejected, Some(requestId),
@@ -118,6 +118,7 @@ final class HiringApiRoutes(
 
   val app: HttpApp[IO] = Kleisli { request =>
     IO.randomUUID.map(_.toString).flatMap { requestId =>
+      TraceContext.root(requestId).flatMap { trace =>
       val method = request.method.name
       val path = request.uri.path.renderString
       val metadata = Map(LogField.Method -> (if (LogFields.validPublic(LogField.Method, method)) method else "OTHER"),
@@ -126,20 +127,23 @@ final class HiringApiRoutes(
         def timedFields: IO[Map[LogField, String]] = IO.monotonic.map { now =>
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
-        route(request, requestId)
-        .handleErrorWith(failure => rejected(Status.InternalServerError, "Request failed", requestId,
-          RejectionReason.INTERNAL_ERROR, LogFields.failure(failure)))
-        .map(_.putHeaders(
-          Header.Raw(CIString("X-Request-ID"), requestId),
-          Header.Raw(CIString("X-Content-Type-Options"), "nosniff"),
-          Header.Raw(CIString("Cache-Control"), "no-store"),
-          Header.Raw(CIString("Content-Security-Policy"),
-            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
-        ))
-        .flatTap(response => timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCompleted,
-          Some(requestId), fields ++ Map(LogField.Status -> response.status.code.toString, LogField.Outcome -> "COMPLETED"))))
-        .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
-          Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
+        Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { requestTrace =>
+          route(request, requestId, requestTrace)
+          .handleErrorWith(failure => rejected(Status.InternalServerError, "Request failed", requestId,
+            RejectionReason.INTERNAL_ERROR, LogFields.failure(failure)))
+          .map(_.putHeaders(
+            Header.Raw(CIString("X-Request-ID"), requestId),
+            Header.Raw(CIString("X-Content-Type-Options"), "nosniff"),
+            Header.Raw(CIString("Cache-Control"), "no-store"),
+            Header.Raw(CIString("Content-Security-Policy"),
+              "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+          ))
+          .flatTap(response => timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCompleted,
+            Some(requestId), fields ++ Map(LogField.Status -> response.status.code.toString, LogField.Outcome -> "COMPLETED"))))
+          .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
+            Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
+        }
+      }
       }
     }
   }

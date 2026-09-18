@@ -25,7 +25,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       appender.stop()
     }).use { appender =>
       val events = List(LogEvent.Started, LogEvent.RequestRejected, LogEvent.RuntimeFailed)
-      events.traverse_(event => SafeDiagnostics("INFO").event(event, Some(requestId))) *> IO {
+      events.traverse_(event => SafeDiagnostics().event(event, Some(requestId))) *> IO {
         val captured = appender.list.asScala.toList.filter(_.getFormattedMessage.contains(requestId))
         assertEquals(captured.size, events.size)
         captured.zip(events).foreach { case (record, event) =>
@@ -40,7 +40,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     val requestId = "fe211944-7015-4e73-8dc1-000000000001"
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-      diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line))
+      diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line))
       _ <- LogEvent.values.toList.traverse_(event => diagnostics.event(event, Some(requestId)))
       lines <- emitted.get
     } yield {
@@ -67,7 +67,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     val secret = "mongodb://user:synthetic-secret@host:invalid\nforged-log"
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-      diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line))
+      diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line))
       invalid <- IO(AppConfig.fromConfig(
         s"""http {
            |  host = "127.0.0.1"
@@ -100,14 +100,19 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     }
   }
 
-  test("P1-AC09 application thresholds suppress lower severity events") {
-    List("TRACE" -> 13, "DEBUG" -> 13, "INFO" -> 13, "WARN" -> 8, "ERROR" -> 4).traverse_ { case (level, count) =>
-      for {
-        emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-        diagnostics = SafeDiagnostics.withSink(level, line => emitted.update(_ :+ line))
-        _ <- LogEvent.values.toList.traverse_(event => diagnostics.event(event))
-        lines <- emitted.get
-      } yield assertEquals(lines.size, count)
+  test("ETR-01 renderer preserves every declared level for Logback to filter") {
+    for {
+      emitted <- Ref.of[IO, Vector[String]](Vector.empty)
+      diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line))
+      _ <- LogEvent.values.toList.traverse_(event => diagnostics.event(event))
+      lines <- emitted.get
+    } yield {
+      assertEquals(lines.size, LogEvent.values.length)
+      val levels = lines.map(line => parse(line).toOption.flatMap(_.hcursor.get[String]("severity").toOption))
+      assert(levels.contains(Some("TRACE")))
+      assert(levels.contains(Some("INFO")))
+      assert(levels.contains(Some("WARN")))
+      assert(levels.contains(Some("ERROR")))
     }
   }
 
@@ -115,7 +120,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     List(true, false).traverse_ { masked =>
       for {
         emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-        diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line), maskSensitive = masked)
+        diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line), maskSensitive = masked)
         _ <- diagnostics.event(LogEvent.MongoProbeFailed, fields = Map(
           LogField.MongoHosts -> "local-db:27017", LogField.MongoDatabase -> "local-hiring",
           LogField.Reason -> "DATABASE_TIMEOUT", LogField.DurationMs -> "2001"))
@@ -136,7 +141,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     failure.setStackTrace(Array(new StackTraceElement("com.example.graphQL.cats.Main", secret, s"/$secret.scala", 25)))
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-      diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line), maskSensitive = false)
+      diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line), maskSensitive = false)
       _ <- diagnostics.event(LogEvent.RuntimeFailed, fields = LogFields.failure(failure))
       _ <- diagnostics.event(LogEvent.RequestRejected, fields = Map(
         LogField.Reason -> secret, LogField.Route -> s"/$secret", LogField.Method -> secret,
@@ -154,7 +159,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   test("LOG-01 records have bounded details and cannot inject additional log lines") {
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
-      diagnostics = SafeDiagnostics.withSink("INFO", line => emitted.update(_ :+ line), maskSensitive = false)
+      diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line), maskSensitive = false)
       _ <- diagnostics.event(LogEvent.Started, fields = LogField.values.map(_ -> ("\n\r\u2028\u202e💡" * 3000)).toMap)
       _ <- diagnostics.event(LogEvent.GraphQLCompleted, fields = Map(LogField.OperationName -> ("💡" * 500)))
       lines <- emitted.get
@@ -178,11 +183,11 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     }
     for {
       _ <- Diagnostics.emit(throwing, LogEvent.Started)
-      _ <- SafeDiagnostics.withSink("INFO", _ => IO.raiseError(secret)).event(LogEvent.Started)
-      _ <- SafeDiagnostics.withSink("INFO", _ => throw secret).event(LogEvent.Started)
+      _ <- SafeDiagnostics.withSink(_ => IO.raiseError(secret)).event(LogEvent.Started)
+      _ <- SafeDiagnostics.withSink(_ => throw secret).event(LogEvent.Started)
       entered <- Deferred[IO, Unit]
       finalized <- Deferred[IO, Unit]
-      waiting = SafeDiagnostics.withSink("INFO", _ => (entered.complete(()) *> IO.never[Unit]).onCancel(finalized.complete(()).void))
+      waiting = SafeDiagnostics.withSink(_ => (entered.complete(()) *> IO.never[Unit]).onCancel(finalized.complete(()).void))
       _ <- Diagnostics.emit(waiting, LogEvent.Started).start.bracket { fiber =>
         for {
           _ <- entered.get.timeout(1.second)
@@ -195,16 +200,15 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   }
 
   test("P1-AC09 backend suppresses raw framework and driver emitters at every app level") {
-    List("TRACE", "DEBUG", "INFO", "WARN", "ERROR").traverse_ { level =>
-      SafeDiagnostics.configure(level).flatMap { _ => IO {
+    SafeDiagnostics.configure().flatMap { _ => IO {
         List("ROOT", "org.mongodb.driver", "org.http4s", "org.typelevel", "com.mongodb.ConnectionString").foreach { name =>
           val logger = LoggerFactory.getLogger(name)
-          assert(!logger.isErrorEnabled, clues(name, level))
-          assert(!logger.isWarnEnabled, clues(name, level))
-          assert(!logger.isInfoEnabled, clues(name, level))
+          assert(!logger.isErrorEnabled, clues(name))
+          assert(!logger.isWarnEnabled, clues(name))
+          assert(!logger.isInfoEnabled, clues(name))
         }
         assert(LoggerFactory.getLogger("hiring.foundation").isInfoEnabled)
-      }}
+      }
     }
   }
 }

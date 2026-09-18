@@ -4,6 +4,7 @@ import cats.effect.IO
 import com.comcast.ip4s.IpAddress
 import com.mongodb.ConnectionString
 import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions, ConfigResolver, ConfigValue, ConfigValueFactory}
+import com.example.graphQL.cats.shared.pagination.PageSize
 import pureconfig.*
 import pureconfig.error.{ConfigReaderFailures, ConvertFailure, KeyNotFound}
 import java.nio.charset.StandardCharsets
@@ -17,9 +18,7 @@ enum ConfigError(val key: String) {
   case InvalidAdmissionPermits extends ConfigError("HTTP_ADMISSION_PERMITS")
   case InvalidMongoUri extends ConfigError("MONGODB_URI")
   case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
-  case InvalidLogLevel extends ConfigError("LOG_LEVEL")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
-  case UnsafeMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
@@ -64,7 +63,6 @@ final case class AppConfig(
     admissionPermits: Int,
     mongoUri: String,
     mongoDatabase: String,
-    logLevel: String,
     maskSensitive: Boolean,
     jwtAuth: JwtAuthConfig,
     vectorSearch: VectorSearchConfig
@@ -74,9 +72,20 @@ final case class AppConfig(
 
 object AppConfig {
   private val DefaultConfigResource = "application.conf"
+  private val LocalConfigResource = "local.conf"
 
   def load: IO[Either[ConfigError, AppConfig]] =
-    load(Path.of("local.conf"), name => Option(System.getenv(name)))
+    IO.blocking {
+      fromResourceSources(name => Option(System.getenv(name)))
+    }
+
+  def loadMaskSensitive: IO[Boolean] =
+    IO.blocking {
+      resourceConfig(name => Option(System.getenv(name))).toOption
+        .flatMap(config => ConfigSource.fromConfig(config).at("logging").load[RawLoggingConfig].toOption)
+        .flatMap(logging => strictBoolean(logging.maskSensitive, ConfigError.InvalidMaskSensitive).toOption)
+        .getOrElse(true)
+    }
 
   def load(localConfig: Path, env: String => Option[String]): IO[Either[ConfigError, AppConfig]] =
     IO.blocking {
@@ -126,6 +135,19 @@ object AppConfig {
       config <- readAppConfig(merged)
     } yield config
 
+  private def fromResourceSources(env: String => Option[String]): Either[ConfigError, AppConfig] =
+    resourceConfig(env).flatMap(readAppConfig)
+
+  private def resourceConfig(env: String => Option[String]): Either[ConfigError, com.typesafe.config.Config] =
+    for {
+      resources <- ConfigSource.resources(LocalConfigResource).optional
+        .withFallback(ConfigSource.resources(DefaultConfigResource))
+        .config()
+        .left.map(_ => ConfigError.InvalidConfigFile)
+      merged <- Try(resources.resolve(resolveOptions(env))).toEither
+        .left.map(_ => ConfigError.InvalidConfigFile)
+    } yield merged
+
   private def readAppConfig(config: com.typesafe.config.Config): Either[ConfigError, AppConfig] =
     ConfigSource.fromConfig(config).load[RawAppConfig].left.map(readError).flatMap(fromRaw)
 
@@ -136,7 +158,6 @@ object AppConfig {
       admissionPermits = raw.http.admissionPermits
       uri = raw.mongo.uri
       database = raw.mongo.database
-      level = raw.logging.level
       maskSensitive = raw.logging.maskSensitive
       jwtSecret = raw.auth.jwt.hs256Secret.getOrElse("disabled")
       jwtIssuer = raw.auth.jwt.issuer
@@ -153,7 +174,7 @@ object AppConfig {
       jobVectorIndex = raw.vectorSearch.indexes.jobs
       candidateVectorIndex = raw.vectorSearch.indexes.candidates
       numCandidates = raw.vectorSearch.numCandidates
-      address <- IpAddress.fromString(host).filter(_ => host.matches("[0-9a-fA-F:.]+"))
+      _ <- IpAddress.fromString(host).filter(_ => host.matches("[0-9a-fA-F:.]+"))
         .toRight(ConfigError.InvalidHost)
       validPort <- port.toIntOption.filter(value => value >= 1 && value <= 65535)
         .filter(_ => port.matches("[0-9]+")).toRight(ConfigError.InvalidPort)
@@ -166,9 +187,7 @@ object AppConfig {
         (),
         ConfigError.InvalidMongoDatabase
       )
-      _ <- Either.cond(Set("TRACE", "DEBUG", "INFO", "WARN", "ERROR").contains(level), (), ConfigError.InvalidLogLevel)
       masking <- strictBoolean(maskSensitive, ConfigError.InvalidMaskSensitive)
-      _ <- Either.cond(masking || address.isLoopback, (), ConfigError.UnsafeMaskSensitive)
       jwtSecretValue <- parseJwtSecret(jwtSecret)
       _ <- Either.cond(jwtIssuer.trim.nonEmpty && jwtIssuer.length <= 128, (), ConfigError.InvalidJwtIssuer)
       _ <- Either.cond(jwtAudience.trim.nonEmpty && jwtAudience.length <= 128, (), ConfigError.InvalidJwtAudience)
@@ -179,7 +198,7 @@ object AppConfig {
       queue <- queueSize.toIntOption.filter(value => value >= 1 && value <= 10000).toRight(ConfigError.InvalidEmbeddingQueueSize)
       workers <- parallelism.toIntOption.filter(value => value >= 1 && value <= 64).toRight(ConfigError.InvalidEmbeddingParallelism)
       timeoutMillis <- timeout.toIntOption.filter(value => value >= 100 && value <= 60000).toRight(ConfigError.InvalidEmbeddingTimeout)
-      candidates <- numCandidates.toIntOption.filter(value => value >= 1 && value <= 10000).toRight(ConfigError.InvalidVectorNumCandidates)
+      candidates <- numCandidates.toIntOption.filter(value => value >= PageSize.Max && value <= 10000).toRight(ConfigError.InvalidVectorNumCandidates)
       _ <- Either.cond(!enabled || voyageKey.trim.nonEmpty && voyageKey != "disabled", (), ConfigError.InvalidVoyageApiKey)
       _ <- Either.cond(voyageEndpoint.startsWith("https://"), (), ConfigError.InvalidVoyageEndpoint)
       _ <- Either.cond(voyageModel.trim.nonEmpty, (), ConfigError.InvalidVoyageModel)
@@ -200,7 +219,7 @@ object AppConfig {
         candidates
       )
       jwtAuth = JwtAuthConfig(jwtSecretValue, jwtIssuer, jwtAudience)
-    } yield AppConfig(host, validPort, validAdmissionPermits, uri, database, level, masking, jwtAuth, vector)
+    } yield AppConfig(host, validPort, validAdmissionPermits, uri, database, masking, jwtAuth, vector)
   }
 
   private def rawToConfig(raw: String): Either[ConfigError, com.typesafe.config.Config] =
@@ -222,7 +241,6 @@ object AppConfig {
       case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
       case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
       case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
-      case "logging.level" => Some(ConfigError.InvalidLogLevel)
       case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
       case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
       case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
@@ -252,7 +270,6 @@ object AppConfig {
          |  database = "${config.mongoDatabase}"
          |}
          |logging {
-         |  level = "${config.logLevel}"
          |  mask-sensitive = ${config.maskSensitive}
          |}
          |auth.jwt {
@@ -312,7 +329,7 @@ object AppConfig {
 
   private final case class RawHttpConfig(host: String, port: String, admissionPermits: String)
   private final case class RawMongoConfig(uri: String, database: String)
-  private final case class RawLoggingConfig(level: String, maskSensitive: String)
+  private final case class RawLoggingConfig(maskSensitive: String)
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig)
   private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: String, audience: String)
   private final case class RawVectorSearchConfig(
@@ -341,7 +358,7 @@ object AppConfig {
   private given ConfigReader[RawMongoConfig] =
     ConfigReader.forProduct2("uri", "database")(RawMongoConfig.apply)
   private given ConfigReader[RawLoggingConfig] =
-    ConfigReader.forProduct2("level", "mask-sensitive")(RawLoggingConfig.apply)
+    ConfigReader.forProduct1("mask-sensitive")(RawLoggingConfig.apply)
   private given ConfigReader[RawAuthConfig] =
     ConfigReader.forProduct1("jwt")(RawAuthConfig.apply)
   private given ConfigReader[RawJwtAuthConfig] =

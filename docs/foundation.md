@@ -1,6 +1,6 @@
 # Running Foundation locally
 
-Foundation runs the Scala application on the host and one standalone MongoDB service in Docker Compose. Prerequisites: Java 17+, sbt 1.11.1, Docker Engine, and Docker Compose. No application image, cloud service, hiring dataset, or SQL database is required.
+Foundation runs the Scala application on the host and one single-node replica-set MongoDB service in Docker Compose. Prerequisites: Java 17+, sbt 1.11.1, Docker Engine, and Docker Compose. No application image, cloud service, hiring dataset, or SQL database is required.
 
 ## Start and stop
 
@@ -21,16 +21,16 @@ curl -sS http://127.0.0.1:8080/graphql \
   --data '{"query":"{ health { status } readiness { status } }"}'
 ```
 
-The local run example binds to loopback. `health` returns UP without querying MongoDB. Readiness returns READY only when the configured database responds to a ping. It proves connectivity, not schema, transaction, or hiring-workflow readiness. HTTP readiness uses 200/503; an executed GraphQL readiness query uses HTTP 200 even for NOT_READY.
+The local run example binds to loopback. `health` returns UP without querying MongoDB. Readiness returns READY only when the configured database responds and hiring setup succeeds. The local Compose replica set supports the transaction-backed hiring write path. HTTP readiness uses 200/503; an executed GraphQL readiness query uses HTTP 200 even for NOT_READY.
 
 Stop/start MongoDB with `docker compose stop mongodb` and `docker compose start mongodb` to observe NOT_READY and recovery while the app remains live. Stop the app with Ctrl-C. Shutdown stops admission, allows ten seconds to drain, then cancels remaining requests and finalizes resources. `docker compose down` stops the database; the ignored `.local/data/mongodb` bind mount survives ordinary stop/down/restart. Do not delete it as a routine reset.
 
 ## Configuration and API tools
 
-The application loads grouped HOCON from `src/main/resources/application.conf` and then overlays an ignored root `local.conf` when present. The checked-in configuration is a deployment template: it may require environment-backed cloud/runtime values and must not hide missing local setup behind fake placeholders. Keep machine-specific local run values in ignored `local.conf`; do not commit credential-bearing overrides.
+The application loads grouped HOCON from `src/main/resources/application.conf` and then overlays an ignored `src/main/resources/local.conf` when present on the runtime classpath. The checked-in configuration is a deployment template: it may require environment-backed cloud/runtime values and must not hide missing local setup behind fake placeholders. Keep machine-specific local run values in ignored `src/main/resources/local.conf`; do not commit credential-bearing overrides or package that file into deployable artifacts.
 
 ```bash
-cat > local.conf <<'EOF'
+cat > src/main/resources/local.conf <<'EOF'
 http {
   host = "127.0.0.1"
   port = 8080
@@ -41,27 +41,25 @@ mongo {
   database = "hiring"
 }
 logging {
-  level = "INFO"
   mask-sensitive = true
 }
 EOF
-MONGODB_URI=mongodb://127.0.0.1:27017 sbt run
+MONGODB_URI='mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true' sbt run
 ```
 
 The repository is backend-only. Download `http://127.0.0.1:8080/schema.graphql` or use an external API client against `/graphql` with introspection. No UI assets, frontend build, or Node tooling are included. See the [API reference](api.md) for operations and error contracts.
 
-For persistent local settings, keep `local.conf` ignored and review it before running the app. Never load untrusted configuration files. Mongo credentials belong in process environment variables referenced by `${?VAR}` config overrides, never committed examples or command transcripts.
+For persistent local settings, keep `src/main/resources/local.conf` ignored and review it before running the app. Never load untrusted configuration files. Mongo credentials belong in process environment variables referenced by `${?VAR}` config overrides, never committed examples or command transcripts.
 
 | Variable | Local value source | Validation |
 |---|---|---|
-| HTTP_HOST | `local.conf` or environment | Numeric IPv4/IPv6 address |
-| HTTP_PORT | `local.conf` or environment | Integer 1..65535 |
-| HTTP_ADMISSION_PERMITS | `application.conf`/`local.conf` or environment | Integer 1..1024; default 16 |
-| MONGODB_URI | `local.conf` or environment | Valid Mongo connection string |
-| MONGODB_DATABASE | `application.conf`/`local.conf` | Valid nonempty database name |
-| LOG_LEVEL | `application.conf`, optional environment override | TRACE, DEBUG, INFO, WARN, ERROR |
-| LOG_MASK_SENSITIVE | `application.conf`/`local.conf` | false only with loopback HTTP binding |
-Malformed configuration exits unsuccessfully with a safe category and configuration key. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default. Framework/driver raw output and request payloads remain suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).
+| HTTP_HOST | `src/main/resources/local.conf` or environment | Numeric IPv4/IPv6 address |
+| HTTP_PORT | `src/main/resources/local.conf` or environment | Integer 1..65535 |
+| HTTP_ADMISSION_PERMITS | `application.conf`/`local.conf` resource or environment | Integer 1..1024; default 16 |
+| MONGODB_URI | `src/main/resources/local.conf` or environment | Valid Mongo connection string |
+| MONGODB_DATABASE | `application.conf`/`local.conf` resource | Valid nonempty database name |
+| `logging.mask-sensitive` | `application.conf`/`local.conf` resource | strict boolean; defaults to `true` |
+Malformed configuration exits unsuccessfully with a safe category and configuration key. Logback XML, not application configuration, selects TRACE/DEBUG/INFO/WARN/ERROR severity. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default. Framework/driver raw output and request payloads remain suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).
 
 ## HTTP contract and budgets
 

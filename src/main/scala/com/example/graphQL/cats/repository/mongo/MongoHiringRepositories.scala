@@ -251,7 +251,7 @@ final class MongoSemanticSearchRepository(
     new Document("$vectorSearch", new Document("index", index)
       .append("path", "embedding")
       .append("queryVector", vector.map(float => java.lang.Double.valueOf(float.toDouble)).asJava)
-      .append("numCandidates", java.lang.Integer.valueOf(math.max(numCandidates, first.value)))
+      .append("numCandidates", java.lang.Integer.valueOf(numCandidates))
       .append("limit", java.lang.Integer.valueOf(first.value))
       .append("filter", filter))
 

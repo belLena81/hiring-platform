@@ -27,7 +27,7 @@ Keep machine-specific files under the ignored root `.local/` directory:
 |---|---|
 | `.local/config/` | Application overrides and local service settings |
 | `.local/data/` | Database bind mounts, generated datasets, caches, and analytical checkpoints |
-| `.local/logs/` | Runtime logs and local diagnostic output |
+| `_logs/` | Runtime logs and local diagnostic output at the project root |
 | `.local/backups/` | Database dumps and migration recovery copies |
 
 The local environment may use ignored `.env`/`.env.*` files where tooling supports them; sanitized `.env.example` and `.env.<name>.example` files remain shareable. Keep local Codex preferences at the ignored `.codex/config.toml`; shared agent rules and skills remain versioned. IDE `.idea/` directories are ignored at every depth.

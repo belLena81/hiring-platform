@@ -2,7 +2,7 @@ package com.example.graphQL.cats.transport.graphql
 
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Dispatcher
-import com.example.graphQL.cats.service.{ActorContext, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, ProbeResult, TraceContext}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, JobUseCases, SearchUseCases}
@@ -12,8 +12,12 @@ final case class HiringGraphQLServices(
     readModel: HiringReadModel[IO],
     jobService: JobUseCases[IO],
     applicationService: ApplicationUseCases[IO],
-    semanticSearchService: Option[SearchUseCases[IO]] = None
-)
+    semanticSearchService: Option[SearchUseCases[IO]] = None,
+    private[graphql] traceServices: Option[TraceContext => HiringGraphQLServices] = None
+) {
+  private[graphql] def forTrace(trace: TraceContext): HiringGraphQLServices =
+    traceServices.fold(this)(_(trace))
+}
 
 final class RequestContext private (
     dispatcher: Dispatcher[IO],
@@ -21,6 +25,7 @@ final class RequestContext private (
     hiringReady: IO[Boolean],
     val actor: Option[ActorContext],
     val hiring: Option[HiringGraphQLServices],
+    val trace: Option[TraceContext],
     userCache: Ref[IO, Map[UserId, User]],
     jobCache: Ref[IO, Map[JobId, Job]]
 ) {
@@ -69,20 +74,21 @@ final class RequestContext private (
 
 object RequestContext {
   def resource(probe: IO[ProbeResult]): Resource[IO, RequestContext] =
-    resource(probe, None, None)
+    resource(probe, None, None, IO.pure(true), None)
 
   def resource(
       probe: IO[ProbeResult],
       actor: Option[ActorContext],
       hiring: Option[HiringGraphQLServices]
   ): Resource[IO, RequestContext] =
-    resource(probe, actor, hiring, IO.pure(true))
+    resource(probe, actor, hiring, IO.pure(true), None)
 
   def resource(
       probe: IO[ProbeResult],
       actor: Option[ActorContext],
       hiring: Option[HiringGraphQLServices],
-      ensureHiringReady: IO[Boolean]
+      ensureHiringReady: IO[Boolean],
+      trace: Option[TraceContext] = None
   ): Resource[IO, RequestContext] =
     for {
       dispatcher <- Dispatcher.parallel[IO](await = false)
@@ -90,6 +96,7 @@ object RequestContext {
       memoizedHiringReady <- Resource.eval(ensureHiringReady.memoize)
       userCache <- Resource.eval(Ref.of[IO, Map[UserId, User]](Map.empty))
       jobCache <- Resource.eval(Ref.of[IO, Map[JobId, Job]](Map.empty))
-      context <- Resource.make(IO(new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, hiring, userCache, jobCache)))(_.close)
+      tracedHiring = hiring.map(services => trace.fold(services)(services.forTrace))
+      context <- Resource.make(IO(new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, tracedHiring, trace, userCache, jobCache)))(_.close)
     } yield context
 }

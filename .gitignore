@@ -6,6 +6,7 @@ node_modules/
 
 ### Local settings and runtime data ###
 /.local/
+/_logs/
 /.sbtopts
 /.codex/config.toml
 .env

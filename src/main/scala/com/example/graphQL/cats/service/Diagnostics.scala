@@ -1,23 +1,36 @@
 package com.example.graphQL.cats.service
 
 import cats.effect.IO
+import cats.syntax.all.*
 
-enum LogEvent(val category: String, val component: String, val message: String, val severity: String, val rank: Int) {
-  case ConfigInvalid extends LogEvent("CONFIG_INVALID", "CONFIG", "Application configuration rejected", "ERROR", 2)
-  case MongoUnavailable extends LogEvent("MONGO_UNAVAILABLE", "READINESS", "Database readiness check failed", "WARN", 1)
-  case MongoAuthFailed extends LogEvent("MONGO_AUTH_FAILED", "READINESS", "Database authentication failed", "WARN", 1)
-  case RequestRejected extends LogEvent("REQUEST_REJECTED", "HTTP", "Request rejected", "WARN", 1)
-  case StartupFailed extends LogEvent("STARTUP_FAILED", "RUNTIME", "Application startup failed", "ERROR", 2)
-  case RuntimeFailed extends LogEvent("RUNTIME_FAILED", "RUNTIME", "Unhandled runtime failure", "ERROR", 2)
-  case Started extends LogEvent("STARTED", "RUNTIME", "Application listening for requests", "INFO", 0)
-  case Shutdown extends LogEvent("SHUTDOWN", "RUNTIME", "Application resources released", "INFO", 0)
-  case RequestCompleted extends LogEvent("REQUEST_COMPLETED", "HTTP", "Application response created", "INFO", 0)
-  case RequestCancelled extends LogEvent("REQUEST_CANCELLED", "HTTP", "Request cancelled; cleanup finished", "INFO", 0)
-  case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", "INFO", 0)
-  case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", "WARN", 1)
-  case LocalUnmasked extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Local diagnostic metadata is unmasked; do not deploy", "WARN", 1)
+enum LogLevel {
+  case Trace, Debug, Info, Warn, Error
+
+  def label: String = productPrefix.toUpperCase(java.util.Locale.ROOT)
+}
+
+enum LogEvent(val category: String, val component: String, val message: String, val level: LogLevel) {
+  case ConfigInvalid extends LogEvent("CONFIG_INVALID", "CONFIG", "Application configuration rejected", LogLevel.Error)
+  case MongoUnavailable extends LogEvent("MONGO_UNAVAILABLE", "READINESS", "Database readiness check failed", LogLevel.Warn)
+  case MongoAuthFailed extends LogEvent("MONGO_AUTH_FAILED", "READINESS", "Database authentication failed", LogLevel.Warn)
+  case RequestRejected extends LogEvent("REQUEST_REJECTED", "HTTP", "Request rejected", LogLevel.Warn)
+  case StartupFailed extends LogEvent("STARTUP_FAILED", "RUNTIME", "Application startup failed", LogLevel.Error)
+  case RuntimeFailed extends LogEvent("RUNTIME_FAILED", "RUNTIME", "Unhandled runtime failure", LogLevel.Error)
+  case Started extends LogEvent("STARTED", "RUNTIME", "Application listening for requests", LogLevel.Info)
+  case Shutdown extends LogEvent("SHUTDOWN", "RUNTIME", "Application resources released", LogLevel.Info)
+  case RequestCompleted extends LogEvent("REQUEST_COMPLETED", "HTTP", "Application response created", LogLevel.Info)
+  case RequestCancelled extends LogEvent("REQUEST_CANCELLED", "HTTP", "Request cancelled; cleanup finished", LogLevel.Info)
+  case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", LogLevel.Info)
+  case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", LogLevel.Warn)
+  case LocalUnmasked extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
+  case SpanParameters extends LogEvent("SPAN_PARAMETERS", "TRACE", "Execution span parameters captured", LogLevel.Debug)
+  case SpanStarted extends LogEvent("SPAN_STARTED", "TRACE", "Execution span started", LogLevel.Trace)
+  case SpanSucceeded extends LogEvent("SPAN_SUCCEEDED", "TRACE", "Execution span succeeded", LogLevel.Trace)
+  case SpanFailed extends LogEvent("SPAN_FAILED", "TRACE", "Execution span failed", LogLevel.Trace)
+  case SpanCancelled extends LogEvent("SPAN_CANCELLED", "TRACE", "Execution span cancelled", LogLevel.Trace)
 
   def marker: String = s"HP.$component.$category"
+  def severity: String = level.label
 }
 
 enum LogField(val key: String, val sensitive: Boolean = false) {
@@ -37,6 +50,20 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case MongoHosts extends LogField("mongoHosts", true)
   case MongoDatabase extends LogField("mongoDatabase", true)
   case HttpHost extends LogField("httpHost", true)
+  case TraceId extends LogField("traceId", true)
+  case SpanId extends LogField("spanId", true)
+  case ParentSpanId extends LogField("parentSpanId", true)
+  case SpanName extends LogField("spanName")
+  case Sequence extends LogField("sequence")
+  case EntityId extends LogField("entityId", true)
+  case ActorId extends LogField("actorId", true)
+  case Count extends LogField("count")
+  case Title extends LogField("title", true)
+  case Country extends LogField("country", true)
+  case City extends LogField("city", true)
+  case Skills extends LogField("skills", true)
+  case Remote extends LogField("remote")
+  case JobStatus extends LogField("jobStatus")
 }
 
 object LogFields {
@@ -85,7 +112,7 @@ object LogFields {
     case LogField.Reason => reasons.contains(value)
     case LogField.Outcome => Set("COMPLETED", "CANCELLED", "FIELD_ERROR", "READY", "NOT_READY").contains(value)
     case LogField.ConfigKey => Set(
-      "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "HTTP_ADMISSION_PERMITS", "MONGODB_URI", "MONGODB_DATABASE", "LOG_LEVEL",
+      "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "HTTP_ADMISSION_PERMITS", "MONGODB_URI", "MONGODB_DATABASE",
       "LOG_MASK_SENSITIVE", "AUTH_JWT_HS256_SECRET", "AUTH_JWT_ISSUER",
       "AUTH_JWT_AUDIENCE", "VECTOR_SEARCH_ENABLED", "VOYAGE_API_KEY", "VOYAGE_ENDPOINT",
       "VOYAGE_MODEL", "VOYAGE_DIMENSION", "EMBEDDING_VERSION", "EMBEDDING_QUEUE_SIZE",
@@ -97,6 +124,12 @@ object LogFields {
       value.startsWith(s"$file:") && value.drop(file.length + 1).matches("[1-9][0-9]{0,5}")
     }
     case LogField.Environment => Set("local", "production").contains(value)
+    case LogField.TraceId | LogField.SpanId | LogField.ParentSpanId | LogField.EntityId | LogField.ActorId =>
+      value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+    case LogField.Sequence | LogField.Count => value.toLongOption.exists(_ >= 0)
+    case LogField.SpanName => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,127}")
+    case LogField.Remote => Set("true", "false").contains(value)
+    case LogField.JobStatus => Set("Draft", "Open", "Closed").contains(value)
     case _ => false
   }
 }
@@ -113,4 +146,57 @@ object Diagnostics {
   def emit(diagnostics: Diagnostics, event: LogEvent, requestId: Option[String] = None,
       fields: Map[LogField, String] = Map.empty): IO[Unit] =
     IO.defer(diagnostics.event(event, requestId, fields)).handleError(_ => ())
+
+  /** Emits a complete lifecycle for an effect without changing its cancellation semantics. */
+  def span[A](diagnostics: Diagnostics, context: TraceContext, name: String, fields: Map[LogField, String] = Map.empty)(
+      action: IO[A]
+  ): IO[A] = spanWith(diagnostics, context, name, fields)(_ => action)
+
+  /** Supplies the span child explicitly across framework interop boundaries. */
+  def spanWith[A](diagnostics: Diagnostics, context: TraceContext, name: String, fields: Map[LogField, String] = Map.empty)(
+      action: TraceContext => IO[A]
+  ): IO[A] =
+    context.child.flatMap { child =>
+      val base = child.fields + (LogField.SpanName -> name) ++ fields
+      emit(diagnostics, LogEvent.SpanParameters, Some(child.traceId), base) *>
+        emit(diagnostics, LogEvent.SpanStarted, Some(child.traceId), base) *>
+        IO.monotonic.flatMap { started =>
+          def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
+            emit(diagnostics, event, Some(child.traceId), base + (LogField.DurationMs -> (now - started).toMillis.toString))
+          }
+          action(child).guaranteeCase {
+            case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
+            case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
+            case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)
+          }
+        }
+    }
+
+  /** A boundary without an inbound request context (for example a repository adapter). */
+  def operation[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty)(action: IO[A]): IO[A] =
+    IO.randomUUID.map(_.toString).flatMap(root => TraceContext.root(root).flatMap(span(diagnostics, _, name, fields)(action)))
+}
+
+final case class TraceContext private (
+    traceId: String,
+    spanId: String,
+    parentSpanId: Option[String],
+    spanSequence: Long,
+    sequence: cats.effect.Ref[IO, Long]
+) {
+  def child: IO[TraceContext] =
+    (IO.randomUUID.map(_.toString), sequence.updateAndGet(_ + 1)).mapN { (nextSpan, nextSequence) =>
+      TraceContext(traceId, nextSpan, Some(spanId), nextSequence, sequence)
+    }
+
+  def fields: Map[LogField, String] = Map(
+    LogField.TraceId -> traceId,
+    LogField.SpanId -> spanId,
+    LogField.Sequence -> spanSequence.toString
+  ) ++ parentSpanId.map(LogField.ParentSpanId -> _)
+}
+
+object TraceContext {
+  def root(requestId: String): IO[TraceContext] =
+    cats.effect.Ref.of[IO, Long](0).map(TraceContext(requestId, requestId, None, 0, _))
 }

@@ -48,10 +48,10 @@ object MongoHiringRuntime {
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
       Resource.eval((Ref.of[IO, Boolean](false), Semaphore[IO](1)).tupled).flatMap { case (setupComplete, setupLock) =>
-        val users = new MongoUserRepository(database)
-        val jobs = new MongoJobRepository(database)
+      val users = new MongoUserRepository(database)
+      val jobs = new MongoJobRepository(database)
         val applications = MongoApplicationRepository.transactional(database, client)
-        hiringServices(database, users, jobs, applications, vectorSearch, embeddingService).map { services =>
+        hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics).map { services =>
           val setup = ensureSetup(database, setupComplete, setupLock)
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
           MongoHiringRuntime(probe(database, metadata, diagnostics, setup), services, UserAuthenticationService[IO](users), setup)
@@ -65,14 +65,15 @@ object MongoHiringRuntime {
       jobs: MongoJobRepository,
       applications: MongoApplicationRepository,
       vectorSearch: VectorSearchConfig,
-      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO]
+      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
+      diagnostics: Diagnostics
   ): Resource[IO, HiringGraphQLServices] =
     if (!vectorSearch.enabled) {
       val readModel = HiringReadService[IO](users, jobs, applications)
       Resource.pure(HiringGraphQLServices(
-        readModel,
-        JobService[IO](users, jobs),
-        ApplicationService[IO](users, jobs, applications)
+        TracedHiringServices.readModel(readModel, diagnostics),
+        TracedHiringServices.jobs(JobService[IO](users, jobs), diagnostics),
+        TracedHiringServices.applications(ApplicationService[IO](users, jobs, applications), diagnostics)
       ))
     } else {
       Resource.eval(IO.fromOption(vectorSearch.voyageApiKey)(
@@ -106,10 +107,10 @@ object MongoHiringRuntime {
             vectorSearch.embeddingVersion
           )
           val services = HiringGraphQLServices(
-            readModel,
-            jobService,
-            applicationService,
-            Some(semanticSearch)
+            TracedHiringServices.readModel(readModel, diagnostics),
+            TracedHiringServices.jobs(jobService, diagnostics),
+            TracedHiringServices.applications(applicationService, diagnostics),
+            Some(TracedHiringServices.search(semanticSearch, diagnostics))
           )
           services
         }

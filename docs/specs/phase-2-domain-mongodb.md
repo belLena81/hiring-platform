@@ -126,7 +126,7 @@ Status: completed for planned development scope — implementation, local verifi
 
 ## Checkpoint and review
 
-- Current status: completed for planned development scope. Domain/application service slice, standalone Mongo setup, replica-set transaction tests, fault-injection rollback, duplicate race handling, closed-job submit guard, and explain-backed application/job/history list indexes are implemented with full local evidence.
+- Current status: completed for planned development scope. Domain/application service slice, single-node replica-set local Mongo setup, replica-set transaction tests, fault-injection rollback, duplicate race handling, closed-job submit guard, and explain-backed application/job/history list indexes are implemented with full local evidence.
 - Completed baseline: Phase 2A domain foundation and evidence remain recorded above.
 - Implementation checkpoint (2026-09-16): TDD red/green captured for `JobLifecycleSpec`; focused service red/green captured for missing `ActorContext`, union `UseCaseError`, services, and repository errors. Earlier local commands passed after review fixes: `sbt test 'IntegrationTest / test' && python3 scripts/check-skills.py && git diff --check` passed 113 unit tests, 30 integration tests, 8 skill validations, and whitespace check.
 - Refactor checkpoint (2026-09-16): application services now use shared `ActorAuthorization`, `EitherT`, and union-style typed `UseCaseError` without service-error remapping; Mongo adapters now use no-null codecs, explicit standalone/session transaction runners, optimistic job `version` guards, and stale application-status guards. Focused service and Mongo repository checks passed before the full local gate.

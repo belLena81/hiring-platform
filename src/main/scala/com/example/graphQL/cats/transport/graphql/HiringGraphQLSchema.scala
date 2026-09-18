@@ -2,7 +2,7 @@ package com.example.graphQL.cats.transport.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, AvailabilityError, HealthService, ProbeResult, RepositoryError, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, AvailabilityError, HealthService, ProbeResult, RepositoryError, SearchError, TraceContext, UseCaseError}
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
@@ -299,9 +299,10 @@ object HiringGraphQLSchema {
       requestId: String,
       actor: Option[ActorContext] = None,
       hiring: Option[HiringGraphQLServices] = None,
-      ensureHiringReady: IO[Boolean] = IO.pure(true)
+      ensureHiringReady: IO[Boolean] = IO.pure(true),
+      trace: Option[TraceContext] = None
   ): IO[Either[Failure, Json]] =
-    RequestContext.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady).use { context =>
+    RequestContext.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, trace).use { context =>
       executeInContext(request, context)
     }
 

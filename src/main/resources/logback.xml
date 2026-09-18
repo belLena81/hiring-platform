@@ -1,6 +1,16 @@
 <configuration>
   <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
-  <appender name="HIRING-PLATFORM" class="ch.qos.logback.core.ConsoleAppender">
+  <appender name="HIRING-PLATFORM" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>_logs/hiring-platform.log</file>
+    <append>true</append>
+    <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+      <fileNamePattern>_logs/hiring-platform.%i.log</fileNamePattern>
+      <minIndex>1</minIndex>
+      <maxIndex>10</maxIndex>
+    </rollingPolicy>
+    <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+      <maxFileSize>20MB</maxFileSize>
+    </triggeringPolicy>
     <encoder>
       <pattern>%msg%n</pattern>
     </encoder>
@@ -8,5 +18,8 @@
   <logger name="hiring.foundation" level="INFO" additivity="false">
     <appender-ref ref="HIRING-PLATFORM"/>
   </logger>
+  <logger name="org.http4s" level="OFF"/>
+  <logger name="org.typelevel" level="OFF"/>
+  <logger name="org.mongodb.driver" level="OFF"/>
   <root level="OFF"/>
 </configuration>

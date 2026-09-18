@@ -108,9 +108,15 @@ class AppConfigSpec extends FunSuite {
       "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
     )), Right(AppConfig("::1", 65535, 64,
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
-      "hiring_test-2", "WARN", maskSensitive = true,
+      "hiring_test-2", maskSensitive = true,
       JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api"),
       defaultVectorSearch)))
+  }
+
+  test("VHS-AC07 rejects a vector candidate budget below the maximum page size") {
+    val config = defaultConfig.replace("num-candidates = 100", "num-candidates = 99")
+
+    assertEquals(AppConfig.fromConfig(config, Map.empty), Left(ConfigError.InvalidVectorNumCandidates))
   }
 
   test("VHS-AC08 packaged application config is grouped, sanitized and fails safely without required local values") {
@@ -137,8 +143,8 @@ class AppConfigSpec extends FunSuite {
         |}
         |""".stripMargin
     val result = AppConfig.fromRawConfig(raw, local, _ => None)
-    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri, config.logLevel)),
-      Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "INFO")))
+    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri)),
+      Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017")))
   }
 
   test("VHS-AC08 packaged application config resolves cloud environment values at startup") {
@@ -148,11 +154,10 @@ class AppConfigSpec extends FunSuite {
       "HTTP_PORT" -> "9090",
       "HTTP_ADMISSION_PERMITS" -> "96",
       "MONGODB_URI" -> "mongodb://127.0.0.1:27018",
-      "LOG_LEVEL" -> "WARN",
       "VOYAGE_MODEL" -> "voyage-4-lite"
     ))
-    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri, config.logLevel)),
-      Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018", "WARN")))
+    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri)),
+      Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018")))
   }
 
   test("CFG-AC02 injected env resolution ignores process system properties") {
@@ -177,13 +182,11 @@ class AppConfigSpec extends FunSuite {
   test("P1-AC01 local config overlays application config values") {
     val local =
       """http.port = 9090
-        |logging.level = "ERROR"
         |logging.mask-sensitive = false
         |""".stripMargin
     val loaded = AppConfig.fromConfig(defaultConfig, Map.empty)
       .flatMap(base => AppConfig.fromConfig(local, Map.empty, Some(base)))
-    assertEquals(loaded.map(config => (config.port, config.logLevel, config.maskSensitive)),
-      Right((9090, "ERROR", false)))
+    assertEquals(loaded.map(config => (config.port, config.maskSensitive)), Right((9090, false)))
   }
 
   test("P1-AC01 local config overrides deploy defaults before env resolution") {
@@ -266,8 +269,7 @@ class AppConfigSpec extends FunSuite {
       ("http.port", List("0", "65536", "-1", "+80", "2147483648"), ConfigError.InvalidPort),
       ("http.admission-permits", List("0", "1025", "-1", "+16", "synthetic-secret"), ConfigError.InvalidAdmissionPermits),
       ("mongo.uri", List("https://synthetic-secret", "mongodb://", "mongodb://host:wrong"), ConfigError.InvalidMongoUri),
-      ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase),
-      ("logging.level", List("VERBOSE", "info", "synthetic-secret"), ConfigError.InvalidLogLevel)
+      ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
     )
     invalid.foreach { case (key, values, error) =>
       values.foreach { value =>
@@ -278,11 +280,9 @@ class AppConfigSpec extends FunSuite {
     }
   }
 
-  test("P1-AC01 accepts boundary ports and all supported severities") {
+  test("P1-AC01 accepts boundary ports without application logging levels") {
     List("1", "65535").foreach { port =>
-      List("TRACE", "DEBUG", "INFO", "WARN", "ERROR").foreach { level =>
-        assert(AppConfig.fromConfig(defaultConfig + s"""http.port = $port\nlogging.level = "$level"\n""", Map.empty).isRight)
-      }
+      assert(AppConfig.fromConfig(defaultConfig + s"http.port = $port\n", Map.empty).isRight)
     }
     List("1", "1024").foreach { permits =>
       assert(AppConfig.fromConfig(defaultConfig + s"http.admission-permits = $permits\n", Map.empty).isRight)
@@ -313,15 +313,15 @@ class AppConfigSpec extends FunSuite {
     }
   }
 
-  test("LOG-03 unsafe logging flags require loopback and disabled masking") {
+  test("LOG-03 masking policy is independent of the bind address") {
     List("0.0.0.0", "::", "192.0.2.1", "126.255.255.255", "128.0.0.1",
       "::2", "2001:db8::1", "::ffff:192.0.2.1").foreach { host =>
-      assertEquals(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty),
-        Left(ConfigError.UnsafeMaskSensitive), clues(host))
+      assertEquals(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
+        .map(_.maskSensitive), Right(false), clues(host))
       assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
-      Right(AppConfig("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "hiring", "INFO",
+      Right(AppConfig("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "hiring",
         maskSensitive = false, defaultJwtAuth, defaultVectorSearch.copy(enabled = false))))
   }
 
