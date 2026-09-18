@@ -17,6 +17,7 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
   private val pageSize = PageSize.fromInt(10).toOption.getOrElse(fail("invalid page size"))
   private val query = VectorSearchQuery(
     List(0.1f, 0.2f),
+    None,
     JobSearchFilter(None, Set.empty, None),
     pageSize,
     SearchMode.VECTOR,

@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.runtime
 
-import cats.effect.{IO, Ref, Resource}
-import cats.effect.std.Semaphore
+import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
@@ -15,7 +14,7 @@ import com.example.graphQL.cats.config.VectorSearchConfig
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
-  MongoUserRepository
+  MongoUserRepository, AtlasSearchIndexConfig
 }
 import com.mongodb.reactivestreams.client.MongoDatabase
 
@@ -25,6 +24,23 @@ final case class MongoHiringRuntime(
     userAuthenticator: UserAuthenticator[IO],
     ensureSetup: IO[Boolean]
 )
+
+private[runtime] final class SetupLifecycle private (
+    completion: Deferred[IO, Either[Throwable, Unit]]
+) {
+  def await: IO[Boolean] = completion.get.map(_.isRight)
+
+  def ready: IO[Boolean] = completion.tryGet.map(_.exists(_.isRight))
+}
+
+private[runtime] object SetupLifecycle {
+  def resource(setup: IO[Unit]): Resource[IO, SetupLifecycle] =
+    Resource.eval(Deferred[IO, Either[Throwable, Unit]]).flatMap { completion =>
+      Resource.make(
+        setup.attempt.flatMap(completion.complete).start
+      )(_.cancel).as(new SetupLifecycle(completion))
+    }
+}
 
 object MongoHiringRuntime {
   def resource(uri: String, databaseName: String, diagnostics: Diagnostics): Resource[IO, MongoHiringRuntime] =
@@ -47,14 +63,18 @@ object MongoHiringRuntime {
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
-      Resource.eval((Ref.of[IO, Boolean](false), Semaphore[IO](1)).tupled).flatMap { case (setupComplete, setupLock) =>
       val users = new MongoUserRepository(database)
       val jobs = new MongoJobRepository(database)
-        val applications = MongoApplicationRepository.transactional(database, client)
-        hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics).map { services =>
-          val setup = ensureSetup(database, setupComplete, setupLock)
+      val applications = MongoApplicationRepository.transactional(database, client)
+      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics).flatMap { services =>
+        SetupLifecycle.resource(setupEffect(database, vectorSearch)).map { setup =>
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
-          MongoHiringRuntime(probe(database, metadata, diagnostics, setup), services, UserAuthenticationService[IO](users), setup)
+          MongoHiringRuntime(
+            probe(database, metadata, diagnostics, setup.ready),
+            services,
+            UserAuthenticationService[IO](users),
+            setup.await
+          )
         }
       }
     }
@@ -84,6 +104,7 @@ object MongoHiringRuntime {
           database,
           vectorSearch.jobVectorIndex,
           vectorSearch.candidateVectorIndex,
+          vectorSearch.jobLexicalIndex,
           vectorSearch.numCandidates
         )
         EmbeddingPipeline.resource(
@@ -139,6 +160,9 @@ object MongoHiringRuntime {
       timeoutMillis = 5000,
       jobVectorIndex = "jobs_embedding_vector",
       candidateVectorIndex = "candidates_embedding_vector",
+      jobLexicalIndex = "jobs_text_search",
+      indexReadyTimeoutMillis = 120000,
+      indexPollIntervalMillis = 1000,
       numCandidates = 100
     )
 
@@ -146,7 +170,7 @@ object MongoHiringRuntime {
       database: MongoDatabase,
       metadata: Map[LogField, String],
       diagnostics: Diagnostics,
-      setup: IO[Boolean]
+      setupReady: IO[Boolean]
   ): DatabaseProbe = new DatabaseProbe {
     private val delegate = MongoDatabaseProbe.fromDatabase(database, metadata, diagnostics)
 
@@ -155,27 +179,21 @@ object MongoHiringRuntime {
 
     override def check(requestId: Option[String]): IO[ProbeResult] =
       delegate.check(requestId).flatMap {
-        case ProbeResult.Ready => setup.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
+        case ProbeResult.Ready => setupReady.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
         case other => IO.pure(other)
       }
   }
 
-  private def ensureSetup(
+  private def setupEffect(
       database: com.mongodb.reactivestreams.client.MongoDatabase,
-      done: Ref[IO, Boolean],
-      lock: Semaphore[IO]
-  ): IO[Boolean] =
-    done.get.flatMap {
-      case true => IO.pure(true)
-      case false =>
-        lock.permit.use { _ =>
-          done.get.flatMap {
-            case true => IO.pure(true)
-            case false => MongoHiringSetup.initialize(database).attempt.flatMap {
-              case Right(()) => done.set(true).as(true)
-              case Left(_) => IO.pure(false)
-            }
-          }
-        }
-    }
+      vectorSearch: VectorSearchConfig
+  ): IO[Unit] =
+    MongoHiringSetup.initialize(database, Option.when(vectorSearch.enabled)(AtlasSearchIndexConfig(
+      vectorSearch.jobVectorIndex,
+      vectorSearch.candidateVectorIndex,
+      vectorSearch.jobLexicalIndex,
+      vectorSearch.voyageDimension,
+      vectorSearch.indexReadyTimeoutMillis,
+      vectorSearch.indexPollIntervalMillis
+    )))
 }

@@ -52,6 +52,9 @@ class AppConfigSpec extends FunSuite {
       |  indexes {
       |    jobs = "jobs_embedding_vector"
       |    candidates = "candidates_embedding_vector"
+      |    lexical = "jobs_text_search"
+      |    ready-timeout-ms = 120000
+      |    poll-interval-ms = 1000
       |  }
       |  num-candidates = 100
       |}
@@ -70,6 +73,9 @@ class AppConfigSpec extends FunSuite {
       timeoutMillis = 5000,
       jobVectorIndex = "jobs_embedding_vector",
       candidateVectorIndex = "candidates_embedding_vector",
+      jobLexicalIndex = "jobs_text_search",
+      indexReadyTimeoutMillis = 120000,
+      indexPollIntervalMillis = 1000,
       numCandidates = 100
     )
   private val defaultJwtAuth =
@@ -112,6 +118,9 @@ class AppConfigSpec extends FunSuite {
         |  indexes {
         |    jobs = "jobs_embedding_vector"
         |    candidates = "candidates_embedding_vector"
+        |    lexical = "jobs_text_search"
+        |    ready-timeout-ms = 120000
+        |    poll-interval-ms = 1000
         |  }
         |  num-candidates = 100
         |}
@@ -245,6 +254,9 @@ class AppConfigSpec extends FunSuite {
         |  indexes {
         |    jobs = "jobs_embedding_vector"
         |    candidates = "candidates_embedding_vector"
+        |    lexical = "jobs_text_search"
+        |    ready-timeout-ms = 120000
+        |    poll-interval-ms = 1000
         |  }
         |  num-candidates = 100
         |}

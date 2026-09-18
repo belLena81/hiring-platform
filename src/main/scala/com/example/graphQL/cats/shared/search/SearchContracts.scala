@@ -13,6 +13,7 @@ final case class JobSearchFilter(
 
 final case class VectorSearchQuery(
     vector: List[Float],
+    lexicalQuery: Option[String],
     filter: JobSearchFilter,
     first: PageSize,
     mode: SearchMode,

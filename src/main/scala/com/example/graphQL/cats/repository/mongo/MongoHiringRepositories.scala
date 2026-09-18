@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
@@ -8,7 +9,7 @@ import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
-  Application, ApplicationEvent, ApplicationStatus, EntityEmbedding, Job, JobStatus, SearchableText, User, UserRole
+  Application, ApplicationEvent, ApplicationStatus, EntityEmbedding, Job, JobStatus, SearchMode, SearchableText, User, UserRole
 }
 import com.mongodb.{MongoCommandException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
@@ -203,16 +204,17 @@ final class MongoSemanticSearchRepository(
     database: MongoDatabase,
     jobVectorIndex: String,
     candidateVectorIndex: String,
+    jobLexicalIndex: String,
     numCandidates: Int
 ) extends SemanticSearchRepository[IO] {
   private val jobs = database.getCollection("jobs")
   private val users = database.getCollection("users")
 
   override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-    rankedJobs(query, jobFilter(query, query.filter))
+    rankedJobs(query, query.filter)
 
   override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-    rankedJobs(query, jobFilter(query, JobSearchFilter(None, Set.empty, None)))
+    rankedJobs(query, JobSearchFilter(None, Set.empty, None))
 
   override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] = {
     val filter = Filters.and(
@@ -221,14 +223,50 @@ final class MongoSemanticSearchRepository(
       Filters.eq("embeddingMeta.model", query.model),
       Filters.eq("embeddingMeta.version", query.version)
     )
-    val pipeline = List(vectorSearchStage(candidateVectorIndex, query.vector, filter, query.first), scoreStage).asJava
+    val pipeline = List(vectorSearchStage(candidateVectorIndex, query.vector, filter, query.first.value), scoreStage).asJava
     PublisherBridge.all(users.aggregate(pipeline)).map { documents =>
       Right(documents.flatMap(document => MongoSemanticSearchResult.rankedCandidate(document, query)))
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
-  private def rankedJobs(query: VectorSearchQuery, filter: Bson): IO[Either[RepositoryError, List[RankedJob]]] = {
-    val pipeline = List(vectorSearchStage(jobVectorIndex, query.vector, filter, query.first), scoreStage).asJava
+  private def rankedJobs(query: VectorSearchQuery, filter: JobSearchFilter): IO[Either[RepositoryError, List[RankedJob]]] = {
+    val mongoFilter = jobFilter(query, filter)
+    query.lexicalQuery.filter(_ => query.mode == SearchMode.HYBRID) match {
+      case Some(text) =>
+        val vector = vectorJobs(query, mongoFilter, numCandidates)
+        val lexical = lexicalJobs(query, text, mongoFilter)
+        (vector, lexical).parMapN { (vectorResults, lexicalResults) =>
+          (vectorResults, lexicalResults) match {
+            case (Right(vectorHits), Right(lexicalHits)) =>
+              Right(HybridRankFusion.jobs(vectorHits, lexicalHits, query.first.value))
+            case _ => Left(RepositoryError.Unavailable)
+          }
+        }
+      case None => vectorJobs(query, mongoFilter, query.first.value)
+    }
+  }
+
+  private def vectorJobs(query: VectorSearchQuery, filter: Bson, limit: Int): IO[Either[RepositoryError, List[RankedJob]]] = {
+    val pipeline = List(vectorSearchStage(jobVectorIndex, query.vector, filter, limit), scoreStage).asJava
+    PublisherBridge.all(jobs.aggregate(pipeline)).map { documents =>
+      Right(documents.flatMap(document => MongoSemanticSearchResult.rankedJob(document, query)))
+    }.handleError(_ => Left(RepositoryError.Unavailable))
+  }
+
+  private def lexicalJobs(
+      query: VectorSearchQuery,
+      text: String,
+      filter: Bson
+  ): IO[Either[RepositoryError, List[RankedJob]]] = {
+    val search = new Document("index", jobLexicalIndex)
+      .append("text", new Document("query", text)
+        .append("path", List("title", "description", "requirements", "skills").asJava))
+    val pipeline = List(
+      new Document("$search", search),
+      new Document("$match", filter),
+      new Document("$limit", java.lang.Integer.valueOf(numCandidates)),
+      new Document("$set", new Document("score", new Document("$meta", "searchScore")))
+    ).asJava
     PublisherBridge.all(jobs.aggregate(pipeline)).map { documents =>
       Right(documents.flatMap(document => MongoSemanticSearchResult.rankedJob(document, query)))
     }.handleError(_ => Left(RepositoryError.Unavailable))
@@ -247,12 +285,12 @@ final class MongoSemanticSearchRepository(
   private def skillsFilter(skills: Set[String]): Option[Bson] =
     Option.when(skills.nonEmpty)(Filters.and(skills.toList.sorted.map(skill => Filters.eq("skills", skill))*))
 
-  private def vectorSearchStage(index: String, vector: List[Float], filter: Bson, first: PageSize): Document =
+  private def vectorSearchStage(index: String, vector: List[Float], filter: Bson, limit: Int): Document =
     new Document("$vectorSearch", new Document("index", index)
       .append("path", "embedding")
       .append("queryVector", vector.map(float => java.lang.Double.valueOf(float.toDouble)).asJava)
       .append("numCandidates", java.lang.Integer.valueOf(numCandidates))
-      .append("limit", java.lang.Integer.valueOf(first.value))
+      .append("limit", java.lang.Integer.valueOf(limit))
       .append("filter", filter))
 
   private val scoreStage: Document =

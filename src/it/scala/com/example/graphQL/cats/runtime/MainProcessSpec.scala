@@ -126,6 +126,9 @@ class MainProcessSpec extends CatsEffectSuite {
        |  indexes {
        |    jobs = "jobs_embedding_vector"
        |    candidates = "candidates_embedding_vector"
+       |    lexical = "jobs_text_search"
+       |    ready-timeout-ms = 120000
+       |    poll-interval-ms = 1000
        |  }
        |  num-candidates = 100
        |}

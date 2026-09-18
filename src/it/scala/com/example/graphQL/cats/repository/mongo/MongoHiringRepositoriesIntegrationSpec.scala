@@ -482,7 +482,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     }
   }
 
-  test("enabled vector runtime wires semantic search service and embedding pipeline for job writes") {
+  test("enabled vector runtime fails readiness without Atlas indexes but wires semantic search and embedding jobs") {
     replicaSetContainer.use { uri =>
       MongoHiringRuntime.resource(uri, "hiring_vector_runtime", Diagnostics.noop, vectorConfig,
         (config, _) => FakeEmbeddingService(config)).use { runtime =>
@@ -497,7 +497,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         )
         for {
           setup <- runtime.ensureSetup
-          _ = assert(setup)
+          _ = assert(!setup)
           _ = assert(runtime.services.semanticSearchService.nonEmpty)
           _ <- MongoDatabaseProbe.clientResource(uri).use { client =>
             new MongoUserRepository(client.getDatabase("hiring_vector_runtime")).insert(recruiterUser).void
@@ -616,6 +616,9 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
       timeoutMillis = 1000,
       jobVectorIndex = "jobs_embedding_vector",
       candidateVectorIndex = "candidates_embedding_vector",
+      jobLexicalIndex = "jobs_text_search",
+      indexReadyTimeoutMillis = 120000,
+      indexPollIntervalMillis = 1000,
       numCandidates = 10
     )
 

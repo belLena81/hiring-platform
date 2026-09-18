@@ -58,6 +58,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield {
       assertEquals(result, Right(Nil))
       assertEquals(recorded.map(_.model), Vector(configuredModel))
+      assertEquals(recorded.map(_.mode), Vector(SearchMode.HYBRID))
+      assertEquals(recorded.map(_.lexicalQuery), Vector(Some("scala backend")))
     }
   }
 

@@ -41,12 +41,16 @@ enum ConfigError(val key: String) {
   case InvalidEmbeddingTimeout extends ConfigError("EMBEDDING_TIMEOUT_MS")
   case InvalidJobVectorIndex extends ConfigError("JOB_VECTOR_INDEX")
   case InvalidCandidateVectorIndex extends ConfigError("CANDIDATE_VECTOR_INDEX")
+  case InvalidJobLexicalIndex extends ConfigError("JOB_LEXICAL_INDEX")
+  case InvalidSearchIndexReadyTimeout extends ConfigError("SEARCH_INDEX_READY_TIMEOUT_MS")
+  case InvalidSearchIndexPollInterval extends ConfigError("SEARCH_INDEX_POLL_INTERVAL_MS")
   case InvalidVectorNumCandidates extends ConfigError("VECTOR_NUM_CANDIDATES")
 }
 
 final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
     voyageModel: String, voyageDimension: Int, embeddingVersion: Int, queueSize: Int, parallelism: Int,
-    timeoutMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, numCandidates: Int)
+    timeoutMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
+    indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
 
 final case class JwtAuthConfig(hmacSecret: Option[String], issuer: String, audience: String)
 
@@ -95,13 +99,14 @@ object AppConfig {
 
     (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
       validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
-      validVoyageApiKey(vector.enabled, voyage.apiKey), validNumCandidates(vector.numCandidates)).mapN {
-      (host, port, permits, uri, database, secret, apiKey, numCandidates) =>
+      validVoyageApiKey(vector.enabled, voyage.apiKey), validIndexReadyTimeout(vector.indexes.readyTimeoutMs),
+      validIndexPollInterval(vector.indexes.pollIntervalMs), validNumCandidates(vector.numCandidates)).mapN {
+      (host, port, permits, uri, database, secret, apiKey, readyTimeout, pollInterval, numCandidates) =>
         new AppConfig(host, port, permits, uri, database, raw.logging.maskSensitive,
           JwtAuthConfig(secret, jwt.issuer, jwt.audience),
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
             embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs,
-            indexes.jobs, indexes.candidates, numCandidates))
+            indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, pollInterval, numCandidates))
     }
   }
 
@@ -123,6 +128,10 @@ object AppConfig {
     Either.cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey).toValidatedNel
   private def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= PageSize.Max && value <= 10000, value, ConfigError.InvalidVectorNumCandidates).toValidatedNel
+  private def validIndexReadyTimeout(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1000 && value <= 600000, value, ConfigError.InvalidSearchIndexReadyTimeout).toValidatedNel
+  private def validIndexPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 100 && value <= 10000, value, ConfigError.InvalidSearchIndexPollInterval).toValidatedNel
 
   private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
     val errors = failures.toList.flatMap {
@@ -158,6 +167,9 @@ object AppConfig {
     case "vector-search.embedding.timeout-ms" => Some(ConfigError.InvalidEmbeddingTimeout)
     case "vector-search.indexes.jobs" => Some(ConfigError.InvalidJobVectorIndex)
     case "vector-search.indexes.candidates" => Some(ConfigError.InvalidCandidateVectorIndex)
+    case "vector-search.indexes.lexical" => Some(ConfigError.InvalidJobLexicalIndex)
+    case "vector-search.indexes.ready-timeout-ms" => Some(ConfigError.InvalidSearchIndexReadyTimeout)
+    case "vector-search.indexes.poll-interval-ms" => Some(ConfigError.InvalidSearchIndexPollInterval)
     case "vector-search.num-candidates" => Some(ConfigError.InvalidVectorNumCandidates)
     case _ => None
   }
@@ -176,7 +188,8 @@ object AppConfig {
       dimension: VoyageDim) derives ConfigReader
   private final case class RawEmbeddingConfig(version: Positive, queueSize: QueueSize, parallelism: Parallelism,
       timeoutMs: TimeoutMs) derives ConfigReader
-  private final case class RawVectorIndexesConfig(jobs: NonBlankStr, candidates: NonBlankStr) derives ConfigReader
+  private final case class RawVectorIndexesConfig(jobs: NonBlankStr, candidates: NonBlankStr, lexical: NonBlankStr,
+      readyTimeoutMs: Int, pollIntervalMs: Int) derives ConfigReader
 
   // Derived naming does not preserve the hs256-secret acronym, so keep this key explicit.
   private given ConfigReader[RawJwtAuthConfig] =

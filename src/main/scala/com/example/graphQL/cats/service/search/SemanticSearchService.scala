@@ -40,6 +40,7 @@ final class SemanticSearchService[F[_]: Monad](
         case Right(vector) =>
           search.searchJobs(VectorSearchQuery(
             vector.values,
+            Some(text),
             filter,
             first,
             SearchMode.HYBRID,
@@ -64,6 +65,7 @@ final class SemanticSearchService[F[_]: Monad](
               embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile)) =>
             val query = VectorSearchQuery(
               embedding.values,
+              None,
               JobSearchFilter(None, Set.empty, None),
               first,
               SearchMode.VECTOR,
@@ -101,6 +103,7 @@ final class SemanticSearchService[F[_]: Monad](
               embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             val query = VectorSearchQuery(
               embedding.values,
+              None,
               JobSearchFilter(None, Set.empty, None),
               first,
               SearchMode.VECTOR,
