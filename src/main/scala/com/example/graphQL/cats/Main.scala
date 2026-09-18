@@ -16,8 +16,8 @@ object Main extends IOApp {
     AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
       SafeDiagnostics.configure(maskSensitive).flatMap { fallback =>
         AppConfig.load.flatMap {
-          case Left(error) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
-            fields = Map(LogField.ConfigKey -> error.key)).as(ExitCode.Error)
+          case Left(errors) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
+            fields = Map(LogField.ConfigKey -> errors.head.key)).as(ExitCode.Error)
           case Right(config) => SafeDiagnostics.configure(config.maskSensitive).flatMap { diagnostics =>
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch)
               .flatMap(runtime => HiringPlatformServer.resource(

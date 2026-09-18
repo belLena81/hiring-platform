@@ -27,7 +27,7 @@ Stop/start MongoDB with `docker compose stop mongodb` and `docker compose start 
 
 ## Configuration and API tools
 
-The application loads grouped HOCON from `src/main/resources/application.conf` and then overlays an ignored `src/main/resources/local.conf` when present on the runtime classpath. The checked-in configuration is a deployment template: it may require environment-backed cloud/runtime values and must not hide missing local setup behind fake placeholders. Keep machine-specific local run values in ignored `src/main/resources/local.conf`; do not commit credential-bearing overrides or package that file into deployable artifacts.
+The application uses PureConfig's `ConfigSource.default`, which delegates configuration loading and precedence to Typesafe Config. `application.conf` is the packaged base; standard Typesafe Config selectors such as `config.file` and `config.resource` can provide an override source, and HOCON merges nested objects with later values taking precedence. HTTP port and admission permits are decoded as Iron refined types. The checked-in configuration is a deployment template: it may require environment-backed cloud/runtime values and must not hide missing local setup behind fake placeholders. Keep machine-specific local run values in ignored `src/main/resources/local.conf`; do not commit credential-bearing overrides or package that file into deployable artifacts.
 
 ```bash
 cat > src/main/resources/local.conf <<'EOF'
@@ -44,12 +44,12 @@ logging {
   mask-sensitive = true
 }
 EOF
-MONGODB_URI='mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true' sbt run
+MONGODB_URI='mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true' sbt -Dconfig.file=src/main/resources/local.conf run
 ```
 
 The repository is backend-only. Download `http://127.0.0.1:8080/schema.graphql` or use an external API client against `/graphql` with introspection. No UI assets, frontend build, or Node tooling are included. See the [API reference](api.md) for operations and error contracts.
 
-For persistent local settings, keep `src/main/resources/local.conf` ignored and review it before running the app. Never load untrusted configuration files. Mongo credentials belong in process environment variables referenced by `${?VAR}` config overrides, never committed examples or command transcripts.
+For persistent local settings, keep `src/main/resources/local.conf` ignored and review it before running the app. Pass it through the standard `config.file` selector as shown above. Never load untrusted configuration files. Mongo credentials belong in process environment variables referenced by `${?VAR}` config overrides, never committed examples or command transcripts.
 
 | Variable | Local value source | Validation |
 |---|---|---|

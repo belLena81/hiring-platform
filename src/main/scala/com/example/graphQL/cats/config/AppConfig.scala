@@ -1,18 +1,26 @@
 package com.example.graphQL.cats.config
 
+import cats.data.{NonEmptyList, ValidatedNel}
 import cats.effect.IO
+import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
-import com.mongodb.ConnectionString
-import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions, ConfigResolver, ConfigValue, ConfigValueFactory}
 import com.example.graphQL.cats.shared.pagination.PageSize
-import pureconfig.*
-import pureconfig.error.{ConfigReaderFailures, ConvertFailure, KeyNotFound}
+import com.mongodb.ConnectionString
+import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions}
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.any.*
+import io.github.iltotore.iron.constraint.collection.MaxLength
+import io.github.iltotore.iron.constraint.numeric.*
+import io.github.iltotore.iron.constraint.string.*
+import io.github.iltotore.iron.pureconfig.given
+import _root_.pureconfig.*
+import _root_.pureconfig.error.{ConfigReaderFailures, ConvertFailure, KeyNotFound}
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 enum ConfigError(val key: String) {
-  case InvalidConfigFile extends ConfigError("CONFIG_FILE")
+  case InvalidConfigFile(message: String) extends ConfigError("CONFIG_FILE")
   case InvalidHost extends ConfigError("HTTP_HOST")
   case InvalidPort extends ConfigError("HTTP_PORT")
   case InvalidAdmissionPermits extends ConfigError("HTTP_ADMISSION_PERMITS")
@@ -36,350 +44,141 @@ enum ConfigError(val key: String) {
   case InvalidVectorNumCandidates extends ConfigError("VECTOR_NUM_CANDIDATES")
 }
 
-final case class VectorSearchConfig(
-    enabled: Boolean,
-    voyageApiKey: Option[String],
-    voyageEndpoint: String,
-    voyageModel: String,
-    voyageDimension: Int,
-    embeddingVersion: Int,
-    queueSize: Int,
-    parallelism: Int,
-    timeoutMillis: Int,
-    jobVectorIndex: String,
-    candidateVectorIndex: String,
-    numCandidates: Int
-)
+final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
+    voyageModel: String, voyageDimension: Int, embeddingVersion: Int, queueSize: Int, parallelism: Int,
+    timeoutMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, numCandidates: Int)
 
-final case class JwtAuthConfig(
-    hmacSecret: Option[String],
-    issuer: String,
-    audience: String
-)
+final case class JwtAuthConfig(hmacSecret: Option[String], issuer: String, audience: String)
 
-final case class AppConfig(
-    host: String,
-    port: Int,
-    admissionPermits: Int,
-    mongoUri: String,
-    mongoDatabase: String,
-    maskSensitive: Boolean,
-    jwtAuth: JwtAuthConfig,
-    vectorSearch: VectorSearchConfig
-) {
+type Port = Int :| Interval.Closed[1, 65535]
+type AdmissionPermits = Int :| Interval.Closed[1, 1024]
+type NonBlank128 = String :| (Not[Blank] & MaxLength[128])
+type NonBlankStr = String :| Not[Blank]
+type VoyageDim = Int :| StrictEqual[1024]
+type Positive = Int :| Greater[0]
+type QueueSize = Int :| Interval.Closed[1, 10000]
+type Parallelism = Int :| Interval.Closed[1, 64]
+type TimeoutMs = Int :| Interval.Closed[100, 60000]
+type HttpsUrl = String :| StartWith["https://"]
+
+final case class AppConfig(host: String, port: Int, admissionPermits: Int, mongoUri: String, mongoDatabase: String,
+    maskSensitive: Boolean, jwtAuth: JwtAuthConfig, vectorSearch: VectorSearchConfig) {
   override def toString: String = "AppConfig([REDACTED])"
 }
 
 object AppConfig {
-  private val DefaultConfigResource = "application.conf"
-  private val LocalConfigResource = "local.conf"
-
-  def load: IO[Either[ConfigError, AppConfig]] =
-    IO.blocking {
-      fromResourceSources(name => Option(System.getenv(name)))
-    }
+  def load: IO[Either[NonEmptyList[ConfigError], AppConfig]] =
+    IO.blocking(ConfigSource.default.load[RawAppConfig].left.map(readError).flatMap(read))
 
   def loadMaskSensitive: IO[Boolean] =
-    IO.blocking {
-      resourceConfig(name => Option(System.getenv(name))).toOption
-        .flatMap(config => ConfigSource.fromConfig(config).at("logging").load[RawLoggingConfig].toOption)
-        .flatMap(logging => strictBoolean(logging.maskSensitive, ConfigError.InvalidMaskSensitive).toOption)
-        .getOrElse(true)
-    }
+    IO.blocking(ConfigSource.default.at("logging").load[RawLoggingConfig].toOption.forall(_.maskSensitive))
 
-  def load(localConfig: Path, env: String => Option[String]): IO[Either[ConfigError, AppConfig]] =
-    IO.blocking {
-      fromSources(localConfig, env)
-    }
-
-  def fromConfig(raw: String, env: Map[String, String], base: Option[AppConfig] = None): Either[ConfigError, AppConfig] =
-    fromConfig(raw, name => env.get(name), base)
-
-  private[config] def fromConfig(
-      raw: String,
-      env: String => Option[String],
-      base: Option[AppConfig]
-  ): Either[ConfigError, AppConfig] =
-    base.fold(fromRawConfig(raw, "", env)) { current =>
-      for {
-        overrideConfig <- rawToConfig(raw)
-        baseConfig <- configToRaw(current)
-        merged <- Try(overrideConfig.withFallback(baseConfig).resolve(resolveOptions(env))).toEither
-          .left.map(_ => ConfigError.InvalidConfigFile)
-        loaded <- readAppConfig(merged)
-      } yield loaded
-    }
-
-  private[config] def fromRawConfig(
-      defaults: String,
-      local: String,
-      env: String => Option[String]
-  ): Either[ConfigError, AppConfig] =
+  def fromConfig(raw: String, env: Map[String, String]): Either[NonEmptyList[ConfigError], AppConfig] =
     for {
-      defaultConfig <- rawToConfig(defaults)
-      localConfig <- rawToConfig(local)
-      merged <- Try(localConfig.withFallback(defaultConfig).resolve(resolveOptions(env))).toEither
-        .left.map(_ => ConfigError.InvalidConfigFile)
-      config <- readAppConfig(merged)
+      parsed <- Try(ConfigFactory.parseString(raw, parseOptions)).toEither.left.map(parseError)
+      resolved <- Try(parsed.withFallback(ConfigFactory.parseMap(env.asJava)).resolve(ConfigResolveOptions.noSystem())).toEither
+        .left.map(parseError)
+      config <- ConfigSource.fromConfig(resolved).load[RawAppConfig].left.map(readError).flatMap(read)
     } yield config
 
-  private def fromSources(localConfig: Path, env: String => Option[String]): Either[ConfigError, AppConfig] =
-    for {
-      defaults <- Try(ConfigFactory.parseResources(DefaultConfigResource, parseOptions)).toEither.left.map(_ => ConfigError.InvalidConfigFile)
-      local <- Try {
-        if (Files.isRegularFile(localConfig)) ConfigFactory.parseFile(localConfig.toFile, parseOptions)
-        else ConfigFactory.empty()
-      }.toEither.left.map(_ => ConfigError.InvalidConfigFile)
-      merged <- Try(local.withFallback(defaults).resolve(resolveOptions(env))).toEither
-        .left.map(_ => ConfigError.InvalidConfigFile)
-      config <- readAppConfig(merged)
-    } yield config
+  private def read(raw: RawAppConfig): Either[NonEmptyList[ConfigError], AppConfig] =
+    validate(raw).toEither
 
-  private def fromResourceSources(env: String => Option[String]): Either[ConfigError, AppConfig] =
-    resourceConfig(env).flatMap(readAppConfig)
+  private def validate(raw: RawAppConfig): ValidatedNel[ConfigError, AppConfig] = {
+    val http = raw.http
+    val mongo = raw.mongo
+    val jwt = raw.auth.jwt
+    val vector = raw.vectorSearch
+    val voyage = vector.voyage
+    val embedding = vector.embedding
+    val indexes = vector.indexes
 
-  private def resourceConfig(env: String => Option[String]): Either[ConfigError, com.typesafe.config.Config] =
-    for {
-      resources <- ConfigSource.resources(LocalConfigResource).optional
-        .withFallback(ConfigSource.resources(DefaultConfigResource))
-        .config()
-        .left.map(_ => ConfigError.InvalidConfigFile)
-      merged <- Try(resources.resolve(resolveOptions(env))).toEither
-        .left.map(_ => ConfigError.InvalidConfigFile)
-    } yield merged
-
-  private def readAppConfig(config: com.typesafe.config.Config): Either[ConfigError, AppConfig] =
-    ConfigSource.fromConfig(config).load[RawAppConfig].left.map(readError).flatMap(fromRaw)
-
-  private def fromRaw(raw: RawAppConfig): Either[ConfigError, AppConfig] = {
-    for {
-      host = raw.http.host
-      port = raw.http.port
-      admissionPermits = raw.http.admissionPermits
-      uri = raw.mongo.uri
-      database = raw.mongo.database
-      maskSensitive = raw.logging.maskSensitive
-      jwtSecret = raw.auth.jwt.hs256Secret.getOrElse("disabled")
-      jwtIssuer = raw.auth.jwt.issuer
-      jwtAudience = raw.auth.jwt.audience
-      vectorEnabled = raw.vectorSearch.enabled
-      voyageKey = raw.vectorSearch.voyage.apiKey.getOrElse("disabled")
-      voyageEndpoint = raw.vectorSearch.voyage.endpoint
-      voyageModel = raw.vectorSearch.voyage.model
-      voyageDimension = raw.vectorSearch.voyage.dimension
-      embeddingVersion = raw.vectorSearch.embedding.version
-      queueSize = raw.vectorSearch.embedding.queueSize
-      parallelism = raw.vectorSearch.embedding.parallelism
-      timeout = raw.vectorSearch.embedding.timeoutMs
-      jobVectorIndex = raw.vectorSearch.indexes.jobs
-      candidateVectorIndex = raw.vectorSearch.indexes.candidates
-      numCandidates = raw.vectorSearch.numCandidates
-      _ <- IpAddress.fromString(host).filter(_ => host.matches("[0-9a-fA-F:.]+"))
-        .toRight(ConfigError.InvalidHost)
-      validPort <- port.toIntOption.filter(value => value >= 1 && value <= 65535)
-        .filter(_ => port.matches("[0-9]+")).toRight(ConfigError.InvalidPort)
-      validAdmissionPermits <- admissionPermits.toIntOption.filter(value => value >= 1 && value <= 1024)
-        .filter(_ => admissionPermits.matches("[0-9]+")).toRight(ConfigError.InvalidAdmissionPermits)
-      _ <- Try(new ConnectionString(uri)).toEither.left.map(_ => ConfigError.InvalidMongoUri)
-      _ <- Either.cond(
-        database.nonEmpty && database.getBytes(java.nio.charset.StandardCharsets.UTF_8).length < 64 &&
-          !database.exists(character => character.isWhitespace || character.isControl || "/\\.\"$*<>:|?".contains(character)),
-        (),
-        ConfigError.InvalidMongoDatabase
-      )
-      masking <- strictBoolean(maskSensitive, ConfigError.InvalidMaskSensitive)
-      jwtSecretValue <- parseJwtSecret(jwtSecret)
-      _ <- Either.cond(jwtIssuer.trim.nonEmpty && jwtIssuer.length <= 128, (), ConfigError.InvalidJwtIssuer)
-      _ <- Either.cond(jwtAudience.trim.nonEmpty && jwtAudience.length <= 128, (), ConfigError.InvalidJwtAudience)
-      enabled <- strictBoolean(vectorEnabled, ConfigError.InvalidVectorSearchEnabled)
-      dimension <- voyageDimension.toIntOption.filter(_ == 1024)
-        .toRight(ConfigError.InvalidVoyageDimension)
-      version <- embeddingVersion.toIntOption.filter(_ > 0).toRight(ConfigError.InvalidEmbeddingVersion)
-      queue <- queueSize.toIntOption.filter(value => value >= 1 && value <= 10000).toRight(ConfigError.InvalidEmbeddingQueueSize)
-      workers <- parallelism.toIntOption.filter(value => value >= 1 && value <= 64).toRight(ConfigError.InvalidEmbeddingParallelism)
-      timeoutMillis <- timeout.toIntOption.filter(value => value >= 100 && value <= 60000).toRight(ConfigError.InvalidEmbeddingTimeout)
-      candidates <- numCandidates.toIntOption.filter(value => value >= PageSize.Max && value <= 10000).toRight(ConfigError.InvalidVectorNumCandidates)
-      _ <- Either.cond(!enabled || voyageKey.trim.nonEmpty && voyageKey != "disabled", (), ConfigError.InvalidVoyageApiKey)
-      _ <- Either.cond(voyageEndpoint.startsWith("https://"), (), ConfigError.InvalidVoyageEndpoint)
-      _ <- Either.cond(voyageModel.trim.nonEmpty, (), ConfigError.InvalidVoyageModel)
-      _ <- Either.cond(jobVectorIndex.trim.nonEmpty, (), ConfigError.InvalidJobVectorIndex)
-      _ <- Either.cond(candidateVectorIndex.trim.nonEmpty, (), ConfigError.InvalidCandidateVectorIndex)
-      vector = VectorSearchConfig(
-        enabled,
-        Option.when(voyageKey != "disabled")(voyageKey),
-        voyageEndpoint,
-        voyageModel,
-        dimension,
-        version,
-        queue,
-        workers,
-        timeoutMillis,
-        jobVectorIndex,
-        candidateVectorIndex,
-        candidates
-      )
-      jwtAuth = JwtAuthConfig(jwtSecretValue, jwtIssuer, jwtAudience)
-    } yield AppConfig(host, validPort, validAdmissionPermits, uri, database, masking, jwtAuth, vector)
+    (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
+      validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
+      validVoyageApiKey(vector.enabled, voyage.apiKey), validNumCandidates(vector.numCandidates)).mapN {
+      (host, port, permits, uri, database, secret, apiKey, numCandidates) =>
+        new AppConfig(host, port, permits, uri, database, raw.logging.maskSensitive,
+          JwtAuthConfig(secret, jwt.issuer, jwt.audience),
+          VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
+            embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs,
+            indexes.jobs, indexes.candidates, numCandidates))
+    }
   }
 
-  private def rawToConfig(raw: String): Either[ConfigError, com.typesafe.config.Config] =
-    Try(ConfigFactory.parseString(raw, parseOptions)).toEither
-      .left.map(_ => ConfigError.InvalidConfigFile)
+  // HTTP_HOST is a bind address, so hostnames such as localhost are intentionally rejected.
+  private def validHost(value: String): ValidatedNel[ConfigError, String] =
+    Either.cond(IpAddress.fromString(value).isDefined, value, ConfigError.InvalidHost).toValidatedNel
+  private def validMongoUri(value: String): ValidatedNel[ConfigError, String] =
+    Try(new ConnectionString(value)).toEither.leftMap(_ => ConfigError.InvalidMongoUri).toValidatedNel.map(_ => value)
+  private def validMongoDatabase(value: String): ValidatedNel[ConfigError, String] =
+    Either.cond(value.nonEmpty && value.getBytes(StandardCharsets.UTF_8).length < 64 &&
+      !value.exists(c => c.isWhitespace || c.isControl || "/\\.\"$*<>:|?".contains(c)), value,
+      ConfigError.InvalidMongoDatabase).toValidatedNel
+  private def validJwtSecret(value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
+    value.filter(_ != "disabled").fold(Option.empty[String].validNel[ConfigError]) { secret =>
+      Either.cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, Some(secret), ConfigError.InvalidJwtSecret).toValidatedNel
+    }
+  private def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
+    val normalized = value.filter(_ != "disabled")
+    Either.cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey).toValidatedNel
+  private def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= PageSize.Max && value <= 10000, value, ConfigError.InvalidVectorNumCandidates).toValidatedNel
 
-  private def readError(failures: ConfigReaderFailures): ConfigError =
-    failures.toList.collectFirst {
+  private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
+    val errors = failures.toList.flatMap {
       case ConvertFailure(KeyNotFound(key, _), _, path) => configErrorForPath(fullPath(path, key))
-    }.flatten.getOrElse(ConfigError.InvalidConfigFile)
-
-  private def fullPath(path: String, key: String): String =
-    Option(path).filter(_.nonEmpty).fold(key)(parent => s"$parent.$key")
-
-  private def configErrorForPath(path: String): Option[ConfigError] =
-    path match {
-      case "http.host" => Some(ConfigError.InvalidHost)
-      case "http.port" => Some(ConfigError.InvalidPort)
-      case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
-      case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
-      case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
-      case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
-      case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
-      case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
-      case "vector-search.enabled" => Some(ConfigError.InvalidVectorSearchEnabled)
-      case "vector-search.voyage.endpoint" => Some(ConfigError.InvalidVoyageEndpoint)
-      case "vector-search.voyage.model" => Some(ConfigError.InvalidVoyageModel)
-      case "vector-search.voyage.dimension" => Some(ConfigError.InvalidVoyageDimension)
-      case "vector-search.embedding.version" => Some(ConfigError.InvalidEmbeddingVersion)
-      case "vector-search.embedding.queue-size" => Some(ConfigError.InvalidEmbeddingQueueSize)
-      case "vector-search.embedding.parallelism" => Some(ConfigError.InvalidEmbeddingParallelism)
-      case "vector-search.embedding.timeout-ms" => Some(ConfigError.InvalidEmbeddingTimeout)
-      case "vector-search.indexes.jobs" => Some(ConfigError.InvalidJobVectorIndex)
-      case "vector-search.indexes.candidates" => Some(ConfigError.InvalidCandidateVectorIndex)
-      case "vector-search.num-candidates" => Some(ConfigError.InvalidVectorNumCandidates)
+      case ConvertFailure(_, _, path) => configErrorForPath(path)
       case _ => None
-    }
-
-  private def configToRaw(config: AppConfig): Either[ConfigError, com.typesafe.config.Config] =
-    rawToConfig(
-      s"""http {
-         |  host = "${config.host}"
-         |  port = ${config.port}
-         |  admission-permits = ${config.admissionPermits}
-         |}
-         |mongo {
-         |  uri = "${config.mongoUri}"
-         |  database = "${config.mongoDatabase}"
-         |}
-         |logging {
-         |  mask-sensitive = ${config.maskSensitive}
-         |}
-         |auth.jwt {
-         |  hs256-secret = "${config.jwtAuth.hmacSecret.getOrElse("disabled")}"
-         |  issuer = "${config.jwtAuth.issuer}"
-         |  audience = "${config.jwtAuth.audience}"
-         |}
-         |vector-search {
-         |  enabled = ${config.vectorSearch.enabled}
-         |  voyage {
-         |    api-key = "${config.vectorSearch.voyageApiKey.getOrElse("disabled")}"
-         |    endpoint = "${config.vectorSearch.voyageEndpoint}"
-         |    model = "${config.vectorSearch.voyageModel}"
-         |    dimension = ${config.vectorSearch.voyageDimension}
-         |  }
-         |  embedding {
-         |    version = ${config.vectorSearch.embeddingVersion}
-         |    queue-size = ${config.vectorSearch.queueSize}
-         |    parallelism = ${config.vectorSearch.parallelism}
-         |    timeout-ms = ${config.vectorSearch.timeoutMillis}
-         |  }
-         |  indexes {
-         |    jobs = "${config.vectorSearch.jobVectorIndex}"
-         |    candidates = "${config.vectorSearch.candidateVectorIndex}"
-         |  }
-         |  num-candidates = ${config.vectorSearch.numCandidates}
-         |}
-         |""".stripMargin,
-    )
-
-  private val parseOptions: ConfigParseOptions =
-    ConfigParseOptions.defaults().setAllowMissing(false)
-
-  private def resolveOptions(env: String => Option[String]): ConfigResolveOptions = {
-    val resolver: ConfigResolver = new ConfigResolver { self =>
-      override def lookup(name: String): ConfigValue =
-        env(name).map(ConfigValueFactory.fromAnyRef).orNull
-
-      override def withFallback(fallback: ConfigResolver): ConfigResolver = new ConfigResolver {
-        override def lookup(name: String): ConfigValue =
-          Option(self.lookup(name)).getOrElse(fallback.lookup(name))
-
-        override def withFallback(next: ConfigResolver): ConfigResolver =
-          this.withFallback(fallback.withFallback(next))
-      }
-    }
-    ConfigResolveOptions.noSystem().appendResolver(resolver)
+    }.distinct
+    NonEmptyList.fromList(errors).getOrElse(NonEmptyList.one(ConfigError.InvalidConfigFile("configuration decoding failed")))
   }
 
-  private final case class RawAppConfig(
-      http: RawHttpConfig,
-      mongo: RawMongoConfig,
-      logging: RawLoggingConfig,
-      auth: RawAuthConfig,
-      vectorSearch: RawVectorSearchConfig
-  )
+  private def parseError(error: Throwable): NonEmptyList[ConfigError] =
+    NonEmptyList.one(ConfigError.InvalidConfigFile(Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)))
 
-  private final case class RawHttpConfig(host: String, port: String, admissionPermits: String)
-  private final case class RawMongoConfig(uri: String, database: String)
-  private final case class RawLoggingConfig(maskSensitive: String)
-  private final case class RawAuthConfig(jwt: RawJwtAuthConfig)
-  private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: String, audience: String)
-  private final case class RawVectorSearchConfig(
-      enabled: String,
-      voyage: RawVoyageConfig,
-      embedding: RawEmbeddingConfig,
-      indexes: RawVectorIndexesConfig,
-      numCandidates: String
-  )
-  private final case class RawVoyageConfig(apiKey: Option[String], endpoint: String, model: String, dimension: String)
-  private final case class RawEmbeddingConfig(
-      version: String,
-      queueSize: String,
-      parallelism: String,
-      timeoutMs: String
-  )
-  private final case class RawVectorIndexesConfig(jobs: String, candidates: String)
+  private def fullPath(path: String, key: String): String = Option(path).filter(_.nonEmpty).fold(key)(parent => s"$parent.$key")
+  private def configErrorForPath(path: String): Option[ConfigError] = path match {
+    case "http.host" => Some(ConfigError.InvalidHost)
+    case "http.port" => Some(ConfigError.InvalidPort)
+    case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
+    case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
+    case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
+    case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
+    case "auth.jwt.hs256-secret" => Some(ConfigError.InvalidJwtSecret)
+    case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
+    case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
+    case "vector-search.enabled" => Some(ConfigError.InvalidVectorSearchEnabled)
+    case "vector-search.voyage.api-key" => Some(ConfigError.InvalidVoyageApiKey)
+    case "vector-search.voyage.endpoint" => Some(ConfigError.InvalidVoyageEndpoint)
+    case "vector-search.voyage.model" => Some(ConfigError.InvalidVoyageModel)
+    case "vector-search.voyage.dimension" => Some(ConfigError.InvalidVoyageDimension)
+    case "vector-search.embedding.version" => Some(ConfigError.InvalidEmbeddingVersion)
+    case "vector-search.embedding.queue-size" => Some(ConfigError.InvalidEmbeddingQueueSize)
+    case "vector-search.embedding.parallelism" => Some(ConfigError.InvalidEmbeddingParallelism)
+    case "vector-search.embedding.timeout-ms" => Some(ConfigError.InvalidEmbeddingTimeout)
+    case "vector-search.indexes.jobs" => Some(ConfigError.InvalidJobVectorIndex)
+    case "vector-search.indexes.candidates" => Some(ConfigError.InvalidCandidateVectorIndex)
+    case "vector-search.num-candidates" => Some(ConfigError.InvalidVectorNumCandidates)
+    case _ => None
+  }
 
-  private given ConfigReader[String] =
-    ConfigReader.fromCursor(_.asConfigValue.map(_.unwrapped.toString))
+  private val parseOptions = ConfigParseOptions.defaults().setAllowMissing(false)
+  private final case class RawAppConfig(http: RawHttpConfig, mongo: RawMongoConfig, logging: RawLoggingConfig,
+      auth: RawAuthConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
+  private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits) derives ConfigReader
+  private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
+  private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
+  private final case class RawAuthConfig(jwt: RawJwtAuthConfig) derives ConfigReader
+  private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: NonBlank128, audience: NonBlank128)
+  private final case class RawVectorSearchConfig(enabled: Boolean, voyage: RawVoyageConfig, embedding: RawEmbeddingConfig,
+      indexes: RawVectorIndexesConfig, numCandidates: Int) derives ConfigReader
+  private final case class RawVoyageConfig(apiKey: Option[String], endpoint: HttpsUrl, model: NonBlankStr,
+      dimension: VoyageDim) derives ConfigReader
+  private final case class RawEmbeddingConfig(version: Positive, queueSize: QueueSize, parallelism: Parallelism,
+      timeoutMs: TimeoutMs) derives ConfigReader
+  private final case class RawVectorIndexesConfig(jobs: NonBlankStr, candidates: NonBlankStr) derives ConfigReader
 
-  private given ConfigReader[RawAppConfig] =
-    ConfigReader.forProduct5("http", "mongo", "logging", "auth", "vector-search")(RawAppConfig.apply)
-  private given ConfigReader[RawHttpConfig] =
-    ConfigReader.forProduct3("host", "port", "admission-permits")(RawHttpConfig.apply)
-  private given ConfigReader[RawMongoConfig] =
-    ConfigReader.forProduct2("uri", "database")(RawMongoConfig.apply)
-  private given ConfigReader[RawLoggingConfig] =
-    ConfigReader.forProduct1("mask-sensitive")(RawLoggingConfig.apply)
-  private given ConfigReader[RawAuthConfig] =
-    ConfigReader.forProduct1("jwt")(RawAuthConfig.apply)
+  // Derived naming does not preserve the hs256-secret acronym, so keep this key explicit.
   private given ConfigReader[RawJwtAuthConfig] =
     ConfigReader.forProduct3("hs256-secret", "issuer", "audience")(RawJwtAuthConfig.apply)
-  private given ConfigReader[RawVectorSearchConfig] =
-    ConfigReader.forProduct5("enabled", "voyage", "embedding", "indexes", "num-candidates")(RawVectorSearchConfig.apply)
-  private given ConfigReader[RawVoyageConfig] =
-    ConfigReader.forProduct4("api-key", "endpoint", "model", "dimension")(RawVoyageConfig.apply)
-  private given ConfigReader[RawEmbeddingConfig] =
-    ConfigReader.forProduct4("version", "queue-size", "parallelism", "timeout-ms")(RawEmbeddingConfig.apply)
-  private given ConfigReader[RawVectorIndexesConfig] =
-    ConfigReader.forProduct2("jobs", "candidates")(RawVectorIndexesConfig.apply)
-
-  private def strictBoolean(value: String, error: ConfigError): Either[ConfigError, Boolean] = value match {
-    case "true" => Right(true)
-    case "false" => Right(false)
-    case _ => Left(error)
-  }
-
-  private def parseJwtSecret(value: String): Either[ConfigError, Option[String]] =
-    if (value == "disabled") Right(None)
-    else if (value.getBytes(StandardCharsets.UTF_8).length >= 32) Right(Some(value))
-    else Left(ConfigError.InvalidJwtSecret)
 }

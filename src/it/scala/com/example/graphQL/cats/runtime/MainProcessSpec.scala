@@ -7,6 +7,7 @@ import java.net.{InetAddress, ServerSocket}
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import java.util.concurrent.TimeUnit
+import java.util.Comparator
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
@@ -26,10 +27,9 @@ class MainProcessSpec extends CatsEffectSuite {
   private def outputDirectory: Resource[IO, Path] =
     Resource.make(IO.blocking(Files.createTempDirectory("hiring-main-process-"))) { directory =>
       IO.blocking {
-        val _ = Files.deleteIfExists(directory.resolve("stdout.log"))
-        val _ = Files.deleteIfExists(directory.resolve("stderr.log"))
-        val _ = Files.deleteIfExists(directory.resolve("local.conf"))
-        val _ = Files.deleteIfExists(directory)
+        val paths = Files.walk(directory)
+        try paths.sorted(Comparator.reverseOrder()).forEach(path => { val _ = Files.deleteIfExists(path); () })
+        finally paths.close()
       }
     }
 
@@ -54,6 +54,7 @@ class MainProcessSpec extends CatsEffectSuite {
         val builder = new ProcessBuilder((List(
           Path.of(System.getProperty("java.home"), "bin", "java").toString,
           "-Dfile.encoding=UTF-8",
+          s"-Dconfig.file=${configFile.toAbsolutePath}",
           "-Djdk.httpclient.allowRestrictedHeaders=connection",
           "-cp", System.getProperty("java.class.path"), entryPoint
         ) ++ arguments)*).directory(directory.toFile).redirectOutput(stdout.toFile).redirectError(stderr.toFile)
@@ -70,7 +71,9 @@ class MainProcessSpec extends CatsEffectSuite {
           assert(process.waitFor(25, TimeUnit.SECONDS), "Child JVM exceeded the 25-second harness deadline")
           assert(Files.size(stdout) <= 65536, "Unexpectedly large child stdout")
           assert(Files.size(stderr) <= 65536, "Unexpectedly large child stderr")
-          ChildResult(process.exitValue(), Files.readString(stdout), Files.readString(stderr))
+          val diagnostics = directory.resolve("_logs/hiring-platform.log")
+          val output = if (Files.isRegularFile(diagnostics)) Files.readString(diagnostics) else Files.readString(stdout)
+          ChildResult(process.exitValue(), output, Files.readString(stderr))
         }
       }
     }
@@ -87,7 +90,9 @@ class MainProcessSpec extends CatsEffectSuite {
     ) ++ overrides
     def value(key: String): String = values(key)
 
-    s"""http {
+    s"""include "application.conf"
+       |
+       |http {
        |  host = ${hoconString(value("HTTP_HOST"))}
        |  port = ${value("HTTP_PORT")}
        |}

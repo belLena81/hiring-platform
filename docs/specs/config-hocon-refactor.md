@@ -71,18 +71,18 @@ vector-search {
 }
 ```
 
-Root `local.conf` remains ignored and should use the same grouped shape. It provides local run values such as HTTP bind address and local MongoDB URI, and it overrides packaged values before final validation. Packaged `application.conf` should contain environment-backed values for cloud/runtime deployment settings, sensitive credentials, provider API keys, and startup-time knobs that are intentionally changed without editing packaged config, such as log level, feature enablement, and model selection. Optional `${?VAR}` substitutions remove the target path when the variable is absent; for required paths this must surface as a sanitized startup configuration error rather than being hidden by invalid local placeholder defaults. Values are resolved at application startup in this slice; runtime reload/hot swap is out of scope.
+Root `local.conf` remains ignored and should use the same grouped shape. It provides local run values such as HTTP bind address and local MongoDB URI and is selected with the standard Typesafe Config `config.file` or `config.resource` mechanism. HOCON itself merges the selected source with `application.conf`, with later values overriding earlier values. Packaged `application.conf` should contain environment-backed values for cloud/runtime deployment settings, sensitive credentials, provider API keys, and startup-time knobs that are intentionally changed without editing packaged config, such as log level, feature enablement, and model selection. Optional `${?VAR}` substitutions remove the target path when the variable is absent; for required paths this must surface as a sanitized startup configuration error rather than being hidden by invalid local placeholder defaults. Values are resolved at application startup in this slice; runtime reload/hot swap is out of scope.
 
 ## Acceptance Criteria
 
 | ID | Acceptance |
 |---|---|
 | CFG-AC01 | `application.conf` uses grouped HOCON sections for `http`, `mongo`, `logging`, `auth.jwt`, and `vector-search`. |
-| CFG-AC02 | `AppConfig.load` reads packaged `application.conf`, overlays ignored root `local.conf` when present, resolves env substitutions, and returns the existing `AppConfig` model. |
-| CFG-AC03 | Custom flat parsing helpers are removed from `AppConfig`; config parsing is delegated to the selected library stack. |
-| CFG-AC04 | Existing validation semantics are preserved: numeric IP host, port range, Mongo URI/database rules, strict booleans, safe logging combinations, JWT secret rules, vector-search bounds, key-required behavior when vector search is enabled, and accepted log levels `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`. |
-| CFG-AC05 | Local startup is supported by ignored `local.conf`, not by fake local defaults in packaged config; missing required packaged/env/local values fail startup with sanitized config errors. |
-| CFG-AC06 | Existing tests are migrated from flat fixtures to grouped fixtures, with added coverage for `local.conf` overriding packaged values, env-backed cloud values resolving when present, optional disabled-provider credentials being absent-safe, and required env-backed paths failing safely when absent. |
+| CFG-AC02 | `AppConfig.load` uses PureConfig's default source, allowing Typesafe Config's standard `application.conf` and `config.file`/`config.resource` precedence, resolves env substitutions, and returns the existing `AppConfig` model. |
+| CFG-AC03 | Custom flat parsing and scalar coercion helpers are removed from `AppConfig`; typed nested ADTs are decoded by PureConfig. |
+| CFG-AC04 | Iron refined types enforce numeric port bounds during PureConfig decoding; `AppConfig.apply` applies the remaining domain validation once through `ValidatedNel`, preserving numeric IP host, Mongo URI/database rules, JWT secret rules, vector-search bounds, key-required behavior when vector search is enabled, and returning independent domain failures in one `NonEmptyList[ConfigError]`. |
+| CFG-AC05 | Local startup is supported by an ignored `local.conf` selected through standard Typesafe Config, not by fake local defaults in packaged config; missing required packaged/env/local values fail startup with sanitized config errors. |
+| CFG-AC06 | Existing tests are migrated from flat fixtures to grouped fixtures, with added coverage for later HOCON values overriding packaged values, env-backed cloud values resolving when present, optional disabled-provider credentials being absent-safe, required env-backed paths failing safely when absent, and multiple validation failures accumulating. |
 | CFG-AC07 | Docs mention HOCON grouping, scoped startup-time `${?VAR}` usage, ignored `local.conf`, required-value failure behavior, and the no `.env` auto-load rule. |
 
 ## Implementation Path
@@ -91,7 +91,7 @@ Root `local.conf` remains ignored and should use the same grouped shape. It prov
 2. Introduce raw decoded case classes that mirror the grouped config shape.
 3. Convert raw decoded values into the existing public `AppConfig`, `JwtAuthConfig`, and `VectorSearchConfig` after running current validation.
 4. Replace custom parser entry points in tests with library-backed helpers.
-5. Rewrite packaged `application.conf` and generated test `local.conf` snippets to grouped HOCON, keeping local run values in ignored local config and env substitutions scoped to approved cloud/sensitive/startup-varying values.
+5. Rewrite packaged `application.conf` and generated test `local.conf` snippets to grouped HOCON, keeping local run values in ignored local config and using standard Typesafe Config source selection and env substitutions scoped to approved cloud/sensitive/startup-varying values.
 6. Update docs and config specs.
 7. Run `sbt test`, affected integration tests, `python3 scripts/check-skills.py`, and `git diff --check`.
 
@@ -103,6 +103,6 @@ Root `local.conf` remains ignored and should use the same grouped shape. It prov
 
 ## Checkpoint
 
-- Implemented grouped HOCON `application.conf`, root `local.conf` overlay support, PureConfig-backed raw config decoding, retained `AppConfig` public model, and removed project-owned flat config parsing.
+- Implemented grouped HOCON `application.conf`, standard Typesafe Config source selection, PureConfig-backed raw config decoding with Iron refined HTTP numeric types, retained `AppConfig` public model, and removed project-owned source merging and flat config parsing.
 - Accepted log levels are `TRACE`, `DEBUG`, `INFO`, `WARN`, and `ERROR`; structured diagnostic events still use INFO/WARN/ERROR severities.
-- Local evidence: `sbt 'testOnly com.example.graphQL.cats.config.AppConfigSpec com.example.graphQL.cats.infrastructure.logging.SafeDiagnosticsSpec'` passed 26/26; `sbt 'IntegrationTest / testOnly com.example.graphQL.cats.runtime.MainProcessSpec'` passed 14/14; `sbt test` passed 172/172.
+- Local evidence: focused configuration and diagnostics tests passed 30/30; `sbt 'IntegrationTest / testOnly com.example.graphQL.cats.runtime.MainProcessSpec'` and the full unit suite are rerun for this refactor.
