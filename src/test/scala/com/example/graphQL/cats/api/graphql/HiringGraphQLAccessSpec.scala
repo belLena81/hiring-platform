@@ -1,8 +1,9 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
+import com.example.graphQL.cats.api.graphql.{CursorCodec, GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContext}
 import com.example.graphQL.cats.service.{ActorContext, HiringReadService, ProbeResult}
 import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector, SemanticSearchRepository, UserRepository}
 import com.example.graphQL.cats.service.RepositoryError

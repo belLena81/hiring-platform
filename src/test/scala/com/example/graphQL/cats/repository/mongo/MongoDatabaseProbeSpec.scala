@@ -1,8 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
-import com.example.graphQL.cats.transport.http.{Admission, HiringApiRoutes}
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.{Method, Request, Status, Uri}

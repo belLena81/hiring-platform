@@ -3,7 +3,7 @@ package com.example.graphQL.cats.runtime
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
-import com.example.graphQL.cats.transport.graphql.HiringGraphQLServices
+import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogField, ProbeResult}
 import com.example.graphQL.cats.service.application.ApplicationService

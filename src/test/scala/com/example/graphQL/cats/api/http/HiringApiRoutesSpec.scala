@@ -1,13 +1,14 @@
-package com.example.graphQL.cats.transport.http
+package com.example.graphQL.cats.api.http
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.transport.graphql.{HiringGraphQLSchema, GraphQLRequest, RequestContext, HiringGraphQLServices}
-import com.example.graphQL.cats.transport.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContext}
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
-import com.example.graphQL.cats.service.application.ApplicationService;
-import com.example.graphQL.cats.service.job.JobService;
+import com.example.graphQL.cats.service.application.ApplicationService
+import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.ServiceFixtures
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.UserRole
@@ -17,6 +18,7 @@ import org.http4s.*
 import org.http4s.circe.*
 import org.typelevel.ci.CIString
 import pdi.jwt.JwtCirce
+
 import scala.concurrent.duration.*
 
 final class HiringApiRoutesSpec extends CatsEffectSuite {
@@ -494,7 +496,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       schema <- response.as[String]
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(schema, com.example.graphQL.cats.transport.graphql.HiringGraphQLSchema.sdl)
+      assertEquals(schema, HiringGraphQLSchema.sdl)
       assert(!schema.contains("users"))
     }
   }

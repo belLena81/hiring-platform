@@ -1,8 +1,10 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{Deferred, IO, Ref, Resource}
+import com.example.graphQL.cats.api.graphql.RequestContext
 import com.example.graphQL.cats.service.ProbeResult
 import munit.CatsEffectSuite
+
 import scala.concurrent.duration.*
 
 final class RequestContextSpec extends CatsEffectSuite {

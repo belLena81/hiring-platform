@@ -1,8 +1,8 @@
-package com.example.graphQL.cats.transport.http
+package com.example.graphQL.cats.api.http
 
 import cats.data.Kleisli
 import cats.effect.IO
-import com.example.graphQL.cats.transport.graphql.{HiringGraphQLSchema, GraphQLRequest, HiringGraphQLServices}
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult, TraceContext}
 import io.circe.Json
 import org.http4s.*

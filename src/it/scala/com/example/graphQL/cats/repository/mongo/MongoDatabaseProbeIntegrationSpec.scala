@@ -1,10 +1,10 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref, Resource}
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
 import com.github.dockerjava.api.model.ExposedPort
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
-import com.example.graphQL.cats.transport.http.{Admission, HiringApiRoutes}
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.bson.Document

@@ -2,9 +2,9 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{IO, Resource}
 import com.comcast.ip4s.{Host, Port}
-import com.example.graphQL.cats.transport.graphql.HiringGraphQLServices
-import com.example.graphQL.cats.transport.http.{Admission, HiringApiRoutes}
-import com.example.graphQL.cats.transport.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.graphql.HiringGraphQLServices
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService}
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.config.JwtAuthConfig

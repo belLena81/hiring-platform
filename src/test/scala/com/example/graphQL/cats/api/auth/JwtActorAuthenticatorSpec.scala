@@ -1,15 +1,17 @@
-package com.example.graphQL.cats.transport.auth
+package com.example.graphQL.cats.api.auth
 
 import cats.effect.IO
 import cats.syntax.all.*
+import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.service.{ActorContext, RepositoryError}
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import com.example.graphQL.cats.repository.protocol.{UserRepository}
+import com.example.graphQL.cats.repository.protocol.UserRepository
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{CandidateProfile, EntityEmbedding, User, UserRole}
 import io.circe.Json
+
 import java.time.Instant
 import java.util.UUID
 import munit.CatsEffectSuite

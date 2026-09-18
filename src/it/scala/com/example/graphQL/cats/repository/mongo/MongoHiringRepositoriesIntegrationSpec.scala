@@ -2,8 +2,8 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.transport.http.{Admission, HiringApiRoutes}
-import com.example.graphQL.cats.transport.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService}
 import com.example.graphQL.cats.repository.protocol.{
   EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector

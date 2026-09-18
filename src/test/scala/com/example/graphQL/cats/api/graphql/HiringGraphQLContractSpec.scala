@@ -1,6 +1,7 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, RequestContext}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import io.circe.Json
 import munit.CatsEffectSuite

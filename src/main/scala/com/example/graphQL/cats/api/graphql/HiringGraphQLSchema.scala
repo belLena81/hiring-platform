@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
@@ -306,7 +306,7 @@ object HiringGraphQLSchema {
       executeInContext(request, context)
     }
 
-  private[transport] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
+  private[api] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
     IO.executionContext.flatMap { implicit executionContext =>
       IO.fromFuture(IO(Executor.execute(
         schema = schema,

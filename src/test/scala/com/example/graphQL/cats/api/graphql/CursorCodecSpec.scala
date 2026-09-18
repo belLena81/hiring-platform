@@ -1,5 +1,6 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
+import com.example.graphQL.cats.api.graphql.CursorCodec
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import io.circe.Json

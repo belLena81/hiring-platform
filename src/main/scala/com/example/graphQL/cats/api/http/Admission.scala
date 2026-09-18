@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.transport.http
+package com.example.graphQL.cats.api.http
 
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Semaphore

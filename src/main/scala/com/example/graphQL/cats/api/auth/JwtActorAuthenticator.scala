@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.transport.auth
+package com.example.graphQL.cats.api.auth
 
 import cats.effect.IO
 import com.example.graphQL.cats.service.ActorContext

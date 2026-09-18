@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.Dispatcher

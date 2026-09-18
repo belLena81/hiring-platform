@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.transport.graphql
+package com.example.graphQL.cats.api.graphql
 
 import io.circe.Json
 import io.circe.parser.parse
