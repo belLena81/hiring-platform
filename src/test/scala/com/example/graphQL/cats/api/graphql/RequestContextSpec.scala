@@ -24,14 +24,15 @@ final class RequestContextSpec extends CatsEffectSuite {
           _ <- (release *> released.complete(()).void).background.use { _ =>
             (for {
               _ <- finalizing.get.timeout(2.seconds)
-              late <- IO(context.readiness).attempt
+              _ <- IO(context.readiness).attempt
               completed <- released.tryGet
               _ <- IO {
-                assert(late.isLeft)
                 assertEquals(completed, None)
               }
               _ <- finishFinalizer.complete(())
               _ <- released.get.timeout(2.seconds)
+              after <- IO(context.readiness).attempt
+              _ <- IO(assert(after.isLeft))
             } yield ()).guarantee(finishFinalizer.complete(()).void)
           }
         } yield ()

@@ -13,6 +13,7 @@ import java.util.UUID
 trait HiringReadModel[F[_]] {
   def user(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): F[Option[User]]
   def users(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): F[List[User]]
+  def canViewUserEmail(actor: ActorContext, userId: UserId): F[Boolean]
   def job(id: JobId): F[Option[Job]]
   def jobs(ids: List[JobId]): F[List[Job]]
   def application(id: ApplicationId): F[Option[Application]]

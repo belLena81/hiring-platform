@@ -17,31 +17,31 @@ final class CursorCodecSpec extends FunSuite {
   test("job cursors only decode as job cursors") {
     val encoded = CursorCodec.encodeJob(JobCursor(instant, JobId(id)))
 
-    assertEquals(CursorCodec.decodeJob(encoded), Some(JobCursor(instant, JobId(id))))
-    assertEquals(CursorCodec.decodeApplication(encoded), None)
-    assertEquals(CursorCodec.decodeEvent(encoded), None)
+    assertEquals(CursorCodec.decodeJob(encoded), Right(JobCursor(instant, JobId(id))))
+    assert(CursorCodec.decodeApplication(encoded).isLeft)
+    assert(CursorCodec.decodeEvent(encoded).isLeft)
   }
 
   test("application cursors only decode as application cursors") {
     val encoded = CursorCodec.encodeApplication(ApplicationCursor(instant, ApplicationId(id)))
 
-    assertEquals(CursorCodec.decodeJob(encoded), None)
-    assertEquals(CursorCodec.decodeApplication(encoded), Some(ApplicationCursor(instant, ApplicationId(id))))
-    assertEquals(CursorCodec.decodeEvent(encoded), None)
+    assert(CursorCodec.decodeJob(encoded).isLeft)
+    assertEquals(CursorCodec.decodeApplication(encoded), Right(ApplicationCursor(instant, ApplicationId(id))))
+    assert(CursorCodec.decodeEvent(encoded).isLeft)
   }
 
   test("application event cursors only decode as event cursors") {
     val encoded = CursorCodec.encodeEvent(ApplicationEventCursor(instant, ApplicationEventId(id)))
 
-    assertEquals(CursorCodec.decodeJob(encoded), None)
-    assertEquals(CursorCodec.decodeApplication(encoded), None)
-    assertEquals(CursorCodec.decodeEvent(encoded), Some(ApplicationEventCursor(instant, ApplicationEventId(id))))
+    assert(CursorCodec.decodeJob(encoded).isLeft)
+    assert(CursorCodec.decodeApplication(encoded).isLeft)
+    assertEquals(CursorCodec.decodeEvent(encoded), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
   }
 
   test("malformed cursors do not decode") {
-    assertEquals(CursorCodec.decodeJob("not-base64"), None)
-    assertEquals(CursorCodec.decodeApplication("not-base64"), None)
-    assertEquals(CursorCodec.decodeEvent("not-base64"), None)
+    assert(CursorCodec.decodeJob("not-base64").isLeft)
+    assert(CursorCodec.decodeApplication("not-base64").isLeft)
+    assert(CursorCodec.decodeEvent("not-base64").isLeft)
   }
 
   test("malformed cursor fields do not throw or decode") {
@@ -49,9 +49,9 @@ final class CursorCodecSpec extends FunSuite {
     val badOccurredAt = cursorJson("applicationEvent", None, Some("not-an-instant"), id.toString)
     val badId = cursorJson("application", Some(instant.toString), None, "not-a-uuid")
 
-    assertEquals(CursorCodec.decodeJob(encode(badCreatedAt)), None)
-    assertEquals(CursorCodec.decodeEvent(encode(badOccurredAt)), None)
-    assertEquals(CursorCodec.decodeApplication(encode(badId)), None)
+    assert(CursorCodec.decodeJob(encode(badCreatedAt)).isLeft)
+    assert(CursorCodec.decodeEvent(encode(badOccurredAt)).isLeft)
+    assert(CursorCodec.decodeApplication(encode(badId)).isLeft)
   }
 
   private def cursorJson(kind: String, createdAt: Option[String], occurredAt: Option[String], id: String): Json =

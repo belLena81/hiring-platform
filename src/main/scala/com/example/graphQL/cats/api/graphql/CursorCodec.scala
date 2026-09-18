@@ -30,7 +30,7 @@ private[graphql] object CursorCodec {
 
   private given Encoder[CursorKind] = Encoder.encodeString.contramap(_.value)
 
-  private given Decoder[CursorKind] = Decoder.decodeString.emap {
+  private given Decoder[CursorKind] = Decoder.decodeString.emap { raw =>
     CursorKind.values.find(_.value == raw).toRight(s"Unknown cursor kind: $raw")
   }
 
@@ -41,7 +41,7 @@ private[graphql] object CursorCodec {
   private given Decoder[Cursor] = Decoder.instance { cursor =>
     for {
       version <- cursor.downField("v").as[Int]
-      _ <- Either.cond(version == CurrentVersion, (), s"Unsupported cursor version: $version")
+      _ <- Either.cond(version == CurrentVersion, (), io.circe.DecodingFailure(s"Unsupported cursor version: $version", Nil))
       kind <- cursor.downField("kind").as[CursorKind]
       createdAt <- cursor.downField("createdAt").as[Option[String]].flatMap(decodeInstant)
       occurredAt <- cursor.downField("occurredAt").as[Option[String]].flatMap(decodeInstant)

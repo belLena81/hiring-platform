@@ -91,6 +91,25 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("nested user email is projected by service authorization") {
+    val query =
+      """query {
+        |  myApplications(first: 10) {
+        |    edges { node { candidate { email } job { recruiter { email } } } }
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+
+    execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
+      val candidateEmail = json.hcursor.downField("data").downField("myApplications").downField("edges").downArray
+        .downField("node").downField("candidate").get[String]("email")
+      val recruiterEmail = json.hcursor.downField("data").downField("myApplications").downField("edges").downArray
+        .downField("node").downField("job").downField("recruiter").get[Option[String]]("email")
+      assertEquals(candidateEmail, Right("candidate@example.com"))
+      assertEquals(recruiterEmail, Right(None))
+    }
+  }
+
   test("job connection rejects a cursor with malformed fields as a typed error") {
     val cursor = encodeCursor(Json.obj(
       "kind" -> Json.fromString("job"),
@@ -173,12 +192,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |  }
         |}""".stripMargin
 
-    execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
-      val jobs = json.hcursor.downField("data").downField("jobs")
-      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
-      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("INVALID_CREATED_AFTER"))
-      assert(!json.hcursor.downField("errors").succeeded)
-    }
+    for {
+      request <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
+        new IllegalArgumentException("Invalid GraphQL test request"))
+      context <- RequestContext.resource(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)), None).allocated
+      result <- HiringGraphQLSchema.executeInContext(request, context._1).guarantee(context._2)
+    } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 
   test("myJobs resolves stored actor before recruiter ownership lookup") {

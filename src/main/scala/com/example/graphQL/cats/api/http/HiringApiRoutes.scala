@@ -2,14 +2,14 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.Kleisli
 import cats.effect.IO
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices}
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContextFactory}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult, TraceContext}
 import io.circe.Json
 import org.http4s.*
 import org.http4s.circe.*
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
-import org.http4s.headers.{Accept, Allow}
+import org.http4s.headers.{Accept, Allow, `Content-Type`}
 import org.http4s.server.middleware.EntityLimiter
 import org.http4s.server.middleware.RequestId
 import org.http4s.syntax.all.*
@@ -22,10 +22,15 @@ final class HiringApiRoutes(
     admission: Admission,
     hiring: Option[HiringGraphQLServices] = None,
     authenticate: Request[IO] => IO[Option[ActorContext]] = (_: Request[IO]) => IO.pure(None),
-    ensureHiringReady: IO[Boolean] = IO.pure(true)
+    ensureHiringReady: IO[Boolean] = IO.pure(true),
+    contextFactory: Option[RequestContextFactory] = None
 ) {
   private val MaxRequestBytes = 64 * 1024
   private val GraphQLResponseMediaType = MediaType.unsafeParse("application/graphql-response+json")
+  private val SupportedResponseMediaTypes = List(
+    GraphQLResponseMediaType -> 1,
+    MediaType.application.json -> 0
+  )
   private val dsl = new Http4sDsl[IO] {}
   import dsl.*
 
@@ -38,7 +43,8 @@ final class HiringApiRoutes(
     case InvalidRequest extends Rejection(Status.BadRequest, "Invalid GraphQL request", RejectionReason.INVALID_REQUEST)
     case InvalidQuery extends Rejection(Status.BadRequest, "Invalid GraphQL query", RejectionReason.INVALID_QUERY)
     case UnsupportedMedia extends Rejection(Status.UnsupportedMediaType, "Expected application/json", RejectionReason.UNSUPPORTED_MEDIA)
-    case NotAcceptable extends Rejection(Status.NotAcceptable, "Expected application/graphql-response+json", RejectionReason.NOT_ACCEPTABLE)
+    case NotAcceptable extends Rejection(Status.NotAcceptable,
+      "Expected application/graphql-response+json or application/json", RejectionReason.NOT_ACCEPTABLE)
     case PayloadTooLarge extends Rejection(Status.PayloadTooLarge, "Request body too large", RejectionReason.PAYLOAD_TOO_LARGE)
     case Overloaded extends Rejection(Status.ServiceUnavailable, "Server busy", RejectionReason.OVERLOADED)
     case DeadlineExceeded extends Rejection(Status.GatewayTimeout, "Request deadline exceeded", RejectionReason.DEADLINE_EXCEEDED)
@@ -49,17 +55,19 @@ final class HiringApiRoutes(
 
   private def json(status: Status, body: Json): Response[IO] = Response[IO](status).withEntity(body)
 
-  private def error(status: Status, message: String): Response[IO] =
+  private def error(status: Status, message: String, mediaType: MediaType): Response[IO] =
     json(status, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString(message)))))
+      .putHeaders(`Content-Type`(mediaType))
 
-  private def graphqlJson(status: Status, body: Json): Response[IO] =
-    json(status, body).putHeaders(Header.Raw(CIString("Content-Type"), GraphQLResponseMediaType.toString))
+  private def graphqlJson(status: Status, body: Json, mediaType: MediaType): Response[IO] =
+    json(status, body).putHeaders(`Content-Type`(mediaType))
 
   private def rejected(rejection: Rejection, requestId: String,
-      failure: Map[LogField, String] = Map.empty): IO[Response[IO]] =
+      failure: Map[LogField, String] = Map.empty,
+      mediaType: MediaType = GraphQLResponseMediaType): IO[Response[IO]] =
     Diagnostics.emit(diagnostics, LogEvent.RequestRejected, Some(requestId),
       failure ++ Map(LogField.Reason -> rejection.reason.toString, LogField.Status -> rejection.status.code.toString))
-      .as(error(rejection.status, rejection.message))
+      .as(error(rejection.status, rejection.message, mediaType))
 
   private def admitted(requestId: String)(action: IO[Response[IO]]): IO[Response[IO]] =
     admission.permit.use { allowed =>
@@ -67,61 +75,74 @@ final class HiringApiRoutes(
       else rejected(Rejection.Overloaded, requestId)
     }
 
-  private def acceptsGraphQLResponse(request: Request[IO]): Boolean =
-    request.headers.get[Accept].forall(_.values.exists { entry =>
-      entry.mediaRange.satisfiedBy(GraphQLResponseMediaType) && entry.qValue > QValue.Zero
-    })
+  private def responseMediaType(request: Request[IO]): Option[MediaType] =
+    request.headers.get[Accept].fold(Option(SupportedResponseMediaTypes.head._1)) { accept =>
+      SupportedResponseMediaTypes.flatMap { case (mediaType, preference) =>
+        accept.values.toList.flatMap { entry =>
+          Option.when(entry.mediaRange.satisfiedBy(mediaType) && entry.qValue > QValue.Zero)(
+            (mediaType, entry.qValue, preference))
+        }
+      }.maxByOption { case (_, quality, preference) => (quality, preference) }.map(_._1)
+    }
 
-  private def graphql(request: Request[IO], requestId: String, trace: TraceContext): IO[Response[IO]] = admitted(requestId) {
+  private def graphql(request: Request[IO], requestId: String, mediaType: MediaType): IO[Response[IO]] = {
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
-      rejected(Rejection.UnsupportedMedia, requestId)
-    else if (!acceptsGraphQLResponse(request)) rejected(Rejection.NotAcceptable, requestId)
-    else request.attemptAs[GraphQLRequest].foldF(
-      _ => rejected(Rejection.InvalidRequest, requestId),
+      rejected(Rejection.UnsupportedMedia, requestId, mediaType = mediaType)
+    else admitted(requestId) {
+      request.attemptAs[GraphQLRequest].foldF(
+      _ => rejected(Rejection.InvalidRequest, requestId, mediaType = mediaType),
       parsed => {
         def execute(actor: Option[ActorContext], services: Option[HiringGraphQLServices]): IO[Response[IO]] =
-          HiringGraphQLSchema.execute(parsed, service, requestId, actor, services, ensureHiringReady, Some(trace)).flatMap {
-            case Right(result) => completedGraphQL(parsed, result, requestId)
-            case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Rejection.InvalidQuery, requestId)
-            case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Rejection.Internal, requestId)
+          HiringGraphQLSchema.execute(parsed, service, requestId, actor, services, ensureHiringReady, contextFactory).flatMap {
+            case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
+            case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Rejection.InvalidQuery, requestId, mediaType = mediaType)
+            case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Rejection.Internal, requestId, mediaType = mediaType)
           }
 
         authenticate(request).flatMap(actor => execute(actor, hiring))
       }
-    )
+      )
+    }
   }
 
-  private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String): IO[Response[IO]] = {
+  private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
+      mediaType: MediaType = GraphQLResponseMediaType): IO[Response[IO]] = {
     val operationName = parsed.operationName.orElse(parsed.document.definitions.collectFirst {
       case operation: sangria.ast.OperationDefinition => operation.name
     }.flatten)
     val fields = Map(LogField.Outcome ->
       (if (result.hcursor.downField("errors").succeeded) "FIELD_ERROR" else "COMPLETED")) ++
       operationName.map(LogField.OperationName -> _)
-    Diagnostics.emit(diagnostics, LogEvent.GraphQLCompleted, Some(requestId), fields).as(graphqlJson(Status.Ok, result))
+    Diagnostics.emit(diagnostics, LogEvent.GraphQLCompleted, Some(requestId), fields).as(graphqlJson(Status.Ok, result, mediaType))
   }
 
-  private def route(request: Request[IO], requestId: String, trace: TraceContext): IO[Response[IO]] =
+  private def requestIdOf(request: Request[IO]): String =
+    request.attributes.lookup(RequestId.requestIdAttrKey).getOrElse("unknown")
+
+  private def route(request: Request[IO], id: String): IO[Response[IO]] =
     HttpRoutes.of[IO] {
-      case GET -> Root / "health" => IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
-      case GET -> Root / "schema.graphql" => IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
-      case GET -> Root / "ready" => admitted(requestId) {
-        service.readiness(Some(requestId)).map { result =>
+      case GET -> Root / "health" =>
+        IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
+      case GET -> Root / "schema.graphql" =>
+        IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
+      case GET -> Root / "ready" => admitted(id) {
+        service.readiness(Some(id)).map { result =>
           val ready = result == ProbeResult.Ready
           json(if (ready) Status.Ok else Status.ServiceUnavailable,
             Json.obj("status" -> Json.fromString(if (ready) "READY" else "NOT_READY")))
         }
       }
-      case POST -> Root / "graphql" => graphql(request, requestId, trace)
-      case _ -> Root / "graphql" => rejected(Rejection.MethodNotAllowed, requestId)
+      case POST -> Root / "graphql" => responseMediaType(request) match {
+        case Some(mediaType) => graphql(request, id, mediaType)
+        case None => rejected(Rejection.NotAcceptable, id)
+      }
+      case _ -> Root / "graphql" => rejected(Rejection.MethodNotAllowed, id)
         .map(_.putHeaders(Allow(Method.POST)))
-      case _ => rejected(Rejection.NotFound, requestId)
+      case _ => rejected(Rejection.NotFound, id)
     }.orNotFound(request)
 
   private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
-    val suppliedRequestId = request.headers.get(CIString("X-Request-ID")).map(_.head.value)
-      .filter(value => scala.util.Try(java.util.UUID.fromString(value)).isSuccess)
-    suppliedRequestId.fold(IO.randomUUID.map(_.toString))(IO.pure).flatMap { requestId =>
+    val requestId = requestIdOf(request)
       TraceContext.root(requestId).flatMap { trace =>
       val method = request.method.name
       val path = request.uri.path.renderString
@@ -131,8 +152,8 @@ final class HiringApiRoutes(
         def timedFields: IO[Map[LogField, String]] = IO.monotonic.map { now =>
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
-        Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { requestTrace =>
-          route(request, requestId, requestTrace)
+        Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { _ =>
+          route(request, requestId)
           .handleErrorWith {
             case _: EntityLimiter.EntityTooLarge => rejected(Rejection.PayloadTooLarge, requestId)
             case failure => rejected(Rejection.Internal, requestId, LogFields.failure(failure))
@@ -150,7 +171,6 @@ final class HiringApiRoutes(
           .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
             Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
         }
-      }
       }
       }
   }

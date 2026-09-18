@@ -63,7 +63,7 @@ Malformed configuration exits unsuccessfully with a safe category and configurat
 
 ## HTTP contract and budgets
 
-POST `/graphql` accepts JSON with required string `query`, optional object `variables`, and optional string `operationName`. Omitted/null optional values are supported. JSON batches and GET query execution are unsupported. Responses use `application/graphql-response+json`; request charset parameters are accepted. Errors never include raw exception, query, variable, or connection-string details.
+POST `/graphql` accepts JSON with required string `query`, optional object `variables`, and optional string `operationName`. Omitted/null optional values are supported. JSON batches and GET query execution are unsupported. Responses negotiate between `application/graphql-response+json` and `application/json`, preferring the former when `Accept` is absent; request charset parameters are accepted. Errors never include raw exception, query, variable, or connection-string details.
 
 | Condition | HTTP status |
 |---|---|

@@ -19,6 +19,7 @@ private[runtime] object TracedHiringServices {
   def readModel(delegate: HiringReadModel[IO], diagnostics: Diagnostics): HiringReadModel[IO] = new HiringReadModel[IO] {
     def user(id: UserId): IO[Option[User]] = call(diagnostics, "repository.read.user", Map(LogField.EntityId -> id.value.toString))(delegate.user(id))
     def users(ids: List[UserId]): IO[List[User]] = call(diagnostics, "repository.read.users", Map(LogField.Count -> ids.size.toString))(delegate.users(ids))
+    def canViewUserEmail(actor: ActorContext, id: UserId) = call(diagnostics, "service.authorization.userEmail", Map(LogField.ActorId -> actor.userId.value.toString, LogField.EntityId -> id.value.toString))(delegate.canViewUserEmail(actor, id))
     def job(id: JobId): IO[Option[Job]] = call(diagnostics, "repository.read.job", Map(LogField.EntityId -> id.value.toString))(delegate.job(id))
     def jobs(ids: List[JobId]): IO[List[Job]] = call(diagnostics, "repository.read.jobs", Map(LogField.Count -> ids.size.toString))(delegate.jobs(ids))
     def application(id: ApplicationId): IO[Option[Application]] = call(diagnostics, "repository.read.application", Map(LogField.EntityId -> id.value.toString))(delegate.application(id))

@@ -30,11 +30,24 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
       result <- HiringGraphQLSchema.executeInContext(parsed, closed)
     } yield {
       val body = result.fold(failure => fail(failure.toString), identity)
-      assertEquals(body.hcursor.get[Json]("errors"),
-        Right(Json.arr(Json.obj("message" -> Json.fromString("Execution failed")))))
+      val errors = body.hcursor.downField("errors").as[Vector[Json]]
+      assertEquals(errors.map(_.size), Right(1))
+      val error = errors.toOption.get.head
+      assertEquals(error.hcursor.get[String]("message"), Right("Execution failed"))
+      assertEquals(error.hcursor.get[Vector[String]]("path"), Right(Vector("readiness")))
+      assert(error.hcursor.downField("locations").succeeded)
       assert(!body.noSpaces.contains("Request context is closed"))
       assert(!body.noSpaces.contains("IllegalStateException"))
     }
+  }
+
+  test("malformed typed identifiers fail GraphQL coercion before resolver execution") {
+    for {
+      parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj(
+        "query" -> Json.fromString("{ job(id: \"not-a-uuid\") { id } }")
+      ).noSpaces))(new IllegalArgumentException("Invalid test operation"))
+      result <- HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001")
+    } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 
   List("health.graphql", "readiness.graphql", "introspection.graphql").foreach { name =>

@@ -1,14 +1,14 @@
 type Application {
   id: ID!
   status: ApplicationStatus!
-  createdAt: String!
-  updatedAt: String!
+  createdAt: Instant!
+  updatedAt: Instant!
   candidate: User
   job: Job
 }
 
 input ApplicationActionInput {
-  applicationId: ID!
+  applicationId: ApplicationID!
 }
 
 type ApplicationConnection {
@@ -27,7 +27,7 @@ type ApplicationEvent {
   previousStatus: ApplicationStatus
   newStatus: ApplicationStatus!
   actorId: ID!
-  occurredAt: String!
+  occurredAt: Instant!
   feedback: String
   reason: String
 }
@@ -42,6 +42,8 @@ type ApplicationEventEdge {
   node: ApplicationEvent!
   cursor: String!
 }
+
+scalar ApplicationID
 
 type ApplicationPayload {
   application: Application
@@ -87,7 +89,7 @@ type CandidateProfile {
 }
 
 input DeclineApplicationInput {
-  applicationId: ID!
+  applicationId: ApplicationID!
   reason: String
 }
 
@@ -104,6 +106,8 @@ enum HealthStatus {
   UP
 }
 
+scalar Instant
+
 type Job {
   id: ID!
   title: String!
@@ -112,13 +116,13 @@ type Job {
   skills: [String!]!
   location: Location!
   status: JobStatus!
-  createdAt: String!
-  updatedAt: String!
+  createdAt: Instant!
+  updatedAt: Instant!
   recruiter: User
 }
 
 input JobActionInput {
-  jobId: ID!
+  jobId: JobID!
 }
 
 type JobConnection {
@@ -135,8 +139,10 @@ type JobEdge {
 input JobFilter {
   city: String
   skills: [String!]
-  createdAfter: String
+  createdAfter: Instant
 }
+
+scalar JobID
 
 input JobInput {
   title: String!
@@ -203,15 +209,15 @@ type Query {
   readiness: Readiness!
   me: User
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
-  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: String): JobConnection!
+  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant): JobConnection!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!): RankedJobResults!
   recommendedJobs(first: Int!): RankedJobResults!
-  candidateMatches(jobId: ID!, first: Int!): RankedCandidateResults!
-  job(id: ID!): Job
+  candidateMatches(jobId: JobID!, first: Int!): RankedCandidateResults!
+  job(id: JobID!): Job
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
-  jobApplications(jobId: ID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
-  applicationHistory(applicationId: ID!, first: Int!, after: String): ApplicationEventConnection!
+  jobApplications(jobId: JobID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
+  applicationHistory(applicationId: ApplicationID!, first: Int!, after: String): ApplicationEventConnection!
 }
 
 type RankedCandidate {
@@ -257,7 +263,7 @@ type RecruiterProfile {
 }
 
 input RejectApplicationInput {
-  applicationId: ID!
+  applicationId: ApplicationID!
   feedback: String
 }
 
@@ -279,11 +285,11 @@ input SignUpInput {
 }
 
 input SubmitApplicationInput {
-  jobId: ID!
+  jobId: JobID!
 }
 
 input UpdateJobInput {
-  id: ID!
+  id: JobID!
   patch: JobInput!
 }
 
@@ -302,7 +308,7 @@ type User {
   role: UserRole!
   status: UserStatus!
   profile: UserProfile
-  createdAt: String!
+  createdAt: Instant!
 }
 
 type UserConnection {

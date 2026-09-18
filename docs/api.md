@@ -46,7 +46,7 @@ Named operations and variables:
 }
 ```
 
-Send `Content-Type: application/json`; GraphQL responses use `application/graphql-response+json`. An absent `Accept` header is supported. When supplied, it must allow `application/graphql-response+json`; unsupported response media returns 406. GraphQL request envelopes are decoded by http4s/Circe, while GraphQL document parsing remains owned by Sangria.
+Send `Content-Type: application/json`; GraphQL responses negotiate between `application/graphql-response+json` and `application/json` and echo the selected media type. An absent `Accept` header prefers `application/graphql-response+json`; unsupported response media returns 406. GraphQL request envelopes are decoded by http4s/Circe, while GraphQL document parsing remains owned by Sangria.
 
 `query` is required. Missing/null `variables` means an empty object, and missing/null `operationName` means no selected name. When the document contains several operations, provide an operation name. Supply required variables explicitly; the pinned Sangria version has a documented limitation with omitted required-variable defaults.
 

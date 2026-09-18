@@ -235,7 +235,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(response.status, Status.Ok)
       assertEquals(body, result)
-      assertEquals(body.hcursor.get[Json]("errors"), Right(Json.arr(Json.obj("message" -> Json.fromString("Execution failed")))))
+      val errors = body.hcursor.downField("errors").as[Vector[Json]]
+      assertEquals(errors.map(_.size), Right(1))
+      val error = errors.toOption.get.head
+      assertEquals(error.hcursor.get[String]("message"), Right("Execution failed"))
+      assertEquals(error.hcursor.get[Vector[String]]("path"), Right(Vector("readiness")))
+      assert(error.hcursor.downField("locations").succeeded)
       assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted))
       assert(captured.forall(_._2.contains(id)))
       assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall(_._3.get(LogField.Outcome).contains("FIELD_ERROR")))
@@ -408,17 +413,20 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("Accept requires the GraphQL response media type") {
+  test("Accept negotiates both GraphQL response media types") {
     val cases = List(
-      "application/graphql-response+json" -> Status.Ok,
-      "application/graphql-response+json;q=0.5" -> Status.Ok,
-      "application/json" -> Status.NotAcceptable,
-      "text/html, application/json;q=1" -> Status.NotAcceptable
+      ("application/graphql-response+json", Status.Ok, "application/graphql-response+json"),
+      ("application/graphql-response+json;q=0.5", Status.Ok, "application/graphql-response+json"),
+      ("application/json", Status.Ok, "application/json"),
+      ("text/html, application/json;q=1", Status.Ok, "application/json")
     )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
-      cases.traverse_ { case (accept, expected) =>
+      cases.traverse_ { case (accept, expected, mediaType) =>
         http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
-          .map(response => assertEquals(response.status, expected, accept))
+          .map { response =>
+            assertEquals(response.status, expected, accept)
+            assertEquals(response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"), Some(mediaType), accept)
+          }
       }
     }
   }
