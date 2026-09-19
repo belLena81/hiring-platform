@@ -12,7 +12,7 @@ final case class HiringGraphQLServices(
     readModel: HiringReadModel[IO],
     jobService: JobUseCases[IO],
     applicationService: ApplicationUseCases[IO],
-    cursorCodec: CursorCodec,
+    cursorCodec: CursorCodec.CursorCodecs,
     accountService: AccountUseCases[IO],
     semanticSearchService: Option[SearchUseCases[IO]] = None,
     traceLocal: Option[IOLocal[Option[com.example.graphQL.cats.service.TraceContext]]] = None
@@ -31,7 +31,7 @@ final class RequestContext private (
   private def inRequestTrace[A](action: IO[A]): IO[A] =
     (traceContext, hiring.traceLocal) match {
       case (Some(context), Some(local)) =>
-        local.get.flatMap(previous => local.set(Some(context)) *> action.guarantee(local.set(previous)))
+        local.set(Some(context)) *> action.guarantee(local.set(None))
       case _ => action
     }
 

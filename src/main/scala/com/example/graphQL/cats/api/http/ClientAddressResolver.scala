@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.api.http
 
-import cats.syntax.all.*
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.config.TrustedProxyConfig
 import org.http4s.Request
@@ -18,7 +17,9 @@ final class ClientAddressResolver private (trustedProxyCidrs: List[Cidr[IpAddres
 
   private def forwardedAddress[F[_]](request: Request[F]): Option[IpAddress] =
     request.headers.get[Forwarded].flatMap { header =>
-      header.values.toList.traverse(concreteAddress).flatMap(_.findLast(address => !isTrusted(address)))
+      header.values.toList.reverse.iterator.map(concreteAddress).collectFirst {
+        case Some(address) if !isTrusted(address) => address
+      }
     }
 
   private def concreteAddress(element: Forwarded.Element): Option[IpAddress] =

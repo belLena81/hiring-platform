@@ -76,7 +76,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   test("application connection rejects a job cursor") {
-    val cursor = TestGraphQLSupport.cursorCodec.encodeJob(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
+    import TestGraphQLSupport.cursorCodec.given
+    val cursor = summon[CursorCodec[com.example.graphQL.cats.shared.pagination.JobCursor]]
+      .encode(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
     val query =
       s"""query {
          |  myApplications(first: 10, after: "$cursor") {

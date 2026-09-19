@@ -21,15 +21,16 @@ import java.util.UUID
 private[graphql] object HiringGraphQLResolvers {
   def jobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
     complete(authenticatedStep(context) { case (actor, hiring) =>
+      val cursorCodec = context.ctx.hiring.cursorCodec.jobCursorCodec
       val filter = JobSearchFilter(
         context.arg(cityArgument),
         context.arg(skillsArgument).fold(Set.empty[String])(_.toSet),
         context.arg(createdAfterArgument)
       )
       for {
-        (page, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), context.ctx.hiring.cursorCodec.decodeJob))
+        (page, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
         values            <- liftUseCase(hiring.jobService.searchOpenJobs(actor, filter, page))
-      } yield jobConnection(context, values, requested)
+      } yield jobConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Job])
 
   def semanticJobSearch(context: Context[RequestContext, Unit]): IO[RankedJobResults] =
@@ -67,37 +68,41 @@ private[graphql] object HiringGraphQLResolvers {
 
   def myJobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
     complete(authenticatedStep(context) { case (actor, hiring) =>
+      val cursorCodec = context.ctx.hiring.cursorCodec.jobCursorCodec
       for {
-        (page, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), context.ctx.hiring.cursorCodec.decodeJob))
+        (page, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
         values            <- liftUseCase(hiring.jobService.myJobs(actor, page.copy(status = context.arg(jobStatusArgument))))
-      } yield jobConnection(context, values, requested)
+      } yield jobConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Job])
 
   def myApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
     complete(authenticatedStep(context) { case (actor, hiring) =>
+      val cursorCodec = context.ctx.hiring.cursorCodec.applicationCursorCodec
       for {
-        (page, requested) <- EitherT(applicationPage(context, context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument)))
+        (page, requested) <- EitherT(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
         values            <- liftUseCase(hiring.applicationService.myApplications(actor, page))
-      } yield applicationConnection(context, values, requested)
+      } yield applicationConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Application])
 
   def jobApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
     complete(authenticatedStep(context) { case (actor, hiring) =>
+      val cursorCodec = context.ctx.hiring.cursorCodec.applicationCursorCodec
       val jobId = context.arg(jobIdArgument)
       for {
-        (page, requested)  <- EitherT(applicationPage(context, context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument)))
+        (page, requested)  <- EitherT(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
         values             <- liftUseCase(hiring.applicationService.jobApplications(actor, jobId, page))
-      } yield applicationConnection(context, values, requested)
+      } yield applicationConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Application])
 
   def applicationHistory(context: Context[RequestContext, Unit]): IO[Connection[ApplicationEvent]] =
     complete(authenticatedStep(context) { case (actor, hiring) =>
+      val cursorCodec = context.ctx.hiring.cursorCodec.eventCursorCodec
       val applicationId = context.arg(applicationIdArgument)
       for {
-        (page, requested)  <- EitherT(pageEvent(context, context.arg(firstArgument), context.arg(afterArgument)))
+        (page, requested)  <- EitherT(pageEvent(context.arg(firstArgument), context.arg(afterArgument), cursorCodec))
         _                  <- liftUseCase(canViewApplication(actor, hiring, applicationId))
         values             <- EitherT.liftF[IO, GraphQLError, List[ApplicationEvent]](hiring.readModel.applicationHistory(applicationId, page))
-      } yield eventConnection(context, values, requested)
+      } yield eventConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[ApplicationEvent])
 
   def submitApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] =
@@ -203,13 +208,14 @@ private[graphql] object HiringGraphQLResolvers {
 
   def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =
     complete(authenticatedStep(context) { case (actor, hiring) =>
+      val cursorCodec = context.ctx.hiring.cursorCodec.userCursorCodec
       val requested = context.arg(firstArgument)
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
-      EitherT(userPage(context, requested, context.arg(afterArgument), status, role)).flatMap {
+      EitherT(userPage(requested, context.arg(afterArgument), status, role, cursorCodec)).flatMap {
         case (request, pageSize) =>
           liftUseCase(hiring.accountService.listUsers(actor, request))
-            .map(values => userConnection(context, values, pageSize))
+            .map(values => userConnection(values, pageSize, cursorCodec))
       }
     }, graphQLErrorConnection[User])
 
@@ -273,25 +279,29 @@ private[graphql] object HiringGraphQLResolvers {
   ): IO[Either[GraphQLError, (JobPageRequest, Int)]] =
     cursorPage(first, after, decode)((cursor, size) => JobPageRequest(None, cursor, size))
 
-  private def pageEvent(context: Context[RequestContext, Unit], first: Int, after: Option[String]): IO[Either[GraphQLError, (ApplicationEventPageRequest, Int)]] =
-    cursorPage(first, after, context.ctx.hiring.cursorCodec.decodeEvent)((cursor, size) => ApplicationEventPageRequest(cursor, size))
-
-  private def applicationPage(
-      context: Context[RequestContext, Unit],
+  private def pageEvent(
       first: Int,
       after: Option[String],
-      status: Option[ApplicationStatus]
+      cursorCodec: CursorCodec[ApplicationEventCursor]
+  ): IO[Either[GraphQLError, (ApplicationEventPageRequest, Int)]] =
+    cursorPage(first, after, cursorCodec.decode)((cursor, size) => ApplicationEventPageRequest(cursor, size))
+
+  private def applicationPage(
+      first: Int,
+      after: Option[String],
+      status: Option[ApplicationStatus],
+      cursorCodec: CursorCodec[ApplicationCursor]
   ): IO[Either[GraphQLError, (ApplicationPageRequest, Int)]] =
-    cursorPage(first, after, context.ctx.hiring.cursorCodec.decodeApplication)((cursor, size) => ApplicationPageRequest(status, cursor, size))
+    cursorPage(first, after, cursorCodec.decode)((cursor, size) => ApplicationPageRequest(status, cursor, size))
 
   private def userPage(
-      context: Context[RequestContext, Unit],
       first: Int,
       after: Option[String],
       status: AccountStatus,
-      role: Option[UserRole]
+      role: Option[UserRole],
+      cursorCodec: CursorCodec[UserCursor]
   ): IO[Either[GraphQLError, (UserPageRequest, Int)]] =
-    cursorPage(first, after, context.ctx.hiring.cursorCodec.decodeUser)((cursor, size) => UserPageRequest(status, role, cursor, size.value))
+    cursorPage(first, after, cursorCodec.decode)((cursor, size) => UserPageRequest(status, role, cursor, size.value))
 
   private def cursorPage[A, B](
       first: Int,
@@ -397,14 +407,14 @@ private[graphql] object HiringGraphQLResolvers {
   ): IO[Either[UseCaseError, Unit]] =
     hiring.readModel.canViewApplication(actor, applicationId)
 
-  private def jobConnection(context: Context[RequestContext, Unit], values: List[Job], requested: Int): Connection[Job] =
-    connection(values, requested)(job => context.ctx.hiring.cursorCodec.encodeJob(JobCursor(job.createdAt, job.id)))
+  private def jobConnection(values: List[Job], requested: Int, cursorCodec: CursorCodec[JobCursor]): Connection[Job] =
+    connection(values, requested)(job => cursorCodec.encode(JobCursor(job.createdAt, job.id)))
 
-  private def applicationConnection(context: Context[RequestContext, Unit], values: List[Application], requested: Int): Connection[Application] =
-    connection(values, requested)(application => context.ctx.hiring.cursorCodec.encodeApplication(ApplicationCursor(application.createdAt, application.id)))
+  private def applicationConnection(values: List[Application], requested: Int, cursorCodec: CursorCodec[ApplicationCursor]): Connection[Application] =
+    connection(values, requested)(application => cursorCodec.encode(ApplicationCursor(application.createdAt, application.id)))
 
-  private def eventConnection(context: Context[RequestContext, Unit], values: List[ApplicationEvent], requested: Int): Connection[ApplicationEvent] =
-    connection(values, requested)(event => context.ctx.hiring.cursorCodec.encodeEvent(ApplicationEventCursor(event.occurredAt, event.id)))
+  private def eventConnection(values: List[ApplicationEvent], requested: Int, cursorCodec: CursorCodec[ApplicationEventCursor]): Connection[ApplicationEvent] =
+    connection(values, requested)(event => cursorCodec.encode(ApplicationEventCursor(event.occurredAt, event.id)))
 
   private def rankedJobResults(values: List[RankedJob]): RankedJobResults =
     RankedJobResults(values.map(value => RankedJobPayload(
@@ -470,8 +480,8 @@ private[graphql] object HiringGraphQLResolvers {
     }
     AccountPayload(None, None, None, List(graphQLError))
 
-  private def userConnection(context: Context[RequestContext, Unit], values: List[User], requested: Int): Connection[User] =
-    connection(values, requested)(user => context.ctx.hiring.cursorCodec.encodeUser(UserCursor(user.createdAt, user.id)))
+  private def userConnection(values: List[User], requested: Int, cursorCodec: CursorCodec[UserCursor]): Connection[User] =
+    connection(values, requested)(user => cursorCodec.encode(UserCursor(user.createdAt, user.id)))
 
   private def toGraphQLError(error: UseCaseError): GraphQLError =
     error match {

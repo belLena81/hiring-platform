@@ -47,19 +47,22 @@ final class ClientAddressResolverSpec extends FunSuite {
       "for=unknown",
       "for=_hidden",
       "by=10.1.2.3",
-      "for=198.51.100.99, for=unknown",
       "for=not-an-address"
     ).foreach { header =>
       assertEquals(addressResolver.resolve(request(Some("10.0.0.5"), List(header))), "10.0.0.5", clues(header))
     }
   }
 
-  test("multiple Forwarded lines are one chain and fail closed for an unusable member") {
+  test("multiple Forwarded lines are one chain and skip unusable members") {
     val addressResolver = resolver("10.0.0.0/8")
     assertEquals(addressResolver.resolve(request(Some("10.0.0.5"),
       List("for=198.51.100.99", "for=10.1.2.3"))), "198.51.100.99")
     assertEquals(addressResolver.resolve(request(Some("10.0.0.5"),
-      List("for=198.51.100.99", "for=unknown"))), "10.0.0.5")
+      List("for=198.51.100.99", "for=unknown"))), "198.51.100.99")
+    assertEquals(addressResolver.resolve(request(Some("10.0.0.5"),
+      List("for=unknown", "for=203.0.113.40"))), "203.0.113.40")
+    assertEquals(addressResolver.resolve(request(Some("10.0.0.5"),
+      List("for=198.51.100.99, for=unknown, for=10.1.2.3"))), "198.51.100.99")
   }
 
   test("IPv6 proxy CIDRs and Forwarded addresses are supported") {

@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.Kleisli
 import cats.effect.IO
+import cats.effect.kernel.Unique
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContextFactory}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult, TraceContext}
@@ -15,19 +16,16 @@ import org.http4s.server.middleware.EntityLimiter
 import org.http4s.server.middleware.RequestId
 import org.http4s.syntax.all.*
 import org.typelevel.ci.CIString
+import org.typelevel.vault.Key
 import scala.concurrent.duration.*
 
 final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, admission: Admission,
     dependencies: HiringApiRoutes.Dependencies) {
   private val MaxRequestBytes = 64 * 1024
-  private val GraphQLResponseMediaType = MediaType.unsafeParse("application/graphql-response+json")
-  private val SupportedResponseMediaTypes = List(
-    GraphQLResponseMediaType -> 1,
-    MediaType.application.json -> 0
-  )
   private val dsl = new Http4sDsl[IO] {}
   import dsl.*
 
+  // These stable uppercase values are part of the public diagnostics schema and intentionally differ from case names.
   private enum RejectionReason {
     case INVALID_REQUEST, INVALID_QUERY, UNSUPPORTED_MEDIA, NOT_ACCEPTABLE, PAYLOAD_TOO_LARGE,
       AUTHENTICATION_FAILED, RATE_LIMITED, OVERLOADED, DEADLINE_EXCEEDED, INTERNAL_ERROR, METHOD_NOT_ALLOWED, NOT_FOUND
@@ -38,7 +36,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     case InvalidQuery extends Rejection(Status.BadRequest, "Invalid GraphQL query", RejectionReason.INVALID_QUERY)
     case UnsupportedMedia extends Rejection(Status.UnsupportedMediaType, "Expected application/json", RejectionReason.UNSUPPORTED_MEDIA)
     case NotAcceptable extends Rejection(Status.NotAcceptable,
-      "Expected application/graphql-response+json or application/json", RejectionReason.NOT_ACCEPTABLE)
+      s"Expected ${HiringApiRoutes.SupportedResponseMediaTypesMessage}", RejectionReason.NOT_ACCEPTABLE)
     case AuthenticationFailed extends Rejection(Status.Unauthorized, "Authentication failed", RejectionReason.AUTHENTICATION_FAILED)
     case RateLimited extends Rejection(Status.TooManyRequests, "Too many authentication attempts", RejectionReason.RATE_LIMITED)
     case PayloadTooLarge extends Rejection(Status.PayloadTooLarge, "Request body too large", RejectionReason.PAYLOAD_TOO_LARGE)
@@ -72,13 +70,13 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     }
 
   private def responseMediaType(request: Request[IO]): Option[MediaType] =
-    request.headers.get[Accept].fold(Option(SupportedResponseMediaTypes.head._1)) { accept =>
-      SupportedResponseMediaTypes.flatMap { case (mediaType, preference) =>
+    request.headers.get[Accept].fold(Option(HiringApiRoutes.SupportedResponseMediaTypes.head._1)) { accept =>
+      HiringApiRoutes.SupportedResponseMediaTypes.flatMap { case (mediaType, declarationIndex) =>
         accept.values.toList.flatMap { entry =>
           Option.when(entry.mediaRange.satisfiedBy(mediaType) && entry.qValue > QValue.Zero)(
-            (mediaType, entry.qValue, preference))
+            (mediaType, entry.qValue, declarationIndex))
         }
-      }.maxByOption { case (_, quality, preference) => (quality, preference) }.map(_._1)
+      }.maxByOption { case (_, quality, declarationIndex) => (quality, -declarationIndex) }.map(_._1)
     }
 
   private def graphql(request: Request[IO], requestId: String, trace: TraceContext,
@@ -128,16 +126,27 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     }
 
   private def accountOperation(request: GraphQLRequest): Option[FixedWindowRateLimiter.Operation] =
-    val topLevelFields = request.document.definitions.collect {
-      case operation: sangria.ast.OperationDefinition =>
-        operation.selections.collect { case field: sangria.ast.Field => field.name }
-    }.flatten
-    if (topLevelFields.contains("signUp")) Some(FixedWindowRateLimiter.Operation.SignUp)
-    else if (topLevelFields.contains("login")) Some(FixedWindowRateLimiter.Operation.Login)
+    val fragmentsByName = request.document.fragments
+    def containsField(selections: Vector[sangria.ast.Selection], name: String,
+        visitedFragments: Set[String] = Set.empty): Boolean =
+      selections.iterator.exists {
+        case field: sangria.ast.Field => field.name == name
+        case spread: sangria.ast.FragmentSpread =>
+          if visitedFragments.contains(spread.name) then false
+          else fragmentsByName.get(spread.name)
+            .exists(fragment => containsField(fragment.selections, name, visitedFragments + spread.name))
+        case inline: sangria.ast.InlineFragment => containsField(inline.selections, name, visitedFragments)
+      }
+    def containsOperationField(name: String): Boolean =
+      request.document.definitions.iterator.collect {
+        case operation: sangria.ast.OperationDefinition => operation.selections
+      }.exists(containsField(_, name))
+    if (containsOperationField("signUp")) Some(FixedWindowRateLimiter.Operation.SignUp)
+    else if (containsOperationField("login")) Some(FixedWindowRateLimiter.Operation.Login)
     else None
 
   private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
-      mediaType: MediaType = GraphQLResponseMediaType): IO[Response[IO]] = {
+      mediaType: MediaType = HiringApiRoutes.GraphQLResponseMediaType): IO[Response[IO]] = {
     val operationName = parsed.operationName.orElse(parsed.document.definitions.collectFirst {
       case operation: sangria.ast.OperationDefinition => operation.name
     }.flatten)
@@ -150,27 +159,42 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private def requestIdOf(request: Request[IO]): String =
     request.attributes.lookup(RequestId.requestIdAttrKey).getOrElse("unknown")
 
-  private def route(request: Request[IO], id: String, trace: TraceContext): IO[Response[IO]] =
-    HttpRoutes.of[IO] {
-      case GET -> Root / "health" =>
-        IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
-      case GET -> Root / "schema.graphql" =>
-        IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
-      case GET -> Root / "ready" => admitted(id) {
-        service.readiness(Some(id)).map { result =>
+  private final case class RequestScope(requestId: String, trace: TraceContext)
+
+  private val requestScopeKey: Key[RequestScope] = new Key[RequestScope](new Unique.Token())
+
+  private def requestScope(request: Request[IO]): IO[RequestScope] =
+    IO.fromOption(request.attributes.lookup(requestScopeKey))(
+      new IllegalStateException("Missing HTTP request scope"))
+
+  private val routedApp: HttpApp[IO] = HttpRoutes.of[IO] {
+    case GET -> Root / "health" =>
+      IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
+    case GET -> Root / "schema.graphql" =>
+      IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
+    case request @ GET -> Root / "ready" => requestScope(request).flatMap { scope =>
+      admitted(scope.requestId) {
+        service.readiness(Some(scope.requestId)).map { result =>
           val ready = result == ProbeResult.Ready
           json(if (ready) Status.Ok else Status.ServiceUnavailable,
             Json.obj("status" -> Json.fromString(if (ready) "READY" else "NOT_READY")))
         }
       }
-      case POST -> Root / "graphql" => responseMediaType(request) match {
-        case Some(mediaType) => graphql(request, id, trace, mediaType)
-        case None => rejected(Rejection.NotAcceptable, id)
+    }
+    case request @ POST -> Root / "graphql" => requestScope(request).flatMap { scope =>
+      responseMediaType(request) match {
+        case Some(mediaType) => graphql(request, scope.requestId, scope.trace, mediaType)
+        case None => rejected(Rejection.NotAcceptable, scope.requestId)
       }
-      case _ -> Root / "graphql" => rejected(Rejection.MethodNotAllowed, id)
+    }
+    case request @ _ -> Root / "graphql" => requestScope(request).flatMap { scope =>
+      rejected(Rejection.MethodNotAllowed, scope.requestId)
         .map(_.putHeaders(Allow(Method.POST)))
-      case _ => rejected(Rejection.NotFound, id)
-    }.orNotFound(request)
+    }
+    case request => requestScope(request).flatMap { scope =>
+      rejected(Rejection.NotFound, scope.requestId)
+    }
+  }.orNotFound
 
   private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
     val requestId = requestIdOf(request)
@@ -184,7 +208,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
         Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { child =>
-          route(request, requestId, child)
+          val scopedRequest = request.withAttribute(requestScopeKey, RequestScope(requestId, child))
+          routedApp(scopedRequest)
           .handleErrorWith {
             case _: EntityLimiter.EntityTooLarge => rejected(Rejection.PayloadTooLarge, requestId)
             case failure => rejected(Rejection.Internal, requestId, LogFields.failure(failure))
@@ -203,7 +228,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
             Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
         }
       }
-      }
+    }
   }
 
   private val requestIdApp: HttpApp[IO] = RequestId.httpApp(tracedApp)
@@ -219,6 +244,14 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 }
 
 object HiringApiRoutes {
+  private val GraphQLResponseMediaType = MediaType.unsafeParse("application/graphql-response+json")
+  private val SupportedResponseMediaTypes = List(
+    GraphQLResponseMediaType,
+    MediaType.application.json
+  ).zipWithIndex
+  private val SupportedResponseMediaTypesMessage =
+    SupportedResponseMediaTypes.map { case (mediaType, _) => s"${mediaType.mainType}/${mediaType.subType}" }.mkString(" or ")
+
   final case class Dependencies(
       hiring: HiringGraphQLServices,
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]],

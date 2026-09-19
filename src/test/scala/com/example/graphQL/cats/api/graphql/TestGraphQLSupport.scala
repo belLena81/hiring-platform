@@ -19,7 +19,7 @@ import scala.concurrent.duration.*
 object TestGraphQLSupport {
   private def unsupported[A]: IO[A] = IO.raiseError(new IllegalStateException("Request context services are not configured"))
 
-  val cursorCodec: CursorCodec =
+  val cursorCodec: CursorCodec.CursorCodecs =
     CursorCodec.fromSecret("test-cursor-secret-01234567890123456789")
 
   val accountService: AccountUseCases[IO] = new AccountUseCases[IO] {

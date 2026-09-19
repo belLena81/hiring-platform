@@ -257,15 +257,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
+      records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+      diagnostics = capture(records)
+      http <- buildRoutes(new HealthService(probe, diagnostics), diagnostics, admission,
         authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
       firstLogin <- http(request(login))
       limitedLogin <- http(request(login))
       firstSignup <- http(request(signup))
       limitedSignup <- http(request(signup))
       limitedBody <- limitedLogin.as[Json]
+      captured <- records.get
     } yield {
       assertEquals(firstLogin.status, Status.Ok)
       assertEquals(limitedLogin.status, Status.TooManyRequests)
@@ -275,6 +278,45 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         .exists(value => value >= 1 && value <= 60))
       assertEquals(limitedLogin.contentType.map(_.mediaType), Some(MediaType.application.json))
       assertEquals(limitedBody, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Too many authentication attempts")))))
+      assert(captured.exists { case (event, _, fields) =>
+        event == LogEvent.RequestRejected && fields.get(LogField.Reason).contains("RATE_LIMITED")
+      })
+    }
+  }
+
+  test("auth rate limiting resolves named and inline fragments") {
+    val namedLogin =
+      """mutation {
+        |  ...LoginFragment
+        |}
+        |fragment LoginFragment on Mutation {
+        |  login(input: { name: "Candidate", password: "password-password" }) {
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+    val inlineSignup =
+      """mutation {
+        |  ... on Mutation {
+        |    signUp(input: { name: "Candidate", role: Candidate, password: "password-password", skills: ["Scala"] }) {
+        |      errors { code }
+        |    }
+        |  }
+        |}""".stripMargin
+
+    for {
+      admission <- Admission.create(16)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      firstNamedLogin <- http(request(namedLogin))
+      limitedNamedLogin <- http(request(namedLogin))
+      firstInlineSignup <- http(request(inlineSignup))
+      limitedInlineSignup <- http(request(inlineSignup))
+    } yield {
+      assertEquals(firstNamedLogin.status, Status.Ok)
+      assertEquals(limitedNamedLogin.status, Status.TooManyRequests)
+      assertEquals(firstInlineSignup.status, Status.Ok)
+      assertEquals(limitedInlineSignup.status, Status.TooManyRequests)
     }
   }
 
@@ -594,6 +636,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val cases = List(
       ("application/graphql-response+json", Status.Ok, "application/graphql-response+json"),
       ("application/graphql-response+json;q=0.5", Status.Ok, "application/graphql-response+json"),
+      ("application/json, application/graphql-response+json", Status.Ok, "application/graphql-response+json"),
       ("application/json", Status.Ok, "application/json"),
       ("text/html, application/json;q=1", Status.Ok, "application/json")
     )
@@ -623,7 +666,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           .map(response => assertEquals(response.status, Status.Ok, accept))
       } *> rejected.traverse_ { accept =>
         http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
-          .map(response => assertEquals(response.status, Status.NotAcceptable, accept))
+          .flatMap { response =>
+            response.as[Json].map { body =>
+              assertEquals(response.status, Status.NotAcceptable, accept)
+              assertEquals(body.hcursor.downField("errors").downArray.get[String]("message"),
+                Right("Expected application/graphql-response+json or application/json"), accept)
+            }
+          }
       }
     }
   }
