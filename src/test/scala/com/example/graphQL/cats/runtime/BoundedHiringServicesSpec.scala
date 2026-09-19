@@ -19,7 +19,7 @@ final class BoundedHiringServicesSpec extends CatsEffectSuite {
         def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, id: UserId): IO[Either[UseCaseError, (User, AccountToken)]] = IO.never
         def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] = IO.never
         def me(actor: ActorContext): IO[Either[UseCaseError, User]] = IO.never.onCancel(cancelled.complete(()).void)
-        def updateMyProfile(actor: ActorContext, input: AccountProfileInput): IO[Either[UseCaseError, User]] = IO.never
+        def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] = IO.never
         def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] = IO.never
         def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] = IO.never
       }, 20.millis)

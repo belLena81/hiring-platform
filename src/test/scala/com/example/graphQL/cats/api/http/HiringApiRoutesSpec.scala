@@ -55,6 +55,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
       .withEntity(Json.obj("query" -> Json.fromString(query)))
 
+  private def request(query: String, operationName: String): Request[IO] =
+    Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+      .withEntity(Json.obj("query" -> Json.fromString(query), "operationName" -> Json.fromString(operationName)))
+
   private def proxiedRequest(query: String, peer: String, forwarded: String): Request[IO] = {
     val socket = if (peer.contains(':')) s"[$peer]:12345" else s"$peer:12345"
     request(query)
@@ -284,6 +288,88 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("account admission rejects multiple selected sensitive root fields before authentication or execution") {
+    val repeatedAliases =
+      """mutation {
+        |  first: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  second: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |}""".stripMargin
+    val mixedOperations =
+      """mutation {
+        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  signUp(input: { name: "Candidate", role: Candidate, password: "password-password", skills: ["Scala"] }) { errors { code } }
+        |}""".stripMargin
+    val cyclicFragments =
+      """mutation {
+        |  ...First
+        |}
+        |fragment First on Mutation {
+        |  first: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  ...Second
+        |}
+        |fragment Second on Mutation {
+        |  second: signUp(input: { name: "Candidate", role: Candidate, password: "password-password", skills: ["Scala"] }) { errors { code } }
+        |  ...First
+        |}""".stripMargin
+
+    for {
+      authenticationCalls <- Ref.of[IO, Int](0)
+      admission <- Admission.create(16)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        authenticate = _ => authenticationCalls.updateAndGet(_ + 1).as(Right(None))).map(_.app)
+      aliasResponse <- http(request(repeatedAliases))
+      mixedResponse <- http(request(mixedOperations))
+      cyclicResponse <- http(request(cyclicFragments))
+      aliasBody <- aliasResponse.as[Json]
+      calls <- authenticationCalls.get
+    } yield {
+      assertEquals(aliasResponse.status, Status.BadRequest)
+      assertEquals(mixedResponse.status, Status.BadRequest)
+      assertEquals(cyclicResponse.status, Status.BadRequest)
+      assertEquals(aliasBody, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Invalid GraphQL query")))))
+      assertEquals(calls, 0)
+    }
+  }
+
+  test("account admission only inspects the selected operation") {
+    val document =
+      """mutation UnselectedSensitive {
+        |  first: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  second: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |}
+        |mutation Harmless {
+        |  createJob(input: {
+        |    title: "Platform developer"
+        |    description: "Build platform services"
+        |    requirements: ["Scala"]
+        |    skills: ["Scala"]
+        |    country: "Cyprus"
+        |    city: "Nicosia"
+        |    remote: false
+        |  }) { errors { code } }
+        |}
+        |mutation SelectedSingle {
+        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |}""".stripMargin
+
+    for {
+      admission <- Admission.create(16)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      harmlessFirst <- http(request(document, "Harmless"))
+      harmlessSecond <- http(request(document, "Harmless"))
+      sensitiveFirst <- http(request(document, "SelectedSingle"))
+      sensitiveSecond <- http(request(document, "SelectedSingle"))
+    } yield {
+      assertEquals(harmlessFirst.status, Status.Ok)
+      assertEquals(harmlessSecond.status, Status.Ok)
+      assertEquals(sensitiveFirst.status, Status.Ok)
+      assertEquals(sensitiveSecond.status, Status.TooManyRequests)
+    }
+  }
+
   test("auth rate limiting resolves named and inline fragments") {
     val namedLogin =
       """mutation {
@@ -302,6 +388,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |    }
         |  }
         |}""".stripMargin
+    val aliasedBootstrap =
+      """mutation {
+        |  ...BootstrapFragment
+        |}
+        |fragment BootstrapFragment on Mutation {
+        |  firstAdmin: bootstrapAdmin(input: { name: "Admin", password: "password-password" }) {
+        |    errors { code }
+        |  }
+        |}""".stripMargin
 
     for {
       admission <- Admission.create(16)
@@ -312,15 +407,19 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       limitedNamedLogin <- http(request(namedLogin))
       firstInlineSignup <- http(request(inlineSignup))
       limitedInlineSignup <- http(request(inlineSignup))
+      firstBootstrap <- http(request(aliasedBootstrap))
+      limitedBootstrap <- http(request(aliasedBootstrap))
     } yield {
       assertEquals(firstNamedLogin.status, Status.Ok)
       assertEquals(limitedNamedLogin.status, Status.TooManyRequests)
       assertEquals(firstInlineSignup.status, Status.Ok)
       assertEquals(limitedInlineSignup.status, Status.TooManyRequests)
+      assertEquals(firstBootstrap.status, Status.Ok)
+      assertEquals(limitedBootstrap.status, Status.TooManyRequests)
     }
   }
 
-  test("auth rate limiting handles duplicate fragment expansion without exponential traversal") {
+  test("account admission rejects duplicate fragment expansion without exponential traversal") {
     val fragmentCount = 32
     val fragments = (0 until fragmentCount).map {
       case 0 =>
@@ -345,8 +444,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       second <- http(request(fragmentBomb))
     } yield {
       assert(fragmentBomb.length < 64 * 1024)
-      assertNotEquals(first.status, Status.TooManyRequests)
-      assertEquals(second.status, Status.TooManyRequests)
+      assertEquals(first.status, Status.BadRequest)
+      assertEquals(second.status, Status.BadRequest)
     }
   }
 

@@ -18,7 +18,7 @@ trait UserAccountRepository[F[_]] {
   def initialized: F[Boolean]
   def createAccount(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
   def findByCanonicalName(nameCanonical: String): F[Option[AccountCredentials]]
-  def updateProfile(userId: UserId, profile: UserProfile): F[Either[RepositoryError, User]]
+  def updateProfile(userId: UserId, profile: UserProfile, now: Instant): F[Either[RepositoryError, User]]
   def listAccounts(page: UserPageRequest): F[List[User]]
   def deleteAccount(userId: UserId, now: Instant, tombstone: String): F[Either[RepositoryError, Unit]]
 }

@@ -4,11 +4,10 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.AccountName
 import com.mongodb.MongoCommandException
-import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, UpdateOptions, Updates}
+import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, Sorts, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
 import org.bson.conversions.Bson
-import java.time.Instant
 import java.util.Date
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -23,6 +22,7 @@ final case class AtlasSearchIndexConfig(
 )
 
 object MongoHiringSetup {
+  private val UserMigrationBatchSize = 100
   val UsersEmailIndex = "users_emailCanonical_unique"
   val UsersNameIndex = "users_nameCanonical_unique"
   val UsersStatusCreatedIndex = "users_accountStatus_created_id"
@@ -58,13 +58,25 @@ object MongoHiringSetup {
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
     ensureUsersCollection(database) *>
       backfillLegacyNames(database) *>
+      recordMigration(database.getCollection("schema_migrations"), UserNameCanonicalMigrationId,
+        "Backfill canonical account names before the unique index") *>
       backfillLegacyAccountStatus(database) *>
+      recordMigration(database.getCollection("schema_migrations"), UserAccountStatusMigrationId,
+        "Backfill active status for legacy user accounts") *>
       migrateUserProfiles(database) *>
+      recordMigration(database.getCollection("schema_migrations"), UserProfileOneOfMigrationId,
+        "Normalize active user profiles to one role-specific MongoDB profile") *>
       replaceEmailIndex(database) *>
+      recordMigration(database.getCollection("schema_migrations"), UserEmailSparseIndexMigrationId,
+        "Replace the legacy email index with a sparse unique index") *>
       (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
       ensureUserProfileValidator(database) *>
-      recordMigrations(database, atlas.isDefined) *>
-      atlas.fold(IO.unit)(config => provisionAtlasIndexes(database, config))
+      recordMigrations(database) *>
+      atlas.fold(IO.unit) { config =>
+        provisionAtlasIndexes(database, config) *>
+          recordMigration(database.getCollection("schema_migrations"), HiringAtlasSearchIndexMigrationId,
+            "Hiring Atlas vector and lexical search indexes")
+      }
 
   private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
       createIndex(database.getCollection("users"),
@@ -119,24 +131,13 @@ object MongoHiringSetup {
         new IndexOptions().name(UsersEmbeddingMetaIndex))
     )
 
-  private def recordMigrations(database: MongoDatabase, atlasEnabled: Boolean): IO[Unit] = {
+  private def recordMigrations(database: MongoDatabase): IO[Unit] = {
     val migrations = database.getCollection("schema_migrations")
-    val base = recordMigration(migrations, HiringDomainMongoMigrationId, "Hiring domain MongoDB collections and indexes") *>
+    recordMigration(migrations, HiringDomainMongoMigrationId, "Hiring domain MongoDB collections and indexes") *>
       recordMigration(migrations, HiringGraphQLSearchIndexMigrationId, "Hiring GraphQL job search indexes") *>
       recordMigration(migrations, HiringAdminJobListingIndexMigrationId, "Hiring Admin job listing indexes") *>
-      recordMigration(migrations, HiringVectorSearchMigrationId, "Hiring Vector Search metadata indexes")
-      *>
-      recordMigration(migrations, UserNameCanonicalMigrationId, "Backfill canonical account names before the unique index")
-      *>
+      recordMigration(migrations, HiringVectorSearchMigrationId, "Hiring Vector Search metadata indexes") *>
       recordMigration(migrations, UserAccountMigrationId, "User account credentials, lifecycle, and query indexes")
-      *>
-      recordMigration(migrations, UserAccountStatusMigrationId, "Backfill active status for legacy user accounts")
-      *>
-      recordMigration(migrations, UserProfileOneOfMigrationId, "Normalize active user profiles to one role-specific MongoDB profile")
-      *>
-      recordMigration(migrations, UserEmailSparseIndexMigrationId, "Replace the legacy email index with a sparse unique index")
-    Option.when(atlasEnabled)(recordMigration(migrations, HiringAtlasSearchIndexMigrationId,
-      "Hiring Atlas vector and lexical search indexes")).fold(base)(base *> _)
   }
 
   private def provisionAtlasIndexes(database: MongoDatabase, config: AtlasSearchIndexConfig): IO[Unit] = {
@@ -179,9 +180,10 @@ object MongoHiringSetup {
       case Some(existing) if searchIndexMatches(existing, expectedType, model.getDefinition) =>
         awaitReady(collection, name, expectedType, model.getDefinition, config)
       case Some(existing) if existing.getString("type", "search") != expectedType =>
-        PublisherBridge.first(collection.dropSearchIndex(name)).void *>
-          createSearchIndex(collection, model) *>
-          awaitReady(collection, name, expectedType, model.getDefinition, config)
+        IO.raiseError(new IllegalStateException(
+          s"Atlas search index '$name' has type '${existing.getString("type", "search")}', expected '$expectedType'; " +
+            "create a new configured index name and perform an explicit cutover migration"
+        ))
       case Some(_) =>
         PublisherBridge.first(collection.updateSearchIndex(name, model.getDefinition)).void *>
           awaitReady(collection, name, expectedType, model.getDefinition, config)
@@ -226,24 +228,30 @@ object MongoHiringSetup {
       id: String,
       description: String
   ): IO[Unit] =
-    PublisherBridge.first(migrations.updateOne(
-      Filters.eq("_id", id),
-      Updates.combine(
-        Updates.setOnInsert("_id", id),
-        Updates.setOnInsert("schemaVersion", 1),
-        Updates.setOnInsert("appliedAt", Date.from(Instant.now())),
-        Updates.setOnInsert("description", description),
-        Updates.setOnInsert("checksum", id)
-      ),
-      new UpdateOptions().upsert(true)
-    )).void
+    IO.realTimeInstant.flatMap { now =>
+      PublisherBridge.first(migrations.updateOne(
+        Filters.eq("_id", id),
+        Updates.combine(
+          Updates.setOnInsert("_id", id),
+          Updates.setOnInsert("schemaVersion", 1),
+          Updates.setOnInsert("appliedAt", Date.from(now)),
+          Updates.setOnInsert("description", description),
+          Updates.setOnInsert("checksum", id)
+        ),
+        new UpdateOptions().upsert(true)
+      )).void
+    }
 
   private def createIndex(
       collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
       keys: org.bson.conversions.Bson,
       options: IndexOptions
   ): IO[Unit] =
-    PublisherBridge.first(collection.createIndex(keys, options)).void
+    PublisherBridge.first(collection.createIndex(keys, options)).void.handleErrorWith {
+      case error: MongoCommandException if options.getName == UsersNameIndex && error.getErrorCode == 11000 =>
+        IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
+      case error => IO.raiseError(error)
+    }
 
   private def ensureUsersCollection(database: MongoDatabase): IO[Unit] =
     PublisherBridge.first(database.createCollection("users")).void.handleErrorWith {
@@ -257,9 +265,9 @@ object MongoHiringSetup {
         case Some(index) if index.getBoolean("unique", false) && index.getBoolean("sparse", false) =>
           IO.unit
         case Some(_) =>
-          PublisherBridge.first(users.dropIndex(UsersEmailIndex)).void *>
-            createIndex(users, Indexes.ascending("emailCanonical"),
-              new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true))
+          IO.raiseError(new IllegalStateException(
+            s"users index '$UsersEmailIndex' is incompatible; create a replacement index and perform an explicit cutover migration"
+          ))
         case None =>
           createIndex(users, Indexes.ascending("emailCanonical"),
             new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true))
@@ -269,25 +277,26 @@ object MongoHiringSetup {
 
   private def migrateUserProfiles(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
-    PublisherBridge.all(users.find()).flatMap { documents =>
-      documents.traverse(profileMigrationUpdates).flatMap { plans =>
-        documents.zip(plans).traverse_ { case (document, updates) =>
-          if (updates.isEmpty) IO.unit
-          else PublisherBridge.first(users.updateOne(
-            Filters.eq("_id", document.getString("_id")),
-            Updates.combine(updates*)
-          )).void
-        }
+    migrateUsers(users) { document =>
+      profileMigrationUpdates(document).flatMap {
+        case Nil => IO.unit
+        case updates => PublisherBridge.first(users.updateOne(
+          Filters.eq("_id", document.getString("_id")),
+          Updates.combine(updates*)
+        )).void
       }
     }
   }
 
   private def backfillLegacyAccountStatus(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
-    PublisherBridge.first(users.updateMany(
-      Filters.exists("accountStatus", false),
-      Updates.set("accountStatus", "Active")
-    )).void
+    migrateUsers(users) { document =>
+      if (document.containsKey("accountStatus")) IO.unit
+      else PublisherBridge.first(users.updateOne(
+        Filters.eq("_id", document.get("_id")),
+        Updates.set("accountStatus", "Active")
+      )).void
+    }
   }
 
   private def profileMigrationUpdates(document: Document): IO[List[Bson]] =
@@ -398,28 +407,42 @@ object MongoHiringSetup {
 
   private def backfillLegacyNames(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
-    PublisherBridge.all(users.find()).flatMap { documents =>
-      val resolved = documents.traverse { document =>
-        Option(document.getString("name")).filter(_.trim.nonEmpty) match {
-          case Some(name) => Right(document -> AccountName.canonical(name))
-          case None => Left(new IllegalStateException("users collection contains an account without a valid name"))
-        }
+    migrateUsers(users) { document =>
+      Option(document.getString("name")).filter(_.trim.nonEmpty) match {
+        case Some(name) if !document.containsKey("nameCanonical") =>
+          PublisherBridge.first(users.updateOne(
+            Filters.eq("_id", document.get("_id")),
+            Updates.set("nameCanonical", AccountName.canonical(name))
+          )).void
+        case Some(_) => IO.unit
+        case None => IO.raiseError(new IllegalStateException("users collection contains an account without a valid name"))
       }
-      resolved match {
-        case Left(error) => IO.raiseError(error)
-        case Right(values) =>
-          val collisions = values.groupBy(_._2).collect { case (canonical, records) if records.size > 1 => canonical }.toList
-          if (collisions.nonEmpty)
-            IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names"))
-          else values.filterNot { case (document, _) => document.containsKey("nameCanonical") }.traverse_ {
-            case (document, canonical) =>
-              PublisherBridge.first(users.updateOne(
-                Filters.eq("_id", document.get("_id")),
-                Updates.set("nameCanonical", canonical)
-              )).void
-          }
-      }
+    }.handleErrorWith {
+      case error: MongoCommandException if error.getErrorCode == 11000 =>
+        IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
+      case error => IO.raiseError(error)
     }
+  }
+
+  // Each update is idempotent; a restart scans completed documents but only advances one bounded batch at a time.
+  private def userMigrationBatch(
+      users: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      after: Option[String]
+  ): IO[List[Document]] =
+    PublisherBridge.all(users.find(after.fold[org.bson.conversions.Bson](new Document())(Filters.gt("_id", _)))
+      .sort(Sorts.ascending("_id"))
+      .limit(UserMigrationBatchSize)
+      .batchSize(UserMigrationBatchSize))
+
+  private def migrateUsers(
+      users: com.mongodb.reactivestreams.client.MongoCollection[Document]
+  )(update: Document => IO[Unit]): IO[Unit] = {
+    def migrateAfter(lastId: Option[String]): IO[Unit] =
+      userMigrationBatch(users, lastId).flatMap { documents =>
+        documents.traverse_(update) *>
+          documents.lastOption.fold(IO.unit)(document => migrateAfter(Option(document.getString("_id"))))
+      }
+    migrateAfter(None)
   }
 
   private def ensureAccountRegistry(database: MongoDatabase): IO[Unit] =

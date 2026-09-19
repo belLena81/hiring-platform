@@ -14,7 +14,7 @@ trait AccountUseCases[F[_]] {
   def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: Identifiers.UserId): F[Either[UseCaseError, (User, AccountToken)]]
   def login(input: LoginInput, now: Instant): F[Either[UseCaseError, (User, AccountToken)]]
   def me(actor: ActorContext): F[Either[UseCaseError, User]]
-  def updateMyProfile(actor: ActorContext, input: AccountProfileInput): F[Either[UseCaseError, User]]
+  def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): F[Either[UseCaseError, User]]
   def deleteMyAccount(actor: ActorContext, now: Instant): F[Either[UseCaseError, Unit]]
   def listUsers(actor: ActorContext, page: UserPageRequest): F[Either[UseCaseError, List[User]]]
 }

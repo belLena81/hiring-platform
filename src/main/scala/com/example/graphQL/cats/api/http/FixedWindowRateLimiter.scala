@@ -50,7 +50,7 @@ object FixedWindowRateLimiter {
   }
 
   enum Operation {
-    case Login, SignUp
+    case Login, SignUp, BootstrapAdmin
   }
 
   private[http] final case class Bucket(window: Long, count: Int)

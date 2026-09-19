@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.service.auth
 
 import cats.effect.{IO, Ref}
-import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{UserAccountRepository, UserRepository}
@@ -24,7 +23,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("ordinary signup cannot create an Admin") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       result <- service.signUp(SignUpInput("Admin", UserRole.Admin, "password-password", None), now, userId)
     } yield assertEquals(result, Left(UseCaseError.account(AccountError.AdminSignupForbidden)))
   }
@@ -32,7 +31,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("signup rejects a profile belonging to another role") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       result <- service.signUp(SignUpInput(
         "Candidate",
         UserRole.Candidate,
@@ -45,7 +44,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("candidate and recruiter signup require their matching profile") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       candidate <- service.signUp(SignUpInput("Candidate", UserRole.Candidate, "password-password", None), now, userId)
       recruiter <- service.signUp(SignUpInput("Recruiter", UserRole.Recruiter, "password-password", None), now, recruiterId)
     } yield {
@@ -57,7 +56,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("signup persists account and returns an access token") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       result <- service.signUp(
         SignUpInput("Candidate", UserRole.Candidate, "password-password",
           Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))),
@@ -71,13 +70,45 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("signup reports a blank name once while retaining other registration validation") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
+      result <- service.signUp(
+        SignUpInput("   ", UserRole.Candidate, "password-password", Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))),
+        now,
+        userId
+      )
+    } yield assertEquals(result, Left(UseCaseError.ValidationFailed(cats.data.NonEmptyList.one(com.example.graphQL.cats.domain.error.DomainValidationError.BlankField("name")))))
+  }
+
+  test("token issuance failure does not persist an account and is not a repository failure") {
+    val unavailableIssuer = new AccessTokenIssuer[IO] {
+      override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
+        IO.pure(Left(AccessTokenIssuanceError.Unavailable))
+    }
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, unavailableIssuer)
+      result <- service.signUp(
+        SignUpInput("Candidate", UserRole.Candidate, "password-password", Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))),
+        now,
+        userId
+      )
+      stored <- accounts.values.get
+    } yield {
+      assertEquals(result, Left(UseCaseError.availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
+      assertEquals(stored, Map.empty)
+    }
+  }
+
   test("profile update rejects non-applicable role fields before persistence") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(recruiter.id -> recruiter)), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map(recruiter.id -> recruiter)), accounts, TestHasher, TestTokenIssuer)
       result <- service.updateMyProfile(
         ActorContext(recruiter.id, UserRole.Recruiter),
-        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now
       )
     } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
   }
@@ -85,10 +116,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("profile update rejects the profile-less Admin role") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(admin.id -> admin)), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map(admin.id -> admin)), accounts, TestHasher, TestTokenIssuer)
       result <- service.updateMyProfile(
         ActorContext(admin.id, UserRole.Admin),
-        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now
       )
     } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
   }
@@ -96,7 +127,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("valid recruiter signup remains supported") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       result <- service.signUp(SignUpInput(
         "Recruiter",
         UserRole.Recruiter,
@@ -109,7 +140,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("signup maps a canonical-name conflict to NameTaken") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       first <- service.signUp(SignUpInput(
         "Candidate Name",
         UserRole.Candidate,
@@ -131,7 +162,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("deleting an already deleted account is idempotent") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)), accounts, TestHasher, TestTokenIssuer)
       result <- service.deleteMyAccount(ActorContext(deletedRecruiter.id, UserRole.Recruiter), now)
     } yield assertEquals(result, Right(()))
   }
@@ -139,6 +170,12 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   private object TestHasher extends PasswordHasher[IO] {
     override def hash(password: String): IO[String] = IO.pure(s"hash:$password")
     override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(encoded == s"hash:$password")
+    override def verifyUnknown(password: String): IO[Unit] = IO.unit
+  }
+
+  private object TestTokenIssuer extends AccessTokenIssuer[IO] {
+    override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
+      IO.pure(Right(AccountToken(s"token-${user.id.value}", now.plusSeconds(900))))
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends UserRepository[IO] {
@@ -161,7 +198,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         else (current.updated(key, AccountCredentials(user, passwordHash)), Right(()))
       }
     override def findByCanonicalName(nameCanonical: String): IO[Option[AccountCredentials]] = values.get.map(_.get(nameCanonical))
-    override def updateProfile(userId: UserId, profile: UserProfile): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
+    override def updateProfile(userId: UserId, profile: UserProfile, now: Instant): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
     override def listAccounts(page: UserPageRequest): IO[List[User]] = IO.pure(Nil)
     override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }

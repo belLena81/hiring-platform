@@ -33,6 +33,9 @@ enum ConfigError(val key: String) {
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
+  case InvalidPasswordHashIterations extends ConfigError("AUTH_PASSWORD_HASH_ITERATIONS")
+  case InvalidPasswordHashMemory extends ConfigError("AUTH_PASSWORD_HASH_MEMORY_KIB")
+  case InvalidPasswordHashParallelism extends ConfigError("AUTH_PASSWORD_HASH_PARALLELISM")
   case InvalidAuthRateLimitWindow extends ConfigError("AUTH_RATE_LIMIT_WINDOW_SECONDS")
   case InvalidAuthRateLimitAttempts extends ConfigError("AUTH_RATE_LIMIT_ATTEMPTS")
   case InvalidAuthRateLimitBuckets extends ConfigError("AUTH_RATE_LIMIT_BUCKETS")
@@ -46,6 +49,8 @@ enum ConfigError(val key: String) {
   case InvalidEmbeddingQueueSize extends ConfigError("EMBEDDING_QUEUE_SIZE")
   case InvalidEmbeddingParallelism extends ConfigError("EMBEDDING_PARALLELISM")
   case InvalidEmbeddingTimeout extends ConfigError("EMBEDDING_TIMEOUT_MS")
+  case InvalidEmbeddingRetryAttempts extends ConfigError("EMBEDDING_RETRY_ATTEMPTS")
+  case InvalidEmbeddingRetryDelay extends ConfigError("EMBEDDING_RETRY_DELAY_MS")
   case InvalidJobVectorIndex extends ConfigError("JOB_VECTOR_INDEX")
   case InvalidCandidateVectorIndex extends ConfigError("CANDIDATE_VECTOR_INDEX")
   case InvalidJobLexicalIndex extends ConfigError("JOB_LEXICAL_INDEX")
@@ -56,10 +61,11 @@ enum ConfigError(val key: String) {
 
 final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
     voyageModel: String, voyageDimension: Int, embeddingVersion: Int, queueSize: Int, parallelism: Int,
-    timeoutMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
+    timeoutMillis: Int, retryAttempts: Int, retryDelayMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
     indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
 
 final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: String, accessTokenSeconds: Long = 900L)
+final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 
@@ -77,7 +83,7 @@ type HttpsUrl = String :| StartWith["https://"]
 final case class AppConfig(host: String, port: Int, admissionPermits: Int, requestTimeout: FiniteDuration,
     resolverTimeout: FiniteDuration, trustedProxy: TrustedProxyConfig,
     mongoUri: String, mongoDatabase: String,
-    maskSensitive: Boolean, jwtAuth: JwtAuthConfig, authRateLimit: AuthRateLimitConfig,
+    maskSensitive: Boolean, jwtAuth: JwtAuthConfig, passwordHash: PasswordHashConfig, authRateLimit: AuthRateLimitConfig,
     vectorSearch: VectorSearchConfig) {
   override def toString: String = "AppConfig([REDACTED])"
 }
@@ -104,6 +110,7 @@ object AppConfig {
     val http = raw.http
     val mongo = raw.mongo
     val jwt = raw.auth.jwt
+    val passwordHash = raw.auth.passwordHash.getOrElse(defaultPasswordHash)
     val vector = raw.vectorSearch
     val voyage = vector.voyage
     val embedding = vector.embedding
@@ -113,17 +120,20 @@ object AppConfig {
       validRequestTimeout(http.requestTimeoutMs), validResolverTimeout(http.resolverTimeoutMs, http.requestTimeoutMs),
       validTrustedProxyCidrs(http.trustedProxyCidrs),
       validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
-      validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds), validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
+      validPasswordHashIterations(passwordHash.iterations), validPasswordHashMemory(passwordHash.memoryKib),
+      validPasswordHashParallelism(passwordHash.parallelism), validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds), validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
       validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets), validVoyageApiKey(vector.enabled, voyage.apiKey),
       validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
-      validNumCandidates(vector.numCandidates)).mapN {
-      (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database, secret, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
-          pollInterval, numCandidates) =>
+      validNumCandidates(vector.numCandidates), validEmbeddingRetryAttempts(embedding.retryAttempts),
+      validEmbeddingRetryDelay(embedding.retryDelayMs)).mapN {
+      (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database, secret, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
+          pollInterval, numCandidates, retryAttempts, retryDelay) =>
         new AppConfig(host, port, permits, requestTimeout.millis, resolverTimeout.millis, trustedProxy, uri, database, raw.logging.maskSensitive,
           JwtAuthConfig(secret, jwt.issuer, jwt.audience),
+          PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
           AuthRateLimitConfig(windowSeconds, attempts, maxBuckets),
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
-            embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs,
+            embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs, retryAttempts, retryDelay,
             indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, pollInterval, numCandidates))
     }
   }
@@ -147,6 +157,12 @@ object AppConfig {
     Either.cond(value >= 1 && value <= 1000, value, ConfigError.InvalidAuthRateLimitAttempts).toValidatedNel
   private def validAuthRateLimitBuckets(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 1 && value <= 100000, value, ConfigError.InvalidAuthRateLimitBuckets).toValidatedNel
+  private def validPasswordHashIterations(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 10, value, ConfigError.InvalidPasswordHashIterations).toValidatedNel
+  private def validPasswordHashMemory(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 8192 && value <= 1048576, value, ConfigError.InvalidPasswordHashMemory).toValidatedNel
+  private def validPasswordHashParallelism(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 16, value, ConfigError.InvalidPasswordHashParallelism).toValidatedNel
   private def validRequestTimeout(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidRequestTimeout).toValidatedNel
   private def validResolverTimeout(value: Int, requestTimeout: Int): ValidatedNel[ConfigError, Int] =
@@ -165,6 +181,10 @@ object AppConfig {
     Either.cond(value >= 1000 && value <= 600000, value, ConfigError.InvalidSearchIndexReadyTimeout).toValidatedNel
   private def validIndexPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 100 && value <= 10000, value, ConfigError.InvalidSearchIndexPollInterval).toValidatedNel
+  private def validEmbeddingRetryAttempts(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 10, value, ConfigError.InvalidEmbeddingRetryAttempts).toValidatedNel
+  private def validEmbeddingRetryDelay(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidEmbeddingRetryDelay).toValidatedNel
 
   private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
     val errors = failures.toList.flatMap {
@@ -191,6 +211,9 @@ object AppConfig {
     case "auth.jwt.hs256-secret" => Some(ConfigError.InvalidJwtSecret)
     case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
     case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
+    case "auth.password-hash.iterations" => Some(ConfigError.InvalidPasswordHashIterations)
+    case "auth.password-hash.memory-kib" => Some(ConfigError.InvalidPasswordHashMemory)
+    case "auth.password-hash.parallelism" => Some(ConfigError.InvalidPasswordHashParallelism)
     case "auth.rate-limit.window-seconds" => Some(ConfigError.InvalidAuthRateLimitWindow)
     case "auth.rate-limit.attempts" => Some(ConfigError.InvalidAuthRateLimitAttempts)
     case "auth.rate-limit.max-buckets" => Some(ConfigError.InvalidAuthRateLimitBuckets)
@@ -204,6 +227,8 @@ object AppConfig {
     case "vector-search.embedding.queue-size" => Some(ConfigError.InvalidEmbeddingQueueSize)
     case "vector-search.embedding.parallelism" => Some(ConfigError.InvalidEmbeddingParallelism)
     case "vector-search.embedding.timeout-ms" => Some(ConfigError.InvalidEmbeddingTimeout)
+    case "vector-search.embedding.retry-attempts" => Some(ConfigError.InvalidEmbeddingRetryAttempts)
+    case "vector-search.embedding.retry-delay-ms" => Some(ConfigError.InvalidEmbeddingRetryDelay)
     case "vector-search.indexes.jobs" => Some(ConfigError.InvalidJobVectorIndex)
     case "vector-search.indexes.candidates" => Some(ConfigError.InvalidCandidateVectorIndex)
     case "vector-search.indexes.lexical" => Some(ConfigError.InvalidJobLexicalIndex)
@@ -220,15 +245,18 @@ object AppConfig {
       requestTimeoutMs: Int, resolverTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
   private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
-  private final case class RawAuthConfig(jwt: RawJwtAuthConfig, rateLimit: RawAuthRateLimitConfig) derives ConfigReader
+  private final case class RawAuthConfig(jwt: RawJwtAuthConfig, passwordHash: Option[RawPasswordHashConfig],
+      rateLimit: RawAuthRateLimitConfig) derives ConfigReader
   private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: NonBlank128, audience: NonBlank128)
   private final case class RawAuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int) derives ConfigReader
+  private final case class RawPasswordHashConfig(iterations: Int, memoryKib: Int, parallelism: Int) derives ConfigReader
+  private val defaultPasswordHash = RawPasswordHashConfig(iterations = 2, memoryKib = 19456, parallelism = 1)
   private final case class RawVectorSearchConfig(enabled: Boolean, voyage: RawVoyageConfig, embedding: RawEmbeddingConfig,
       indexes: RawVectorIndexesConfig, numCandidates: Int) derives ConfigReader
   private final case class RawVoyageConfig(apiKey: Option[String], endpoint: HttpsUrl, model: NonBlankStr,
       dimension: VoyageDim) derives ConfigReader
   private final case class RawEmbeddingConfig(version: Positive, queueSize: QueueSize, parallelism: Parallelism,
-      timeoutMs: TimeoutMs) derives ConfigReader
+      timeoutMs: TimeoutMs, retryAttempts: Int, retryDelayMs: Int) derives ConfigReader
   private final case class RawVectorIndexesConfig(jobs: NonBlankStr, candidates: NonBlankStr, lexical: NonBlankStr,
       readyTimeoutMs: Int, pollIntervalMs: Int) derives ConfigReader
 

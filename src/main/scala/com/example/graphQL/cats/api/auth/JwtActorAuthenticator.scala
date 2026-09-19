@@ -5,12 +5,12 @@ import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
+import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
 import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import org.http4s.Request
 import org.http4s.{AuthScheme, Credentials}
 import org.http4s.headers.Authorization
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
-import io.circe.Json
 import scala.util.Try
 
 enum AuthFailure {
@@ -52,25 +52,12 @@ object JwtActorAuthenticator {
     new JwtActorAuthenticator(config, users, clock)
 
   def issue(config: JwtAuthConfig, userId: UserId, now: Instant): (String, Instant) = {
-    val expiresAt = now.plusSeconds(config.accessTokenSeconds)
-    val token = JwtCirce.encode(
-      Json.obj("alg" -> Json.fromString(Algorithm)),
-      Json.obj(
-        "sub" -> Json.fromString(userId.value.toString),
-        "iss" -> Json.fromString(config.issuer),
-        "aud" -> Json.fromString(config.audience),
-        "iat" -> Json.fromLong(now.getEpochSecond),
-        "exp" -> Json.fromLong(expiresAt.getEpochSecond)
-      ),
-      config.hmacSecret
-    )
-    token -> expiresAt
+    val accountToken = JwtAccessTokenIssuer.issue(config, userId, now)
+    accountToken.value -> accountToken.expiresAt
   }
 
   def verify(token: String, secret: String, issuer: String, audience: String, clock: EffectClock[IO]): IO[Option[UserId]] =
     clock.realTimeInstant.map(instant => verifyAt(token, secret, issuer, audience, instant))
-
-  private val Algorithm = "HS256"
 
   private[auth] def verifyAt(token: String, secret: String, issuer: String, audience: String, now: Instant): Option[UserId] =
     given clock: JavaClock = JavaClock.fixed(now, ZoneOffset.UTC)

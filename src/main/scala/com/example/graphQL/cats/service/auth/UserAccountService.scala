@@ -3,8 +3,6 @@ package com.example.graphQL.cats.service.auth
 import cats.data.ValidatedNel
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
-import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -18,10 +16,8 @@ final class UserAccountService(
     users: UserRepository[IO],
     accounts: UserAccountRepository[IO],
     hasher: PasswordHasher[IO],
-    jwt: JwtAuthConfig
+    tokenIssuer: AccessTokenIssuer[IO]
 ) extends AccountUseCases[IO] {
-  private val dummyHash = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-
   override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
     if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.account(AccountError.AdminSignupForbidden)))
     else if (!profileShapeValid(input.role, input.profile))
@@ -63,9 +59,9 @@ final class UserAccountService(
   override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] = {
     val canonical = canonicalName(input.name)
     accounts.findByCanonicalName(canonical).flatMap {
-      case None => hasher.verify(dummyHash, input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
+      case None => hasher.verifyUnknown(input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
       case Some(credentials) if credentials.user.accountStatus != AccountStatus.Active =>
-        hasher.verify(dummyHash, input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
+        hasher.verifyUnknown(input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
       case Some(credentials) => hasher.verify(credentials.passwordHash, input.password).flatMap {
         case false => IO.pure(Left(UseCaseError.account(AccountError.InvalidCredentials)))
         case true => token(credentials.user, now)
@@ -76,7 +72,7 @@ final class UserAccountService(
   override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
     users.find(actor.userId).map(_.filter(_.accountStatus == AccountStatus.Active).toRight(UseCaseError.authentication(AuthenticationError.Unauthorized)))
 
-  override def updateMyProfile(actor: ActorContext, input: AccountProfileInput): IO[Either[UseCaseError, User]] =
+  override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
     users.find(actor.userId).flatMap {
       case None => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
       case Some(user) if user.accountStatus != AccountStatus.Active => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
@@ -85,7 +81,7 @@ final class UserAccountService(
         if (!profileShapeValid(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
         else validateProfile(user.role, Some(input.profile)).fold(
           errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
-          _ => accounts.updateProfile(user.id, input.profile).map(_.leftMap(UseCaseError.repository))
+          _ => accounts.updateProfile(user.id, input.profile, now).map(_.leftMap(UseCaseError.repository))
         )
     }
 
@@ -106,12 +102,12 @@ final class UserAccountService(
     }
 
   private def token(user: User, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
-    IO(JwtActorAuthenticator.issue(jwt, user.id, now))
-      .map { case (value, expiresAt) => Right(user -> AccountToken(value, expiresAt)) }
-      .handleError(_ => Left(UseCaseError.repository(RepositoryError.Unavailable)))
+    tokenIssuer.issue(user, now)
+      .handleError(_ => Left(AccessTokenIssuanceError.Unavailable))
+      .map(_.leftMap(_ => UseCaseError.availability(AvailabilityError.ServiceNotReady)).map(user -> _))
 
   private def validateRegistration(input: SignUpInput): ValidatedNel[DomainValidationError, Unit] =
-    (validateName(input.name), validateCredentials(input.name, input.password), validateProfile(input.role, input.profile)).mapN((_, _, _) => ())
+    (validateCredentials(input.name, input.password), validateProfile(input.role, input.profile)).mapN((_, _) => ())
 
   private def validateCredentials(name: String, password: String): ValidatedNel[DomainValidationError, Unit] =
     (validateName(name), if (password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= 12) ().validNel else DomainValidationError.BlankField("password").invalidNel).mapN((_, _) => ())

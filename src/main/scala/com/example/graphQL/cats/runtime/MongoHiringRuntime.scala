@@ -10,8 +10,8 @@ import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountS
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.service.search.{EmbeddingPipeline, SemanticSearchService}
-import com.example.graphQL.cats.config.VectorSearchConfig
-import com.example.graphQL.cats.config.JwtAuthConfig
+import com.example.graphQL.cats.config.{JwtAuthConfig, PasswordHashConfig, VectorSearchConfig}
+import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
 import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
@@ -75,7 +75,8 @@ object MongoHiringRuntime {
       vectorSearch: VectorSearchConfig,
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
       jwtAuth: JwtAuthConfig,
-      resolverTimeout: FiniteDuration
+      resolverTimeout: FiniteDuration,
+      passwordHash: PasswordHashConfig = defaultPasswordHash
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
@@ -83,7 +84,7 @@ object MongoHiringRuntime {
       val jobs = new MongoJobRepository(database)
       val applications = MongoApplicationRepository.transactional(database, client)
       Resource.eval(IOLocal[Option[com.example.graphQL.cats.service.TraceContext]](None)).flatMap { traceLocal =>
-      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth, traceLocal, resolverTimeout).flatMap { services =>
+      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, traceLocal, resolverTimeout).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, vectorSearch)).map { setup =>
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
           MongoHiringRuntime(
@@ -106,12 +107,15 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
       diagnostics: Diagnostics,
       jwtAuth: JwtAuthConfig,
+      passwordHash: PasswordHashConfig,
       traceLocal: IOLocal[Option[com.example.graphQL.cats.service.TraceContext]],
       resolverTimeout: FiniteDuration
   ): Resource[IO, HiringGraphQLServices] =
+    val hasher = new Argon2PasswordHasher(passwordHash.iterations, passwordHash.memoryKilobytes, passwordHash.parallelism)
+    val tokenIssuer = new JwtAccessTokenIssuer(jwtAuth)
     if (!vectorSearch.enabled) {
       val readModel = BoundedHiringServices.readModel(HiringReadService[IO](users, jobs, applications), resolverTimeout)
-      val account = BoundedHiringServices.accounts(UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth), resolverTimeout)
+      val account = BoundedHiringServices.accounts(UserAccountService(users, users, hasher, tokenIssuer), resolverTimeout)
       val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
       Resource.pure(HiringGraphQLServices(
         TracedHiringServices.readModel(readModel, diagnostics, traceLocal),
@@ -140,7 +144,9 @@ object MongoHiringRuntime {
           vectorSearch.voyageModel,
           vectorSearch.embeddingVersion,
           vectorSearch.queueSize,
-          vectorSearch.parallelism
+          vectorSearch.parallelism,
+          vectorSearch.retryAttempts,
+          vectorSearch.retryDelayMillis.millis
         ).map { queue =>
           val jobService = BoundedHiringServices.jobs(JobService[IO](users, jobs, queue), resolverTimeout)
           val applicationService = BoundedHiringServices.applications(ApplicationService[IO](users, jobs, applications), resolverTimeout)
@@ -159,7 +165,7 @@ object MongoHiringRuntime {
             TracedHiringServices.jobs(jobService, diagnostics, traceLocal),
             TracedHiringServices.applications(applicationService, diagnostics, traceLocal),
             cursorCodec,
-            TracedHiringServices.accounts(BoundedHiringServices.accounts(UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth), resolverTimeout), diagnostics, traceLocal),
+            TracedHiringServices.accounts(BoundedHiringServices.accounts(UserAccountService(users, users, hasher, tokenIssuer), resolverTimeout), diagnostics, traceLocal),
             Some(TracedHiringServices.search(semanticSearch, diagnostics, traceLocal)),
             Some(traceLocal)
           )
@@ -188,6 +194,8 @@ object MongoHiringRuntime {
       queueSize = 128,
       parallelism = 4,
       timeoutMillis = 5000,
+      retryAttempts = 3,
+      retryDelayMillis = 250,
       jobVectorIndex = "jobs_embedding_vector",
       candidateVectorIndex = "candidates_embedding_vector",
       jobLexicalIndex = "jobs_text_search",
@@ -226,4 +234,6 @@ object MongoHiringRuntime {
       vectorSearch.indexReadyTimeoutMillis,
       vectorSearch.indexPollIntervalMillis
     )))
+
+  private val defaultPasswordHash = PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
 }

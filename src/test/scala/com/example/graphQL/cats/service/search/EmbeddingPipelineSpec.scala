@@ -31,7 +31,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         model = "voyage-4-lite",
         version = 1,
         queueSize = 8,
-        parallelism = 1
+        parallelism = 1,
+        retryAttempts = 3,
+        retryDelay = 10.millis
       ).use { queue =>
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
@@ -70,7 +72,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           model = "voyage-4-lite",
           version = 1,
           queueSize = 8,
-          parallelism = 1
+          parallelism = 1,
+          retryAttempts = 3,
+          retryDelay = 10.millis
         ).use { queue =>
           for {
             _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
@@ -84,6 +88,37 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         }
       } yield ()
     }
+  }
+
+  test("embedding pipeline retries a transient provider failure with bounded configured attempts") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      users = InMemoryUsers(usersRef)
+      jobs = InMemoryJobs(jobsRef)
+      embeddings = FailOnceEmbeddingService(calls)
+      _ <- EmbeddingPipeline.resource(
+        users,
+        jobs,
+        embeddings,
+        model = "voyage-4-lite",
+        version = 1,
+        queueSize = 8,
+        parallelism = 1,
+        retryAttempts = 2,
+        retryDelay = 10.millis
+      ).use { queue =>
+        for {
+          _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
+          updated <- eventually(jobs.find(jobId))(_.flatMap(_.embedding).nonEmpty)
+          attempts <- calls.get
+        } yield {
+          assert(updated.flatMap(_.embedding).nonEmpty)
+          assertEquals(attempts, 2)
+        }
+      }
+    } yield ()
   }
 
   test("VHS-AC05 embedding pipeline ignores stale in-flight job writes after version changes") {
@@ -105,7 +140,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         model = "voyage-4-lite",
         version = 1,
         queueSize = 8,
-        parallelism = 1
+        parallelism = 1,
+        retryAttempts = 3,
+        retryDelay = 10.millis
       ).use { queue =>
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
@@ -143,7 +180,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         model = "voyage-4-lite",
         version = 1,
         queueSize = 1,
-        parallelism = 1
+        parallelism = 1,
+        retryAttempts = 3,
+        retryDelay = 10.millis
       ).use { queue =>
         for {
           _ <- queue.publish(EmbeddingWork.JobChanged(jobId))
@@ -181,6 +220,14 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
   private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.update(_ + 1).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
+  }
+
+  private final case class FailOnceEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
+    override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+      calls.modify {
+        case 0 => 1 -> Left(EmbeddingError.ProviderUnavailable)
+        case count => (count + 1) -> Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))
+      }
   }
 
   private final case class BlockingEmbeddingService(

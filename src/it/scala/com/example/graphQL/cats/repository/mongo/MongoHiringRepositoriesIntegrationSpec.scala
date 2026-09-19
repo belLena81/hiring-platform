@@ -162,7 +162,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           _ <- PublisherBridge.first(migrations.insertOne(existingDomainMigration))
           _ <- PublisherBridge.first(database.getCollection("users").createIndex(
             Indexes.ascending("emailCanonical"),
-            new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true)
+            new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true).sparse(true)
           ))
           _ <- MongoHiringSetup.initialize(database)
           graphqlPerformanceMigrationAfterFirstRun <- PublisherBridge.first(migrations
@@ -245,6 +245,28 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(graphqlPerformanceMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringGraphQLSearchIndexMigrationId))
           assert(adminJobListingMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringAdminJobListingIndexMigrationId))
           assert(vectorSearchMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringVectorSearchMigrationId))
+        }
+      }
+    }
+  }
+
+  test("setup preserves an incompatible live email uniqueness index and fails closed") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_incompatible_email_index")
+        val users = database.getCollection("users")
+        for {
+          _ <- PublisherBridge.first(users.createIndex(
+            Indexes.ascending("emailCanonical"),
+            new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true)
+          ))
+          result <- MongoHiringSetup.initialize(database).attempt
+          indexesAfterFailure <- indexes(users)
+        } yield {
+          assert(result.left.toOption.exists(_.getMessage.contains("explicit cutover migration")))
+          assert(indexesAfterFailure.contains(MongoHiringSetup.UsersEmailIndex))
+          assert(indexesAfterFailure(MongoHiringSetup.UsersEmailIndex).getBoolean("unique", false))
+          assert(!indexesAfterFailure(MongoHiringSetup.UsersEmailIndex).getBoolean("sparse", false))
         }
       }
     }
@@ -750,6 +772,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
       queueSize = 16,
       parallelism = 1,
       timeoutMillis = 1000,
+      retryAttempts = 3,
+      retryDelayMillis = 250,
       jobVectorIndex = "jobs_embedding_vector",
       candidateVectorIndex = "candidates_embedding_vector",
       jobLexicalIndex = "jobs_text_search",

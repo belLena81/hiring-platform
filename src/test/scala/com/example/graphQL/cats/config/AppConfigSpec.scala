@@ -57,6 +57,8 @@ class AppConfigSpec extends FunSuite {
       |    queue-size = 128
       |    parallelism = 4
       |    timeout-ms = 5000
+      |    retry-attempts = 3
+      |    retry-delay-ms = 250
       |  }
       |  indexes {
       |    jobs = "jobs_embedding_vector"
@@ -80,6 +82,8 @@ class AppConfigSpec extends FunSuite {
       queueSize = 128,
       parallelism = 4,
       timeoutMillis = 5000,
+      retryAttempts = 3,
+      retryDelayMillis = 250,
       jobVectorIndex = "jobs_embedding_vector",
       candidateVectorIndex = "candidates_embedding_vector",
       jobLexicalIndex = "jobs_text_search",
@@ -89,6 +93,8 @@ class AppConfigSpec extends FunSuite {
     )
   private val defaultJwtAuth =
     JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
+  private val defaultPasswordHash =
+    PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
   private val defaultAuthRateLimit =
     AuthRateLimitConfig(windowSeconds = 60, attempts = 20, maxBuckets = 10000)
 
@@ -133,6 +139,8 @@ class AppConfigSpec extends FunSuite {
         |    queue-size = 128
         |    parallelism = 4
         |    timeout-ms = 5000
+        |    retry-attempts = 3
+        |    retry-delay-ms = 250
         |  }
         |  indexes {
         |    jobs = "jobs_embedding_vector"
@@ -151,6 +159,7 @@ class AppConfigSpec extends FunSuite {
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "hiring_test-2", maskSensitive = true,
       JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
+      defaultPasswordHash,
       AuthRateLimitConfig(30, 10, 500),
       defaultVectorSearch)))
   }
@@ -283,6 +292,8 @@ class AppConfigSpec extends FunSuite {
         |    queue-size = 128
         |    parallelism = 4
         |    timeout-ms = 5000
+        |    retry-attempts = 3
+        |    retry-delay-ms = 250
         |  }
         |  indexes {
         |    jobs = "jobs_embedding_vector"
@@ -377,7 +388,7 @@ class AppConfigSpec extends FunSuite {
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
       Right(AppConfig("127.0.0.1", 8080, 16, 5.seconds, 4.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
-        maskSensitive = false, defaultJwtAuth, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false))))
+        maskSensitive = false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false))))
   }
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
@@ -407,6 +418,24 @@ class AppConfigSpec extends FunSuite {
       ConfigError.InvalidAuthRateLimitAttempts)
     assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
       ConfigError.InvalidAuthRateLimitBuckets)
+  }
+
+  test("password hash cost is explicit and bounded") {
+    val passwordHash =
+      """auth.password-hash {
+        |  iterations = 3
+        |  memory-kib = 32768
+        |  parallelism = 2
+        |}
+        |""".stripMargin
+    val configured = AppConfig.fromConfig(defaultConfig + passwordHash, Map.empty)
+    assertEquals(configured.map(_.passwordHash), Right(PasswordHashConfig(3, 32768, 2)))
+    assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("iterations = 3", "iterations = 0"), Map.empty),
+      ConfigError.InvalidPasswordHashIterations)
+    assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("memory-kib = 32768", "memory-kib = 1"), Map.empty),
+      ConfigError.InvalidPasswordHashMemory)
+    assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("parallelism = 2", "parallelism = 0"), Map.empty),
+      ConfigError.InvalidPasswordHashParallelism)
   }
 
   test("resolver timeout is positive, bounded, and strictly below the request deadline") {

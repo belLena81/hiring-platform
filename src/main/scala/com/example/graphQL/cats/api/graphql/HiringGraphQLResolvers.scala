@@ -171,40 +171,46 @@ private[graphql] object HiringGraphQLResolvers {
 
   def signUp(context: Context[RequestContext, Unit]): IO[AccountPayload] = {
     val input = context.arg(signUpInputArgument)
-    signUpProfile(input).fold(
-      error => IO.pure(accountErrorPayload(error)),
-      profile => timestamped { (now, id) =>
-        context.ctx.hiring.accountService.signUp(
-          SignUpInput(input.name, input.role, input.password, profile),
-          now,
-          Identifiers.UserId(id)
-        )
-      }.map(result => accountPayload(result, signUpErrorPayload))
-    )
+    publicAccountPayload(errors => AccountPayload(None, None, None, errors))(context) { hiring =>
+      signUpProfile(input).fold(
+        error => IO.pure(accountErrorPayload(error)),
+        profile => timestamped { (now, id) =>
+          hiring.accountService.signUp(
+            SignUpInput(input.name, input.role, input.password, profile),
+            now,
+            Identifiers.UserId(id)
+          )
+        }.map(result => accountPayload(result, signUpErrorPayload))
+      )
+    }
   }
 
   def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[AccountPayload] =
     val input = context.arg(bootstrapAdminInputArgument)
-    timestamped { (now, id) =>
-      context.ctx.hiring.accountService.bootstrapAdmin(
-        BootstrapAdminInput(input.name, input.password),
-        now,
-        Identifiers.UserId(id)
-      )
-    }.map(result => accountPayload(result))
+    publicAccountPayload(errors => AccountPayload(None, None, None, errors))(context) { hiring =>
+      timestamped { (now, id) =>
+        hiring.accountService.bootstrapAdmin(
+          BootstrapAdminInput(input.name, input.password),
+          now,
+          Identifiers.UserId(id)
+        )
+      }.map(result => accountPayload(result))
+    }
 
   def login(context: Context[RequestContext, Unit]): IO[AccountPayload] =
     val input = context.arg(loginInputArgument)
-    IO.realTimeInstant.flatMap(now =>
-      context.ctx.hiring.accountService.login(LoginInput(input.name, input.password), now)
-    ).map(result => accountPayload(result))
+    publicAccountPayload(errors => AccountPayload(None, None, None, errors))(context) { hiring =>
+      IO.realTimeInstant.flatMap(now =>
+        hiring.accountService.login(LoginInput(input.name, input.password), now)
+      ).map(result => accountPayload(result))
+    }
 
   def updateMyProfile(context: Context[RequestContext, Unit]): IO[UserPayload] =
     authenticatedPayload(UserPayload(None, _))(context) { case (actor, hiring) =>
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
         error => IO.pure(UserPayload(None, List(toGraphQLError(error)))),
-        profile => hiring.accountService.updateMyProfile(actor, profile).map(userPayload)
+        profile => IO.realTimeInstant.flatMap(now => hiring.accountService.updateMyProfile(actor, profile, now)).map(userPayload)
       )
     }
 
@@ -282,6 +288,16 @@ private[graphql] object HiringGraphQLResolvers {
       action: (ActorContext, HiringGraphQLServices) => IO[A]
   ): IO[A] =
     authenticated(context).flatMap(_.fold(error => IO.pure(unauthenticated(List(toGraphQLError(error)))), action.tupled))
+
+  private def publicAccountPayload[A](
+      unavailable: List[GraphQLError] => A
+  )(context: Context[RequestContext, Unit])(
+      action: HiringGraphQLServices => IO[A]
+  ): IO[A] =
+    context.ctx.hiringAvailable.flatMap {
+      case ProbeResult.Ready => action(context.ctx.hiring)
+      case _ => IO.pure(unavailable(List(toGraphQLError(UseCaseError.availability(AvailabilityError.ServiceNotReady)))))
+    }
 
   private def page(
       first: Int,
@@ -516,6 +532,7 @@ private[graphql] object HiringGraphQLResolvers {
       case UseCaseError.Domain(DomainError.CandidateRequired) => GraphQLError("CANDIDATE_REQUIRED", "Candidate role required")
       case UseCaseError.Domain(DomainError.RecruiterRequired) => GraphQLError("RECRUITER_REQUIRED", "Recruiter role required")
       case UseCaseError.Domain(DomainError.InvalidJobTransition(_, _)) => GraphQLError("INVALID_JOB_TRANSITION", "Invalid job transition")
+      case UseCaseError.Domain(DomainError.InvalidInitialJobStatus(_)) => GraphQLError("INVALID_INITIAL_JOB_STATUS", "New jobs must be open")
       case UseCaseError.Domain(DomainError.InvalidStatusTransition(_, _)) => GraphQLError("INVALID_STATUS_TRANSITION", "Invalid application status transition")
       case UseCaseError.Domain(DomainError.RejectionFeedbackRequired) => GraphQLError("REJECTION_FEEDBACK_REQUIRED", "Rejection feedback is required")
       case UseCaseError.Domain(DomainError.DeclineReasonRequired) => GraphQLError("DECLINE_REASON_REQUIRED", "Decline reason is required")

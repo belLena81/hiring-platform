@@ -109,24 +109,21 @@ final class JobService[F[_]: Monad](
       now: Instant,
       jobId: JobId
   ): Either[UseCaseError, Job] =
-    if (input.status == JobStatus.Closed) UseCaseError.domain(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed)).asLeft
-    else {
-      Job
-        .validate(
-          jobId,
-          recruiterId,
-          input.title,
-          input.description,
-          input.requirements,
-          input.skills,
-          input.location,
-          input.status,
-          now,
-          now
-        )
-        .toEither
-        .widenUseCase
-    }
+    Job
+      .validate(
+        jobId,
+        recruiterId,
+        input.title,
+        input.description,
+        input.requirements,
+        input.skills,
+        input.location,
+        input.status,
+        now,
+        now
+      )
+      .toEither
+      .widenUseCase
 
   private def validateUpdatedJob(job: Job, input: UpdateJobInput, now: Instant): Either[UseCaseError, JobLifecycle.Update] =
     Job

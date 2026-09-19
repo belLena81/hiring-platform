@@ -56,7 +56,8 @@ private[runtime] object BoundedHiringServices {
     def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, id: UserId) = typed(timeout)(delegate.bootstrapAdmin(input, now, id))
     def login(input: LoginInput, now: Instant) = typed(timeout)(delegate.login(input, now))
     def me(actor: ActorContext) = typed(timeout)(delegate.me(actor))
-    def updateMyProfile(actor: ActorContext, input: AccountProfileInput) = typed(timeout)(delegate.updateMyProfile(actor, input))
+    def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant) =
+      typed(timeout)(delegate.updateMyProfile(actor, input, now))
     def deleteMyAccount(actor: ActorContext, now: Instant) = typed(timeout)(delegate.deleteMyAccount(actor, now))
     def listUsers(actor: ActorContext, page: UserPageRequest) = typed(timeout)(delegate.listUsers(actor, page))
   }

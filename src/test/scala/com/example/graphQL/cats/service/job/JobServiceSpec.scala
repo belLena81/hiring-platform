@@ -38,6 +38,24 @@ class JobServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("createJob rejects a Closed initial status through JobLifecycle") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      result <- service.createJob(
+        ActorContext(recruiterId, UserRole.Recruiter),
+        CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Closed),
+        now,
+        jobId
+      )
+      stored <- jobs.get
+    } yield {
+      assertEquals(result, Left(UseCaseError.domain(DomainError.InvalidInitialJobStatus(JobStatus.Closed))))
+      assertEquals(stored, Map.empty)
+    }
+  }
+
   test("VHS-AC05 createJob and updateJob enqueue embedding work only after successful writes") {
     val updatedInput = UpdateJobInput(
       "Updated role",

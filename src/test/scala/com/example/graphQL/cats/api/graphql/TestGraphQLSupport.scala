@@ -27,7 +27,7 @@ object TestGraphQLSupport {
     def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId) = unsupported
     def login(input: LoginInput, now: Instant) = unsupported
     def me(actor: ActorContext) = unsupported
-    def updateMyProfile(actor: ActorContext, input: AccountProfileInput) = unsupported
+    def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant) = unsupported
     def deleteMyAccount(actor: ActorContext, now: Instant) = unsupported
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }

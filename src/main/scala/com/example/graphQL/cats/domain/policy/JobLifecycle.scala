@@ -18,7 +18,10 @@ object JobLifecycle {
   type Transition = State[Job, Either[DomainError, Job]]
 
   def create(job: Job): Transition =
-    State(_ => (job, Right(job)))
+    State { _ =>
+      if (job.status == JobStatus.Closed) (job, Left(DomainError.InvalidInitialJobStatus(JobStatus.Closed)))
+      else (job, Right(job))
+    }
 
   def update(input: Update): Transition =
     State { job =>

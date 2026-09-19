@@ -11,6 +11,7 @@ enum DomainError {
   case Forbidden
   case NotFound(entity: String)
   case InvalidJobTransition(from: JobStatus, to: JobStatus)
+  case InvalidInitialJobStatus(status: JobStatus)
   case InvalidStatusTransition(from: ApplicationStatus, to: ApplicationStatus)
   case RejectionFeedbackRequired
   case DeclineReasonRequired

@@ -52,7 +52,8 @@ private[runtime] object TracedHiringServices {
     def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, id: UserId) = call(diagnostics, trace, "service.account.bootstrapAdmin", Map(LogField.EntityId -> id.value.toString))(delegate.bootstrapAdmin(input, now, id))
     def login(input: LoginInput, now: Instant) = call(diagnostics, trace, "service.account.login", Map.empty)(delegate.login(input, now))
     def me(actor: ActorContext) = call(diagnostics, trace, "service.account.me", Map(LogField.ActorId -> actor.userId.value.toString))(delegate.me(actor))
-    def updateMyProfile(actor: ActorContext, input: AccountProfileInput) = call(diagnostics, trace, "service.account.updateProfile", Map(LogField.ActorId -> actor.userId.value.toString))(delegate.updateMyProfile(actor, input))
+    def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant) =
+      call(diagnostics, trace, "service.account.updateProfile", Map(LogField.ActorId -> actor.userId.value.toString))(delegate.updateMyProfile(actor, input, now))
     def deleteMyAccount(actor: ActorContext, now: Instant) = call(diagnostics, trace, "service.account.delete", Map(LogField.ActorId -> actor.userId.value.toString))(delegate.deleteMyAccount(actor, now))
     def listUsers(actor: ActorContext, page: UserPageRequest) = call(diagnostics, trace, "service.account.list", Map(LogField.ActorId -> actor.userId.value.toString, LogField.Count -> page.pageSize.toString))(delegate.listUsers(actor, page))
   }

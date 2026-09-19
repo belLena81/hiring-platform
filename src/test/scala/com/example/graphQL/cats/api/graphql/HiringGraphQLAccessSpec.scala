@@ -75,6 +75,28 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("public account mutations are unavailable until hiring setup is ready") {
+    val signUp =
+      """mutation { signUp(input: { name: "Candidate", role: Candidate, password: "password-password", skills: ["Scala"] }) { errors { code } } }"""
+    val bootstrap =
+      """mutation { bootstrapAdmin(input: { name: "Admin", password: "password-password" }) { errors { code } } }"""
+    val login =
+      """mutation { login(input: { name: "Candidate", password: "password-password" }) { errors { code } } }"""
+    for {
+      calls <- Ref.of[IO, Int](0)
+      service = new PublicAccountService(calls)
+      results <- List(signUp, bootstrap, login).traverse(query =>
+        executeWithUsers(query, None, List(candidate, recruiter), service, hiringReady = IO.pure(ProbeResult.Unavailable)))
+      count <- calls.get
+    } yield {
+      results.zip(List("signUp", "bootstrapAdmin", "login")).foreach { case (json, field) =>
+        assertEquals(json.hcursor.downField("data").downField(field).downField("errors").downArray.get[String]("code"),
+          Right("SERVICE_NOT_READY"))
+      }
+      assertEquals(count, 0)
+    }
+  }
+
   test("application connection rejects a job cursor") {
     val cursor = TestGraphQLSupport.cursorCodec.jobCursorCodec
       .encode(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
@@ -816,7 +838,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       actor: Option[ActorContext],
       users: List[User],
       accountService: AccountUseCases[IO] = TestGraphQLSupport.accountService,
-      variables: Json = Json.obj()
+      variables: Json = Json.obj(),
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready)
   ): IO[Json] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
@@ -829,7 +852,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
       services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, accountService = accountService)
       request <- parseRequest(query, variables)
-      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services).use(HiringGraphQLSchema.executeInContext(request, _))
+      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services, hiringReady).use(HiringGraphQLSchema.executeInContext(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
   }
 
@@ -889,7 +912,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
       IO.pure(Left(unsupported))
 
-    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput): IO[Either[UseCaseError, User]] =
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
       updateCalls.update(_ + 1).as(Left(unsupported))
 
     override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
@@ -897,6 +920,24 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =
       IO.pure(Left(unsupported))
+  }
+
+  private final class PublicAccountService(calls: Ref[IO, Int]) extends AccountUseCases[IO] {
+    private val unavailable = Left(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady))
+
+    override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+      calls.update(_ + 1).as(unavailable)
+
+    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+      calls.update(_ + 1).as(unavailable)
+
+    override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
+      calls.update(_ + 1).as(unavailable)
+
+    override def me(actor: ActorContext): IO[Either[UseCaseError, User]] = IO.pure(unavailable)
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] = IO.pure(unavailable)
+    override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] = IO.pure(unavailable)
+    override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] = IO.pure(unavailable)
   }
 
   private object NameTakenAccountService extends AccountUseCases[IO] {
@@ -914,7 +955,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
       IO.pure(Left(unsupported))
 
-    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput): IO[Either[UseCaseError, User]] =
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
       IO.pure(Left(unsupported))
 
     override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =

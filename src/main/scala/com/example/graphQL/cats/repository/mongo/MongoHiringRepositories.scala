@@ -9,7 +9,7 @@ import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
-import com.mongodb.{MongoCommandException, MongoWriteException}
+import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts, Updates}
 import com.mongodb.client.result.InsertOneResult
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
@@ -46,36 +46,72 @@ private[mongo] trait MongoApplicationEventInsertion {
 }
 
 private[mongo] object MongoTransactionRunner {
+  private val MaxTransactionAttempts = 3
+  private val MaxCommitAttempts = 3
+
+  private enum CommitOutcome {
+    case Completed(result: Either[RepositoryError, Unit])
+    case RetryTransaction
+  }
+
   val noTransaction: MongoTransactionRunner =
     operation => operation(None)
 
   def sessions(client: MongoClient, duplicateKeyError: RepositoryError): MongoTransactionRunner =
-    operation =>
-      Resource.make(PublisherBridge.first(client.startSession()).flatMap {
-        case Some(session) => IO.pure(session)
-        case None => IO.raiseError(new IllegalStateException("Mongo startSession returned no session"))
-      })(session => IO.blocking(session.close())).use { session =>
+    operation => {
+      def withSession[A](use: ClientSession => IO[A]): IO[A] =
+        Resource.make(PublisherBridge.first(client.startSession()).flatMap {
+          case Some(session) => IO.pure(session)
+          case None => IO.raiseError(new IllegalStateException("Mongo startSession returned no session"))
+        })(session => IO.blocking(session.close())).use(use)
+
+      def abort(session: ClientSession): IO[Unit] =
+        PublisherBridge.first(session.abortTransaction()).attempt.void
+
+      def commit(session: ClientSession, attempt: Int): IO[CommitOutcome] =
+        PublisherBridge.first(session.commitTransaction()).as(CommitOutcome.Completed(Right(()))).handleErrorWith {
+          case error: MongoException if isUnknownCommitResult(error) && attempt < MaxCommitAttempts =>
+            commit(session, attempt + 1)
+          case error: MongoException if isTransientTransactionError(error) =>
+            abort(session).as(CommitOutcome.RetryTransaction)
+          case error => abort(session).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+        }
+
+      def run(attempt: Int): IO[Either[RepositoryError, Unit]] = withSession { session =>
         IO.delay(session.startTransaction()) *> operation(Some(session)).attempt.flatMap {
           case Left(error) =>
-            PublisherBridge.first(session.abortTransaction()).attempt.as(mapWrite(error, duplicateKeyError))
+            abort(session) *> (if (isTransientTransactionError(error) && attempt < MaxTransactionAttempts) run(attempt + 1)
+                               else IO.pure(mapWrite(error, duplicateKeyError)))
           case Right(Left(error)) =>
-            PublisherBridge.first(session.abortTransaction()).attempt.as(Left(error))
+            abort(session).as(Left(error))
           case Right(Right(())) =>
-            PublisherBridge.first(session.commitTransaction()).as(Right(())).handleErrorWith { error =>
-              PublisherBridge.first(session.abortTransaction()).attempt.as(mapWrite(error, duplicateKeyError))
+            commit(session, 1).flatMap {
+              case CommitOutcome.RetryTransaction if attempt < MaxTransactionAttempts => run(attempt + 1)
+              case CommitOutcome.RetryTransaction => IO.pure(Left(RepositoryError.Conflict))
+              case CommitOutcome.Completed(result) => IO.pure(result)
             }
         }
       }
+      run(1)
+    }
 
   private def mapWrite(error: Throwable, duplicateKeyError: RepositoryError): Either[RepositoryError, Unit] =
     error match {
       case write: MongoWriteException if write.getError.getCode == 11000 => Left(duplicateKeyError)
-      case command: MongoCommandException if isWriteConflict(command) => Left(RepositoryError.Conflict)
+      case mongo: MongoException if isTransientTransactionError(mongo) => Left(RepositoryError.Conflict)
       case _ => Left(RepositoryError.Unavailable)
     }
 
   private[mongo] def isWriteConflict(error: MongoCommandException): Boolean =
     error.getErrorCode == 112 || error.hasErrorLabel("TransientTransactionError")
+
+  private def isTransientTransactionError(error: Throwable): Boolean = error match {
+    case mongo: MongoException => mongo.hasErrorLabel("TransientTransactionError")
+    case _ => false
+  }
+
+  private def isUnknownCommitResult(error: MongoException): Boolean =
+    error.hasErrorLabel("UnknownTransactionCommitResult")
 }
 
 private[mongo] object MongoKeysetPaging {
@@ -177,14 +213,15 @@ final class MongoUserRepository(
 
   override def updateProfile(
       userId: UserId,
-      profile: UserProfile
+      profile: UserProfile,
+      now: Instant
   ): IO[Either[RepositoryError, User]] =
     PublisherBridge.first(collection.updateOne(
       Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString)),
       Updates.combine(
         Updates.set("profile", MongoHiringCodecs.profile(profile)),
         Updates.inc("version", 1L),
-        Updates.set("updatedAt", Date.from(Instant.now()))
+        Updates.set("updatedAt", Date.from(now))
       )
     )).flatMap {
       case Some(result) if result.getMatchedCount == 1L => find(userId).map(_.toRight(RepositoryError.Unavailable))

@@ -106,12 +106,13 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
           }
 
         accountOperation(parsed) match {
-          case Some(operation) =>
+          case AccountOperation.Single(operation) =>
             limited(operation).flatMap {
               case Left(response) => IO.pure(response)
               case Right(()) => authenticateAndExecute(request, requestId, mediaType, execute)
             }
-          case None => authenticateAndExecute(request, requestId, mediaType, execute)
+          case AccountOperation.Multiple => rejected(Rejection.InvalidQuery, requestId, mediaType = mediaType)
+          case AccountOperation.None => authenticateAndExecute(request, requestId, mediaType, execute)
         }
       }
       )
@@ -126,34 +127,49 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
       case Right(actor) => execute(actor)
     }
 
-  private def accountOperation(request: GraphQLRequest): Option[FixedWindowRateLimiter.Operation] =
-    def containsField(
-        selections: Vector[sangria.ast.Selection],
-        visited: Set[String],
-        name: String
-    ): Boolean =
-      selections.zipWithIndex.exists { case (selection, index) =>
-        val branchVisited = visited ++ selections.take(index).collect {
-          case spread: sangria.ast.FragmentSpread => spread.name
-        }
-        selection match {
-        case field: sangria.ast.Field => field.name == name
-        case spread: sangria.ast.FragmentSpread if !branchVisited(spread.name) =>
-          request.document.fragments.get(spread.name).exists { fragment =>
-            containsField(fragment.selections, branchVisited + spread.name, name)
+  private enum AccountOperation {
+    case None
+    case Single(operation: FixedWindowRateLimiter.Operation)
+    case Multiple
+  }
+
+  private object AccountOperation {
+    val byFieldName: Map[String, FixedWindowRateLimiter.Operation] = Map(
+      "signUp" -> FixedWindowRateLimiter.Operation.SignUp,
+      "login" -> FixedWindowRateLimiter.Operation.Login,
+      "bootstrapAdmin" -> FixedWindowRateLimiter.Operation.BootstrapAdmin
+    )
+  }
+
+  private def accountOperation(request: GraphQLRequest): AccountOperation = {
+    val operations = request.document.definitions.collect { case operation: sangria.ast.OperationDefinition => operation }
+    val selected = request.operationName match {
+      case Some(name) => operations.find(_.name.contains(name))
+      case None => Option.when(operations.size == 1)(operations.head)
+    }
+
+    def sensitiveFields(selections: Vector[sangria.ast.Selection], expanding: Set[String]): Vector[FixedWindowRateLimiter.Operation] =
+      selections.foldLeft(Vector.empty[FixedWindowRateLimiter.Operation]) { (found, selection) =>
+        if (found.size >= 2) found
+        else {
+          val next = selection match {
+            case field: sangria.ast.Field => AccountOperation.byFieldName.get(field.name).toVector
+            case inline: sangria.ast.InlineFragment => sensitiveFields(inline.selections, expanding)
+            case spread: sangria.ast.FragmentSpread if !expanding(spread.name) =>
+              request.document.fragments.get(spread.name).toVector.flatMap(fragment =>
+                sensitiveFields(fragment.selections, expanding + spread.name))
+            case _ => Vector.empty
           }
-        case inline: sangria.ast.InlineFragment => containsField(inline.selections, branchVisited, name)
-        case _ => false
+          (found ++ next).take(2)
         }
       }
-    def hasField(name: String): Boolean =
-      request.document.definitions.collect { case operation: sangria.ast.OperationDefinition => operation.selections }
-        .exists(containsField(_, Set.empty, name))
 
-    List(
-      "signUp" -> FixedWindowRateLimiter.Operation.SignUp,
-      "login" -> FixedWindowRateLimiter.Operation.Login
-    ).collectFirst { case (name, operation) if hasField(name) => operation }
+    selected.map(operation => sensitiveFields(operation.selections, Set.empty)) match {
+      case Some(Vector(operation)) => AccountOperation.Single(operation)
+      case Some(fields) if fields.size >= 2 => AccountOperation.Multiple
+      case _ => AccountOperation.None
+    }
+  }
 
   private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
       mediaType: MediaType = HiringApiRoutes.GraphQLResponseMediaType): IO[Response[IO]] = {

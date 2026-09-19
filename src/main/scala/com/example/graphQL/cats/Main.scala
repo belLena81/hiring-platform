@@ -25,7 +25,7 @@ object Main extends IOApp {
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
               (vector, apiKey) => new com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService(
                 apiKey, vector.voyageEndpoint, vector.voyageModel, vector.voyageDimension, vector.timeoutMillis), config.jwtAuth,
-              config.resolverTimeout)
+              config.resolverTimeout, config.passwordHash)
               .flatMap { runtime =>
                 for {
                   admission <- Admission.resource(config.admissionPermits)

@@ -875,7 +875,15 @@ Large differences indicate that the query/index combination should be investigat
 
 ---
 
-# 30. Final Modeling Rules
+# 30. Setup Migration Safety
+
+Mongo setup records an Atlas Search migration only after every configured index reaches `READY` and is queryable. Startup may update a compatible named Atlas index definition, but it never drops an index: a type change requires a new configured index name and an explicit expand/verify/cutover migration.
+
+User-document backfills use deterministic `_id` keyset batches of 100. Their updates are idempotent, so a restart safely re-scans completed records and resumes remaining work without retaining an entire collection in memory. Atlas provisioning readiness remains an environment-dependent integration check; local Mongo containers do not emulate it.
+
+The critical `users_emailCanonical_unique` index is also fail-closed: startup creates it only when absent and accepts only the expected sparse unique definition. It never drops or replaces an incompatible live uniqueness index; an operator must perform a separately verified cutover migration.
+
+# 31. Final Modeling Rules
 
 Use these rules when introducing new MongoDB data:
 
