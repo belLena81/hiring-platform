@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, RequestContext}
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import io.circe.Json
 import munit.CatsEffectSuite
@@ -17,16 +17,18 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
   private val probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
   private val service = new HealthService(probe, Diagnostics.noop)
 
+  private def parseRequest(query: String): IO[GraphQLRequest] =
+    IO.fromEither(Json.obj("query" -> Json.fromString(query)).as[GraphQLRequest]
+      .left.map(error => new IllegalArgumentException("Invalid test operation", error)))
+
   test("served SDL matches the deterministic contract fixture") {
     fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))
   }
 
   test("a closed request context causes a sanitized GraphQL field execution error") {
     for {
-      parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj(
-        "query" -> Json.fromString("{ readiness { status } }")
-      ).noSpaces))(new IllegalArgumentException("Invalid test operation"))
-      closed <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(IO.pure)
+      parsed <- parseRequest("{ readiness { status } }")
+      closed <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(IO.pure)
       result <- HiringGraphQLSchema.executeInContext(parsed, closed)
     } yield {
       val body = result.fold(failure => fail(failure.toString), identity)
@@ -43,10 +45,10 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
 
   test("malformed typed identifiers fail GraphQL coercion before resolver execution") {
     for {
-      parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj(
-        "query" -> Json.fromString("{ job(id: \"not-a-uuid\") { id } }")
-      ).noSpaces))(new IllegalArgumentException("Invalid test operation"))
-      result <- HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001")
+      parsed <- parseRequest("{ job(id: \"not-a-uuid\") { id } }")
+      result <- TestGraphQLSupport.dependencies().use(dependencies =>
+        HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001",
+          None, dependencies.hiring, dependencies.ensureHiringReady, dependencies.contextFactory))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 
@@ -54,9 +56,10 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     test(s"execute consumer fixture $name") {
       for {
         query <- fixture(name)
-        parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj("query" -> Json.fromString(query)).noSpaces))(
-          new IllegalArgumentException("Fixture exceeds request contract"))
-        result <- HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001")
+        parsed <- parseRequest(query)
+        result <- TestGraphQLSupport.dependencies().use(dependencies =>
+          HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001",
+            None, dependencies.hiring, dependencies.ensureHiringReady, dependencies.contextFactory))
       } yield {
         val json = result.fold(failure => fail(failure.toString), identity)
         assert(json.hcursor.downField("data").succeeded)

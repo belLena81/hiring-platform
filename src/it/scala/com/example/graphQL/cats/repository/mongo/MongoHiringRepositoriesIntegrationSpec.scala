@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService}
 import com.example.graphQL.cats.repository.protocol.{
@@ -562,8 +563,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
 
   test("served JWT GraphQL submit initializes Mongo setup before the first hiring write") {
     replicaSetContainer.use { uri =>
-      MongoHiringRuntime.resource(uri, "hiring_served_jwt", Diagnostics.noop).use { runtime =>
-        val jwt = JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api")
+      val jwt = JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
+      MongoHiringRuntime.resource(uri, "hiring_served_jwt", Diagnostics.noop, jwt).use { runtime =>
         val candidateUser = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
           Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)
         val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
@@ -577,14 +578,12 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             users.insert(candidateUser) *> users.insert(recruiterUser) *> jobs.create(jobFixture(jobId, JobStatus.Open)).void
           }
           authenticator = JwtActorAuthenticator(jwt, runtime.userAuthenticator, IO.pure(now))
-          http = HiringApiRoutes(
-            HealthService(runtime.probe, Diagnostics.noop),
-            Diagnostics.noop,
-            admission,
-            Some(runtime.services),
-            authenticator.authenticate,
-            runtime.ensureSetup
-          ).app
+          dependencies <- TestGraphQLSupport.dependencies(
+            runtime.services,
+            authenticator.authenticateDetailed,
+            runtime.ensureSetup.map(if (_) com.example.graphQL.cats.service.ProbeResult.Ready else com.example.graphQL.cats.service.ProbeResult.Unavailable)
+          ).allocated.map(_._1)
+          http = new HiringApiRoutes(HealthService(runtime.probe, Diagnostics.noop), Diagnostics.noop, admission, dependencies).app
           token = signedToken(candidateId, jwt)
           submit = s"""mutation {
                       |  submitApplication(input: { jobId: "${jobId.value}" }) {
@@ -618,8 +617,9 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
 
   test("enabled vector runtime fails readiness without Atlas indexes but wires semantic search and embedding jobs") {
     replicaSetContainer.use { uri =>
+      val jwt = JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
       MongoHiringRuntime.resource(uri, "hiring_vector_runtime", Diagnostics.noop, vectorConfig,
-        (config, _) => FakeEmbeddingService(config)).use { runtime =>
+        (config, _) => FakeEmbeddingService(config), jwt).use { runtime =>
         val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
           Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
         val create = CreateJobInput(
@@ -722,7 +722,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         "exp" -> Json.fromLong(now.plusSeconds(300).getEpochSecond),
         "role" -> Json.fromString("Admin")
       ),
-      jwt.hmacSecret.getOrElse(fail("Missing JWT test secret"))
+      jwt.hmacSecret
     )
 
   private def assertIndex(

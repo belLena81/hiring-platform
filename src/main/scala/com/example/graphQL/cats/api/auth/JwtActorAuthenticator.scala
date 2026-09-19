@@ -1,11 +1,11 @@
 package com.example.graphQL.cats.api.auth
 
-import cats.effect.IO
+import cats.effect.{Clock as EffectClock, IO}
 import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import java.time.{Clock, Instant, ZoneOffset}
+import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import org.http4s.Request
 import org.http4s.{AuthScheme, Credentials}
 import org.http4s.headers.Authorization
@@ -13,40 +13,43 @@ import org.typelevel.ci.CIString
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
 import io.circe.Json
 import scala.util.Try
+import scala.concurrent.duration.*
 
 enum AuthFailure {
-  case MalformedCredentials, InvalidToken, UnknownActor
+  case MalformedCredentials, InvalidToken, UnknownActor, InvalidConfiguration
 }
 
-final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]) {
-  def authenticate(request: Request[IO]): IO[Option[ActorContext]] =
-    authenticateDetailed(request).map(_.toOption.flatten)
+final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
+  def this(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]) =
+    this(config, users, new EffectClock[IO] {
+      override val applicative: cats.Applicative[IO] = cats.effect.IO.asyncForIO
+      override def realTime: IO[FiniteDuration] = now.map(_.toEpochMilli.millis)
+      override def monotonic: IO[FiniteDuration] = IO.monotonic
+    })
 
   def authenticateDetailed(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
     bearerToken(request) match {
       case Right(None) => IO.pure(Right(None))
       case Left(failure) => IO.pure(Left(failure))
-      case Right(Some(token)) => config.hmacSecret match {
-        case None => IO.pure(Right(None))
-        case Some(secret) =>
-          JwtActorAuthenticator.verify(token, secret, config.issuer, config.audience, now).flatMap {
-            case None => IO.pure(Left(AuthFailure.InvalidToken))
-            case Some(userId) => users.actorFor(userId).map {
-              case Some(actor) => Right(Some(actor))
-              case None => Left(AuthFailure.UnknownActor)
-            }
+      case Right(Some(token)) =>
+        JwtActorAuthenticator.verify(token, config.hmacSecret, config.issuer, config.audience, clock).flatMap {
+          case None => IO.pure(Left(AuthFailure.InvalidToken))
+          case Some(userId) => users.actorFor(userId).map {
+            case Some(actor) => Right(Some(actor))
+            case None => Left(AuthFailure.UnknownActor)
           }
-      }
+        }
     }
 
   private def bearerToken(request: Request[IO]): Either[AuthFailure, Option[String]] =
-    request.headers.get(CIString("Authorization")).map(_.toList) match {
-      case Some(values) if values.size != 1 => Left(AuthFailure.MalformedCredentials)
-      case _ => request.headers.get[Authorization] match {
-      case None => Right(None)
-      case Some(Authorization(Credentials.Token(AuthScheme.Bearer, token))) if token.nonEmpty => Right(Some(token))
-      case Some(_) => Left(AuthFailure.MalformedCredentials)
-      }
+    request.headers.headers.filter(_.name == CIString("Authorization")) match {
+      case Nil => Right(None)
+      case _ :: _ :: _ => Left(AuthFailure.MalformedCredentials)
+      case header :: Nil =>
+        Authorization.parse(header.value).toOption match {
+          case Some(Authorization(Credentials.Token(AuthScheme.Bearer, token))) if token.nonEmpty => Right(Some(token))
+          case _ => Left(AuthFailure.MalformedCredentials)
+        }
     }
 }
 
@@ -54,33 +57,35 @@ object JwtActorAuthenticator {
   private val Algorithms = Seq(JwtAlgorithm.HS256)
   private val Options = JwtOptions(signature = true, expiration = true, notBefore = true, leeway = 0)
 
+  def apply(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]): JwtActorAuthenticator =
+    new JwtActorAuthenticator(config, users, clock)
+
   def apply(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]): JwtActorAuthenticator =
     new JwtActorAuthenticator(config, users, now)
 
-  def issue(config: JwtAuthConfig, userId: UserId, now: Instant): Option[(String, Instant)] =
-    config.hmacSecret.map { secret =>
-      val expiresAt = now.plusSeconds(config.accessTokenSeconds)
-      val token = JwtCirce.encode(
-        Json.obj("alg" -> Json.fromString("HS256")),
-        Json.obj(
-          "sub" -> Json.fromString(userId.value.toString),
-          "iss" -> Json.fromString(config.issuer),
-          "aud" -> Json.fromString(config.audience),
-          "iat" -> Json.fromLong(now.getEpochSecond),
-          "exp" -> Json.fromLong(expiresAt.getEpochSecond)
-        ),
-        secret
-      )
-      token -> expiresAt
-    }
+  def issue(config: JwtAuthConfig, userId: UserId, now: Instant): (String, Instant) = {
+    val expiresAt = now.plusSeconds(config.accessTokenSeconds)
+    val token = JwtCirce.encode(
+      Json.obj("alg" -> Json.fromString(Algorithm)),
+      Json.obj(
+        "sub" -> Json.fromString(userId.value.toString),
+        "iss" -> Json.fromString(config.issuer),
+        "aud" -> Json.fromString(config.audience),
+        "iat" -> Json.fromLong(now.getEpochSecond),
+        "exp" -> Json.fromLong(expiresAt.getEpochSecond)
+      ),
+      config.hmacSecret
+    )
+    token -> expiresAt
+  }
 
-  def verify(token: String, secret: String, issuer: String, audience: String, now: IO[Instant]): IO[Option[UserId]] =
-    now.map { instant =>
-      verifyAt(token, secret, issuer, audience, instant)
-    }
+  def verify(token: String, secret: String, issuer: String, audience: String, clock: EffectClock[IO]): IO[Option[UserId]] =
+    clock.realTimeInstant.map(instant => verifyAt(token, secret, issuer, audience, instant))
+
+  private val Algorithm = "HS256"
 
   private[auth] def verifyAt(token: String, secret: String, issuer: String, audience: String, now: Instant): Option[UserId] =
-    given clock: Clock = Clock.fixed(now, ZoneOffset.UTC)
+    given clock: JavaClock = JavaClock.fixed(now, ZoneOffset.UTC)
 
     JwtCirce(clock)
       .decode(token, secret, Algorithms, Options)

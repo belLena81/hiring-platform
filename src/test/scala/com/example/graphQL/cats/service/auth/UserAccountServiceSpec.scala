@@ -24,7 +24,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("ordinary signup cannot create an Admin") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.signUp(SignUpInput("Admin", UserRole.Admin, "password-password", None), now, userId)
     } yield assertEquals(result, Left(UseCaseError.account(AccountError.AdminSignupForbidden)))
   }
@@ -32,7 +32,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("signup rejects a profile belonging to another role") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.signUp(SignUpInput(
         "Candidate",
         UserRole.Candidate,
@@ -45,7 +45,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("candidate and recruiter signup require their matching profile") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       candidate <- service.signUp(SignUpInput("Candidate", UserRole.Candidate, "password-password", None), now, userId)
       recruiter <- service.signUp(SignUpInput("Recruiter", UserRole.Recruiter, "password-password", None), now, recruiterId)
     } yield {
@@ -54,10 +54,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("signup does not persist when JWT issuance is disabled") {
+  test("signup persists account and returns an access token") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(None, "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.signUp(
         SignUpInput("Candidate", UserRole.Candidate, "password-password",
           Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))),
@@ -66,15 +66,15 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       )
       stored <- accounts.values.get
     } yield {
-      assertEquals(result, Left(UseCaseError.repository(RepositoryError.Unavailable)))
-      assertEquals(stored, Map.empty)
+      assert(result.exists(_._2.value.nonEmpty))
+      assertEquals(stored.size, 1)
     }
   }
 
   test("profile update rejects non-applicable role fields before persistence") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(recruiter.id -> recruiter)), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map(recruiter.id -> recruiter)), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.updateMyProfile(
         ActorContext(recruiter.id, UserRole.Recruiter),
         AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
@@ -85,7 +85,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("profile update rejects the profile-less Admin role") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(admin.id -> admin)), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map(admin.id -> admin)), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.updateMyProfile(
         ActorContext(admin.id, UserRole.Admin),
         AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
@@ -96,7 +96,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("valid recruiter signup remains supported") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.signUp(SignUpInput(
         "Recruiter",
         UserRole.Recruiter,
@@ -109,7 +109,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("signup maps a canonical-name conflict to NameTaken") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       first <- service.signUp(SignUpInput(
         "Candidate Name",
         UserRole.Candidate,
@@ -131,7 +131,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("deleting an already deleted account is idempotent") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)), accounts, TestHasher, JwtAuthConfig(Some("secret"), "issuer", "audience"))
+      service = new UserAccountService(new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)), accounts, TestHasher, JwtAuthConfig("secret", "issuer", "audience"))
       result <- service.deleteMyAccount(ActorContext(deletedRecruiter.id, UserRole.Recruiter), now)
     } yield assertEquals(result, Right(()))
   }

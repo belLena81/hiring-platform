@@ -29,6 +29,13 @@ final class HiringReadService[F[_]: Monad](
       case Left(_) => false
     }
 
+  override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): F[Set[UserId]] =
+    authorization.resolve(actor).map {
+      case Right(viewer) if viewer.role == UserRole.Admin && viewer.adminSingleton => userIds.toSet
+      case Right(viewer) => userIds.filter(_ == viewer.id).toSet
+      case Left(_) => Set.empty
+    }
+
   override def job(id: JobId): F[Option[Job]] =
     jobs.find(id)
 

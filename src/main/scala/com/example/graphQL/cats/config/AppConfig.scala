@@ -30,6 +30,9 @@ enum ConfigError(val key: String) {
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
+  case InvalidAuthRateLimitWindow extends ConfigError("AUTH_RATE_LIMIT_WINDOW_SECONDS")
+  case InvalidAuthRateLimitAttempts extends ConfigError("AUTH_RATE_LIMIT_ATTEMPTS")
+  case InvalidAuthRateLimitBuckets extends ConfigError("AUTH_RATE_LIMIT_BUCKETS")
   case InvalidVectorSearchEnabled extends ConfigError("VECTOR_SEARCH_ENABLED")
   case InvalidVoyageApiKey extends ConfigError("VOYAGE_API_KEY")
   case InvalidVoyageEndpoint extends ConfigError("VOYAGE_ENDPOINT")
@@ -52,7 +55,8 @@ final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[Strin
     timeoutMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
     indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
 
-final case class JwtAuthConfig(hmacSecret: Option[String], issuer: String, audience: String, accessTokenSeconds: Long = 900L)
+final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: String, accessTokenSeconds: Long = 900L)
+final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 
 type Port = Int :| Interval.Closed[1, 65535]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]
@@ -66,7 +70,8 @@ type TimeoutMs = Int :| Interval.Closed[100, 60000]
 type HttpsUrl = String :| StartWith["https://"]
 
 final case class AppConfig(host: String, port: Int, admissionPermits: Int, mongoUri: String, mongoDatabase: String,
-    maskSensitive: Boolean, jwtAuth: JwtAuthConfig, vectorSearch: VectorSearchConfig) {
+    maskSensitive: Boolean, jwtAuth: JwtAuthConfig, authRateLimit: AuthRateLimitConfig,
+    vectorSearch: VectorSearchConfig) {
   override def toString: String = "AppConfig([REDACTED])"
 }
 
@@ -99,11 +104,15 @@ object AppConfig {
 
     (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
       validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
-      validVoyageApiKey(vector.enabled, voyage.apiKey), validIndexReadyTimeout(vector.indexes.readyTimeoutMs),
-      validIndexPollInterval(vector.indexes.pollIntervalMs), validNumCandidates(vector.numCandidates)).mapN {
-      (host, port, permits, uri, database, secret, apiKey, readyTimeout, pollInterval, numCandidates) =>
+      validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds), validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
+      validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets), validVoyageApiKey(vector.enabled, voyage.apiKey),
+      validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
+      validNumCandidates(vector.numCandidates)).mapN {
+      (host, port, permits, uri, database, secret, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
+          pollInterval, numCandidates) =>
         new AppConfig(host, port, permits, uri, database, raw.logging.maskSensitive,
           JwtAuthConfig(secret, jwt.issuer, jwt.audience),
+          AuthRateLimitConfig(windowSeconds, attempts, maxBuckets),
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
             embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs,
             indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, pollInterval, numCandidates))
@@ -119,10 +128,16 @@ object AppConfig {
     Either.cond(value.nonEmpty && value.getBytes(StandardCharsets.UTF_8).length < 64 &&
       !value.exists(c => c.isWhitespace || c.isControl || "/\\.\"$*<>:|?".contains(c)), value,
       ConfigError.InvalidMongoDatabase).toValidatedNel
-  private def validJwtSecret(value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
-    value.filter(_ != "disabled").fold(Option.empty[String].validNel[ConfigError]) { secret =>
-      Either.cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, Some(secret), ConfigError.InvalidJwtSecret).toValidatedNel
+  private def validJwtSecret(value: Option[String]): ValidatedNel[ConfigError, String] =
+    value.filter(_ != "disabled").filter(_.trim.nonEmpty).fold(ConfigError.InvalidJwtSecret.invalidNel[String]) { secret =>
+      Either.cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, secret, ConfigError.InvalidJwtSecret).toValidatedNel
     }
+  private def validAuthRateLimitWindow(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 3600, value, ConfigError.InvalidAuthRateLimitWindow).toValidatedNel
+  private def validAuthRateLimitAttempts(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 1000, value, ConfigError.InvalidAuthRateLimitAttempts).toValidatedNel
+  private def validAuthRateLimitBuckets(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 100000, value, ConfigError.InvalidAuthRateLimitBuckets).toValidatedNel
   private def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
     val normalized = value.filter(_ != "disabled")
     Either.cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey).toValidatedNel
@@ -156,6 +171,9 @@ object AppConfig {
     case "auth.jwt.hs256-secret" => Some(ConfigError.InvalidJwtSecret)
     case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
     case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
+    case "auth.rate-limit.window-seconds" => Some(ConfigError.InvalidAuthRateLimitWindow)
+    case "auth.rate-limit.attempts" => Some(ConfigError.InvalidAuthRateLimitAttempts)
+    case "auth.rate-limit.max-buckets" => Some(ConfigError.InvalidAuthRateLimitBuckets)
     case "vector-search.enabled" => Some(ConfigError.InvalidVectorSearchEnabled)
     case "vector-search.voyage.api-key" => Some(ConfigError.InvalidVoyageApiKey)
     case "vector-search.voyage.endpoint" => Some(ConfigError.InvalidVoyageEndpoint)
@@ -180,8 +198,9 @@ object AppConfig {
   private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits) derives ConfigReader
   private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
-  private final case class RawAuthConfig(jwt: RawJwtAuthConfig) derives ConfigReader
+  private final case class RawAuthConfig(jwt: RawJwtAuthConfig, rateLimit: RawAuthRateLimitConfig) derives ConfigReader
   private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: NonBlank128, audience: NonBlank128)
+  private final case class RawAuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int) derives ConfigReader
   private final case class RawVectorSearchConfig(enabled: Boolean, voyage: RawVoyageConfig, embedding: RawEmbeddingConfig,
       indexes: RawVectorIndexesConfig, numCandidates: Int) derives ConfigReader
   private final case class RawVoyageConfig(apiKey: Option[String], endpoint: HttpsUrl, model: NonBlankStr,

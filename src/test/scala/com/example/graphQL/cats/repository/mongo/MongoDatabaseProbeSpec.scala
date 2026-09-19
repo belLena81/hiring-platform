@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
+import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
 import io.circe.Json
@@ -25,7 +26,8 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
         _ <- MongoDatabaseProbe.resource(s"mongodb://127.0.0.1:${socket.getLocalPort}", "foundation", sink).use { probe =>
           for {
             admission <- Admission.create(16)
-            http = new HiringApiRoutes(new HealthService(probe, sink), sink, admission).app
+            dependencies <- TestGraphQLSupport.dependencies().allocated.map(_._1)
+            http = new HiringApiRoutes(new HealthService(probe, sink), sink, admission, dependencies).app
             measured <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready"))).timed
             (elapsed, response) = measured
             body <- response.as[Json]

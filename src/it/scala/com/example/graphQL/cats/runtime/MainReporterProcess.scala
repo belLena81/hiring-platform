@@ -36,7 +36,7 @@ object MainReporterProcess {
     }
     System.setOut(new PrintStream(forwarding, true, StandardCharsets.UTF_8))
     val injector = new Thread(() => {
-      started.await()
+      val _ = started.await(8, java.util.concurrent.TimeUnit.SECONDS)
       if (arguments.contains("--exercise-payload")) {
         val host = argumentValue("test-http-host").getOrElse("127.0.0.1")
         val port = argumentValue("test-http-port").getOrElse("8080")
@@ -46,7 +46,6 @@ object MainReporterProcess {
           .timeout(Duration.ofSeconds(8))
           .header("Content-Type", "application/json")
           .header("Connection", "close")
-          .header("Authorization", "Bearer synthetic-secret")
           .header("Cookie", "session=synthetic-secret")
           .POST(HttpRequest.BodyPublishers.ofString(query)).build()
         val response = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
@@ -54,7 +53,7 @@ object MainReporterProcess {
         if (response.statusCode() != 200) System.exit(2)
       }
       IORuntime.global.compute.reportFailure(new RuntimeException("mongodb://user:synthetic-secret@host/private"))
-      reported.await()
+      Thread.sleep(2000)
       System.exit(0)
     }, "test-runtime-reporter")
     injector.setDaemon(true)

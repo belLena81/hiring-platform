@@ -32,12 +32,12 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   test("valid signed bearer token authenticates the user role stored in Mongo-backed users") {
     val token = signedToken(candidateId, Json.obj("role" -> Json.fromString("Admin")))
     val authenticator = new JwtActorAuthenticator(
-      JwtAuthConfig(Some(secret), issuer, audience),
+      JwtAuthConfig(secret, issuer, audience),
       users(Map(candidateId -> recruiter)),
       IO.pure(now)
     )
-    authenticator.authenticate(request(Some(token))).map { actor =>
-      assertEquals(actor, Some(ActorContext(candidateId, UserRole.Recruiter)))
+    authenticator.authenticateDetailed(request(Some(token))).map { actor =>
+      assertEquals(actor, Right(Some(ActorContext(candidateId, UserRole.Recruiter))))
     }
   }
 
@@ -57,17 +57,24 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
       Some(signedToken(candidateId, Json.obj("sub" -> Json.fromString("not-a-uuid"))))
     )
     val authenticator = new JwtActorAuthenticator(
-      JwtAuthConfig(Some(secret), issuer, audience),
+      JwtAuthConfig(secret, issuer, audience),
       users(Map(candidateId -> candidate)),
       IO.pure(now)
     )
-    invalidTokens.traverse(token => authenticator.authenticate(request(token)).map(assertEquals(_, None)))
+    invalidTokens.traverse { token =>
+      authenticator.authenticateDetailed(request(token)).map { result =>
+        token match {
+          case None => assertEquals(result, Right(None))
+          case Some(_) => assert(result.isLeft, clues(result))
+        }
+      }
+    }
   }
 
   test("multiple Authorization headers do not authenticate") {
     val token = signedToken(candidateId)
     val authenticator = new JwtActorAuthenticator(
-      JwtAuthConfig(Some(secret), issuer, audience),
+      JwtAuthConfig(secret, issuer, audience),
       users(Map(candidateId -> candidate)),
       IO.pure(now)
     )
@@ -75,20 +82,13 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
       Header.Raw(CIString("Authorization"), s"Bearer $token"),
       Header.Raw(CIString("Authorization"), s"Bearer $token")
     )
-    authenticator.authenticate(duplicated).map(assertEquals(_, None))
+    authenticator.authenticateDetailed(duplicated).map(assertEquals(_, Left(AuthFailure.MalformedCredentials)))
   }
 
-  test("disabled auth and unknown users remain unauthenticated") {
+  test("unknown users remain unauthenticated") {
     val token = signedToken(candidateId)
-    val enabled = new JwtActorAuthenticator(JwtAuthConfig(Some(secret), issuer, audience), users(Map.empty), IO.pure(now))
-    val disabled = new JwtActorAuthenticator(JwtAuthConfig(None, issuer, audience), users(Map(candidateId -> candidate)), IO.pure(now))
-    for {
-      missing <- enabled.authenticate(request(Some(token)))
-      inactive <- disabled.authenticate(request(Some(token)))
-    } yield {
-      assertEquals(missing, None)
-      assertEquals(inactive, None)
-    }
+    val enabled = new JwtActorAuthenticator(JwtAuthConfig(secret, issuer, audience), users(Map.empty), IO.pure(now))
+    enabled.authenticateDetailed(request(Some(token))).map(assertEquals(_, Left(AuthFailure.UnknownActor)))
   }
 
   private def request(token: Option[String]): Request[IO] =

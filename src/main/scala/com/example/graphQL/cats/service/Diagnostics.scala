@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service
 
-import cats.effect.IO
+import cats.effect.{IO, IOLocal}
 import cats.syntax.all.*
 
 enum LogLevel {
@@ -175,6 +175,13 @@ object Diagnostics {
   /** A boundary without an inbound request context (for example a repository adapter). */
   def operation[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty)(action: IO[A]): IO[A] =
     IO.randomUUID.map(_.toString).flatMap(root => TraceContext.root(root).flatMap(span(diagnostics, _, name, fields)(action)))
+
+  def operation[A](diagnostics: Diagnostics, local: IOLocal[Option[TraceContext]], name: String,
+      fields: Map[LogField, String])(action: IO[A]): IO[A] =
+    local.get.flatMap {
+      case Some(context) => span(diagnostics, context, name, fields)(action)
+      case None => operation(diagnostics, name, fields)(action)
+    }
 }
 
 final case class TraceContext private (

@@ -1,10 +1,11 @@
 package com.example.graphQL.cats
 
 import cats.effect.{ExitCode, IO, IOApp}
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
+import scala.concurrent.duration.*
 
 object Main extends IOApp {
   override protected def reportFailure(error: Throwable): IO[Unit] =
@@ -28,10 +29,12 @@ object Main extends IOApp {
                 runtime.probe,
                 diagnostics,
                 config.admissionPermits,
-                Some(runtime.services),
-                Some(config.jwtAuth),
-                Some(runtime.userAuthenticator),
-                runtime.ensureSetup
+                runtime.services,
+                config.jwtAuth,
+                config.authRateLimit,
+                runtime.userAuthenticator,
+                runtime.ensureSetup.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable),
+                5.seconds
               ))
               .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
                 LogField.HttpHost -> config.host,

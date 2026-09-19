@@ -43,6 +43,16 @@ Prefer one evolving GraphQL schema over automatically introducing `/v1` and `/v2
 - For unavoidable breaking changes, document the consumer migration and compatibility window or a coordinated cutover; use explicit versioned alternatives only when justified. Keep cursor readers compatible across that window or explicitly version and validate cursors without bypassing ownership checks.
 - A schema diff alone is insufficient. Run representative old operations against the new schema with variables and relevant errors/permissions. Validate expected response semantics and query counts; keep old persisted data compatible with the application serving those requests.
 
+### Hiring GraphQL typed IDs and signed cursor cutover
+
+The current Hiring GraphQL contract intentionally uses typed scalar IDs for jobs and applications in both inputs and outputs: `Job.id` is `JobID!` and `Application.id` is `ApplicationID!`. Clients that treated these output fields as plain `ID` should refresh generated types from the served SDL before this change is released.
+
+Pagination cursors are signed v2 values. A cursor contains the cursor version, connection kind, pagination key, and an HMAC-SHA256 signature derived from the configured JWT HS256 secret with a cursor-specific derivation label. The server validates the signature before decoding payload fields. Valid signed cursors for the wrong connection return `WRONG_CURSOR_KIND`; malformed, tampered, unsigned, missing-version, or old-version cursors return `INVALID_CURSOR`.
+
+This is a coordinated breaking security change: old unsigned cursors are not accepted. Consumers must discard stored pagination cursors and restart pagination from the first page after deploying against this contract. Runtime configuration must provide a valid `AUTH_JWT_HS256_SECRET`; `disabled`, missing, blank, or short values fail configuration validation.
+
+Login and signup now pass through a configured process-local fixed-window limiter keyed by remote address and operation. Consumers should treat HTTP 429 with `Retry-After` as a transport-level retry signal for account operations. Public signup no longer exposes canonical-name collisions as `NAME_TAKEN`; unauthenticated registration collisions return generic `REGISTRATION_FAILED` to avoid account enumeration.
+
 ## Events and analytical schemas
 
 Events remain immutable facts with envelope versions. Define producer/consumer compatibility, defaults and unknown-version handling; never silently reinterpret historical payloads. Test old fixtures with new readers and supported new payloads with old readers where the rollout requires it. Keep upcasting/normalization pure and versioned, preserve replay input, and quarantine unsupported records with a bounded recovery path.

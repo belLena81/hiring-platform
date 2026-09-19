@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import com.example.graphQL.cats.api.graphql.RequestContext
 import com.example.graphQL.cats.service.ProbeResult
 import munit.CatsEffectSuite
 
@@ -14,7 +13,7 @@ final class RequestContextSpec extends CatsEffectSuite {
       finalizing <- Deferred[IO, Unit]
       finishFinalizer <- Deferred[IO, Unit]
       released <- Deferred[IO, Unit]
-      _ <- Resource.make(RequestContext.resource((entered.complete(()) *> IO.never[ProbeResult])
+      _ <- Resource.make(TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
         .onCancel(finalizing.complete(()) *> finishFinalizer.get)).allocated) {
         case (_, release) => finishFinalizer.complete(()).void *> release
       }.use { case (context, release) =>
@@ -44,7 +43,7 @@ final class RequestContextSpec extends CatsEffectSuite {
     for {
       entered <- Deferred[IO, Unit]
       released <- Deferred[IO, Unit]
-      _ <- Resource.make(RequestContext.resource((entered.complete(()) *> IO.never[ProbeResult])
+      _ <- Resource.make(TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
         .onCancel(released.complete(()).void)).allocated)(_._2).use { case (context, release) =>
         for {
           _ <- IO(context.readiness)
@@ -60,7 +59,7 @@ final class RequestContextSpec extends CatsEffectSuite {
   test("memoization executes the request probe once across concurrent aliases") {
     for {
       count <- Ref.of[IO, Int](0)
-      results <- RequestContext.resource(count.update(_ + 1).as(ProbeResult.Ready)).use { context =>
+      results <- TestGraphQLSupport.context(count.update(_ + 1).as(ProbeResult.Ready)).use { context =>
         for {
           first <- IO(context.readiness)
           second <- IO(context.readiness)

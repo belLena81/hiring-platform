@@ -1,5 +1,5 @@
 type Application {
-  id: ID!
+  id: ApplicationID!
   status: ApplicationStatus!
   createdAt: Instant!
   updatedAt: Instant!
@@ -109,7 +109,7 @@ enum HealthStatus {
 scalar Instant
 
 type Job {
-  id: ID!
+  id: JobID!
   title: String!
   description: String!
   requirements: [String!]!

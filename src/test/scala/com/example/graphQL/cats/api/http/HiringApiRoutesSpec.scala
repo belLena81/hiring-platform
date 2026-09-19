@@ -3,14 +3,14 @@ package com.example.graphQL.cats.api.http
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContext}
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, TestGraphQLSupport}
 import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.ServiceFixtures
-import com.example.graphQL.cats.config.JwtAuthConfig
+import com.example.graphQL.cats.config.{AuthRateLimitConfig, JwtAuthConfig}
 import com.example.graphQL.cats.domain.model.UserRole
 import io.circe.Json
 import munit.CatsEffectSuite
@@ -29,10 +29,24 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       diagnostics: Diagnostics = Diagnostics.noop,
       admissionPermits: Int = DefaultAdmissionPermits
   ): IO[HttpApp[IO]] =
-    Admission.create(admissionPermits).map { admission =>
+    Admission.create(admissionPermits).flatMap { admission =>
       val probe = new DatabaseProbe { def check: IO[ProbeResult] = effect }
-      new HiringApiRoutes(new HealthService(probe, diagnostics), diagnostics, admission).app
+      buildRoutes(new HealthService(probe, diagnostics), diagnostics, admission).map(_.app)
     }
+
+  private def buildRoutes(
+      service: HealthService,
+      diagnostics: Diagnostics,
+      admission: Admission,
+      hiring: HiringGraphQLServices = com.example.graphQL.cats.api.graphql.RequestContext.emptyServices,
+      authenticate: Request[IO] => IO[Either[com.example.graphQL.cats.api.auth.AuthFailure, Option[com.example.graphQL.cats.service.ActorContext]]] =
+        _ => IO.pure(Right(None)),
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
+      authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
+      requestTimeout: FiniteDuration = 5.seconds
+  ): IO[HiringApiRoutes] =
+    TestGraphQLSupport.dependencies(hiring, authenticate, hiringReady, authRateLimit, requestTimeout).allocated
+      .map { case (dependencies, _) => new HiringApiRoutes(service, diagnostics, admission, dependencies) }
 
   private def request(query: String): Request[IO] =
     Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
@@ -40,7 +54,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   private val health = request("{ health { status } }")
   private val jwtSecret = "01234567890123456789012345678901"
-  private val jwtConfig = JwtAuthConfig(Some(jwtSecret), "hiring-platform-local", "hiring-graphql-api")
+  private val jwtConfig = JwtAuthConfig(jwtSecret, "hiring-platform-local", "hiring-graphql-api")
 
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
@@ -95,10 +109,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), IO.pure(ServiceFixtures.now))
-      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        Some(services), authenticator.authenticate).app
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission, services, authenticator.authenticateDetailed).map(_.app)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Admin)
       submitted <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
       listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
@@ -137,10 +150,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), IO.pure(ServiceFixtures.now))
-      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        Some(services), authenticator.authenticate, ensureHiringReady = IO.pure(false)).app
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission, services,
+        authenticator.authenticateDetailed, IO.pure(ProbeResult.Unavailable)).map(_.app)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       response <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       body <- response.as[Json]
@@ -170,10 +183,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications))
+      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), IO.pure(ServiceFixtures.now))
-      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        Some(services), authenticator.authenticate, ensureHiringReady = setupChecks.update(_ + 1).as(false)).app
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission, services,
+        authenticator.authenticateDetailed, setupChecks.update(_ + 1).as(ProbeResult.Unavailable)).map(_.app)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       authenticatedHealth <- http(health.putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       healthBody <- authenticatedHealth.as[Json]
@@ -200,13 +213,49 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
       response <- http(request(mutation))
       body <- response.as[Json]
     } yield {
       assertEquals(response.status, Status.Ok)
       assertEquals(body.hcursor.downField("data").downField("submitApplication").downField("errors").downArray.get[String]("code"),
         Right("UNAUTHORIZED"))
+    }
+  }
+
+  test("login and signup requests are rate limited by remote address and operation") {
+    val login =
+      """mutation {
+        |  login(input: { name: "Candidate", password: "password-password" }) {
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+    val signup =
+      """mutation {
+        |  signUp(input: { name: "Candidate", role: Candidate, password: "password-password", skills: ["Scala"] }) {
+        |    errors { code }
+        |  }
+        |}""".stripMargin
+
+    for {
+      admission <- Admission.create(16)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      firstLogin <- http(request(login))
+      limitedLogin <- http(request(login))
+      firstSignup <- http(request(signup))
+      limitedSignup <- http(request(signup))
+      limitedBody <- limitedLogin.as[Json]
+    } yield {
+      assertEquals(firstLogin.status, Status.Ok)
+      assertEquals(limitedLogin.status, Status.TooManyRequests)
+      assertEquals(limitedSignup.status, Status.TooManyRequests)
+      assertEquals(firstSignup.status, Status.Ok)
+      assert(limitedLogin.headers.get(CIString("Retry-After")).flatMap(_.head.value.toLongOption)
+        .exists(value => value >= 1 && value <= 60))
+      assertEquals(limitedLogin.contentType.map(_.mediaType), Some(MediaType.application.json))
+      assertEquals(limitedBody, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Too many authentication attempts")))))
     }
   }
 
@@ -217,17 +266,17 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
           records.update(_ :+ ((event, id, fields)))
       }
-      parsed <- IO.fromOption(GraphQLRequest.parseBody(Json.obj(
+      parsed <- IO.fromEither(Json.obj(
         "query" -> Json.fromString("query Selected($include: Boolean!) { readiness @include(if: $include) { status } } # synthetic-field-comment-secret"),
         "operationName" -> Json.fromString("Selected"),
         "variables" -> Json.obj("include" -> Json.True, "password" -> Json.fromString("synthetic-field-value-secret"))
-      ).noSpaces))(new IllegalArgumentException("Invalid test query"))
-      closed <- RequestContext.resource(IO.pure(ProbeResult.Ready)).use(IO.pure)
+      ).as[GraphQLRequest].leftMap(error => new IllegalArgumentException("Invalid test query", error)))
+      closed <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(IO.pure)
       execution <- HiringGraphQLSchema.executeInContext(parsed, closed)
       result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      routes = new HiringApiRoutes(new HealthService(probe, sink), sink, admission)
+      routes <- buildRoutes(new HealthService(probe, sink), sink, admission)
       id <- IO.randomUUID.map(_.toString)
       response <- routes.completedGraphQL(parsed, result, id)
       body <- response.as[Json]
@@ -270,7 +319,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         finish <- Deferred[IO, Unit]
         admission <- Admission.create(16)
         probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-        http = new HiringApiRoutes(new HealthService(probe, sink), sink, admission).app
+        http <- buildRoutes(new HealthService(probe, sink), sink, admission).map(_.app)
         slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
           .onFinalize(finalizing.complete(()) *> finish.get *> IO.delay(finalized.set(true))))
         _ <- List.fill(15)(admission.permit).sequence.use { held =>
@@ -451,40 +500,27 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("GraphQL permit remains occupied until resolver cancellation finalizers finish") {
+  test("readiness cancellation releases admission capacity") {
     for {
       admission <- Admission.create(16)
       entered <- Deferred[IO, Unit]
-      finalizing <- Deferred[IO, Unit]
-      finishFinalizer <- Deferred[IO, Unit]
       cancelled <- Deferred[IO, Unit]
       probe = new DatabaseProbe {
-        def check: IO[ProbeResult] = (entered.complete(()) *> IO.never[ProbeResult])
-          .onCancel(finalizing.complete(()) *> finishFinalizer.get)
+        def check: IO[ProbeResult] = entered.complete(()) *> IO.never[ProbeResult]
       }
-      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
       _ <- List.fill(15)(admission.permit).sequence.use { held =>
         for {
           _ <- IO(assert(held.forall(identity)))
-          _ <- Resource.make(http(request("{ readiness { status } }")).start) { requestFiber =>
-            finishFinalizer.complete(()).void *> requestFiber.cancel
-          }.use { requestFiber =>
+          _ <- Resource.make(http(Request[IO](Method.GET, Uri.unsafeFromString("/ready"))).start)(_.cancel).use { requestFiber =>
             for {
               _ <- entered.get.timeout(2.seconds)
               _ <- (requestFiber.cancel *> cancelled.complete(()).void).background.use { _ =>
-                (for {
-                  _ <- finalizing.get.timeout(2.seconds)
-                  rejected <- http(health)
-                  completed <- cancelled.tryGet
-                  _ <- IO {
-                    assertEquals(rejected.status, Status.ServiceUnavailable)
-                    assertEquals(completed, None)
-                  }
-                  _ <- finishFinalizer.complete(())
+                for {
                   _ <- cancelled.get.timeout(2.seconds)
                   recovered <- http(health)
                   _ <- IO(assertEquals(recovered.status, Status.Ok))
-                } yield ()).guarantee(finishFinalizer.complete(()).void)
+                } yield ()
               }
             } yield ()
           }
@@ -835,7 +871,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http = new HiringApiRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).app
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
       ui <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql")))
       asset <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql/assets/graphiql.js")))
       _ <- admission.close

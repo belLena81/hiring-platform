@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref, Resource}
+import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
 import com.github.dockerjava.api.model.ExposedPort
@@ -135,7 +136,8 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           _ <- MongoDatabaseProbe.resource(invalid, "foundation", diagnostics).use { rejected =>
             for {
               admission <- Admission.create(16)
-              http = new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, admission).app
+              dependencies <- TestGraphQLSupport.dependencies().allocated.map(_._1)
+              http = new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, admission, dependencies).app
               response <- http(Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
                 .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }"))))
               body <- response.as[Json]
@@ -144,7 +146,9 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
               assertEquals(response.status, Status.Ok)
               assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
-              assertEquals(correlated.map(_._1), Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed,
+              val domainEvents = correlated.map(_._1).filterNot(event =>
+                Set(LogEvent.SpanParameters, LogEvent.SpanStarted, LogEvent.SpanSucceeded).contains(event))
+              assertEquals(domainEvents, Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed,
                 LogEvent.GraphQLCompleted, LogEvent.RequestCompleted))
               assert(id.nonEmpty)
               assert(correlated.forall(_._2 == id))

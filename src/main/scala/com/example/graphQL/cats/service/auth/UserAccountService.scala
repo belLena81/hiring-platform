@@ -106,7 +106,7 @@ final class UserAccountService(
     }
 
   private def token(user: User, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
-    IO.fromOption(JwtActorAuthenticator.issue(jwt, user.id, now))(new IllegalStateException("JWT issuance is disabled"))
+    IO(JwtActorAuthenticator.issue(jwt, user.id, now))
       .map { case (value, expiresAt) => Right(user -> AccountToken(value, expiresAt)) }
       .handleError(_ => Left(UseCaseError.repository(RepositoryError.Unavailable)))
 

@@ -31,9 +31,14 @@ class AppConfigSpec extends FunSuite {
       |  mask-sensitive = true
       |}
       |auth.jwt {
-      |  hs256-secret = "disabled"
+      |  hs256-secret = "01234567890123456789012345678901"
       |  issuer = "hiring-platform-local"
       |  audience = "hiring-graphql-api"
+      |}
+      |auth.rate-limit {
+      |  window-seconds = 60
+      |  attempts = 20
+      |  max-buckets = 10000
       |}
       |vector-search {
       |  enabled = false
@@ -79,7 +84,9 @@ class AppConfigSpec extends FunSuite {
       numCandidates = 100
     )
   private val defaultJwtAuth =
-    JwtAuthConfig(None, "hiring-platform-local", "hiring-graphql-api")
+    JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
+  private val defaultAuthRateLimit =
+    AuthRateLimitConfig(windowSeconds = 60, attempts = 20, maxBuckets = 10000)
 
   test("P1-AC01 loads grouped HOCON settings and resolves env placeholders") {
     val config =
@@ -100,6 +107,11 @@ class AppConfigSpec extends FunSuite {
         |  hs256-secret = ${AUTH_JWT_HS256_SECRET}
         |  issuer = "hiring-platform-local"
         |  audience = "hiring-graphql-api"
+        |}
+        |auth.rate-limit {
+        |  window-seconds = 30
+        |  attempts = 10
+        |  max-buckets = 500
         |}
         |vector-search {
         |  enabled = false
@@ -131,7 +143,8 @@ class AppConfigSpec extends FunSuite {
     )), Right(AppConfig("::1", 65535, 64,
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "hiring_test-2", maskSensitive = true,
-      JwtAuthConfig(Some("01234567890123456789012345678901"), "hiring-platform-local", "hiring-graphql-api"),
+      JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
+      AuthRateLimitConfig(30, 10, 500),
       defaultVectorSearch)))
   }
 
@@ -163,6 +176,7 @@ class AppConfigSpec extends FunSuite {
         |mongo {
         |  uri = "mongodb://127.0.0.1:27017"
         |}
+        |auth.jwt.hs256-secret = "01234567890123456789012345678901"
         |""".stripMargin
     val result = AppConfig.fromConfig(raw + local, Map.empty)
     assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri)),
@@ -176,6 +190,7 @@ class AppConfigSpec extends FunSuite {
       "HTTP_PORT" -> "9090",
       "HTTP_ADMISSION_PERMITS" -> "96",
       "MONGODB_URI" -> "mongodb://127.0.0.1:27018",
+      "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901",
       "VOYAGE_MODEL" -> "voyage-4-lite"
     ))
     assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri)),
@@ -235,6 +250,11 @@ class AppConfigSpec extends FunSuite {
         |  issuer = "hiring-platform-local"
         |  audience = "hiring-graphql-api"
         |}
+        |auth.rate-limit {
+        |  window-seconds = 60
+        |  attempts = 20
+        |  max-buckets = 10000
+        |}
         |vector-search {
         |  enabled = false
         |  voyage {
@@ -265,7 +285,7 @@ class AppConfigSpec extends FunSuite {
       """http.host = "127.42.10.8"
         |http.port = 9091
         |mongo.uri = "mongodb://127.0.0.1:27018"
-        |auth.jwt.hs256-secret = "disabled"
+        |auth.jwt.hs256-secret = "01234567890123456789012345678901"
         |vector-search.voyage.api-key = "disabled"
         |vector-search.voyage.model = "voyage-4-lite"
         |""".stripMargin
@@ -344,7 +364,7 @@ class AppConfigSpec extends FunSuite {
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
       Right(AppConfig("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "hiring",
-        maskSensitive = false, defaultJwtAuth, defaultVectorSearch.copy(enabled = false))))
+        maskSensitive = false, defaultJwtAuth, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false))))
   }
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
@@ -356,12 +376,24 @@ class AppConfigSpec extends FunSuite {
     assertEquals(result.map(_.vectorSearch.voyageApiKey), Right(Some("synthetic-voyage-key")))
   }
 
-  test("HGQL-AC02 JWT auth config is disabled by default and requires a strong external secret when enabled") {
+  test("HGQL-AC02 JWT auth config requires a strong secret") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth), Right(defaultJwtAuth))
+    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = disabled\n", Map.empty), ConfigError.InvalidJwtSecret)
+    assertContainsError(AppConfig.fromConfig(defaultConfig.replace("hs256-secret = \"01234567890123456789012345678901\"", ""), Map.empty), ConfigError.InvalidJwtSecret)
     assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = \"short\"\n", Map.empty), ConfigError.InvalidJwtSecret)
     val loaded = AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = ${AUTH_JWT_HS256_SECRET}\n",
       Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456"))
-    assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right(Some("abcdefghijklmnopqrstuvwxyz123456")))
+    assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right("abcdefghijklmnopqrstuvwxyz123456"))
+  }
+
+  test("HGQL-AC02 auth limiter config is bounded and explicit") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.authRateLimit), Right(defaultAuthRateLimit))
+    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.window-seconds = 0\n", Map.empty),
+      ConfigError.InvalidAuthRateLimitWindow)
+    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.attempts = 0\n", Map.empty),
+      ConfigError.InvalidAuthRateLimitAttempts)
+    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
+      ConfigError.InvalidAuthRateLimitBuckets)
   }
 
   test("VHS-AC07 vector search dimension is fixed to the configured Atlas index contract") {
