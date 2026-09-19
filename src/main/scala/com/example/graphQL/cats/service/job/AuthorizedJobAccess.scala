@@ -2,8 +2,10 @@ package com.example.graphQL.cats.service.job
 
 import cats.Monad
 import cats.data.EitherT
+import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.JobRepository
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
@@ -19,7 +21,7 @@ private[service] final class AuthorizedJobAccess[F[_]: Monad](
   )(operation: Job => F[Either[UseCaseError, A]]): F[Either[UseCaseError, A]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      job <- EitherT.fromOptionF(jobs.find(jobId), UseCaseError.domain(DomainError.NotFound("job")))
+      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
       _ <- EitherT.cond[F](authorization.canManage(user, job), (), UseCaseError.domain(DomainError.Forbidden))
       result <- EitherT(operation(job))
     } yield result).value

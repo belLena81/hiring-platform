@@ -154,19 +154,34 @@ private[mongo] object MongoTransactionRunner {
 
 }
 
+private[mongo] object MongoStoredDocumentDecoding {
+  def repository[A](decoded: Either[MongoHiringCodecs.StoredDocumentError, A]): Either[RepositoryError, A] =
+    decoded.leftMap(_ => RepositoryError.Unavailable)
+
+  def optional[A](decoded: Either[MongoHiringCodecs.StoredDocumentError, Option[A]]): Either[RepositoryError, Option[A]] =
+    repository(decoded)
+
+  def values[A](decoded: List[Either[MongoHiringCodecs.StoredDocumentError, A]]): Either[RepositoryError, List[A]] =
+    repository(decoded.sequence)
+}
+
 private[mongo] object MongoKeysetPaging {
-  def byId[A](collection: MongoCollection[Document], ids: List[String])(read: Document => A): IO[List[A]] =
-    if (ids.isEmpty) IO.pure(Nil)
-    else PublisherBridge.all(collection.find(Filters.in("_id", ids.distinct*))).map(_.map(read))
+  def byId[A](collection: MongoCollection[Document], ids: List[String])(read: Document => Either[MongoHiringCodecs.StoredDocumentError, A]): IO[Either[RepositoryError, List[A]]] =
+    if (ids.isEmpty) IO.pure(Right(Nil))
+    else PublisherBridge.collectWithin(collection.find(Filters.in("_id", ids.distinct*)), ids.distinct.size)
+      .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
 
   def page[A](collection: MongoCollection[Document], filter: Bson, timestampField: String, pageSize: PageSize)(
-      read: Document => A
-  ): IO[List[A]] =
-    PublisherBridge.all(
+      read: Document => Either[MongoHiringCodecs.StoredDocumentError, A]
+  ): IO[Either[RepositoryError, List[A]]] =
+    PublisherBridge.collectWithin(
       collection.find(filter)
         .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending("_id")))
-        .limit(pageSize.value)
-    ).map(_.map(read))
+        .limit(pageSize.value),
+      pageSize.value
+    ).map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
 
   def filter(filters: List[Option[Bson]]): Bson =
     Filters.and(filters.flatten*)
@@ -190,10 +205,12 @@ final class MongoUserRepository(
     if (!user.roleProfileIsValid) IO.pure(Left(RepositoryError.Conflict))
     else PublisherBridge.first(collection.insertOne(MongoHiringCodecs.user(user))).as(Right(())).handleError(mapWrite)
 
-  override def find(id: UserId): IO[Option[User]] =
-    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString))).map(_.map(MongoHiringCodecs.readUser))
+  override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
+    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString)))
+      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def findMany(ids: List[UserId]): IO[List[User]] =
+  override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
 
   override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
@@ -264,7 +281,7 @@ final class MongoUserRepository(
       else transactionRunner.run { session =>
         val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Initialized"))
         findOne(session, registry, stateFilter).flatMap {
-          case None => IO.pure(Left(RepositoryError.Conflict))
+          case None => IO.pure(Left[RepositoryError, Unit](RepositoryError.Conflict))
           case Some(_) =>
             insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)).flatMap {
               case Some(_) => work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, user.id.value.toString), now)
@@ -274,8 +291,10 @@ final class MongoUserRepository(
       }.handleError(mapWrite)
     }
 
-  override def findByCanonicalName(nameCanonical: String): IO[Option[AccountCredentials]] =
-    PublisherBridge.first(collection.find(Filters.eq("nameCanonical", nameCanonical))).map(_.flatMap(MongoHiringCodecs.readCredentials))
+  override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] =
+    PublisherBridge.first(collection.find(Filters.eq("nameCanonical", nameCanonical))).map { document =>
+      MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readCredentials)).map(_.flatten)
+    }.handleError(_ => Left(RepositoryError.Unavailable))
 
   override def updateProfile(
       userId: UserId,
@@ -300,7 +319,7 @@ final class MongoUserRepository(
         Updates.set("updatedAt", Date.from(now))
       )
     )).flatMap {
-      case Some(result) if result.getMatchedCount == 1L => find(userId).map(_.toRight(RepositoryError.Unavailable))
+      case Some(result) if result.getMatchedCount == 1L => find(userId).map(_.flatMap(_.toRight(RepositoryError.Unavailable)))
       case Some(_) => IO.pure(Left(RepositoryError.Conflict))
       case None => IO.pure(Left(RepositoryError.Unavailable))
     }.handleError(mapWrite)
@@ -330,19 +349,23 @@ final class MongoUserRepository(
           case None => IO.pure(Left(RepositoryError.Unavailable))
         }
       }.flatMap {
-        case Right(()) => find(userId).map(_.toRight(RepositoryError.Unavailable))
+        case Right(()) => find(userId).map(_.flatMap(_.toRight(RepositoryError.Unavailable)))
         case Left(error) => IO.pure(Left(error))
       }.handleError(mapWrite)
     }
 
-  override def listAccounts(page: UserPageRequest): IO[List[User]] = {
+  override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = {
     val filters = List(
       Some(Filters.eq("accountStatus", page.status.toString)),
       page.role.map(role => Filters.eq("role", role.toString)),
       page.cursor.map(cursor => MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString))
     ).flatten
     val filter = Filters.and(filters*)
-    PublisherBridge.all(collection.find(filter).sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id"))).limit(page.pageSize.value)).map(_.map(MongoHiringCodecs.readUser))
+    PublisherBridge.collectWithin(
+      collection.find(filter).sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id"))).limit(page.pageSize.value),
+      page.pageSize.value
+    ).map(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readUser)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
   }
 
   override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] =
@@ -409,19 +432,21 @@ final class MongoJobRepository(
 ) extends JobRepository[IO] with MongoConflictWriteMapping {
   private val collection = database.getCollection("jobs")
 
-  override def find(id: JobId): IO[Option[Job]] =
-    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString))).map(_.map(MongoHiringCodecs.readJob))
+  override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
+    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString)))
+      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def findMany(ids: List[JobId]): IO[List[Job]] =
+  override def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)
 
-  override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[List[Job]] =
+  override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     findMany(baseSearchFilter(filter, page), page)
 
-  override def findAll(page: JobPageRequest): IO[List[Job]] =
+  override def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     findMany(baseJobFilter(List(page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
-  override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[List[Job]] =
+  override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     findMany(baseJobFilter(List(Some(Filters.eq("recruiterId", recruiterId.value.toString)), page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
   override def create(job: Job): IO[Either[RepositoryError, Unit]] =
@@ -490,7 +515,7 @@ final class MongoJobRepository(
     }.handleError(mapWrite)
   }
 
-  private def findMany(filter: Bson, page: JobPageRequest): IO[List[Job]] =
+  private def findMany(filter: Bson, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)
 
   private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): Bson =
@@ -552,8 +577,8 @@ final class MongoSemanticSearchRepository(
       Filters.eq("embeddingMeta.version", query.version)
     )
     val pipeline = List(vectorSearchStage(candidateVectorIndex, query.vector, filter, query.first.value), scoreStage).asJava
-    PublisherBridge.all(users.aggregate(pipeline)).map { documents =>
-      Right(documents.flatMap(document => MongoSemanticSearchResult.rankedCandidate(document, query)))
+    PublisherBridge.collectWithin(users.aggregate(pipeline), query.first.value).map { documents =>
+      MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
@@ -576,8 +601,8 @@ final class MongoSemanticSearchRepository(
 
   private def vectorJobs(query: VectorSearchQuery, filter: Bson, limit: Int): IO[Either[RepositoryError, List[RankedJob]]] = {
     val pipeline = List(vectorSearchStage(jobVectorIndex, query.vector, filter, limit), scoreStage).asJava
-    PublisherBridge.all(jobs.aggregate(pipeline)).map { documents =>
-      Right(documents.flatMap(document => MongoSemanticSearchResult.rankedJob(document, query)))
+    PublisherBridge.collectWithin(jobs.aggregate(pipeline), limit).map { documents =>
+      MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
@@ -595,8 +620,8 @@ final class MongoSemanticSearchRepository(
       new Document("$limit", java.lang.Integer.valueOf(numCandidates)),
       new Document("$set", new Document("score", new Document("$meta", "searchScore")))
     ).asJava
-    PublisherBridge.all(jobs.aggregate(pipeline)).map { documents =>
-      Right(documents.flatMap(document => MongoSemanticSearchResult.rankedJob(document, query)))
+    PublisherBridge.collectWithin(jobs.aggregate(pipeline), numCandidates).map { documents =>
+      MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
@@ -626,28 +651,34 @@ final class MongoSemanticSearchRepository(
 }
 
 private[mongo] object MongoSemanticSearchResult {
-  def rankedJob(document: Document, query: VectorSearchQuery): Option[RankedJob] = {
-    val job = MongoHiringCodecs.readJob(document)
-    for {
+  def rankedJobs(documents: List[Document], query: VectorSearchQuery): Either[RepositoryError, List[Option[RankedJob]]] =
+    documents.traverse(rankedJob(_, query)).leftMap(_ => RepositoryError.Unavailable)
+
+  def rankedCandidates(documents: List[Document], query: VectorSearchQuery): Either[RepositoryError, List[Option[RankedCandidate]]] =
+    documents.traverse(rankedCandidate(_, query)).leftMap(_ => RepositoryError.Unavailable)
+
+  def rankedJob(document: Document, query: VectorSearchQuery): Either[MongoHiringCodecs.StoredDocumentError, Option[RankedJob]] =
+    MongoHiringCodecs.readJob(document).map { job =>
+      for {
       embedding <- job.embedding
       if embedding.meta.model == query.model
       if embedding.meta.version == query.version
       if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job))
-      score <- Option(document.get("score", classOf[Number]))
+      score <- Option(document.get("score")).collect { case value: Number => value }
     } yield RankedJob(job, score.doubleValue, query.mode, embedding.meta, query.searchId)
-  }
+    }
 
-  def rankedCandidate(document: Document, query: VectorSearchQuery): Option[RankedCandidate] = {
-    val candidate = MongoHiringCodecs.readUser(document)
-    for {
+  def rankedCandidate(document: Document, query: VectorSearchQuery): Either[MongoHiringCodecs.StoredDocumentError, Option[RankedCandidate]] =
+    MongoHiringCodecs.readUser(document).map { candidate =>
+      for {
       profile <- candidate.candidateProfile
       embedding <- candidate.embedding
       if embedding.meta.model == query.model
       if embedding.meta.version == query.version
       if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
-      score <- Option(document.get("score", classOf[Number]))
+      score <- Option(document.get("score")).collect { case value: Number => value }
     } yield RankedCandidate(candidate, score.doubleValue, query.mode, embedding.meta, query.searchId)
-  }
+    }
 }
 
 final class MongoApplicationRepository private (
@@ -658,16 +689,18 @@ final class MongoApplicationRepository private (
   private val events = database.getCollection("application_events")
   private val jobs = database.getCollection("jobs")
 
-  override def find(id: ApplicationId): IO[Option[Application]] =
-    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString))).map(_.map(MongoHiringCodecs.readApplication))
+  override def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]] =
+    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString)))
+      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readApplication)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): IO[List[Application]] =
+  override def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]] =
     findMany(baseFilter("candidateId", candidateId.value.toString, page), page)
 
-  override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[List[Application]] =
+  override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]] =
     findMany(baseFilter("jobId", jobId.value.toString, page), page)
 
-  override def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[List[ApplicationEvent]] =
+  override def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[Either[RepositoryError, List[ApplicationEvent]]] =
     MongoKeysetPaging.page(events, eventFilter(applicationId, page), "occurredAt", page.pageSize)(MongoHiringCodecs.readEvent)
 
   override def createForOpenJob(
@@ -698,7 +731,7 @@ final class MongoApplicationRepository private (
       }
     }.handleError(mapWrite)
 
-  private def findMany(filter: Bson, page: ApplicationPageRequest): IO[List[Application]] =
+  private def findMany(filter: Bson, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]] =
     MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readApplication)
 
   private def baseFilter(field: String, id: String, page: ApplicationPageRequest): Bson = {
@@ -725,8 +758,9 @@ final class MongoApplicationRepository private (
     submitOnce(observedJob, application, initialEvent).flatMap {
       case Left(RepositoryError.Conflict) if remainingRetries > 0 =>
         currentOpenJob(observedJob.id).flatMap {
-          case Some(current) => submitWithRetry(current, application, initialEvent, remainingRetries - 1)
-          case None => IO.pure(Left(RepositoryError.Conflict))
+          case Right(Some(current)) => submitWithRetry(current, application, initialEvent, remainingRetries - 1)
+          case Right(None) => IO.pure(Left(RepositoryError.Conflict))
+          case Left(error) => IO.pure(Left(error))
         }
       case result => IO.pure(result)
     }
@@ -783,10 +817,10 @@ final class MongoApplicationRepository private (
     }
   }
 
-  private def currentOpenJob(id: JobId): IO[Option[Job]] =
+  private def currentOpenJob(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
     PublisherBridge.first(jobs.find(Filters.eq("_id", id.value.toString))).map(
-      _.map(MongoHiringCodecs.readJob).filter(_.status == JobStatus.Open)
-    )
+      document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)).map(_.filter(_.status == JobStatus.Open))
+    ).handleError(_ => Left(RepositoryError.Unavailable))
 
   private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
     error match {

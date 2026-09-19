@@ -11,6 +11,10 @@ import java.util.{Date, UUID}
 
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
 final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends EmbeddingWorkRepository[IO] {
+  private enum StoredWorkError {
+    case InvalidDocument
+  }
+
   private val collection = database.getCollection("embedding_work")
 
   override def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
@@ -90,7 +94,13 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
         .returnDocument(ReturnDocument.AFTER)
         .sort(Sorts.ascending("availableAt", "_id"))
       PublisherBridge.first(collection.findOneAndUpdate(Filters.or(available, expiredLease), update, options))
-        .map(document => Right(document.map(readClaim)))
+        .map {
+          case Some(document) => readClaim(document) match {
+            case Right(claim) => Right(Some(claim))
+            case Left(_) => Left(RepositoryError.Unavailable)
+          }
+          case None => Right(None)
+        }
         .handleError(_ => Left(RepositoryError.Unavailable))
     }
   }
@@ -135,11 +145,18 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
       Filters.eq("leaseToken", claim.leaseToken)
     )
 
-  private def readClaim(document: Document): ClaimedEmbeddingWork =
-    ClaimedEmbeddingWork(
-      EmbeddingWorkKey(EmbeddingWorkKind.valueOf(document.getString("kind")), document.getString("entityId")),
-      document.get("generation", classOf[Number]).longValue,
-      document.get("attempts", classOf[Number]).intValue,
-      document.getString("leaseToken")
-    )
+  private def readClaim(document: Document): Either[StoredWorkError, ClaimedEmbeddingWork] =
+    for {
+      kind <- requiredString(document, "kind").flatMap(value => EmbeddingWorkKind.values.find(_.toString == value).toRight(StoredWorkError.InvalidDocument))
+      entityId <- requiredString(document, "entityId")
+      generation <- requiredNumber(document, "generation").map(_.longValue)
+      attempts <- requiredNumber(document, "attempts").map(_.intValue)
+      leaseToken <- requiredString(document, "leaseToken")
+    } yield ClaimedEmbeddingWork(EmbeddingWorkKey(kind, entityId), generation, attempts, leaseToken)
+
+  private def requiredString(document: Document, field: String): Either[StoredWorkError, String] =
+    Option(document.get(field)).collect { case value: String => value }.toRight(StoredWorkError.InvalidDocument)
+
+  private def requiredNumber(document: Document, field: String): Either[StoredWorkError, Number] =
+    Option(document.get(field)).collect { case value: Number => value }.toRight(StoredWorkError.InvalidDocument)
 }

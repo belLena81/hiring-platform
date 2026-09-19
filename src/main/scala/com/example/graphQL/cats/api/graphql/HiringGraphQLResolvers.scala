@@ -101,7 +101,7 @@ private[graphql] object HiringGraphQLResolvers {
       for {
         (page, requested)  <- EitherT(pageEvent(context.arg(firstArgument), context.arg(afterArgument), cursorCodec))
         _                  <- liftUseCase(canViewApplication(actor, hiring, applicationId))
-        values             <- EitherT.liftF[IO, GraphQLError, List[ApplicationEvent]](hiring.readModel.applicationHistory(applicationId, page))
+        values             <- liftUseCase(hiring.readModel.applicationHistory(applicationId, page))
       } yield eventConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[ApplicationEvent])
 

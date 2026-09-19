@@ -30,16 +30,16 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     val job = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite", 1)))
     val ranked = MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(job)), query)
 
-    assertEquals(ranked.map(_.job.id), Some(job.id))
-    assertEquals(ranked.map(_.score), Some(0.91d))
-    assertEquals(ranked.map(_.meta.sourceHash), Some(SourceHash.sha256(SearchableText.job(job))))
+    assertEquals(ranked.map(_.map(_.job.id)), Right(Some(job.id)))
+    assertEquals(ranked.map(_.map(_.score)), Right(Some(0.91d)))
+    assertEquals(ranked.map(_.map(_.meta.sourceHash)), Right(Some(SourceHash.sha256(SearchableText.job(job)))))
   }
 
   test("stale job vector hit is omitted") {
     val stale = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite", 1)
       .copy(meta = jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite", 1).meta.copy(sourceHash = "stale"))))
 
-    assertEquals(MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(stale)), query), None)
+    assertEquals(MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(stale)), query), Right(None))
   }
 
   test("fresh candidate vector hit is returned and stale candidate hit is omitted") {
@@ -49,12 +49,12 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     val stale = fresh.copy(embedding = Some(candidateEmbedding(profile, "voyage-4-lite", 1)
       .copy(meta = candidateEmbedding(profile, "voyage-4-lite", 1).meta.copy(sourceHash = "stale"))))
 
-    assert(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(fresh)), query).exists {
+    assert(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(fresh)), query).exists(_.exists {
       case RankedCandidate(candidate, 0.91d, SearchMode.VECTOR, meta, `searchId`) =>
         candidate.id == fresh.id && meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
       case _ => false
-    })
-    assertEquals(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(stale)), query), None)
+    }))
+    assertEquals(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(stale)), query), Right(None))
   }
 
   private def jobEmbedding(

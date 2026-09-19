@@ -111,6 +111,55 @@ class PublisherBridgeSpec extends CatsEffectSuite {
     PublisherBridge.first[Int](subscriber => subscriber.onComplete()).map(result => assertEquals(result, None))
   }
 
+  test("bounded collection completes only after probing past its declared limit") {
+    val publisher = new Controlled
+    for {
+      fiber <- PublisherBridge.collectWithin(publisher, maximum = 2).start
+      _ <- publisher.awaitRegistration
+      _ <- publisher.attach
+      _ <- IO {
+        publisher.subscriber.get().onNext(1)
+        publisher.subscriber.get().onNext(2)
+        publisher.subscriber.get().onComplete()
+      }
+      result <- fiber.joinWithNever
+      _ <- IO {
+        assertEquals(result, List(1, 2))
+        assertEquals(publisher.requests.get(), 3)
+        assertEquals(publisher.cancellations.get(), 1)
+      }
+    } yield ()
+  }
+
+  test("bounded collection fails and cancels instead of returning a partial result") {
+    val publisher = new Controlled
+    for {
+      fiber <- PublisherBridge.collectWithin(publisher, maximum = 2).attempt.start
+      _ <- publisher.awaitRegistration
+      _ <- publisher.attach
+      _ <- IO {
+        publisher.subscriber.get().onNext(1)
+        publisher.subscriber.get().onNext(2)
+        publisher.subscriber.get().onNext(3)
+      }
+      result <- fiber.joinWithNever
+      _ <- IO {
+        assertEquals(result, Left(PublisherBridge.CollectionLimitExceeded(2)))
+        assertEquals(publisher.requests.get(), 3)
+        assertEquals(publisher.cancellations.get(), 1)
+      }
+    } yield ()
+  }
+
+  test("bounded collection rejects a non-positive cap before subscribing") {
+    val subscribed = new AtomicInteger()
+    val publisher: Publisher[Int] = _ => { val _ = subscribed.incrementAndGet() }
+    PublisherBridge.collectWithin(publisher, maximum = 0).attempt.map { result =>
+      assert(result.left.exists(_.isInstanceOf[IllegalArgumentException]))
+      assertEquals(subscribed.get(), 0)
+    }
+  }
+
   test("success joins and interrupts registration even when subscribe has not returned") {
     val exited = new CountDownLatch(1)
     val publisher: Publisher[Int] = subscriber => {

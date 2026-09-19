@@ -53,11 +53,11 @@ private[cats] object ServiceFixtures {
   final class InMemoryUsers(protected val ref: Ref[IO, Map[UserId, User]])
       extends UserRepository[IO]
       with RefBackedLookup[UserId, User] {
-    override def find(id: UserId): IO[Option[User]] =
-      findOne(id)
+    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
+      findOne(id).map(Right(_))
 
-    override def findMany(ids: List[UserId]): IO[List[User]] =
-      findAll(ids)
+    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
+      findAll(ids).map(Right(_))
 
     override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       ref.modify { users =>
@@ -72,13 +72,13 @@ private[cats] object ServiceFixtures {
   final class InMemoryJobs(protected val ref: Ref[IO, Map[JobId, Job]])
       extends JobRepository[IO]
       with RefBackedLookup[JobId, Job] {
-    override def find(id: JobId): IO[Option[Job]] =
-      findOne(id)
+    override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
+      findOne(id).map(Right(_))
 
-    override def findMany(ids: List[JobId]): IO[List[Job]] =
-      findAll(ids)
+    override def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]] =
+      findAll(ids).map(Right(_))
 
-    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[List[Job]] =
+    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       ref.get.map(_.values.filter { job =>
         job.status == JobStatus.Open &&
           filter.city.forall(_ == job.location.city) &&
@@ -86,20 +86,20 @@ private[cats] object ServiceFixtures {
           filter.createdAfter.forall(!job.createdAt.isBefore(_)) &&
           matches(page)(job) &&
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
-      }.toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+      }.toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString)).map(Right(_))
 
-    override def findAll(page: JobPageRequest): IO[List[Job]] =
+    override def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       ref.get.map(_.values.filter(job =>
         matches(page)(job) &&
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
-      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString)).map(Right(_))
 
-    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[List[Job]] =
+    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       ref.get.map(_.values.filter(job =>
         job.recruiterId == recruiterId &&
           matches(page)(job) &&
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
-      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString)).map(Right(_))
 
     override def create(job: Job): IO[Either[RepositoryError, Unit]] =
       ref.update(_ + (job.id -> job)).as(Right(()))
@@ -129,28 +129,28 @@ private[cats] object ServiceFixtures {
       events: Ref[IO, Vector[ApplicationEvent]],
       nextCreateError: Ref[IO, Option[RepositoryError]]
   ) extends ApplicationRepository[IO] {
-    override def find(id: ApplicationId): IO[Option[Application]] =
-      applications.get.map(_.get(id))
+    override def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]] =
+      applications.get.map(_.get(id)).map(Right(_))
 
-    override def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): IO[List[Application]] =
+    override def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]] =
       applications.get.map(_.values.filter(application =>
         application.candidateId == candidateId &&
           matches(page)(application) &&
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(_.createdAt, _.id.value.toString)
-      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString)).map(Right(_))
 
-    override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[List[Application]] =
+    override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]] =
       applications.get.map(_.values.filter(application =>
         application.jobId == jobId &&
           matches(page)(application) &&
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(_.createdAt, _.id.value.toString)
-      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString)).map(Right(_))
 
-    override def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[List[ApplicationEvent]] =
+    override def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[Either[RepositoryError, List[ApplicationEvent]]] =
       events.get.map(_.filter(event =>
         event.applicationId == applicationId &&
           keysetAfter(page.cursor.map(cursor => cursor.occurredAt -> cursor.id.value.toString))(event)(_.occurredAt, _.id.value.toString)
-      ).toList).map(keysetPage(_, page.pageSize.value)(_.occurredAt, _.id.value.toString))
+      ).toList).map(keysetPage(_, page.pageSize.value)(_.occurredAt, _.id.value.toString)).map(Right(_))
 
     private def create(application: Application, initialEvent: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
       applications.modify { current =>

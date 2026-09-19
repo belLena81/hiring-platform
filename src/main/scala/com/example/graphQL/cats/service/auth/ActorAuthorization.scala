@@ -9,7 +9,7 @@ import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, Use
 
 final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
   def resolve(actor: ActorContext, allowDeleted: Boolean = false): F[Either[UseCaseError, User]] =
-    users.find(actor.userId).map {
+    users.find(actor.userId).map(_.leftMap(UseCaseError.repository).flatMap {
       case None => UseCaseError.authentication(AuthenticationError.Unauthorized).asLeft[User]
       case Some(user) if user.accountStatus != AccountStatus.Active && !allowDeleted =>
         UseCaseError.authentication(AuthenticationError.Unauthorized).asLeft[User]
@@ -17,7 +17,7 @@ final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
       case Some(user) if user.role == UserRole.Admin && !user.adminSingleton =>
         UseCaseError.authentication(AuthenticationError.SingletonAdminViolation).asLeft[User]
       case Some(user) => user.asRight[UseCaseError]
-    }
+    })
 
   def canManageJobs(user: User): Boolean =
     user.role == UserRole.Recruiter || (user.role == UserRole.Admin && user.adminSingleton)

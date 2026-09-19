@@ -4,8 +4,19 @@ import cats.effect.{IO, Resource}
 import org.reactivestreams.{Publisher, Subscriber, Subscription}
 
 private[mongo] object PublisherBridge {
-  def all[A](publisher: => Publisher[A]): IO[List[A]] =
-    subscribe(publisher, new CollectingSubscriber[A])
+  final case class CollectionLimitExceeded(maximum: Int)
+      extends RuntimeException(s"reactive collection exceeded its maximum of $maximum elements")
+
+  /**
+    * Collects a finite publisher only when it completes within `maximum` elements.
+    *
+    * Demand is one-at-a-time and deliberately includes one probe beyond the bound: a
+    * producer with more than `maximum` elements fails rather than returning a partial
+    * collection.
+    */
+  def collectWithin[A](publisher: => Publisher[A], maximum: Int): IO[List[A]] =
+    IO.raiseWhen(maximum < 1)(new IllegalArgumentException("maximum must be positive")) *>
+      subscribe(publisher, new CollectingSubscriber[A](maximum))
 
   def first[A](publisher: => Publisher[A]): IO[Option[A]] =
     subscribe(publisher, new FirstSubscriber[A])
@@ -65,6 +76,9 @@ private[mongo] object PublisherBridge {
       if (!finished) action
     }
 
+    protected final def requestNext(): Unit =
+      subscription.foreach(_.request(1L))
+
     final override def onError(error: Throwable): Unit = finish(Left(error))
   }
 
@@ -73,12 +87,16 @@ private[mongo] object PublisherBridge {
     override def onComplete(): Unit = finish(Right(None))
   }
 
-  private final class CollectingSubscriber[A] extends BaseSubscriber[A, List[A]](Long.MaxValue) {
+  private final class CollectingSubscriber[A](maximum: Int) extends BaseSubscriber[A, List[A]](1L) {
     private var values = Vector.empty[A]
 
     override def onNext(value: A): Unit =
       whenActive {
-        values = values :+ value
+        if (values.size == maximum) finish(Left(CollectionLimitExceeded(maximum)))
+        else {
+          values = values :+ value
+          requestNext()
+        }
       }
 
     override def onComplete(): Unit = finish(Right(values.toList))

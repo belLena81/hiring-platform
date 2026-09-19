@@ -17,56 +17,61 @@ final class HiringReadService[F[_]: Monad](
 ) extends HiringReadModel[F] {
   private val authorization = ActorAuthorization(users)
 
-  override def user(id: UserId): F[Option[User]] =
-    users.find(id)
+  override def user(id: UserId): F[Either[UseCaseError, Option[User]]] =
+    read(users.find(id))
 
-  override def users(ids: List[UserId]): F[List[User]] =
-    users.findMany(ids)
+  override def users(ids: List[UserId]): F[Either[UseCaseError, List[User]]] =
+    read(users.findMany(ids))
 
-  override def canViewUserEmail(actor: ActorContext, userId: UserId): F[Boolean] =
+  override def canViewUserEmail(actor: ActorContext, userId: UserId): F[Either[UseCaseError, Boolean]] =
     authorization.resolve(actor).map {
-      case Right(viewer) => viewer.id == userId || (viewer.role == UserRole.Admin && viewer.adminSingleton)
-      case Left(_) => false
+      case Right(viewer) => Right(viewer.id == userId || (viewer.role == UserRole.Admin && viewer.adminSingleton))
+      case Left(error) => Left(error)
     }
 
-  override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): F[Set[UserId]] =
+  override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): F[Either[UseCaseError, Set[UserId]]] =
     authorization.resolve(actor).map {
-      case Right(viewer) if viewer.role == UserRole.Admin && viewer.adminSingleton => userIds.toSet
-      case Right(viewer) => userIds.filter(_ == viewer.id).toSet
-      case Left(_) => Set.empty
+      case Right(viewer) if viewer.role == UserRole.Admin && viewer.adminSingleton => Right(userIds.toSet)
+      case Right(viewer) => Right(userIds.filter(_ == viewer.id).toSet)
+      case Left(error) => Left(error)
     }
 
-  override def job(id: JobId): F[Option[Job]] =
-    jobs.find(id)
+  override def job(id: JobId): F[Either[UseCaseError, Option[Job]]] =
+    read(jobs.find(id))
 
-  override def jobs(ids: List[JobId]): F[List[Job]] =
-    jobs.findMany(ids)
+  override def jobs(ids: List[JobId]): F[Either[UseCaseError, List[Job]]] =
+    read(jobs.findMany(ids))
 
-  override def application(id: ApplicationId): F[Option[Application]] =
-    applications.find(id)
+  override def application(id: ApplicationId): F[Either[UseCaseError, Option[Application]]] =
+    read(applications.find(id))
 
   override def canViewApplication(actor: ActorContext, applicationId: ApplicationId): F[Either[UseCaseError, Unit]] =
     authorization.resolve(actor).flatMap {
       case Left(error) => error.asLeft[Unit].pure[F]
       case Right(user) =>
-        applications.find(applicationId).flatMap {
-          case None => UseCaseError.domain(DomainError.NotFound("application")).asLeft[Unit].pure[F]
-          case Some(application) if application.candidateId == user.id && user.role == UserRole.Candidate =>
+        read(applications.find(applicationId)).flatMap {
+          case Left(error) => error.asLeft[Unit].pure[F]
+          case Right(None) => UseCaseError.domain(DomainError.NotFound("application")).asLeft[Unit].pure[F]
+          case Right(Some(application)) if application.candidateId == user.id && user.role == UserRole.Candidate =>
             ().asRight[UseCaseError].pure[F]
-          case Some(_) if user.role == UserRole.Admin && user.adminSingleton =>
+          case Right(Some(_)) if user.role == UserRole.Admin && user.adminSingleton =>
             ().asRight[UseCaseError].pure[F]
-          case Some(application) if user.role == UserRole.Recruiter =>
-            jobs.find(application.jobId).map {
-              case Some(job) if job.recruiterId == user.id => Right(())
-              case Some(_) => Left(UseCaseError.domain(DomainError.Forbidden))
-              case None => Left(UseCaseError.domain(DomainError.NotFound("job")))
+          case Right(Some(application)) if user.role == UserRole.Recruiter =>
+            read(jobs.find(application.jobId)).map {
+              case Left(error) => Left(error)
+              case Right(Some(job)) if job.recruiterId == user.id => Right(())
+              case Right(Some(_)) => Left(UseCaseError.domain(DomainError.Forbidden))
+              case Right(None) => Left(UseCaseError.domain(DomainError.NotFound("job")))
             }
-          case Some(_) => UseCaseError.domain(DomainError.Forbidden).asLeft[Unit].pure[F]
+          case Right(Some(_)) => UseCaseError.domain(DomainError.Forbidden).asLeft[Unit].pure[F]
         }
     }
 
-  override def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[List[ApplicationEvent]] =
-    applications.history(applicationId, page)
+  override def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[Either[UseCaseError, List[ApplicationEvent]]] =
+    read(applications.history(applicationId, page))
+
+  private def read[A](value: F[Either[RepositoryError, A]]): F[Either[UseCaseError, A]] =
+    value.map(_.leftMap(UseCaseError.repository))
 }
 
 object HiringReadService {

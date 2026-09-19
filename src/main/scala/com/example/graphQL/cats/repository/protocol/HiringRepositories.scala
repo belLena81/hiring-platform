@@ -9,8 +9,8 @@ import java.time.Instant
 import scala.annotation.unused
 
 trait UserRepository[F[_]] {
-  def find(id: UserId): F[Option[User]]
-  def findMany(ids: List[UserId]): F[List[User]]
+  def find(id: UserId): F[Either[RepositoryError, Option[User]]]
+  def findMany(ids: List[UserId]): F[Either[RepositoryError, List[User]]]
   def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
@@ -20,18 +20,18 @@ trait UserAccountRepository[F[_]] {
   def createAccount(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
   def createAccount(user: User, passwordHash: String, @unused now: Instant): F[Either[RepositoryError, Unit]] =
     createAccount(user, passwordHash)
-  def findByCanonicalName(nameCanonical: String): F[Option[AccountCredentials]]
+  def findByCanonicalName(nameCanonical: String): F[Either[RepositoryError, Option[AccountCredentials]]]
   def updateProfile(userId: UserId, profile: UserProfile, now: Instant): F[Either[RepositoryError, User]]
-  def listAccounts(page: UserPageRequest): F[List[User]]
+  def listAccounts(page: UserPageRequest): F[Either[RepositoryError, List[User]]]
   def deleteAccount(userId: UserId, now: Instant, tombstone: String): F[Either[RepositoryError, Unit]]
 }
 
 trait JobRepository[F[_]] {
-  def find(id: JobId): F[Option[Job]]
-  def findMany(ids: List[JobId]): F[List[Job]]
-  def findOpen(filter: JobSearchFilter, page: JobPageRequest): F[List[Job]]
-  def findAll(page: JobPageRequest): F[List[Job]]
-  def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[List[Job]]
+  def find(id: JobId): F[Either[RepositoryError, Option[Job]]]
+  def findMany(ids: List[JobId]): F[Either[RepositoryError, List[Job]]]
+  def findOpen(filter: JobSearchFilter, page: JobPageRequest): F[Either[RepositoryError, List[Job]]]
+  def findAll(page: JobPageRequest): F[Either[RepositoryError, List[Job]]]
+  def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[Either[RepositoryError, List[Job]]]
   def create(job: Job): F[Either[RepositoryError, Unit]]
   def create(job: Job, @unused now: Instant): F[Either[RepositoryError, Unit]] = create(job)
   def update(job: Job): F[Either[RepositoryError, Job]]
@@ -89,10 +89,10 @@ trait SemanticSearchRepository[F[_]] {
 }
 
 trait ApplicationRepository[F[_]] {
-  def find(id: ApplicationId): F[Option[Application]]
-  def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): F[List[Application]]
-  def findByJob(jobId: JobId, page: ApplicationPageRequest): F[List[Application]]
-  def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[List[ApplicationEvent]]
+  def find(id: ApplicationId): F[Either[RepositoryError, Option[Application]]]
+  def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): F[Either[RepositoryError, List[Application]]]
+  def findByJob(jobId: JobId, page: ApplicationPageRequest): F[Either[RepositoryError, List[Application]]]
+  def history(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[Either[RepositoryError, List[ApplicationEvent]]]
   def createForOpenJob(
       observedJob: Job,
       application: Application,

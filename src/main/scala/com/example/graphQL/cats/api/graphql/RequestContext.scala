@@ -6,6 +6,8 @@ import com.example.graphQL.cats.service.{ActorContext, ProbeResult, TraceContext
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, JobUseCases, SearchUseCases}
+import com.example.graphQL.cats.service.UseCaseError
+import scala.util.control.NoStackTrace
 
 final case class HiringGraphQLServices(
     readModel: HiringReadModel[IO],
@@ -41,16 +43,19 @@ final class RequestContext private (
   private[graphql] def unsafeToFuture[A](action: IO[A]) = dispatcher.unsafeToFuture(inRequestTrace(action))
 
   def users(ids: List[UserId]): IO[List[User]] =
-    hiring.readModel.users(ids.distinct)
+    read(hiring.readModel.users(ids.distinct))
 
   def jobs(ids: List[JobId]): IO[List[Job]] =
-    hiring.readModel.jobs(ids.distinct)
+    read(hiring.readModel.jobs(ids.distinct))
 
   def visibleEmailUsers(ids: List[UserId]): IO[List[EmailVisibility]] =
     actor match {
-      case Some(current) => hiring.readModel.canViewUserEmails(current, ids.distinct).map(_.toList.map(EmailVisibility(_)))
+      case Some(current) => read(hiring.readModel.canViewUserEmails(current, ids.distinct)).map(_.toList.map(EmailVisibility(_)))
       case None => IO.pure(Nil)
     }
+
+  private def read[A](result: IO[Either[UseCaseError, A]]): IO[A] =
+    result.flatMap(_.fold(error => IO.raiseError(RequestContext.ReadFailure(error)), IO.pure))
 
 }
 
@@ -71,6 +76,8 @@ object RequestContextFactory {
 }
 
 object RequestContext {
+  final case class ReadFailure(error: UseCaseError) extends RuntimeException with NoStackTrace
+
   private[graphql] def withDispatcher(
       dispatcher: Dispatcher[IO],
       probe: IO[ProbeResult],

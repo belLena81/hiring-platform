@@ -19,11 +19,17 @@ enum EmbeddingWork {
 
 trait EmbeddingWorkPublisher[F[_]] {
   def publish(work: EmbeddingWork): F[Unit]
+
+  /** Signals work that was atomically persisted by the mutation transaction. */
+  def wake: F[Unit]
 }
 
 object EmbeddingWorkPublisher {
   def noop[F[_]: cats.Applicative]: EmbeddingWorkPublisher[F] =
-    _ => cats.Applicative[F].unit
+    new EmbeddingWorkPublisher[F] {
+      override def publish(work: EmbeddingWork): F[Unit] = cats.Applicative[F].unit
+      override def wake: F[Unit] = cats.Applicative[F].unit
+    }
 }
 
 final class DurableEmbeddingWorkPublisher private[search] (
@@ -33,11 +39,13 @@ final class DurableEmbeddingWorkPublisher private[search] (
 ) extends EmbeddingWorkPublisher[IO] {
   def offer(work: EmbeddingWork): IO[Unit] =
     now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _)).flatMap {
-      case Right(()) => wakeups.tryOffer(()).void
+      case Right(()) => wake
       case Left(error) => IO.raiseError(new IllegalStateException(s"Embedding work enqueue failed: $error"))
     }
 
   override def publish(work: EmbeddingWork): IO[Unit] = offer(work)
+
+  override def wake: IO[Unit] = wakeups.tryOffer(()).void
 }
 
 object DurableEmbeddingWorkPublisher {
@@ -107,7 +115,7 @@ final class EmbeddingPipeline(
 
   private def processJob(id: JobId): IO[ProcessingOutcome] =
     jobs.find(id).flatMap {
-      case Some(job) =>
+      case Right(Some(job)) =>
         val text = SearchableText.job(job)
         val hash = SourceHash.sha256(text)
         if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
@@ -116,12 +124,13 @@ final class EmbeddingPipeline(
           case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
           case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
         }
-      case None => IO.pure(ProcessingOutcome.Completed)
+      case Right(None) => IO.pure(ProcessingOutcome.Completed)
+      case Left(_) => IO.pure(ProcessingOutcome.Retry)
     }
 
   private def processCandidate(id: UserId): IO[ProcessingOutcome] =
     users.find(id).flatMap {
-      case Some(user) => user.candidateProfile match {
+      case Right(Some(user)) => user.candidateProfile match {
         case Some(profile) =>
           val text = SearchableText.candidate(profile)
           val hash = SourceHash.sha256(text)
@@ -133,7 +142,8 @@ final class EmbeddingPipeline(
           }
         case None => IO.pure(ProcessingOutcome.Completed)
       }
-      case None => IO.pure(ProcessingOutcome.Completed)
+      case Right(None) => IO.pure(ProcessingOutcome.Completed)
+      case Left(_) => IO.pure(ProcessingOutcome.Retry)
     }
 
   private def isCurrent(embedding: EntityEmbedding, hash: String): Boolean =

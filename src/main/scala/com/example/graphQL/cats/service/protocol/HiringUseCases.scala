@@ -5,25 +5,25 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
-import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, RepositoryError, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.time.Instant
 import java.util.UUID
 
 trait HiringReadModel[F[_]] {
-  def user(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): F[Option[User]]
-  def users(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): F[List[User]]
-  def canViewUserEmail(actor: ActorContext, userId: UserId): F[Boolean]
-  def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): F[Set[UserId]]
-  def job(id: JobId): F[Option[Job]]
-  def jobs(ids: List[JobId]): F[List[Job]]
-  def application(id: ApplicationId): F[Option[Application]]
+  def user(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): F[Either[UseCaseError, Option[User]]]
+  def users(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): F[Either[UseCaseError, List[User]]]
+  def canViewUserEmail(actor: ActorContext, userId: UserId): F[Either[UseCaseError, Boolean]]
+  def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): F[Either[UseCaseError, Set[UserId]]]
+  def job(id: JobId): F[Either[UseCaseError, Option[Job]]]
+  def jobs(ids: List[JobId]): F[Either[UseCaseError, List[Job]]]
+  def application(id: ApplicationId): F[Either[UseCaseError, Option[Application]]]
   def canViewApplication(actor: ActorContext, applicationId: ApplicationId): F[Either[UseCaseError, Unit]]
-  def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[List[ApplicationEvent]]
+  def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): F[Either[UseCaseError, List[ApplicationEvent]]]
 }
 
 trait UserAuthenticator[F[_]] {
-  def actorFor(userId: UserId): F[Option[ActorContext]]
+  def actorFor(userId: UserId): F[Either[RepositoryError, Option[ActorContext]]]
 }
 
 trait JobUseCases[F[_]] {

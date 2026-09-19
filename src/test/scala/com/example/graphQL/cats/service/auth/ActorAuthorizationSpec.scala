@@ -28,11 +28,11 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
 
   private def repository(values: Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]): UserRepository[IO] =
     new UserRepository[IO] {
-      override def find(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): IO[Option[User]] =
-        IO.pure(values.get(id))
+      override def find(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): IO[Either[RepositoryError, Option[User]]] =
+        IO.pure(Right(values.get(id)))
 
-      override def findMany(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): IO[List[User]] =
-        IO.pure(ids.flatMap(values.get))
+      override def findMany(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): IO[Either[RepositoryError, List[User]]] =
+        IO.pure(Right(ids.flatMap(values.get)))
 
       override def updateEmbedding(
           id: com.example.graphQL.cats.domain.model.Identifiers.UserId,

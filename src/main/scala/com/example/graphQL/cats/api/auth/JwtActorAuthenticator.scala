@@ -14,7 +14,7 @@ import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
 import scala.util.Try
 
 enum AuthFailure {
-  case MalformedCredentials, InvalidToken, UnknownActor
+  case MalformedCredentials, InvalidToken, UnknownActor, Unavailable
 }
 
 final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
@@ -26,8 +26,9 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
         JwtActorAuthenticator.verify(token, config.hmacSecret, config.issuer, config.audience, clock).flatMap {
           case None => IO.pure(Left(AuthFailure.InvalidToken))
           case Some(userId) => users.actorFor(userId).map {
-            case Some(actor) => Right(Some(actor))
-            case None => Left(AuthFailure.UnknownActor)
+            case Left(_) => Left(AuthFailure.Unavailable)
+            case Right(Some(actor)) => Right(Some(actor))
+            case Right(None) => Left(AuthFailure.UnknownActor)
           }
         }
     }

@@ -5,6 +5,7 @@ import cats.effect.Ref
 import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.shared.pagination.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.service.ServiceFixtures.*
+import com.example.graphQL.cats.service.search.{EmbeddingWork, EmbeddingWorkPublisher}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
@@ -82,6 +83,31 @@ class JobServiceSpec extends CatsEffectSuite {
       assertEquals(created.map(_.id), Right(jobId))
       assertEquals(rejected, Left(UseCaseError.domain(DomainError.Forbidden)))
       assertEquals(updated.map(_.id), Right(jobId))
+    }
+  }
+
+  test("successful writes wake durable embedding work without publishing a second work record") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      wakes <- Ref.of[IO, Int](0)
+      publisher = new EmbeddingWorkPublisher[IO] {
+        override def publish(work: EmbeddingWork): IO[Unit] =
+          IO.raiseError(new AssertionError("job service must not enqueue embedding work"))
+
+        override def wake: IO[Unit] = wakes.update(_ + 1)
+      }
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs), publisher)
+      result <- service.createJob(
+        ActorContext(recruiterId, UserRole.Recruiter),
+        CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Open),
+        now,
+        jobId
+      )
+      wakeCount <- wakes.get
+    } yield {
+      assertEquals(result.map(_.id), Right(jobId))
+      assertEquals(wakeCount, 1)
     }
   }
 

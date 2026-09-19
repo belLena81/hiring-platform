@@ -74,6 +74,24 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   private val jwtSecret = "01234567890123456789012345678901"
   private val jwtConfig = JwtAuthConfig(jwtSecret, "hiring-platform-local", "hiring-graphql-api")
 
+  test("authentication repository unavailability returns a sanitized service-unavailable response") {
+    for {
+      admission <- Admission.create(DefaultAdmissionPermits)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        admission,
+        authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.Unavailable))
+      ).map(_.app)
+      response <- http(request("{ health { status } }"))
+      body <- response.as[Json]
+    } yield {
+      assertEquals(response.status, Status.ServiceUnavailable)
+      assertEquals(body.hcursor.downField("errors").downArray.get[String]("message"), Right("Service unavailable"))
+    }
+  }
+
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
   private def spanEvent(event: LogEvent): Boolean = event match {

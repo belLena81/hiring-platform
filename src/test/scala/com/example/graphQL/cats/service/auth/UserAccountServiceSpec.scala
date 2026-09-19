@@ -214,8 +214,8 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
 
   private final class TestUsers(values: Map[UserId, User]) extends UserRepository[IO] {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
-    override def find(id: UserId): IO[Option[User]] = IO.pure(values.get(id))
-    override def findMany(ids: List[UserId]): IO[List[User]] = IO.pure(ids.flatMap(values.get))
+    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
+    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(ids.flatMap(values.get)))
     override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
@@ -231,9 +231,9 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         if (current.contains(key)) current -> Left(RepositoryError.Conflict)
         else (current.updated(key, AccountCredentials(user, passwordHash)), Right(()))
       }
-    override def findByCanonicalName(nameCanonical: String): IO[Option[AccountCredentials]] = values.get.map(_.get(nameCanonical))
+    override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] = values.get.map(values => Right(values.get(nameCanonical)))
     override def updateProfile(userId: UserId, profile: UserProfile, now: Instant): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
-    override def listAccounts(page: UserPageRequest): IO[List[User]] = IO.pure(Nil)
+    override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
     override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 

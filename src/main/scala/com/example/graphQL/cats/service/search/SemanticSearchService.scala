@@ -91,12 +91,13 @@ final class SemanticSearchService[F[_]: Monad](
         UseCaseError.domain(DomainError.RecruiterRequired).asLeft[List[RankedCandidate]].pure[F]
       case Right(user) =>
         jobs.find(jobId).flatMap {
-      case None => UseCaseError.domain(DomainError.NotFound("job")).asLeft[List[RankedCandidate]].pure[F]
-      case Some(job) if user.role == UserRole.Recruiter && job.recruiterId != user.id =>
+      case Left(error) => UseCaseError.repository(error).asLeft[List[RankedCandidate]].pure[F]
+      case Right(None) => UseCaseError.domain(DomainError.NotFound("job")).asLeft[List[RankedCandidate]].pure[F]
+      case Right(Some(job)) if user.role == UserRole.Recruiter && job.recruiterId != user.id =>
         UseCaseError.domain(DomainError.Forbidden).asLeft[List[RankedCandidate]].pure[F]
-      case Some(job) if job.status != JobStatus.Open =>
+      case Right(Some(job)) if job.status != JobStatus.Open =>
         UseCaseError.domain(DomainError.JobMustBeOpen).asLeft[List[RankedCandidate]].pure[F]
-      case Some(job) =>
+      case Right(Some(job)) =>
         job.embedding match {
           case Some(embedding) if embedding.meta.model == embeddingModel &&
               embedding.meta.version == embeddingVersion &&

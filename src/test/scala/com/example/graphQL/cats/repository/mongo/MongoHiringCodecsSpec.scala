@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
+import com.example.graphQL.cats.service.RepositoryError
 import java.time.Instant
 import java.util.{Date, UUID}
 import munit.FunSuite
@@ -26,7 +27,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val result = MongoHiringCodecs.readUser(MongoHiringCodecs.user(user))
 
-    assertEquals(result, user)
+    assertEquals(result, Right(user))
     assertEquals(MongoHiringCodecs.user(user).get("profile", classOf[Document]).getString("kind"), "Candidate")
     assert(!MongoHiringCodecs.user(user).containsKey("recruiterProfile"))
   }
@@ -43,12 +44,12 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val document = MongoHiringCodecs.user(user)
 
-    assertEquals(MongoHiringCodecs.readUser(document), user)
+    assertEquals(MongoHiringCodecs.readUser(document), Right(user))
     assertEquals(document.get("profile", classOf[Document]).getString("kind"), "Recruiter")
     assert(!document.containsKey("recruiterProfile"))
   }
 
-  test("user codec reads legacy documents without profile as absent profile") {
+  test("user codec rejects legacy documents whose role and profile do not satisfy the current invariant") {
     val legacyDocument = new Document("_id", candidateId.value.toString)
       .append("schemaVersion", 1)
       .append("email", "candidate@example.com")
@@ -59,7 +60,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val result = MongoHiringCodecs.readUser(legacyDocument)
 
-    assertEquals(result.profile, None)
+    assertEquals(result, Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
   }
 
   test("job codec preserves closedAt round-trip for closed jobs") {
@@ -81,7 +82,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     val result = MongoHiringCodecs.readJob(document)
 
     assertEquals(document.getDate("closedAt"), Date.from(later))
-    assertEquals(result, job)
+    assertEquals(result, Right(job))
   }
 
   test("job codec preserves embedding metadata when present") {
@@ -105,7 +106,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     assert(document.containsKey("embedding"))
     assert(document.containsKey("embeddingMeta"))
-    assertEquals(result.embedding, Some(embedding))
+    assertEquals(result.map(_.embedding), Right(Some(embedding)))
   }
 
   test("job codec reads legacy documents without closedAt as absent close timestamp") {
@@ -124,6 +125,48 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val result = MongoHiringCodecs.readJob(legacyDocument)
 
-    assertEquals(result.closedAt, None)
+    assertEquals(result.map(_.closedAt), Right(None))
+  }
+
+  test("malformed stored documents decode to non-sensitive typed errors") {
+    val missingName = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+    missingName.remove("name")
+    val invalidRole = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+      .append("role", "NotARole")
+    val invalidEmbedding = MongoHiringCodecs.job(Job(jobId, recruiterId, "Title", "Description", Nil, Set.empty, Location("Cyprus", "Nicosia", true), JobStatus.Open, now, now))
+      .append("embedding", List("not-a-number").asJava)
+      .append("embeddingMeta", new Document("model", "model"))
+
+    assertEquals(MongoHiringCodecs.readUser(missingName), Left(MongoHiringCodecs.StoredDocumentError.MissingField("name")))
+    assertEquals(MongoHiringCodecs.readUser(invalidRole), Left(MongoHiringCodecs.StoredDocumentError.InvalidField("role")))
+    assertEquals(MongoHiringCodecs.readJob(invalidEmbedding), Left(MongoHiringCodecs.StoredDocumentError.InvalidField("embedding")))
+    assertEquals(
+      MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readUser(missingName)),
+      Left(RepositoryError.Unavailable)
+    )
+  }
+
+  test("user codec rejects role-profile mismatches and non-singleton admins") {
+    val candidateWithRecruiterProfile = MongoHiringCodecs.user(User(
+      candidateId,
+      Some("candidate@example.com"),
+      "Candidate",
+      UserRole.Candidate,
+      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+      now
+    )).append("profile", MongoHiringCodecs.profile(UserProfile.Recruiter(RecruiterProfile("Acme", None))))
+    val adminWithoutSingleton = MongoHiringCodecs.user(User(
+      candidateId,
+      Some("admin@example.com"),
+      "Admin",
+      UserRole.Admin,
+      None,
+      now,
+      adminSingleton = true
+    ))
+    adminWithoutSingleton.remove("adminSingletonKey")
+
+    assertEquals(MongoHiringCodecs.readUser(candidateWithRecruiterProfile), Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
+    assertEquals(MongoHiringCodecs.readUser(adminWithoutSingleton), Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
   }
 }

@@ -14,24 +14,19 @@ import scala.concurrent.duration.FiniteDuration
 
 /** Bounds resolver-owned effects before they cross Sangria's non-cancellable Future boundary. */
 private[runtime] object BoundedHiringServices {
-  private final class ResolverTimedOut extends RuntimeException(null, null, false, false)
-
   private def typed[A](timeout: FiniteDuration)(action: IO[Either[UseCaseError, A]]): IO[Either[UseCaseError, A]] =
     action.timeoutTo(timeout, IO.pure(Left(UseCaseError.repository(RepositoryError.Unavailable))))
 
-  private def read[A](timeout: FiniteDuration)(action: IO[A]): IO[A] =
-    action.timeoutTo(timeout, IO.raiseError(new ResolverTimedOut))
-
   def readModel(delegate: HiringReadModel[IO], timeout: FiniteDuration): HiringReadModel[IO] = new HiringReadModel[IO] {
-    def user(id: UserId): IO[Option[User]] = read(timeout)(delegate.user(id))
-    def users(ids: List[UserId]): IO[List[User]] = read(timeout)(delegate.users(ids))
-    def canViewUserEmail(actor: ActorContext, id: UserId): IO[Boolean] = read(timeout)(delegate.canViewUserEmail(actor, id))
-    def canViewUserEmails(actor: ActorContext, ids: List[UserId]): IO[Set[UserId]] = read(timeout)(delegate.canViewUserEmails(actor, ids))
-    def job(id: JobId): IO[Option[Job]] = read(timeout)(delegate.job(id))
-    def jobs(ids: List[JobId]): IO[List[Job]] = read(timeout)(delegate.jobs(ids))
-    def application(id: ApplicationId): IO[Option[Application]] = read(timeout)(delegate.application(id))
+    def user(id: UserId): IO[Either[UseCaseError, Option[User]]] = typed(timeout)(delegate.user(id))
+    def users(ids: List[UserId]): IO[Either[UseCaseError, List[User]]] = typed(timeout)(delegate.users(ids))
+    def canViewUserEmail(actor: ActorContext, id: UserId): IO[Either[UseCaseError, Boolean]] = typed(timeout)(delegate.canViewUserEmail(actor, id))
+    def canViewUserEmails(actor: ActorContext, ids: List[UserId]): IO[Either[UseCaseError, Set[UserId]]] = typed(timeout)(delegate.canViewUserEmails(actor, ids))
+    def job(id: JobId): IO[Either[UseCaseError, Option[Job]]] = typed(timeout)(delegate.job(id))
+    def jobs(ids: List[JobId]): IO[Either[UseCaseError, List[Job]]] = typed(timeout)(delegate.jobs(ids))
+    def application(id: ApplicationId): IO[Either[UseCaseError, Option[Application]]] = typed(timeout)(delegate.application(id))
     def canViewApplication(actor: ActorContext, id: ApplicationId): IO[Either[UseCaseError, Unit]] = typed(timeout)(delegate.canViewApplication(actor, id))
-    def applicationHistory(id: ApplicationId, page: ApplicationEventPageRequest): IO[List[ApplicationEvent]] = read(timeout)(delegate.applicationHistory(id, page))
+    def applicationHistory(id: ApplicationId, page: ApplicationEventPageRequest): IO[Either[UseCaseError, List[ApplicationEvent]]] = typed(timeout)(delegate.applicationHistory(id, page))
   }
 
   def jobs(delegate: JobUseCases[IO], timeout: FiniteDuration): JobUseCases[IO] = new JobUseCases[IO] {

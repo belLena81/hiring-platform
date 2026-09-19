@@ -3,6 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
 import com.example.graphQL.cats.service.{ActorContext, HealthService, ProbeResult, TraceContext}
+import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
 import io.circe.Json
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
 import sangria.marshalling.circe.*
@@ -42,6 +43,8 @@ object HiringGraphQLSchema {
         exceptionHandler = ExceptionHandler {
           case (_, error: QueryAnalysisError) => throw error
           case (_, error: QueryComplexityExceeded) => throw error
+          case (_, RequestContext.ReadFailure(UseCaseError.Repository(RepositoryError.Unavailable))) =>
+            HandledException("Repository unavailable")
           case (_, _) => HandledException("Execution failed")
         },
         queryReducers = HiringGraphQLSchemaAssembly.queryReducers,

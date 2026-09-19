@@ -8,7 +8,9 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{UserAccountRepository, UserRepository}
 import com.example.graphQL.cats.service.*
+import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.protocol.*
+import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import java.text.Normalizer
 import java.time.Instant
 
@@ -16,7 +18,8 @@ final class UserAccountService(
     users: UserRepository[IO],
     accounts: UserAccountRepository[IO],
     hasher: PasswordHasher[IO],
-    tokenIssuer: AccessTokenIssuer[IO]
+    tokenIssuer: AccessTokenIssuer[IO],
+    embeddingWork: EmbeddingWorkPublisher[IO] = EmbeddingWorkPublisher.noop[IO]
 ) extends AccountUseCases[IO] {
   private val authorization = ActorAuthorization(users)
 
@@ -39,7 +42,7 @@ final class UserAccountService(
             }
           }
         }
-      }
+      }.flatTap(wakeCandidateAfterCommit)
     )
 
   override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
@@ -61,10 +64,11 @@ final class UserAccountService(
   override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] = {
     val canonical = canonicalName(input.name)
     accounts.findByCanonicalName(canonical).flatMap {
-      case None => hasher.verifyUnknown(input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
-      case Some(credentials) if credentials.user.accountStatus != AccountStatus.Active =>
+      case Left(error) => IO.pure(Left(UseCaseError.repository(error)))
+      case Right(None) => hasher.verifyUnknown(input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
+      case Right(Some(credentials)) if credentials.user.accountStatus != AccountStatus.Active =>
         hasher.verifyUnknown(input.password).as(Left(UseCaseError.account(AccountError.InvalidCredentials)))
-      case Some(credentials) => hasher.verify(credentials.passwordHash, input.password).flatMap {
+      case Right(Some(credentials)) => hasher.verify(credentials.passwordHash, input.password).flatMap {
         case false => IO.pure(Left(UseCaseError.account(AccountError.InvalidCredentials)))
         case true => token(credentials.user, now)
       }
@@ -82,7 +86,7 @@ final class UserAccountService(
         if (!UserProfile.matchesRole(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
         else UserProfile.validateFor(user.role, Some(input.profile)).fold(
           errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
-          _ => accounts.updateProfile(user.id, input.profile, now).map(_.leftMap(UseCaseError.repository))
+          _ => accounts.updateProfile(user.id, input.profile, now).map(_.leftMap(UseCaseError.repository)).flatTap(wakeCandidateAfterCommit)
         )
     }
 
@@ -98,7 +102,7 @@ final class UserAccountService(
   override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =
     authorization.resolve(actor).flatMap {
       case Right(user) if user.role == UserRole.Admin =>
-        accounts.listAccounts(page).map(_.asRight[UseCaseError])
+        accounts.listAccounts(page).map(_.widenUseCase)
       case _ => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
     }
 
@@ -132,4 +136,7 @@ final class UserAccountService(
 
   private def canonicalName(value: String): String =
     AccountName.canonical(value)
+
+  private def wakeCandidateAfterCommit[A](result: Either[UseCaseError, A]): IO[Unit] =
+    result.fold(_ => IO.unit, _ => embeddingWork.wake.handleError(_ => ()))
 }

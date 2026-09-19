@@ -863,11 +863,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       ref: Ref[IO, Map[UserId, User]],
       batches: Ref[IO, Vector[List[UserId]]]
   ) extends UserRepository[IO] {
-    override def find(id: UserId): IO[Option[User]] =
-      ref.get.map(_.get(id))
+    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
+      ref.get.map(_.get(id)).map(Right(_))
 
-    override def findMany(ids: List[UserId]): IO[List[User]] =
-      batches.update(_ :+ ids) *> ref.get.map(users => ids.distinct.flatMap(users.get))
+    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
+      batches.update(_ :+ ids) *> ref.get.map(users => Right(ids.distinct.flatMap(users.get)))
 
     override def updateEmbedding(
         id: UserId,

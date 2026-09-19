@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.given
 import io.circe.Json
 import munit.CatsEffectSuite
 import sangria.execution.Executor
@@ -47,6 +48,19 @@ final class HiringGraphQLInputsSpec extends CatsEffectSuite {
       |  inspect(input: $input) { required optionalShape optional }
       |}""".stripMargin
 
+  private val updateInputArgument = Argument("input", HiringGraphQLInputs.updateJobInputType)
+  private val updateSchema = Schema(
+    ObjectType("UpdateQuery", fields[Unit, Unit](Field("health", StringType, resolve = _ => "UP"))),
+    Some(ObjectType("UpdateMutation", fields[Unit, Unit](
+      Field("inspectUpdate", StringType, arguments = updateInputArgument :: Nil,
+        resolve = context => context.arg(updateInputArgument).patch.title)
+    )))
+  )
+  private val updateMutation =
+    """mutation InspectUpdate($input: UpdateJobInput!) {
+      |  inspectUpdate(input: $input)
+      |}""".stripMargin
+
   test("CoercedScalaResultMarshaller omits absent optional variables and wraps present nullable values") {
     val present = Json.obj("input" -> Json.obj(
       "required" -> Json.fromString("required-present"),
@@ -65,10 +79,52 @@ final class HiringGraphQLInputsSpec extends CatsEffectSuite {
     }
   }
 
+  test("null or scalar nested job patches are rejected without exposing conversion failures") {
+    val id = "00000000-0000-0000-0000-000000000001"
+    val nullPatch = Json.obj("input" -> Json.obj("id" -> Json.fromString(id), "patch" -> Json.Null))
+    val scalarPatch = Json.obj("input" -> Json.obj("id" -> Json.fromString(id), "patch" -> Json.fromString("invalid")))
+
+    (executeUpdate(nullPatch), executeUpdate(scalarPatch)).mapN { (nullResult, scalarResult) =>
+      List(nullResult, scalarResult).foreach { result =>
+        assert(result.isLeft)
+        val message = result.fold(_.getMessage, _.noSpaces)
+        assert(!message.contains("ClassCastException"))
+        assert(!message.contains("MatchError"))
+      }
+    }
+  }
+
+  test("malformed coerced input maps fail with the sanitized adapter error") {
+    val malformedInputs = List(
+      Map.empty[String, Any],
+      Map("title" -> 1),
+      Map("title" -> "title", "description" -> "description", "requirements" -> "not-a-list",
+        "skills" -> Vector("Scala"), "country" -> "Cyprus", "remote" -> true),
+      Map("title" -> "title", "description" -> "description", "requirements" -> Vector("requirement"),
+        "skills" -> Vector("Scala"), "country" -> "Cyprus", "remote" -> "not-a-boolean")
+    )
+
+    malformedInputs.foreach { input =>
+      val failure = intercept[RuntimeException] {
+        summon[FromInput[HiringGraphQLModel.JobGraphQLInput]].fromResult(input)
+      }
+      assertEquals(failure.getMessage, "Invalid GraphQL input")
+      assert(!failure.isInstanceOf[ClassCastException])
+      assert(!failure.isInstanceOf[NoSuchElementException])
+    }
+  }
+
   private def execute(variables: Json): IO[Json] =
     IO.fromEither(QueryParser.parse(mutation).toEither).flatMap { query =>
       IO.executionContext.flatMap { implicit executionContext =>
         IO.fromFuture(IO(Executor.execute(schema, query, variables = variables)))
+      }
+    }
+
+  private def executeUpdate(variables: Json): IO[Either[Throwable, Json]] =
+    IO.fromEither(QueryParser.parse(updateMutation).toEither).flatMap { query =>
+      IO.executionContext.flatMap { implicit executionContext =>
+        IO.fromFuture(IO(Executor.execute(updateSchema, query, variables = variables))).attempt
       }
     }
 

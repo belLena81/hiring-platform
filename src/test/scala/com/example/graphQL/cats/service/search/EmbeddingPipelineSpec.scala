@@ -39,7 +39,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- waitFor(calls.get.map(_ == 1))
-          updated <- eventually(jobs.find(jobId))(
+          updated <- eventually(successfulFind(jobs, jobId))(
             _.flatMap(_.embedding).exists(_.meta.sourceHash == SourceHash.sha256(SearchableText.job(openJob)))
           )
           _ = assert(updated.flatMap(_.embedding).exists(_.meta.sourceHash == SourceHash.sha256(SearchableText.job(openJob))))
@@ -80,7 +80,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           for {
             _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
             _ <- waitFor(calls.get.map(_ == 1))
-            updated <- jobs.find(jobId)
+            updated <- successfulFind(jobs, jobId)
           } yield {
             assertEquals(updated.flatMap(_.embedding).map(_.meta.model), Some("voyage-4-lite"))
             assertEquals(updated.flatMap(_.embedding).map(_.meta.version), Some(1))
@@ -112,7 +112,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       ).use { queue =>
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
-          updated <- eventually(jobs.find(jobId))(_.flatMap(_.embedding).nonEmpty)
+          updated <- eventually(successfulFind(jobs, jobId))(_.flatMap(_.embedding).nonEmpty)
           attempts <- calls.get
         } yield {
           assert(updated.flatMap(_.embedding).nonEmpty)
@@ -152,7 +152,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           _ = assert(updated.exists(_.version == 1L))
           _ <- release.complete(()).void
           staleResult <- writeResult.get
-          finalJob <- jobs.find(jobId)
+          finalJob <- successfulFind(jobs, jobId)
         } yield {
           assertEquals(staleResult, Left(RepositoryError.Conflict))
           assertEquals(finalJob.map(_.version), Some(1L))
@@ -192,7 +192,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           saturatedPublish <- queue.publish(EmbeddingWork.JobChanged(otherJobId)).timeout(200.millis).attempt
           _ = assertEquals(saturatedPublish, Right(()))
           _ <- release.complete(()).void
-          updated <- eventually(jobs.find(otherJobId))(
+          updated <- eventually(successfulFind(jobs, otherJobId))(
             _.flatMap(_.embedding).exists(_.meta.sourceHash == SourceHash.sha256(SearchableText.job(otherJob)))
           )
           finalCalls <- calls.get
@@ -282,6 +282,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       else IO.raiseError(new AssertionError("condition was not met"))
     }
 
+  private def successfulFind(jobs: JobRepository[IO], id: Identifiers.JobId): IO[Option[Job]] =
+    jobs.find(id).map(_.toOption.flatten)
+
   private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.update(_ + 1).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
@@ -310,19 +313,19 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       delegate: InMemoryJobs,
       writeResult: Deferred[IO, Either[RepositoryError, Unit]]
   ) extends JobRepository[IO] {
-    override def find(id: Identifiers.JobId): IO[Option[Job]] =
+    override def find(id: Identifiers.JobId): IO[Either[RepositoryError, Option[Job]]] =
       delegate.find(id)
 
-    override def findMany(ids: List[Identifiers.JobId]): IO[List[Job]] =
+    override def findMany(ids: List[Identifiers.JobId]): IO[Either[RepositoryError, List[Job]]] =
       delegate.findMany(ids)
 
-    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[List[Job]] =
+    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       delegate.findOpen(filter, page)
 
-    override def findAll(page: JobPageRequest): IO[List[Job]] =
+    override def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       delegate.findAll(page)
 
-    override def findByRecruiter(recruiterId: Identifiers.UserId, page: JobPageRequest): IO[List[Job]] =
+    override def findByRecruiter(recruiterId: Identifiers.UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       delegate.findByRecruiter(recruiterId, page)
 
     override def create(job: Job): IO[Either[RepositoryError, Unit]] =

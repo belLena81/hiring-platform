@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.job
 
-import cats.Monad
+import cats.MonadError
 import cats.data.EitherT
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
@@ -12,6 +12,7 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole
 import com.example.graphQL.cats.domain.policy.JobLifecycle
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.protocol.JobUseCases
+import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.shared.pagination.JobPageRequest
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import java.time.Instant
@@ -33,10 +34,11 @@ final case class UpdateJobInput(
     location: Location
 )
 
-final class JobService[F[_]: Monad](
+final class JobService[F[_]](
     users: UserRepository[F],
-    jobs: JobRepository[F]
-) extends JobUseCases[F] {
+    jobs: JobRepository[F],
+    embeddingWork: EmbeddingWorkPublisher[F]
+)(using MonadError[F, Throwable]) extends JobUseCases[F] {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
@@ -79,14 +81,14 @@ final class JobService[F[_]: Monad](
   def viewJob(actor: ActorContext, jobId: JobId): F[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      job <- EitherT.fromOptionF(jobs.find(jobId), UseCaseError.domain(DomainError.NotFound("job")))
+      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
       _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.domain(DomainError.Forbidden))
     } yield job).value
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
     (for {
       _ <- EitherT(authorization.resolve(actor))
-      openJobs <- EitherT.liftF(jobs.findOpen(filter, page))
+      openJobs <- EitherT(jobs.findOpen(filter, page).map(_.widenUseCase))
     } yield openJobs).value
 
   def myJobs(actor: ActorContext, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
@@ -94,8 +96,8 @@ final class JobService[F[_]: Monad](
       user <- EitherT(authorization.resolve(actor))
       manageableJobs <- {
         user.role match {
-          case UserRole.Admin => EitherT.liftF(jobs.findAll(page))
-          case UserRole.Recruiter => EitherT.liftF(jobs.findByRecruiter(user.id, page))
+          case UserRole.Admin => EitherT(jobs.findAll(page).map(_.widenUseCase))
+          case UserRole.Recruiter => EitherT(jobs.findByRecruiter(user.id, page).map(_.widenUseCase))
           case UserRole.Candidate => EitherT.leftT[F, List[Job]](UseCaseError.domain(DomainError.Forbidden))
         }
       }
@@ -156,7 +158,7 @@ final class JobService[F[_]: Monad](
     result match {
       case Left(error) => error.asLeft[Job].pure[F]
       case Right(job) =>
-        jobs.create(job, job.createdAt).map(_.widenUseCase.as(job))
+        notifyAfterCommit(jobs.create(job, job.createdAt).map(_.widenUseCase.as(job)))
     }
 
   private def persistUpdatedJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
@@ -165,11 +167,21 @@ final class JobService[F[_]: Monad](
   private def persistJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
     result match {
       case Left(error) => error.asLeft[Job].pure[F]
-      case Right(job) => jobs.update(job, job.updatedAt).map(_.widenUseCase)
+      case Right(job) => notifyAfterCommit(jobs.update(job, job.updatedAt).map(_.widenUseCase))
     }
+
+  private def notifyAfterCommit(result: F[Either[UseCaseError, Job]]): F[Either[UseCaseError, Job]] =
+    result.flatTap(_.fold(_ => MonadError[F, Throwable].unit, _ => embeddingWork.wake.handleError(_ => ())))
 }
 
 object JobService {
-  def apply[F[_]: Monad](users: UserRepository[F], jobs: JobRepository[F]): JobService[F] =
-    new JobService(users, jobs)
+  def apply[F[_]](users: UserRepository[F], jobs: JobRepository[F])(using MonadError[F, Throwable]): JobService[F] =
+    new JobService(users, jobs, EmbeddingWorkPublisher.noop[F])
+
+  def apply[F[_]](
+      users: UserRepository[F],
+      jobs: JobRepository[F],
+      embeddingWork: EmbeddingWorkPublisher[F]
+  )(using MonadError[F, Throwable]): JobService[F] =
+    new JobService(users, jobs, embeddingWork)
 }

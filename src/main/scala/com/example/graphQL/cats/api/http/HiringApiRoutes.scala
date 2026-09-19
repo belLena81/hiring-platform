@@ -38,6 +38,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     case NotAcceptable extends Rejection(Status.NotAcceptable,
       s"Expected ${HiringApiRoutes.SupportedResponseMediaTypesMessage}", RejectionReason.NOT_ACCEPTABLE)
     case AuthenticationFailed extends Rejection(Status.Unauthorized, "Authentication failed", RejectionReason.AUTHENTICATION_FAILED)
+    case Unavailable extends Rejection(Status.ServiceUnavailable, "Service unavailable", RejectionReason.INTERNAL_ERROR)
     case RateLimited extends Rejection(Status.TooManyRequests, "Too many authentication attempts", RejectionReason.RATE_LIMITED)
     case PayloadTooLarge extends Rejection(Status.PayloadTooLarge, "Request body too large", RejectionReason.PAYLOAD_TOO_LARGE)
     case Overloaded extends Rejection(Status.ServiceUnavailable, "Server busy", RejectionReason.OVERLOADED)
@@ -115,6 +116,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private def authenticateAndExecute(request: Request[IO], requestId: String, mediaType: MediaType,
       execute: Option[ActorContext] => IO[Response[IO]]): IO[Response[IO]] =
     dependencies.authenticate(request).flatMap {
+      case Left(AuthFailure.Unavailable) => rejected(Rejection.Unavailable, requestId, mediaType = mediaType)
       case Left(_) => rejected(Rejection.AuthenticationFailed, requestId, mediaType = mediaType)
         .map(_.putHeaders(Header.Raw(CIString("WWW-Authenticate"), "Bearer")))
       case Right(actor) => execute(actor)

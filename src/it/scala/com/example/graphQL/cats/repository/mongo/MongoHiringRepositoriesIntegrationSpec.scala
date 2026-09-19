@@ -73,7 +73,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val database = client.getDatabase("hiring_fresh_setup")
         for {
           _ <- MongoHiringSetup.initialize(database)
-          collections <- PublisherBridge.all(database.listCollectionNames())
+          collections <- PublisherBridge.collectWithin(database.listCollectionNames(), 32)
           userIndexes <- indexes(database.getCollection("users"))
           _ <- MongoHiringSetup.initialize(database)
         } yield {
@@ -287,7 +287,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             .append("checksum", "tampered")
             .append("status", "Pending")))
           result <- MongoHiringSetup.initialize(database).attempt
-          collections <- PublisherBridge.all(database.listCollectionNames())
+          collections <- PublisherBridge.collectWithin(database.listCollectionNames(), 32)
         } yield {
           assert(result.left.toOption.exists(_.getMessage.contains("descriptor or checksum mismatch")))
           assert(!collections.contains("users"))
@@ -417,7 +417,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           candidatePage <- applications.findByCandidate(candidateId, page)
           jobPage <- applications.findByJob(jobId, page)
           eventHistory <- applications.history(applicationId, eventPage)
-          history <- PublisherBridge.all(database.getCollection("application_events").find())
+          history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           assertEquals(rejectedAdmin, Left(RepositoryError.Conflict))
           assertEquals(staleJob, Left(RepositoryError.Conflict))
@@ -492,7 +492,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           result <- applications.createForOpenJob(openJob, application, initialEvent)
           storedJob <- jobs.find(jobId)
           storedApplication <- applications.find(applicationId)
-          history <- PublisherBridge.all(database.getCollection("application_events").find())
+          history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           assertEquals(closed.map(_.status), Right(JobStatus.Closed))
           assertEquals(closed.map(_.closedAt), Right(Some(later)))
@@ -521,7 +521,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           _ <- PublisherBridge.first(database.getCollection("application_events").insertOne(MongoHiringCodecs.event(conflictingEvent)))
           result <- applications.createForOpenJob(job, application, event)
           storedApplication <- applications.find(applicationId)
-          history <- PublisherBridge.all(database.getCollection("application_events").find())
+          history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           assertEquals(result, Left(RepositoryError.Conflict))
           assertEquals(storedApplication, None)
@@ -551,7 +551,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           _ <- PublisherBridge.first(database.getCollection("application_events").insertOne(MongoHiringCodecs.event(duplicateEvent)))
           result <- applications.updateStatus(accepted, acceptedEvent)
           storedApplication <- applications.find(applicationId)
-          history <- PublisherBridge.all(database.getCollection("application_events").find())
+          history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           assertEquals(result, Left(RepositoryError.Conflict))
           assertEquals(storedApplication.map(_.status), Some(ApplicationStatus.Created))
@@ -582,8 +582,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           fiberB <- second.start
           _ <- ready.complete(())
           results <- (fiberA.joinWithNever, fiberB.joinWithNever).tupled
-          stored <- PublisherBridge.all(database.getCollection("applications").find(Filters.eq("candidateId", candidateId.value.toString)))
-          history <- PublisherBridge.all(database.getCollection("application_events").find())
+          stored <- PublisherBridge.collectWithin(database.getCollection("applications").find(Filters.eq("candidateId", candidateId.value.toString)), 32)
+          history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           val outcomes = List(results._1, results._2)
           assert(outcomes.contains(Right(())))
@@ -785,7 +785,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
   }
 
   private def indexes(collection: com.mongodb.reactivestreams.client.MongoCollection[Document]): IO[Map[String, Document]] =
-    PublisherBridge.all(collection.listIndexes()).map(_.map(index => index.getString("name") -> index).toMap)
+    PublisherBridge.collectWithin(collection.listIndexes(), 128).map(_.map(index => index.getString("name") -> index).toMap)
 
   private def graphqlRequest(query: String, token: String): Request[IO] =
     Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))

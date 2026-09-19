@@ -26,6 +26,7 @@ final case class AtlasSearchIndexConfig(
 
 object MongoHiringSetup {
   private val UserMigrationBatchSize = 100
+  private val IndexMetadataLimit = 128
   private val MigrationLease = 5.minutes
   val HiringMigrationLedger = "hiring_migration_ledger"
   val HiringUserSetupMigrationId = "hiring-user-setup-v2"
@@ -373,7 +374,7 @@ object MongoHiringSetup {
   private def verifyHiringUserSetup(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
     val expectedKeys = new Document("emailCanonical", 1)
-    PublisherBridge.all(users.listIndexes()).flatMap { indexes =>
+    PublisherBridge.collectWithin(users.listIndexes(), IndexMetadataLimit).flatMap { indexes =>
       val names = indexes.map(_.getString("name")).toSet
       val required = Set(UsersEmailIndex, UsersNameIndex, UsersStatusCreatedIndex, UsersRoleStatusCreatedIndex,
         UsersAdminSingletonIndex, UsersEmbeddingMetaIndex)
@@ -396,7 +397,7 @@ object MongoHiringSetup {
       collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
       required: Set[String]
   ): IO[Unit] =
-    PublisherBridge.all(collection.listIndexes()).flatMap { indexes =>
+    PublisherBridge.collectWithin(collection.listIndexes(), IndexMetadataLimit).flatMap { indexes =>
       if (required.subsetOf(indexes.map(_.getString("name")).toSet)) IO.unit
       else IO.raiseError(new IllegalStateException(s"${collection.getNamespace.getCollectionName} index verification failed"))
     }
@@ -422,7 +423,7 @@ object MongoHiringSetup {
     )
 
   private def verifyEmbeddingWorkIndexes(database: MongoDatabase): IO[Unit] =
-    PublisherBridge.all(database.getCollection("embedding_work").listIndexes()).flatMap { indexes =>
+    PublisherBridge.collectWithin(database.getCollection("embedding_work").listIndexes(), IndexMetadataLimit).flatMap { indexes =>
       indexes.find(_.getString("name") == EmbeddingWorkAvailableIndex) match {
         case Some(index) if Option(index.get("key", classOf[Document])).contains(
               new Document("state", 1).append("availableAt", 1).append("leaseUntil", 1)
@@ -535,7 +536,7 @@ object MongoHiringSetup {
   private def replaceEmailIndex(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
     val expectedKeys = new Document("emailCanonical", 1)
-    PublisherBridge.all(users.listIndexes()).flatMap { indexes =>
+    PublisherBridge.collectWithin(users.listIndexes(), IndexMetadataLimit).flatMap { indexes =>
       indexes.find(_.getString("name") == UsersEmailIndex) match {
         case Some(index) if Option(index.get("key", classOf[Document])).contains(expectedKeys) &&
             index.getBoolean("unique", false) && index.getBoolean("sparse", false) =>
@@ -661,10 +662,10 @@ object MongoHiringSetup {
       users: com.mongodb.reactivestreams.client.MongoCollection[Document],
       after: Option[String]
   ): IO[List[Document]] =
-    PublisherBridge.all(users.find(after.fold[org.bson.conversions.Bson](new Document())(Filters.gt("_id", _)))
+    PublisherBridge.collectWithin(users.find(after.fold[org.bson.conversions.Bson](new Document())(Filters.gt("_id", _)))
       .sort(Sorts.ascending("_id"))
       .limit(UserMigrationBatchSize)
-      .batchSize(UserMigrationBatchSize))
+      .batchSize(UserMigrationBatchSize), UserMigrationBatchSize)
 
   private def migrateUsers(
       users: com.mongodb.reactivestreams.client.MongoCollection[Document],
@@ -712,10 +713,10 @@ object MongoHiringSetup {
 
     def batch(after: Option[String]): IO[List[Document]] = {
       val cursorFilter = after.fold[Option[Bson]](None)(id => Some(Filters.gt("_id", id)))
-      PublisherBridge.all(source.find(Filters.and((List(Some(sourceFilter), cursorFilter).flatten)*))
+      PublisherBridge.collectWithin(source.find(Filters.and((List(Some(sourceFilter), cursorFilter).flatten)*))
         .sort(Sorts.ascending("_id"))
         .limit(UserMigrationBatchSize)
-        .batchSize(UserMigrationBatchSize))
+        .batchSize(UserMigrationBatchSize), UserMigrationBatchSize)
     }
 
     def enqueue(document: Document): IO[Unit] =
