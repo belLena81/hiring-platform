@@ -12,6 +12,7 @@ import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.service.search.{EmbeddingPipeline, SemanticSearchService}
 import com.example.graphQL.cats.config.VectorSearchConfig
 import com.example.graphQL.cats.config.JwtAuthConfig
+import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
@@ -65,13 +66,24 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
       jwtAuth: JwtAuthConfig
   ): Resource[IO, MongoHiringRuntime] =
+    resource(uri, databaseName, diagnostics, vectorSearch, embeddingService, jwtAuth, 4.seconds)
+
+  def resource(
+      uri: String,
+      databaseName: String,
+      diagnostics: Diagnostics,
+      vectorSearch: VectorSearchConfig,
+      embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
+      jwtAuth: JwtAuthConfig,
+      resolverTimeout: FiniteDuration
+  ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
       val users = MongoUserRepository.transactional(database, client)
       val jobs = new MongoJobRepository(database)
       val applications = MongoApplicationRepository.transactional(database, client)
       Resource.eval(IOLocal[Option[com.example.graphQL.cats.service.TraceContext]](None)).flatMap { traceLocal =>
-      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth, traceLocal).flatMap { services =>
+      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth, traceLocal, resolverTimeout).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, vectorSearch)).map { setup =>
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
           MongoHiringRuntime(
@@ -94,18 +106,19 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
       diagnostics: Diagnostics,
       jwtAuth: JwtAuthConfig,
-      traceLocal: IOLocal[Option[com.example.graphQL.cats.service.TraceContext]]
+      traceLocal: IOLocal[Option[com.example.graphQL.cats.service.TraceContext]],
+      resolverTimeout: FiniteDuration
   ): Resource[IO, HiringGraphQLServices] =
     if (!vectorSearch.enabled) {
-      val readModel = HiringReadService[IO](users, jobs, applications)
-      val account = UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth)
+      val readModel = BoundedHiringServices.readModel(HiringReadService[IO](users, jobs, applications), resolverTimeout)
+      val account = BoundedHiringServices.accounts(UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth), resolverTimeout)
       val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
       Resource.pure(HiringGraphQLServices(
         TracedHiringServices.readModel(readModel, diagnostics, traceLocal),
-        TracedHiringServices.jobs(JobService[IO](users, jobs), diagnostics, traceLocal),
-        TracedHiringServices.applications(ApplicationService[IO](users, jobs, applications), diagnostics, traceLocal),
+        TracedHiringServices.jobs(BoundedHiringServices.jobs(JobService[IO](users, jobs), resolverTimeout), diagnostics, traceLocal),
+        TracedHiringServices.applications(BoundedHiringServices.applications(ApplicationService[IO](users, jobs, applications), resolverTimeout), diagnostics, traceLocal),
         cursorCodec,
-        accountService = account,
+        accountService = TracedHiringServices.accounts(account, diagnostics, traceLocal),
         traceLocal = Some(traceLocal)
       ))
     } else {
@@ -129,24 +142,24 @@ object MongoHiringRuntime {
           vectorSearch.queueSize,
           vectorSearch.parallelism
         ).map { queue =>
-          val jobService = JobService[IO](users, jobs, queue)
-          val applicationService = ApplicationService[IO](users, jobs, applications)
-          val readModel = HiringReadService[IO](users, jobs, applications)
-          val semanticSearch = SemanticSearchService[IO](
+          val jobService = BoundedHiringServices.jobs(JobService[IO](users, jobs, queue), resolverTimeout)
+          val applicationService = BoundedHiringServices.applications(ApplicationService[IO](users, jobs, applications), resolverTimeout)
+          val readModel = BoundedHiringServices.readModel(HiringReadService[IO](users, jobs, applications), resolverTimeout)
+          val semanticSearch = BoundedHiringServices.search(SemanticSearchService[IO](
             users,
             jobs,
             embeddings,
             search,
             vectorSearch.voyageModel,
             vectorSearch.embeddingVersion
-          )
+          ), resolverTimeout)
           val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
           val services = HiringGraphQLServices(
             TracedHiringServices.readModel(readModel, diagnostics, traceLocal),
             TracedHiringServices.jobs(jobService, diagnostics, traceLocal),
             TracedHiringServices.applications(applicationService, diagnostics, traceLocal),
             cursorCodec,
-            UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth),
+            TracedHiringServices.accounts(BoundedHiringServices.accounts(UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth), resolverTimeout), diagnostics, traceLocal),
             Some(TracedHiringServices.search(semanticSearch, diagnostics, traceLocal)),
             Some(traceLocal)
           )

@@ -6,63 +6,66 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, Ap
 import com.example.graphQL.cats.domain.model.UserCursor
 import io.circe.Json
 import munit.FunSuite
+import pdi.jwt.{JwtAlgorithm, JwtCirce}
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.{Base64, UUID}
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 final class CursorCodecSpec extends FunSuite {
   private val secret = "test-cursor-secret-01234567890123456789"
   private val codec = CursorCodec.fromSecret(secret)
   private val instant = Instant.parse("2026-09-17T08:00:00Z")
   private val id = UUID.fromString("10000000-0000-0000-0000-000000000001")
-  import codec.given
-
   test("job cursors only decode as job cursors") {
-    val encoded = summon[CursorCodec[JobCursor]].encode(JobCursor(instant, JobId(id)))
+    val encoded = codec.jobCursorCodec.encode(JobCursor(instant, JobId(id)))
 
-    assertEquals(summon[CursorCodec[JobCursor]].decode(encoded), Right(JobCursor(instant, JobId(id))))
-    assertEquals(summon[CursorCodec[ApplicationCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("job")))
-    assertEquals(summon[CursorCodec[ApplicationEventCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("job")))
+    assertEquals(codec.jobCursorCodec.decode(encoded), Right(JobCursor(instant, JobId(id))))
+    assertEquals(codec.applicationCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("job")))
+    assertEquals(codec.eventCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("job")))
+  }
+
+  test("encoded cursors use a signed JWT envelope") {
+    val encoded = codec.jobCursorCodec.encode(JobCursor(instant, JobId(id)))
+
+    assertEquals(encoded.split("\\.", -1).length, 3)
   }
 
   test("application cursors only decode as application cursors") {
-    val encoded = summon[CursorCodec[ApplicationCursor]].encode(ApplicationCursor(instant, ApplicationId(id)))
+    val encoded = codec.applicationCursorCodec.encode(ApplicationCursor(instant, ApplicationId(id)))
 
-    assertEquals(summon[CursorCodec[JobCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("application")))
-    assertEquals(summon[CursorCodec[ApplicationCursor]].decode(encoded), Right(ApplicationCursor(instant, ApplicationId(id))))
-    assertEquals(summon[CursorCodec[ApplicationEventCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("application")))
+    assertEquals(codec.jobCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("application")))
+    assertEquals(codec.applicationCursorCodec.decode(encoded), Right(ApplicationCursor(instant, ApplicationId(id))))
+    assertEquals(codec.eventCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("application")))
   }
 
   test("application event cursors only decode as event cursors") {
-    val encoded = summon[CursorCodec[ApplicationEventCursor]].encode(ApplicationEventCursor(instant, ApplicationEventId(id)))
+    val encoded = codec.eventCursorCodec.encode(ApplicationEventCursor(instant, ApplicationEventId(id)))
 
-    assertEquals(summon[CursorCodec[JobCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("applicationEvent")))
-    assertEquals(summon[CursorCodec[ApplicationCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("applicationEvent")))
-    assertEquals(summon[CursorCodec[ApplicationEventCursor]].decode(encoded), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
+    assertEquals(codec.jobCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("applicationEvent")))
+    assertEquals(codec.applicationCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("applicationEvent")))
+    assertEquals(codec.eventCursorCodec.decode(encoded), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
   }
 
   test("user cursors only decode as user cursors") {
     val expected = UserCursor(instant, UserId(id))
-    val encoded = summon[CursorCodec[UserCursor]].encode(expected)
+    val encoded = codec.userCursorCodec.encode(expected)
 
-    assertEquals(summon[CursorCodec[UserCursor]].decode(encoded), Right(expected))
-    assertEquals(summon[CursorCodec[JobCursor]].decode(encoded), Left(CursorCodec.CursorError.WrongKind("user")))
+    assertEquals(codec.userCursorCodec.decode(encoded), Right(expected))
+    assertEquals(codec.jobCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("user")))
   }
 
   test("malformed cursors do not decode") {
-    assert(summon[CursorCodec[JobCursor]].decode("not-base64").isLeft)
-    assert(summon[CursorCodec[ApplicationCursor]].decode("not-base64").isLeft)
-    assert(summon[CursorCodec[ApplicationEventCursor]].decode("not-base64").isLeft)
+    assert(codec.jobCursorCodec.decode("not-base64").isLeft)
+    assert(codec.applicationCursorCodec.decode("not-base64").isLeft)
+    assert(codec.eventCursorCodec.decode("not-base64").isLeft)
   }
 
   test("tampered signed cursors do not decode") {
-    val encoded = summon[CursorCodec[JobCursor]].encode(JobCursor(instant, JobId(id)))
+    val encoded = codec.jobCursorCodec.encode(JobCursor(instant, JobId(id)))
     val tampered = encoded.updated(0, if (encoded.head == 'A') 'B' else 'A')
 
-    assert(summon[CursorCodec[JobCursor]].decode(tampered).isLeft)
+    assert(codec.jobCursorCodec.decode(tampered).isLeft)
   }
 
   test("old unsigned cursors do not decode") {
@@ -73,7 +76,19 @@ final class CursorCodecSpec extends FunSuite {
       "id" -> Json.fromString(id.toString)
     ).noSpaces.getBytes(StandardCharsets.UTF_8))
 
-    assert(summon[CursorCodec[JobCursor]].decode(legacy).isLeft)
+    assert(codec.jobCursorCodec.decode(legacy).isLeft)
+  }
+
+  test("old custom signed cursor envelopes do not decode") {
+    val payload = Base64.getUrlEncoder.withoutPadding().encodeToString(Json.obj(
+      "v" -> Json.fromInt(2),
+      "kind" -> Json.fromString("job"),
+      "createdAt" -> Json.fromString(instant.toString),
+      "occurredAt" -> Json.Null,
+      "id" -> Json.fromString(id.toString)
+    ).noSpaces.getBytes(StandardCharsets.UTF_8))
+
+    assert(codec.jobCursorCodec.decode(s"$payload.signature").isLeft)
   }
 
   test("malformed cursor fields do not throw or decode") {
@@ -81,9 +96,9 @@ final class CursorCodecSpec extends FunSuite {
     val badOccurredAt = cursorJson("applicationEvent", None, Some("not-an-instant"), id.toString)
     val badId = cursorJson("application", Some(instant.toString), None, "not-a-uuid")
 
-    assert(summon[CursorCodec[JobCursor]].decode(encode(badCreatedAt)).isLeft)
-    assert(summon[CursorCodec[ApplicationEventCursor]].decode(encode(badOccurredAt)).isLeft)
-    assert(summon[CursorCodec[ApplicationCursor]].decode(encode(badId)).isLeft)
+    assert(codec.jobCursorCodec.decode(encode(badCreatedAt)).isLeft)
+    assert(codec.eventCursorCodec.decode(encode(badOccurredAt)).isLeft)
+    assert(codec.applicationCursorCodec.decode(encode(badId)).isLeft)
   }
 
   private def cursorJson(kind: String, createdAt: Option[String], occurredAt: Option[String], id: String): Json =
@@ -96,20 +111,6 @@ final class CursorCodecSpec extends FunSuite {
     )
 
   private def encode(json: Json): String = {
-    val payload = Base64.getUrlEncoder.withoutPadding().encodeToString(json.noSpaces.getBytes(StandardCharsets.UTF_8))
-    val signature = Base64.getUrlEncoder.withoutPadding().encodeToString(sign(payload))
-    s"$payload.$signature"
-  }
-
-  private def sign(payload: String): Array[Byte] = {
-    val mac = Mac.getInstance("HmacSHA256")
-    mac.init(new SecretKeySpec(deriveKey, "HmacSHA256"))
-    mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
-  }
-
-  private def deriveKey: Array[Byte] = {
-    val mac = Mac.getInstance("HmacSHA256")
-    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
-    mac.doFinal("hiring-platform:graphql-cursor:v2".getBytes(StandardCharsets.UTF_8))
+    JwtCirce.encode(json, secret, JwtAlgorithm.HS256)
   }
 }

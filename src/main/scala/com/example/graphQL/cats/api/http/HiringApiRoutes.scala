@@ -65,6 +65,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
   private def admitted(requestId: String)(action: IO[Response[IO]]): IO[Response[IO]] =
     admission.permit.use { allowed =>
+      // Sangria leaf actions run as Futures; this deadline cannot cancel them after the bridge.
       if (allowed) action.timeoutTo(dependencies.requestTimeout, rejected(Rejection.DeadlineExceeded, requestId))
       else rejected(Rejection.Overloaded, requestId)
     }
@@ -127,23 +128,37 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
   private def accountOperation(request: GraphQLRequest): Option[FixedWindowRateLimiter.Operation] =
     val fragmentsByName = request.document.fragments
-    def containsField(selections: Vector[sangria.ast.Selection], name: String,
-        visitedFragments: Set[String] = Set.empty): Boolean =
-      selections.iterator.exists {
-        case field: sangria.ast.Field => field.name == name
-        case spread: sangria.ast.FragmentSpread =>
-          if visitedFragments.contains(spread.name) then false
-          else fragmentsByName.get(spread.name)
-            .exists(fragment => containsField(fragment.selections, name, visitedFragments + spread.name))
-        case inline: sangria.ast.InlineFragment => containsField(inline.selections, name, visitedFragments)
+    def containsField(
+        selections: Vector[sangria.ast.Selection],
+        visited: Set[String],
+        name: String
+    ): (Boolean, Set[String]) =
+      selections.foldLeft((false, visited)) {
+        case ((true, seen), _) => (true, seen)
+        case ((false, seen), field: sangria.ast.Field) => (field.name == name, seen)
+        case ((false, seen), spread: sangria.ast.FragmentSpread) if seen(spread.name) =>
+          (false, seen)
+        case ((false, seen), spread: sangria.ast.FragmentSpread) =>
+          val expanded = seen + spread.name
+          fragmentsByName.get(spread.name) match {
+            case Some(fragment) => containsField(fragment.selections, expanded, name)
+            case None => (false, expanded)
+          }
+        case ((false, seen), inline: sangria.ast.InlineFragment) =>
+          containsField(inline.selections, seen, name)
       }
-    def containsOperationField(name: String): Boolean =
-      request.document.definitions.iterator.collect {
+    def hasField(name: String): Boolean =
+      request.document.definitions.collect {
         case operation: sangria.ast.OperationDefinition => operation.selections
-      }.exists(containsField(_, name))
-    if (containsOperationField("signUp")) Some(FixedWindowRateLimiter.Operation.SignUp)
-    else if (containsOperationField("login")) Some(FixedWindowRateLimiter.Operation.Login)
-    else None
+      }.foldLeft((false, Set.empty[String])) {
+        case ((true, visited), _) => (true, visited)
+        case ((false, visited), selections) => containsField(selections, visited, name)
+      }._1
+
+    List(
+      "signUp" -> FixedWindowRateLimiter.Operation.SignUp,
+      "login" -> FixedWindowRateLimiter.Operation.Login
+    ).collectFirst { case (name, operation) if hasField(name) => operation }
 
   private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
       mediaType: MediaType = HiringApiRoutes.GraphQLResponseMediaType): IO[Response[IO]] = {

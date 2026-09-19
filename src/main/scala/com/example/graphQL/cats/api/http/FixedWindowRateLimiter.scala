@@ -1,37 +1,45 @@
 package com.example.graphQL.cats.api.http
 
-import cats.effect.{Clock, IO, Ref}
+import cats.effect.{Clock, IO, Ref, Resource, Temporal}
+import cats.syntax.all.*
 import com.example.graphQL.cats.config.AuthRateLimitConfig
 import scala.concurrent.duration.*
 
 final class FixedWindowRateLimiter private (
     state: Ref[IO, Map[FixedWindowRateLimiter.Key, FixedWindowRateLimiter.Bucket]],
-    config: AuthRateLimitConfig
+    config: AuthRateLimitConfig,
+    clock: Clock[IO]
 ) {
   // Buckets are process-local: this mitigates abuse on a single node, not across distributed replicas.
   import FixedWindowRateLimiter.*
 
   def permit(key: Key): IO[Either[RateLimited, Unit]] =
-    Clock[IO].realTime.map(_.toMillis).flatMap { now =>
+    clock.realTime.map(_.toMillis).flatMap { now =>
+      val windowMillis = config.windowSeconds.seconds.toMillis
+      val currentWindow = now / windowMillis
+      val retryAfter = ((currentWindow + 1) * windowMillis - now).millis
       state.modify { buckets =>
-        val windowMillis = config.windowSeconds.seconds.toMillis
-        val currentWindow = now / windowMillis
-        val active = buckets.filter { case (_, bucket) => bucket.window == currentWindow }
-        val existing = active.get(key)
-        val retryAfter = ((currentWindow + 1) * windowMillis - now).millis
-
-        existing match {
+        buckets.get(key).filter(_.window == currentWindow) match {
           case Some(bucket) if bucket.count >= config.attempts =>
-            active -> Left(RateLimited(retryAfter))
+            buckets -> Left(RateLimited(retryAfter))
           case Some(bucket) =>
-            active.updated(key, bucket.copy(count = bucket.count + 1)) -> Right(())
-          case None if active.size >= config.maxBuckets =>
-            active -> Left(RateLimited(config.windowSeconds.seconds))
+            buckets.updated(key, bucket.copy(count = bucket.count + 1)) -> Right(())
+          case None if buckets.size >= config.maxBuckets =>
+            buckets -> Left(RateLimited(config.windowSeconds.seconds))
           case None =>
-            active.updated(key, Bucket(currentWindow, 1)) -> Right(())
+            buckets.updated(key, Bucket(currentWindow, 1)) -> Right(())
         }
       }
     }
+
+  private[http] def evictExpired: IO[Unit] =
+    clock.realTime.map(_.toMillis).flatMap { now =>
+      val currentWindow = now / config.windowSeconds.seconds.toMillis
+      state.update(_.filter { case (_, bucket) => bucket.window == currentWindow })
+    }
+
+  private[http] def evictionLoop(interval: FiniteDuration): IO[Nothing] =
+    (Temporal[IO].sleep(interval) *> evictExpired).foreverM
 }
 
 object FixedWindowRateLimiter {
@@ -48,5 +56,16 @@ object FixedWindowRateLimiter {
   private[http] final case class Bucket(window: Long, count: Int)
 
   def create(config: AuthRateLimitConfig): IO[FixedWindowRateLimiter] =
-    Ref.of[IO, Map[Key, Bucket]](Map.empty).map(new FixedWindowRateLimiter(_, config))
+    Ref.of[IO, Map[Key, Bucket]](Map.empty).map(new FixedWindowRateLimiter(_, config, Clock[IO]))
+
+  def resource(config: AuthRateLimitConfig): Resource[IO, FixedWindowRateLimiter] =
+    resource(config, config.windowSeconds.seconds)
+
+  private[http] def resource(
+      config: AuthRateLimitConfig,
+      evictionInterval: FiniteDuration
+  ): Resource[IO, FixedWindowRateLimiter] =
+    Resource.eval(create(config)).flatMap { limiter =>
+      Resource.make(limiter.evictionLoop(evictionInterval).start)(_.cancel).as(limiter)
+    }
 }

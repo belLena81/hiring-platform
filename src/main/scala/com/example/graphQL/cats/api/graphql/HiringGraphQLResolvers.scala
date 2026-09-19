@@ -108,17 +108,25 @@ private[graphql] object HiringGraphQLResolvers {
   def submitApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] =
     authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
       val jobId = context.arg(submitApplicationInputArgument).jobId
-      (IO.realTimeInstant, IO.randomUUID, IO.randomUUID).mapN { (now, applicationId, eventId) =>
-        hiring.applicationService.submitApplication(actor, jobId, ApplicationId(applicationId), ApplicationEventId(eventId), now)
-      }.flatten.map(applicationPayload)
+      timestamped { (now, applicationId) =>
+        IO.randomUUID.flatMap { eventId =>
+          hiring.applicationService.submitApplication(
+            actor,
+            jobId,
+            ApplicationId(applicationId),
+            ApplicationEventId(eventId),
+            now
+          )
+        }
+      }.map(applicationPayload)
     }
 
   def createJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
       jobInput(context.arg(createJobInputArgument), JobStatus.Open).fold(error => IO.pure(jobErrorPayload(error)), input =>
-        (IO.realTimeInstant, IO.randomUUID).mapN { (now, jobId) =>
+        timestamped { (now, jobId) =>
           hiring.jobService.createJob(actor, input, now, JobId(jobId))
-        }.flatten.map(jobPayload)
+        }.map(jobPayload)
       )
     }
 
@@ -165,25 +173,25 @@ private[graphql] object HiringGraphQLResolvers {
     val input = context.arg(signUpInputArgument)
     signUpProfile(input).fold(
       error => IO.pure(accountErrorPayload(error)),
-      profile => (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
+      profile => timestamped { (now, id) =>
         context.ctx.hiring.accountService.signUp(
           SignUpInput(input.name, input.role, input.password, profile),
           now,
           Identifiers.UserId(id)
         )
-      }.flatten.map(result => accountPayload(result, signUpErrorPayload))
+      }.map(result => accountPayload(result, signUpErrorPayload))
     )
   }
 
   def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[AccountPayload] =
     val input = context.arg(bootstrapAdminInputArgument)
-    (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
+    timestamped { (now, id) =>
       context.ctx.hiring.accountService.bootstrapAdmin(
         BootstrapAdminInput(input.name, input.password),
         now,
         Identifiers.UserId(id)
       )
-    }.flatten.map(result => accountPayload(result))
+    }.map(result => accountPayload(result))
 
   def login(context: Context[RequestContext, Unit]): IO[AccountPayload] =
     val input = context.arg(loginInputArgument)
@@ -222,6 +230,9 @@ private[graphql] object HiringGraphQLResolvers {
   private def liftUseCase[A](value: IO[Either[UseCaseError, A]]): GraphQLStep[A] =
     EitherT(value.map(_.leftMap(toGraphQLError)))
 
+  private def timestamped[A](f: (Instant, UUID) => IO[A]): IO[A] =
+    (IO.realTimeInstant, IO.randomUUID).mapN(f).flatten
+
   private def complete[A](value: GraphQLStep[A], onError: GraphQLError => A): IO[A] =
     value.value.map(_.fold(onError, identity))
 
@@ -238,9 +249,9 @@ private[graphql] object HiringGraphQLResolvers {
       reason: Option[String]
   ): IO[ApplicationPayload] =
     authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
-      (IO.realTimeInstant, IO.randomUUID).mapN { (now, eventId) =>
+      timestamped { (now, eventId) =>
         hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
-      }.flatten.map(applicationPayload)
+      }.map(applicationPayload)
     }
 
   private def updateProfileInput(role: UserRole, input: UpdateProfileGraphQLInput): Either[UseCaseError, AccountProfileInput] =

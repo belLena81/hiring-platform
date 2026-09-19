@@ -18,12 +18,15 @@ import _root_.pureconfig.error.{ConfigReaderFailures, ConvertFailure, KeyNotFoun
 import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
+import scala.concurrent.duration.*
 
 enum ConfigError(val key: String) {
   case InvalidConfigFile(message: String) extends ConfigError("CONFIG_FILE")
   case InvalidHost extends ConfigError("HTTP_HOST")
   case InvalidPort extends ConfigError("HTTP_PORT")
   case InvalidAdmissionPermits extends ConfigError("HTTP_ADMISSION_PERMITS")
+  case InvalidRequestTimeout extends ConfigError("HTTP_REQUEST_TIMEOUT_MS")
+  case InvalidResolverTimeout extends ConfigError("HTTP_RESOLVER_TIMEOUT_MS")
   case InvalidMongoUri extends ConfigError("MONGODB_URI")
   case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
@@ -71,7 +74,8 @@ type Parallelism = Int :| Interval.Closed[1, 64]
 type TimeoutMs = Int :| Interval.Closed[100, 60000]
 type HttpsUrl = String :| StartWith["https://"]
 
-final case class AppConfig(host: String, port: Int, admissionPermits: Int, trustedProxy: TrustedProxyConfig,
+final case class AppConfig(host: String, port: Int, admissionPermits: Int, requestTimeout: FiniteDuration,
+    resolverTimeout: FiniteDuration, trustedProxy: TrustedProxyConfig,
     mongoUri: String, mongoDatabase: String,
     maskSensitive: Boolean, jwtAuth: JwtAuthConfig, authRateLimit: AuthRateLimitConfig,
     vectorSearch: VectorSearchConfig) {
@@ -106,15 +110,16 @@ object AppConfig {
     val indexes = vector.indexes
 
     (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
+      validRequestTimeout(http.requestTimeoutMs), validResolverTimeout(http.resolverTimeoutMs, http.requestTimeoutMs),
       validTrustedProxyCidrs(http.trustedProxyCidrs),
       validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
       validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds), validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
       validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets), validVoyageApiKey(vector.enabled, voyage.apiKey),
       validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
       validNumCandidates(vector.numCandidates)).mapN {
-      (host, port, permits, trustedProxy, uri, database, secret, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
+      (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database, secret, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
           pollInterval, numCandidates) =>
-        new AppConfig(host, port, permits, trustedProxy, uri, database, raw.logging.maskSensitive,
+        new AppConfig(host, port, permits, requestTimeout.millis, resolverTimeout.millis, trustedProxy, uri, database, raw.logging.maskSensitive,
           JwtAuthConfig(secret, jwt.issuer, jwt.audience),
           AuthRateLimitConfig(windowSeconds, attempts, maxBuckets),
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
@@ -142,6 +147,10 @@ object AppConfig {
     Either.cond(value >= 1 && value <= 1000, value, ConfigError.InvalidAuthRateLimitAttempts).toValidatedNel
   private def validAuthRateLimitBuckets(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 1 && value <= 100000, value, ConfigError.InvalidAuthRateLimitBuckets).toValidatedNel
+  private def validRequestTimeout(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidRequestTimeout).toValidatedNel
+  private def validResolverTimeout(value: Int, requestTimeout: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 100 && value < requestTimeout, value, ConfigError.InvalidResolverTimeout).toValidatedNel
   private def validTrustedProxyCidrs(values: List[String]): ValidatedNel[ConfigError, TrustedProxyConfig] =
     values.traverse { value =>
       Cidr.fromString(value).filter(_.prefixBits > 0)
@@ -174,6 +183,8 @@ object AppConfig {
     case "http.host" => Some(ConfigError.InvalidHost)
     case "http.port" => Some(ConfigError.InvalidPort)
     case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
+    case "http.request-timeout-ms" => Some(ConfigError.InvalidRequestTimeout)
+    case "http.resolver-timeout-ms" => Some(ConfigError.InvalidResolverTimeout)
     case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
     case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
     case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
@@ -206,7 +217,7 @@ object AppConfig {
   private final case class RawAppConfig(http: RawHttpConfig, mongo: RawMongoConfig, logging: RawLoggingConfig,
       auth: RawAuthConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
   private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits,
-      trustedProxyCidrs: List[String]) derives ConfigReader
+      requestTimeoutMs: Int, resolverTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
   private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig, rateLimit: RawAuthRateLimitConfig) derives ConfigReader

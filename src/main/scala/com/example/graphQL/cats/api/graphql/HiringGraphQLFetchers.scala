@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.ioFetcher
 import sangria.execution.deferred.{Fetcher, HasId}
 
 private[graphql] object HiringGraphQLFetchers {
@@ -10,15 +11,9 @@ private[graphql] object HiringGraphQLFetchers {
   given HasId[EmailVisibility, UserId] = HasId(_.userId)
 
   lazy val usersFetcher: Fetcher[RequestContext, User, User, UserId] =
-    Fetcher.caching[RequestContext, User, UserId] { (context, ids) =>
-      context.unsafeToFuture(context.users(ids.toList))
-    }
+    ioFetcher[User, UserId]((context, ids) => context.users(ids.toList))
   lazy val jobsFetcher: Fetcher[RequestContext, Job, Job, JobId] =
-    Fetcher.caching[RequestContext, Job, JobId] { (context, ids) =>
-      context.unsafeToFuture(context.jobs(ids.toList))
-    }
+    ioFetcher[Job, JobId]((context, ids) => context.jobs(ids.toList))
   lazy val emailVisibilityFetcher: Fetcher[RequestContext, EmailVisibility, EmailVisibility, UserId] =
-    Fetcher.caching[RequestContext, EmailVisibility, UserId] { (context, ids) =>
-      context.unsafeToFuture(context.visibleEmailUsers(ids.toList))
-    }
+    ioFetcher[EmailVisibility, UserId]((context, ids) => context.visibleEmailUsers(ids.toList))
 }

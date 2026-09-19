@@ -3,15 +3,12 @@ package com.example.graphQL.cats.api.graphql
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
-import io.circe.parser.decode
+import io.circe.generic.semiauto.*
 import io.circe.syntax.*
-import io.circe.{Decoder, DecodingFailure, Encoder}
-import java.nio.charset.StandardCharsets
+import io.circe.{Decoder, Encoder}
 import java.time.Instant
-import java.security.MessageDigest
-import java.util.{Base64, UUID}
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
+import java.util.UUID
+import pdi.jwt.{JwtAlgorithm, JwtCirce}
 import scala.util.Try
 
 private[cats] trait CursorCodec[A] {
@@ -21,8 +18,6 @@ private[cats] trait CursorCodec[A] {
 
 private[cats] object CursorCodec {
   private val CurrentVersion = 2
-  private val HmacAlgorithm = "HmacSHA256"
-  private val KeyDerivationLabel = "hiring-platform:graphql-cursor:v2"
 
   enum CursorError {
     case Malformed(message: String)
@@ -36,10 +31,10 @@ private[cats] object CursorCodec {
     case User extends CursorKind("user")
   }
 
-  private final case class Cursor(version: Int, kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
+  private final case class Cursor(v: Int, kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
 
-  final class CursorCodecs private[CursorCodec] (key: Array[Byte]) {
-    given jobCursorCodec: CursorCodec[JobCursor] = typed(
+  final class CursorCodecs private[CursorCodec] (secret: String) {
+    val jobCursorCodec: CursorCodec[JobCursor] = typed(
       CursorKind.Job,
       "job",
       cursor => cursor.createdAt,
@@ -47,7 +42,7 @@ private[cats] object CursorCodec {
       (timestamp, id) => JobCursor(timestamp, JobId(id))
     )
 
-    given applicationCursorCodec: CursorCodec[ApplicationCursor] = typed(
+    val applicationCursorCodec: CursorCodec[ApplicationCursor] = typed(
       CursorKind.Application,
       "application",
       cursor => cursor.createdAt,
@@ -55,7 +50,7 @@ private[cats] object CursorCodec {
       (timestamp, id) => ApplicationCursor(timestamp, ApplicationId(id))
     )
 
-    given eventCursorCodec: CursorCodec[ApplicationEventCursor] = typed(
+    val eventCursorCodec: CursorCodec[ApplicationEventCursor] = typed(
       CursorKind.ApplicationEvent,
       "event",
       cursor => cursor.occurredAt,
@@ -63,7 +58,7 @@ private[cats] object CursorCodec {
       (timestamp, id) => ApplicationEventCursor(timestamp, ApplicationEventId(id))
     )
 
-    given userCursorCodec: CursorCodec[UserCursor] = typed(
+    val userCursorCodec: CursorCodec[UserCursor] = typed(
       CursorKind.User,
       "user",
       cursor => cursor.createdAt,
@@ -80,18 +75,21 @@ private[cats] object CursorCodec {
     ): CursorCodec[A] = new CursorCodec[A] {
       def encode(value: A): String = {
         val encodedTimestamp = timestamp(value)
+        val (createdAt, occurredAt) =
+          if kind == CursorKind.ApplicationEvent then (None, Some(encodedTimestamp))
+          else (Some(encodedTimestamp), None)
         val cursor = Cursor(
           CurrentVersion,
           kind,
-          Option.when(kind != CursorKind.ApplicationEvent)(encodedTimestamp),
-          Option.when(kind == CursorKind.ApplicationEvent)(encodedTimestamp),
+          createdAt,
+          occurredAt,
           id(value)
         )
-        encodeCursor(cursor)
+        JwtCirce.encode(cursor.asJson, secret, JwtAlgorithm.HS256)
       }
 
       def decode(value: String): Either[CursorError, A] =
-        CursorCodec.decodeCursor(key, value).flatMap {
+        CursorCodec.decodeCursor(secret, value).flatMap {
           case Cursor(_, actualKind, _, _, _) if actualKind != kind =>
             Left(CursorError.WrongKind(actualKind.value))
           case Cursor(_, _, createdAt, occurredAt, cursorId) =>
@@ -104,11 +102,10 @@ private[cats] object CursorCodec {
         }
     }
 
-    private def encodeCursor(cursor: Cursor): String = CursorCodec.encodeCursor(key, cursor)
   }
 
   def fromSecret(jwtSecret: String): CursorCodecs =
-    new CursorCodecs(deriveKey(jwtSecret))
+    new CursorCodecs(jwtSecret)
 
   private given Encoder[CursorKind] = Encoder.encodeString.contramap(_.value)
 
@@ -116,70 +113,24 @@ private[cats] object CursorCodec {
     CursorKind.values.find(_.value == raw).toRight(s"Unknown cursor kind: $raw")
   }
 
-  private given Encoder[Cursor] = Encoder.forProduct5("v", "kind", "createdAt", "occurredAt", "id")(cursor =>
-    (cursor.version, cursor.kind, cursor.createdAt.map(_.toString), cursor.occurredAt.map(_.toString), cursor.id.toString)
-  )
+  private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
 
-  private given Decoder[Cursor] = Decoder.instance { cursor =>
-    for {
-      version <- cursor.downField("v").as[Int]
-      _ <- Either.cond(version == CurrentVersion, (), io.circe.DecodingFailure(s"Unsupported cursor version: $version", Nil))
-      kind <- cursor.downField("kind").as[CursorKind]
-      createdAt <- cursor.downField("createdAt").as[Option[String]].flatMap(decodeInstant)
-      occurredAt <- cursor.downField("occurredAt").as[Option[String]].flatMap(decodeInstant)
-      id <- cursor.downField("id").as[String].flatMap(decodeUuid)
-    } yield Cursor(version, kind, createdAt, occurredAt, id)
+  private given Decoder[Instant] = Decoder.decodeString.emap { raw =>
+    Try(Instant.parse(raw)).toEither.left.map(_ => "Invalid cursor timestamp")
   }
 
-  private def encodeCursor(key: Array[Byte], cursor: Cursor): String = {
-    val payload = base64(cursor.asJson.noSpaces.getBytes(StandardCharsets.UTF_8))
-    val signature = base64(sign(key, payload))
-    s"$payload.$signature"
+  private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
+
+  private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
+    Try(UUID.fromString(raw)).toEither.left.map(_ => "Invalid cursor id")
   }
 
-  private def decodeCursor(key: Array[Byte], value: String): Either[CursorError, Cursor] =
-    value.split("\\.", -1).toList match {
-      case payload :: signature :: Nil if payload.nonEmpty && signature.nonEmpty =>
-        for {
-          provided <- decodeBase64(signature)
-          _ <- Either.cond(MessageDigest.isEqual(sign(key, payload), provided), (), CursorError.Malformed("Invalid cursor signature"))
-          bytes <- decodeBase64(payload)
-          cursor <- decode[Cursor](String(bytes, StandardCharsets.UTF_8)).left.map(error => CursorError.Malformed(error.getMessage))
-        } yield cursor
-      case _ => Left(CursorError.Malformed("Invalid signed cursor"))
-    }
+  private given Encoder[Cursor] = deriveEncoder[Cursor]
 
-  private def sign(key: Array[Byte], payload: String): Array[Byte] = {
-    val mac = Mac.getInstance(HmacAlgorithm)
-    mac.init(new SecretKeySpec(key, HmacAlgorithm))
-    mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
-  }
+  private given Decoder[Cursor] = deriveDecoder[Cursor].ensure(_.v == CurrentVersion, s"Unsupported cursor version: $CurrentVersion")
 
-  private def deriveKey(secret: String): Array[Byte] = {
-    val mac = Mac.getInstance(HmacAlgorithm)
-    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HmacAlgorithm))
-    mac.doFinal(KeyDerivationLabel.getBytes(StandardCharsets.UTF_8))
-  }
-
-  private def base64(bytes: Array[Byte]): String =
-    Base64.getUrlEncoder.withoutPadding().encodeToString(bytes)
-
-  private def decodeBase64(value: String): Either[CursorError, Array[Byte]] =
-    Try(Base64.getUrlDecoder.decode(value)).toEither.left.map(error => CursorError.Malformed(error.getMessage))
-
-  private def decodeInstant(value: Option[String]): Decoder.Result[Option[Instant]] =
-    decodeOptional(value, Instant.parse, "Invalid cursor timestamp")
-
-  private def decodeUuid(value: String): Decoder.Result[UUID] =
-    Try(UUID.fromString(value)).toEither.left.map(_ => DecodingFailure("Invalid cursor id", Nil))
-
-  private def decodeOptional[A](
-     value: Option[String],
-     decode: String => A,
-     message: String
-  ): Decoder.Result[Option[A]] =
-    value match {
-      case Some(raw) => Try(decode(raw)).toEither.left.map(_ => DecodingFailure(message, Nil)).map(Some(_))
-      case None => Right(None)
-    }
+  private def decodeCursor(secret: String, value: String): Either[CursorError, Cursor] =
+    JwtCirce.decodeJson(value, secret, Seq(JwtAlgorithm.HS256)).toEither
+      .left.map(error => CursorError.Malformed(error.getMessage))
+      .flatMap(_.as[Cursor].left.map(error => CursorError.Malformed(error.getMessage)))
 }

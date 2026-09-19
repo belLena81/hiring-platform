@@ -1,6 +1,6 @@
 package com.example.graphQL.cats
 
-import cats.effect.{ExitCode, IO, IOApp, Resource}
+import cats.effect.{ExitCode, IO, IOApp}
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.RequestContextFactory
 import com.example.graphQL.cats.api.http.{Admission, ClientAddressResolver, FixedWindowRateLimiter, HiringApiRoutes}
@@ -8,7 +8,6 @@ import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFie
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
-import scala.concurrent.duration.*
 
 object Main extends IOApp {
   override protected def reportFailure(error: Throwable): IO[Unit] =
@@ -25,12 +24,13 @@ object Main extends IOApp {
           case Right(config) => SafeDiagnostics.configure(config.maskSensitive).flatMap { diagnostics =>
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
               (vector, apiKey) => new com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService(
-                apiKey, vector.voyageEndpoint, vector.voyageModel, vector.voyageDimension, vector.timeoutMillis), config.jwtAuth)
+                apiKey, vector.voyageEndpoint, vector.voyageModel, vector.voyageDimension, vector.timeoutMillis), config.jwtAuth,
+              config.resolverTimeout)
               .flatMap { runtime =>
                 for {
                   admission <- Admission.resource(config.admissionPermits)
                   contextFactory <- RequestContextFactory.resource
-                  rateLimiter <- Resource.eval(FixedWindowRateLimiter.create(config.authRateLimit))
+                  rateLimiter <- FixedWindowRateLimiter.resource(config.authRateLimit)
                   authenticate = new JwtActorAuthenticator(
                     config.jwtAuth,
                     runtime.userAuthenticator,
@@ -47,7 +47,7 @@ object Main extends IOApp {
                       contextFactory,
                       rateLimiter,
                       ClientAddressResolver(config.trustedProxy),
-                      5.seconds
+                      config.requestTimeout
                     )
                   ).app
                   server <- HiringPlatformServer.resource(config.host, config.port, routes)

@@ -6,7 +6,6 @@ import com.example.graphQL.cats.service.{ActorContext, ProbeResult, TraceContext
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, JobUseCases, SearchUseCases}
-import scala.concurrent.Future
 
 final case class HiringGraphQLServices(
     readModel: HiringReadModel[IO],
@@ -35,11 +34,11 @@ final class RequestContext private (
       case _ => action
     }
 
-  def readiness: Future[ProbeResult] = dispatcher.unsafeToFuture(inRequestTrace(probe))
+  def readiness: IO[ProbeResult] = inRequestTrace(probe)
 
   def hiringAvailable: IO[ProbeResult] = hiringReady
 
-  def unsafeToFuture[A](action: IO[A]): Future[A] = dispatcher.unsafeToFuture(inRequestTrace(action))
+  private[graphql] def unsafeToFuture[A](action: IO[A]) = dispatcher.unsafeToFuture(inRequestTrace(action))
 
   def users(ids: List[UserId]): IO[List[User]] =
     hiring.readModel.users(ids.distinct)

@@ -9,7 +9,6 @@ import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import org.http4s.Request
 import org.http4s.{AuthScheme, Credentials}
 import org.http4s.headers.Authorization
-import org.typelevel.ci.CIString
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
 import io.circe.Json
 import scala.util.Try
@@ -34,11 +33,11 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
     }
 
   private def bearerToken(request: Request[IO]): Either[AuthFailure, Option[String]] =
-    request.headers.headers.filter(_.name == CIString("Authorization")) match {
-      case Nil => Right(None)
-      case _ :: _ :: _ => Left(AuthFailure.MalformedCredentials)
-      case header :: Nil =>
-        Authorization.parse(header.value).toOption match {
+    request.headers.get(Authorization.headerInstance.name).map(_.toList) match {
+      case None | Some(Nil) => Right(None)
+      case Some(_ :: _ :: _) => Left(AuthFailure.MalformedCredentials)
+      case Some(_) =>
+        request.headers.get[Authorization] match {
           case Some(Authorization(Credentials.Token(AuthScheme.Bearer, token))) if token.nonEmpty => Right(Some(token))
           case _ => Left(AuthFailure.MalformedCredentials)
         }

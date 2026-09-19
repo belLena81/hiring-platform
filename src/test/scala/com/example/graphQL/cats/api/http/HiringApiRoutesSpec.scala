@@ -320,6 +320,36 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("auth rate limiting handles duplicate fragment expansion without exponential traversal") {
+    val fragmentCount = 32
+    val fragments = (0 until fragmentCount).map {
+      case 0 =>
+        """fragment Fragment0 on Mutation {
+          |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+          |}""".stripMargin
+      case index =>
+        s"""fragment Fragment$index on Mutation {
+           |  ...Fragment${index - 1}
+           |  ...Fragment${index - 1}
+           |}""".stripMargin
+    }
+    val fragmentBomb = s"""mutation { ...Fragment${fragmentCount - 1} }
+                            |${fragments.mkString("\n")}""".stripMargin
+
+    for {
+      admission <- Admission.create(16)
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      first <- http(request(fragmentBomb))
+      second <- http(request(fragmentBomb))
+    } yield {
+      assert(fragmentBomb.length < 64 * 1024)
+      assertNotEquals(first.status, Status.TooManyRequests)
+      assertEquals(second.status, Status.TooManyRequests)
+    }
+  }
+
   test("auth rate limiting ignores auth words outside top-level fields") {
     val createJob =
       """mutation {

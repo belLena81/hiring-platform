@@ -19,6 +19,8 @@ The checked schema snapshot is [hiring.graphql](../src/test/resources/graphql/hi
 
 The schema includes Hiring GraphQL operations and typed payloads for jobs, applications, status transitions, cursor connections, application history, and account lifecycle. `Job.id` and job inputs use `JobID`; `Application.id` and application action inputs use `ApplicationID`. The `job(id:)` and `me` query fields return `JobPayload` and `UserPayload`, so unauthorized, forbidden, not-found, and unavailable outcomes are visible in `errors` instead of being collapsed to `null`. Connection cursors are opaque signed v2 values; old unsigned cursors are rejected and clients must restart pagination after the cursor-contract cutover. `User.profile` is the nullable `UserProfile` union of `CandidateProfile` and `RecruiterProfile`; it is null for the singleton Admin and profile-less deleted accounts, while active Candidates and Recruiters expose only their matching union member. Clients select role-specific fields with inline fragments. `bootstrapAdmin` creates the first singleton Admin and cannot recreate one later; `signUp` then accepts only Candidates and Recruiters with exactly one matching profile, while Admin signup returns `ADMIN_BOOTSTRAP_ONLY`. Public `signUp` name collisions return generic `REGISTRATION_FAILED` rather than `NAME_TAKEN`. `login` issues short-lived HS256 bearer tokens with the required `AUTH_JWT_HS256_SECRET`. Login and signup are protected by a process-local fixed-window limiter configured under `auth.rate-limit`; exhausted buckets return HTTP 429 with `Retry-After`. The limiter uses the TCP peer by default and accepts RFC 7239 `Forwarded` client addresses only when that peer is in `http.trusted-proxy-cidrs`; see the [runbook](foundation.md#configuration) for the required reverse-proxy trust boundary. `me`, `updateMyProfile`, and `deleteMyAccount` derive identity from the token subject. Admin profile updates return `PROFILE_UNSUPPORTED_FOR_ROLE`; malformed Candidate or Recruiter profile variants return `PROFILE_ROLE_MISMATCH`. The token `sub` must match a currently Active stored user, and authorization derives the actor role from that stored user rather than from role claims. Missing, invalid, expired, wrong issuer/audience, deleted-user, or unknown-user tokens return sanitized unauthorized payloads. Passwords are stored only as Argon2id hashes; email is optional and is not a login identity.
 
+Cursor values use a signed HS256 JWT envelope. Legacy unsigned and custom-envelope cursors are invalid after the signed-v2 cutover.
+
 ## Execute operations
 
 ```bash
@@ -35,6 +37,8 @@ With MongoDB available:
 ```
 
 During a database outage the same executed GraphQL operation still returns HTTP 200, with `readiness.status` equal to `NOT_READY`. Liveness does not access MongoDB.
+
+By default, GraphQL execution has a five-second HTTP deadline and a four-second resolver-service deadline. Because Sangria leaf actions are `Future`-based, an HTTP timeout cannot cancel a resolver already running after the Cats Effect to Future bridge. The service bound limits cooperative `IO` work, but a timed-out mutation may still have completed; clients must determine the outcome through a subsequent authorized read instead of blindly retrying.
 
 Named operations and variables:
 

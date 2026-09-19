@@ -45,19 +45,19 @@ final class RequestContextSpec extends CatsEffectSuite {
         case (_, release) => finishFinalizer.complete(()).void *> release
       }.use { case (context, release) =>
         for {
-          _ <- IO(context.readiness)
+          _ <- IO(context.unsafeToFuture(context.readiness))
           _ <- entered.get.timeout(2.seconds)
           _ <- (release *> released.complete(()).void).background.use { _ =>
             (for {
               _ <- finalizing.get.timeout(2.seconds)
-              _ <- IO(context.readiness).attempt
+              _ <- IO(context.unsafeToFuture(context.readiness)).attempt
               completed <- released.tryGet
               _ <- IO {
                 assertEquals(completed, None)
               }
               _ <- finishFinalizer.complete(())
               _ <- released.get.timeout(2.seconds)
-              after <- IO(context.readiness).attempt
+              after <- IO(context.unsafeToFuture(context.readiness)).attempt
               _ <- IO(assert(after.isLeft))
             } yield ()).guarantee(finishFinalizer.complete(()).void)
           }
@@ -73,11 +73,11 @@ final class RequestContextSpec extends CatsEffectSuite {
       _ <- Resource.make(TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
         .onCancel(released.complete(()).void)).allocated)(_._2).use { case (context, release) =>
         for {
-          _ <- IO(context.readiness)
+          _ <- IO(context.unsafeToFuture(context.readiness))
           _ <- entered.get.timeout(2.seconds)
           _ <- release
           _ <- released.get.timeout(1.second)
-          late <- IO(context.readiness).attempt
+          late <- IO(context.unsafeToFuture(context.readiness)).attempt
         } yield assert(late.isLeft)
       }
     } yield ()
@@ -88,8 +88,8 @@ final class RequestContextSpec extends CatsEffectSuite {
       count <- Ref.of[IO, Int](0)
       results <- TestGraphQLSupport.context(count.update(_ + 1).as(ProbeResult.Ready)).use { context =>
         for {
-          first <- IO(context.readiness)
-          second <- IO(context.readiness)
+          first <- IO(context.unsafeToFuture(context.readiness))
+          second <- IO(context.unsafeToFuture(context.readiness))
           firstResult <- IO.fromFuture(IO.pure(first))
           secondResult <- IO.fromFuture(IO.pure(second))
         } yield (firstResult, secondResult)

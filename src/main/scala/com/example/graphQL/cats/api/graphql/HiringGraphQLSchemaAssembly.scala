@@ -4,6 +4,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLFetchers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.ioField
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import sangria.execution.QueryReducer
 import sangria.execution.deferred.DeferredResolver
@@ -26,67 +27,36 @@ private[graphql] object HiringGraphQLSchemaAssembly {
 
   lazy val queryType: ObjectType[RequestContext, Unit] = ObjectType("Query", fields[RequestContext, Unit](
     Field("health", healthType, resolve = _ => ()),
-    Field("readiness", readinessType, resolve = context => context.ctx.readiness),
-    Field("me", userPayloadType, resolve = context => context.ctx.unsafeToFuture(accountMe(context))),
-    Field("users", userConnectionType, arguments = firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(users(context))),
-    Field("jobs", jobConnectionType,
-      arguments = firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(jobs(context))),
-    Field("semanticJobSearch", rankedJobResultsType,
-      arguments = queryArgument :: jobFilterArgument :: firstArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(semanticJobSearch(context))),
-    Field("recommendedJobs", rankedJobResultsType,
-      arguments = firstArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(recommendedJobs(context))),
-    Field("candidateMatches", rankedCandidateResultsType,
-      arguments = jobIdArgument :: firstArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(candidateMatches(context))),
-    Field("job", jobPayloadType, arguments = idArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(job(context))),
-    Field("myJobs", jobConnectionType, arguments = firstArgument :: afterArgument :: jobStatusArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(myJobs(context))),
-    Field("myApplications", applicationConnectionType, arguments = firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(myApplications(context))),
-    Field("jobApplications", applicationConnectionType,
-      arguments = jobIdArgument :: firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(jobApplications(context))),
-    Field("applicationHistory", applicationEventConnectionType,
-      arguments = applicationIdArgument :: firstArgument :: afterArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(applicationHistory(context)))
+    ioField("readiness", readinessType)(context => context.ctx.readiness),
+    ioField("me", userPayloadType)(accountMe),
+    ioField("users", userConnectionType, firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil)(users),
+    ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: Nil)(jobs),
+    ioField("semanticJobSearch", rankedJobResultsType, queryArgument :: jobFilterArgument :: firstArgument :: Nil)(semanticJobSearch),
+    ioField("recommendedJobs", rankedJobResultsType, firstArgument :: Nil)(recommendedJobs),
+    ioField("candidateMatches", rankedCandidateResultsType, jobIdArgument :: firstArgument :: Nil)(candidateMatches),
+    ioField("job", jobPayloadType, idArgument :: Nil)(job),
+    ioField("myJobs", jobConnectionType, firstArgument :: afterArgument :: jobStatusArgument :: Nil)(myJobs),
+    ioField("myApplications", applicationConnectionType, firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(myApplications),
+    ioField("jobApplications", applicationConnectionType, jobIdArgument :: firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(jobApplications),
+    ioField("applicationHistory", applicationEventConnectionType, applicationIdArgument :: firstArgument :: afterArgument :: Nil)(applicationHistory)
   ))
 
   lazy val mutationType: ObjectType[RequestContext, Unit] = ObjectType("Mutation", fields[RequestContext, Unit](
-    Field("submitApplication", applicationPayloadType, arguments = submitApplicationInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(submitApplication(context))),
-    Field("createJob", jobPayloadType, arguments = createJobInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(createJob(context))),
-    Field("updateJob", jobPayloadType, arguments = updateJobInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(updateJob(context))),
-    Field("publishJob", jobPayloadType, arguments = jobActionInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(changeJob(context, _.publishJob))),
-    Field("closeJob", jobPayloadType, arguments = jobActionInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(changeJob(context, _.closeJob))),
-    Field("acceptApplication", applicationPayloadType, arguments = applicationActionInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(applicationStatusAction(context, ApplicationStatus.Accepted))),
-    Field("moveApplicationToInterview", applicationPayloadType, arguments = applicationActionInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(applicationStatusAction(context, ApplicationStatus.Interview))),
-    Field("hireApplication", applicationPayloadType, arguments = applicationActionInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(applicationStatusAction(context, ApplicationStatus.Hired))),
-    Field("rejectApplication", applicationPayloadType, arguments = rejectApplicationInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(rejectApplication(context))),
-    Field("declineApplication", applicationPayloadType, arguments = declineApplicationInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(declineApplication(context))),
-    Field("signUp", accountPayloadType, arguments = signUpInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(signUp(context))),
-    Field("login", accountPayloadType, arguments = loginInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(login(context))),
-    Field("bootstrapAdmin", accountPayloadType, arguments = bootstrapAdminInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(bootstrapAdmin(context))),
-    Field("updateMyProfile", userPayloadType, arguments = updateProfileInputArgument :: Nil,
-      resolve = context => context.ctx.unsafeToFuture(updateMyProfile(context))),
-    Field("deleteMyAccount", deleteAccountPayloadType,
-      resolve = context => context.ctx.unsafeToFuture(deleteMyAccount(context)))
+    ioField("submitApplication", applicationPayloadType, submitApplicationInputArgument :: Nil)(submitApplication),
+    ioField("createJob", jobPayloadType, createJobInputArgument :: Nil)(createJob),
+    ioField("updateJob", jobPayloadType, updateJobInputArgument :: Nil)(updateJob),
+    ioField("publishJob", jobPayloadType, jobActionInputArgument :: Nil)(context => changeJob(context, _.publishJob)),
+    ioField("closeJob", jobPayloadType, jobActionInputArgument :: Nil)(context => changeJob(context, _.closeJob)),
+    ioField("acceptApplication", applicationPayloadType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Accepted)),
+    ioField("moveApplicationToInterview", applicationPayloadType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Interview)),
+    ioField("hireApplication", applicationPayloadType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Hired)),
+    ioField("rejectApplication", applicationPayloadType, rejectApplicationInputArgument :: Nil)(rejectApplication),
+    ioField("declineApplication", applicationPayloadType, declineApplicationInputArgument :: Nil)(declineApplication),
+    ioField("signUp", accountPayloadType, signUpInputArgument :: Nil)(signUp),
+    ioField("login", accountPayloadType, loginInputArgument :: Nil)(login),
+    ioField("bootstrapAdmin", accountPayloadType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
+    ioField("updateMyProfile", userPayloadType, updateProfileInputArgument :: Nil)(updateMyProfile),
+    ioField("deleteMyAccount", deleteAccountPayloadType)(deleteMyAccount)
   ))
 
   lazy val schema: Schema[RequestContext, Unit] = Schema(queryType, Some(mutationType))
