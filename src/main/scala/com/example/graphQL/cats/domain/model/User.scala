@@ -52,6 +52,25 @@ enum UserProfile {
   case Recruiter(value: RecruiterProfile)
 }
 
+object UserProfile {
+  def matchesRole(role: UserRole, profile: Option[UserProfile]): Boolean =
+    (role, profile) match {
+      case (UserRole.Candidate, Some(UserProfile.Candidate(_))) => true
+      case (UserRole.Recruiter, Some(UserProfile.Recruiter(_))) => true
+      case (UserRole.Admin, None) => true
+      case _ => false
+    }
+
+  def validateFor(role: UserRole, profile: Option[UserProfile]): ValidatedNel[DomainValidationError, Unit] =
+    (role, profile) match {
+      case (UserRole.Candidate, Some(UserProfile.Candidate(value))) =>
+        CandidateProfile.validate(value.skills, value.experienceSummary, value.resumeRef).void
+      case (UserRole.Recruiter, Some(UserProfile.Recruiter(value))) =>
+        RecruiterProfile.validate(value.organizationName, value.jobTitle).void
+      case _ => DomainValidationError.BlankField("profile").invalidNel
+    }
+}
+
 final case class User(
   id: UserId,
   email: Option[String],
@@ -74,8 +93,7 @@ final case class User(
       case AccountStatus.Active =>
         role match {
           case UserRole.Admin => adminSingleton && profile.isEmpty
-          case UserRole.Candidate => !adminSingleton && profile.exists(_.isInstanceOf[UserProfile.Candidate])
-          case UserRole.Recruiter => !adminSingleton && profile.exists(_.isInstanceOf[UserProfile.Recruiter])
+          case UserRole.Candidate | UserRole.Recruiter => !adminSingleton && UserProfile.matchesRole(role, profile)
         }
     }
 }

@@ -19,15 +19,16 @@ final class FixedWindowRateLimiter private (
       val currentWindow = now / windowMillis
       val retryAfter = ((currentWindow + 1) * windowMillis - now).millis
       state.modify { buckets =>
-        buckets.get(key).filter(_.window == currentWindow) match {
+        val activeBuckets = buckets.filter { case (_, bucket) => bucket.window == currentWindow }
+        activeBuckets.get(key) match {
           case Some(bucket) if bucket.count >= config.attempts =>
-            buckets -> Left(RateLimited(retryAfter))
+            activeBuckets -> Left(RateLimited(retryAfter))
           case Some(bucket) =>
-            buckets.updated(key, bucket.copy(count = bucket.count + 1)) -> Right(())
-          case None if buckets.size >= config.maxBuckets =>
-            buckets -> Left(RateLimited(config.windowSeconds.seconds))
+            activeBuckets.updated(key, bucket.copy(count = bucket.count + 1)) -> Right(())
+          case None if activeBuckets.size >= config.maxBuckets =>
+            activeBuckets -> Left(RateLimited(config.windowSeconds.seconds))
           case None =>
-            buckets.updated(key, Bucket(currentWindow, 1)) -> Right(())
+            activeBuckets.updated(key, Bucket(currentWindow, 1)) -> Right(())
         }
       }
     }
@@ -56,7 +57,10 @@ object FixedWindowRateLimiter {
   private[http] final case class Bucket(window: Long, count: Int)
 
   def create(config: AuthRateLimitConfig): IO[FixedWindowRateLimiter] =
-    Ref.of[IO, Map[Key, Bucket]](Map.empty).map(new FixedWindowRateLimiter(_, config, Clock[IO]))
+    create(config, Clock[IO])
+
+  private[http] def create(config: AuthRateLimitConfig, clock: Clock[IO]): IO[FixedWindowRateLimiter] =
+    Ref.of[IO, Map[Key, Bucket]](Map.empty).map(new FixedWindowRateLimiter(_, config, clock))
 
   def resource(config: AuthRateLimitConfig): Resource[IO, FixedWindowRateLimiter] =
     resource(config, config.windowSeconds.seconds)

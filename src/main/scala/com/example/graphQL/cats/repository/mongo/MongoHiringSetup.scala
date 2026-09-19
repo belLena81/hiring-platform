@@ -4,11 +4,13 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.AccountName
 import com.mongodb.MongoCommandException
-import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, Sorts, UpdateOptions, Updates}
+import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, IndexOptions, Indexes, ReturnDocument, SearchIndexModel, SearchIndexType, Sorts, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
 import org.bson.conversions.Bson
 import java.util.Date
+import java.util.UUID
+import java.security.MessageDigest
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
@@ -23,6 +25,15 @@ final case class AtlasSearchIndexConfig(
 
 object MongoHiringSetup {
   private val UserMigrationBatchSize = 100
+  private val MigrationLease = 5.minutes
+  val HiringMigrationLedger = "hiring_migration_ledger"
+  val HiringUserSetupMigrationId = "hiring-user-setup-v2"
+  val EmbeddingWorkMigrationId = "hiring-embedding-work-v1"
+  private val HiringUserSetupDescriptor = "canonical-name-account-status-profile-email-indexes-validator-atlas-v2"
+  private val HiringUserSetupChecksum = sha256(HiringUserSetupDescriptor)
+  private val EmbeddingWorkDescriptor = "durable-embedding-work-claim-index-v1"
+  private val EmbeddingWorkChecksum = sha256(EmbeddingWorkDescriptor)
+  val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
   val UsersEmailIndex = "users_emailCanonical_unique"
   val UsersNameIndex = "users_nameCanonical_unique"
   val UsersStatusCreatedIndex = "users_accountStatus_created_id"
@@ -56,27 +67,7 @@ object MongoHiringSetup {
     initialize(database, None)
 
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    ensureUsersCollection(database) *>
-      backfillLegacyNames(database) *>
-      recordMigration(database.getCollection("schema_migrations"), UserNameCanonicalMigrationId,
-        "Backfill canonical account names before the unique index") *>
-      backfillLegacyAccountStatus(database) *>
-      recordMigration(database.getCollection("schema_migrations"), UserAccountStatusMigrationId,
-        "Backfill active status for legacy user accounts") *>
-      migrateUserProfiles(database) *>
-      recordMigration(database.getCollection("schema_migrations"), UserProfileOneOfMigrationId,
-        "Normalize active user profiles to one role-specific MongoDB profile") *>
-      replaceEmailIndex(database) *>
-      recordMigration(database.getCollection("schema_migrations"), UserEmailSparseIndexMigrationId,
-        "Replace the legacy email index with a sparse unique index") *>
-      (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
-      ensureUserProfileValidator(database) *>
-      recordMigrations(database) *>
-      atlas.fold(IO.unit) { config =>
-        provisionAtlasIndexes(database, config) *>
-          recordMigration(database.getCollection("schema_migrations"), HiringAtlasSearchIndexMigrationId,
-            "Hiring Atlas vector and lexical search indexes")
-      }
+    runHiringUserSetupMigration(database, atlas) *> runEmbeddingWorkMigration(database)
 
   private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
       createIndex(database.getCollection("users"),
@@ -131,14 +122,233 @@ object MongoHiringSetup {
         new IndexOptions().name(UsersEmbeddingMetaIndex))
     )
 
-  private def recordMigrations(database: MongoDatabase): IO[Unit] = {
-    val migrations = database.getCollection("schema_migrations")
-    recordMigration(migrations, HiringDomainMongoMigrationId, "Hiring domain MongoDB collections and indexes") *>
-      recordMigration(migrations, HiringGraphQLSearchIndexMigrationId, "Hiring GraphQL job search indexes") *>
-      recordMigration(migrations, HiringAdminJobListingIndexMigrationId, "Hiring Admin job listing indexes") *>
-      recordMigration(migrations, HiringVectorSearchMigrationId, "Hiring Vector Search metadata indexes") *>
-      recordMigration(migrations, UserAccountMigrationId, "User account credentials, lifecycle, and query indexes")
+  private def runHiringUserSetupMigration(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] = {
+    val ledger = database.getCollection(HiringMigrationLedger)
+    IO(UUID.randomUUID().toString).flatMap { owner =>
+      for {
+        now <- IO.realTimeInstant
+        _ <- ensureLedgerRecord(ledger, HiringUserSetupMigrationId, HiringUserSetupDescriptor, HiringUserSetupChecksum, now)
+        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", HiringUserSetupMigrationId)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("hiring migration ledger record was not created")))
+        _ <- validateLedgerRecord(record, HiringUserSetupMigrationId, HiringUserSetupDescriptor, HiringUserSetupChecksum)
+        claimed <- claimMigration(ledger, HiringUserSetupMigrationId, HiringUserSetupChecksum, owner, now)
+        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", HiringUserSetupMigrationId)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("hiring migration ledger record disappeared"))))(IO.pure)
+        _ <- claimed match {
+          case None if current.getString("status") == "Applied" =>
+            verifyAppliedHiringUserSetup(database, atlas)
+          case None => IO.raiseError(new IllegalStateException(
+            s"hiring migration '$HiringUserSetupMigrationId' is already applying; wait for its lease to expire before recovery"
+          ))
+          case Some(_) =>
+            ensureUsersCollection(database) *>
+              migrateUsers(database.getCollection("users"), ledger, owner) *>
+              replaceEmailIndex(database) *>
+              (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
+              ensureUserProfileValidator(database) *>
+              atlas.fold(IO.unit)(provisionAtlasIndexes(database, _)) *>
+              verifyHiringUserSetup(database) *>
+              markMigrationApplied(ledger, HiringUserSetupMigrationId, HiringUserSetupChecksum, owner)
+        }
+      } yield ()
+    }
   }
+
+  private def verifyAppliedHiringUserSetup(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
+    ensureUsersCollection(database) *>
+      replaceEmailIndex(database) *>
+      (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
+      ensureUserProfileValidator(database) *>
+      verifyHiringUserSetup(database) *>
+      atlas.fold(IO.unit)(provisionAtlasIndexes(database, _))
+
+  private def runEmbeddingWorkMigration(database: MongoDatabase): IO[Unit] = {
+    val ledger = database.getCollection(HiringMigrationLedger)
+    IO(UUID.randomUUID().toString).flatMap { owner =>
+      for {
+        now <- IO.realTimeInstant
+        _ <- ensureLedgerRecord(ledger, EmbeddingWorkMigrationId, EmbeddingWorkDescriptor, EmbeddingWorkChecksum, now)
+        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", EmbeddingWorkMigrationId)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("embedding work migration ledger record was not created")))
+        _ <- validateLedgerRecord(record, EmbeddingWorkMigrationId, EmbeddingWorkDescriptor, EmbeddingWorkChecksum)
+        claimed <- claimMigration(ledger, EmbeddingWorkMigrationId, EmbeddingWorkChecksum, owner, now)
+        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", EmbeddingWorkMigrationId)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("embedding work migration ledger record disappeared"))))(IO.pure)
+        _ <- claimed match {
+          case None if current.getString("status") == "Applied" => verifyEmbeddingWorkIndexes(database)
+          case None => IO.raiseError(new IllegalStateException(
+            s"hiring migration '$EmbeddingWorkMigrationId' is already applying; wait for its lease to expire before recovery"
+          ))
+          case Some(_) =>
+            ensureEmbeddingWorkIndexes(database) *> verifyEmbeddingWorkIndexes(database) *>
+              markMigrationApplied(ledger, EmbeddingWorkMigrationId, EmbeddingWorkChecksum, owner)
+        }
+      } yield ()
+    }
+  }
+
+  private def ensureLedgerRecord(
+      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      id: String,
+      descriptor: String,
+      checksum: String,
+      now: java.time.Instant
+  ): IO[Unit] =
+    PublisherBridge.first(ledger.updateOne(
+      Filters.eq("_id", id),
+      Updates.combine(
+        Updates.setOnInsert("_id", id),
+        Updates.setOnInsert("schemaVersion", 2),
+        Updates.setOnInsert("descriptor", descriptor),
+        Updates.setOnInsert("checksum", checksum),
+        Updates.setOnInsert("status", "Pending"),
+        Updates.setOnInsert("createdAt", Date.from(now))
+      ),
+      new UpdateOptions().upsert(true)
+    )).void
+
+  private def validateLedgerRecord(record: Document, id: String, descriptor: String, checksum: String): IO[Unit] =
+    if (record.getString("checksum") == checksum && record.getString("descriptor") == descriptor)
+      IO.unit
+    else IO.raiseError(new IllegalStateException(
+      s"hiring migration '$id' has an immutable descriptor or checksum mismatch"
+    ))
+
+  private def claimMigration(
+      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      id: String,
+      checksum: String,
+      owner: String,
+      now: java.time.Instant
+  ): IO[Option[Document]] =
+    PublisherBridge.first(ledger.findOneAndUpdate(
+      Filters.and(
+        Filters.eq("_id", id),
+        Filters.eq("checksum", checksum),
+        Filters.or(
+          Filters.eq("status", "Pending"),
+          Filters.and(Filters.eq("status", "Applying"), Filters.lte("leaseUntil", Date.from(now)))
+        )
+      ),
+      Updates.combine(
+        Updates.set("status", "Applying"),
+        Updates.set("owner", owner),
+        Updates.set("leaseUntil", Date.from(now.plusMillis(MigrationLease.toMillis))),
+        Updates.set("startedAt", Date.from(now))
+      ),
+      new FindOneAndUpdateOptions().returnDocument(ReturnDocument.AFTER)
+    ))
+
+  private def persistCheckpoint(
+      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      owner: String,
+      lastProcessedId: String
+  ): IO[Unit] =
+    IO.realTimeInstant.flatMap { now =>
+      PublisherBridge.first(ledger.updateOne(
+        Filters.and(
+          Filters.eq("_id", HiringUserSetupMigrationId),
+          Filters.eq("checksum", HiringUserSetupChecksum),
+          Filters.eq("status", "Applying"),
+          Filters.eq("owner", owner)
+        ),
+        Updates.combine(
+          Updates.set("lastProcessedId", lastProcessedId),
+          Updates.set("leaseUntil", Date.from(now.plusMillis(MigrationLease.toMillis))),
+          Updates.set("updatedAt", Date.from(now))
+        )
+      )).flatMap { result =>
+        if (result.exists(_.getMatchedCount == 1)) IO.unit
+        else IO.raiseError(new IllegalStateException(s"hiring migration '$HiringUserSetupMigrationId' lost its lease"))
+      }
+    }
+
+  private def markMigrationApplied(
+      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      id: String,
+      checksum: String,
+      owner: String
+  ): IO[Unit] =
+    IO.realTimeInstant.flatMap { now =>
+      PublisherBridge.first(ledger.updateOne(
+        Filters.and(
+          Filters.eq("_id", id),
+          Filters.eq("checksum", checksum),
+          Filters.eq("status", "Applying"),
+          Filters.eq("owner", owner)
+        ),
+        Updates.combine(
+          Updates.set("status", "Applied"),
+          Updates.set("appliedAt", Date.from(now)),
+          Updates.unset("owner"),
+          Updates.unset("leaseUntil")
+        )
+      )).flatMap { result =>
+        if (result.exists(_.getMatchedCount == 1)) IO.unit
+        else IO.raiseError(new IllegalStateException(s"hiring migration '$id' lost its lease before verification"))
+      }
+    }
+
+  private def verifyHiringUserSetup(database: MongoDatabase): IO[Unit] = {
+    val users = database.getCollection("users")
+    val expectedKeys = new Document("emailCanonical", 1)
+    PublisherBridge.all(users.listIndexes()).flatMap { indexes =>
+      val names = indexes.map(_.getString("name")).toSet
+      val required = Set(UsersEmailIndex, UsersNameIndex, UsersStatusCreatedIndex, UsersRoleStatusCreatedIndex,
+        UsersAdminSingletonIndex, UsersEmbeddingMetaIndex)
+      indexes.find(_.getString("name") == UsersEmailIndex) match {
+        case Some(index) if Option(index.get("key", classOf[Document])).contains(expectedKeys) &&
+            index.getBoolean("unique", false) && index.getBoolean("sparse", false) && required.subsetOf(names) => IO.unit
+        case _ => IO.raiseError(new IllegalStateException("users security index verification failed"))
+      }
+    } *> verifyIndexes(database.getCollection("applications"), Set(
+      ApplicationsCandidateJobIndex, ApplicationsCandidateStatusCreatedIndex, ApplicationsCandidateCreatedIndex,
+      ApplicationsJobStatusCreatedIndex, ApplicationsJobCreatedIndex
+    )) *> verifyIndexes(database.getCollection("jobs"), Set(
+      JobsRecruiterStatusCreatedIndex, JobsRecruiterCreatedIndex, JobsCreatedIndex, JobsOpenCreatedIndex,
+      JobsOpenCityCreatedIndex, JobsEmbeddingMetaIndex
+    )) *> verifyIndexes(database.getCollection("application_events"), Set(ApplicationEventsApplicationCreatedIndex)) *>
+      verifyAccountRegistry(database) *> verifyUserProfileValidator(database)
+  }
+
+  private def verifyIndexes(
+      collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      required: Set[String]
+  ): IO[Unit] =
+    PublisherBridge.all(collection.listIndexes()).flatMap { indexes =>
+      if (required.subsetOf(indexes.map(_.getString("name")).toSet)) IO.unit
+      else IO.raiseError(new IllegalStateException(s"${collection.getNamespace.getCollectionName} index verification failed"))
+    }
+
+  private def verifyAccountRegistry(database: MongoDatabase): IO[Unit] =
+    PublisherBridge.first(database.getCollection("account_registry").find(Filters.eq("_id", "user-account-registry"))).flatMap {
+      case Some(record) if Set("Initialized", "Uninitialized").contains(record.getString("state")) => IO.unit
+      case _ => IO.raiseError(new IllegalStateException("account registry verification failed"))
+    }
+
+  private def verifyUserProfileValidator(database: MongoDatabase): IO[Unit] =
+    PublisherBridge.first(database.listCollections().filter(Filters.eq("name", "users")).first()).flatMap {
+      case Some(collection) if Option(collection.get("options", classOf[Document]))
+            .flatMap(options => Option(options.get("validator", classOf[Document]))).nonEmpty => IO.unit
+      case _ => IO.raiseError(new IllegalStateException("users profile validator verification failed"))
+    }
+
+  private def ensureEmbeddingWorkIndexes(database: MongoDatabase): IO[Unit] =
+    createIndex(
+      database.getCollection("embedding_work"),
+      Indexes.ascending("state", "availableAt", "leaseUntil"),
+      new IndexOptions().name(EmbeddingWorkAvailableIndex)
+    )
+
+  private def verifyEmbeddingWorkIndexes(database: MongoDatabase): IO[Unit] =
+    PublisherBridge.all(database.getCollection("embedding_work").listIndexes()).flatMap { indexes =>
+      indexes.find(_.getString("name") == EmbeddingWorkAvailableIndex) match {
+        case Some(index) if Option(index.get("key", classOf[Document])).contains(
+              new Document("state", 1).append("availableAt", 1).append("leaseUntil", 1)
+            ) => IO.unit
+        case _ => IO.raiseError(new IllegalStateException("embedding work claim index verification failed"))
+      }
+    }
 
   private def provisionAtlasIndexes(database: MongoDatabase, config: AtlasSearchIndexConfig): IO[Unit] = {
     val jobs = database.getCollection("jobs")
@@ -185,8 +395,10 @@ object MongoHiringSetup {
             "create a new configured index name and perform an explicit cutover migration"
         ))
       case Some(_) =>
-        PublisherBridge.first(collection.updateSearchIndex(name, model.getDefinition)).void *>
-          awaitReady(collection, name, expectedType, model.getDefinition, config)
+        IO.raiseError(new IllegalStateException(
+          s"Atlas search index '$name' has an incompatible definition; " +
+            "create a new configured index name and perform an explicit cutover migration"
+        ))
     }
   }
 
@@ -223,25 +435,6 @@ object MongoHiringSetup {
     IO.monotonic.flatMap(loop)
   }
 
-  private def recordMigration(
-      migrations: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      id: String,
-      description: String
-  ): IO[Unit] =
-    IO.realTimeInstant.flatMap { now =>
-      PublisherBridge.first(migrations.updateOne(
-        Filters.eq("_id", id),
-        Updates.combine(
-          Updates.setOnInsert("_id", id),
-          Updates.setOnInsert("schemaVersion", 1),
-          Updates.setOnInsert("appliedAt", Date.from(now)),
-          Updates.setOnInsert("description", description),
-          Updates.setOnInsert("checksum", id)
-        ),
-        new UpdateOptions().upsert(true)
-      )).void
-    }
-
   private def createIndex(
       collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
       keys: org.bson.conversions.Bson,
@@ -260,9 +453,11 @@ object MongoHiringSetup {
 
   private def replaceEmailIndex(database: MongoDatabase): IO[Unit] = {
     val users = database.getCollection("users")
+    val expectedKeys = new Document("emailCanonical", 1)
     PublisherBridge.all(users.listIndexes()).flatMap { indexes =>
       indexes.find(_.getString("name") == UsersEmailIndex) match {
-        case Some(index) if index.getBoolean("unique", false) && index.getBoolean("sparse", false) =>
+        case Some(index) if Option(index.get("key", classOf[Document])).contains(expectedKeys) &&
+            index.getBoolean("unique", false) && index.getBoolean("sparse", false) =>
           IO.unit
         case Some(_) =>
           IO.raiseError(new IllegalStateException(
@@ -272,30 +467,6 @@ object MongoHiringSetup {
           createIndex(users, Indexes.ascending("emailCanonical"),
             new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true))
       }
-    }
-  }
-
-  private def migrateUserProfiles(database: MongoDatabase): IO[Unit] = {
-    val users = database.getCollection("users")
-    migrateUsers(users) { document =>
-      profileMigrationUpdates(document).flatMap {
-        case Nil => IO.unit
-        case updates => PublisherBridge.first(users.updateOne(
-          Filters.eq("_id", document.getString("_id")),
-          Updates.combine(updates*)
-        )).void
-      }
-    }
-  }
-
-  private def backfillLegacyAccountStatus(database: MongoDatabase): IO[Unit] = {
-    val users = database.getCollection("users")
-    migrateUsers(users) { document =>
-      if (document.containsKey("accountStatus")) IO.unit
-      else PublisherBridge.first(users.updateOne(
-        Filters.eq("_id", document.get("_id")),
-        Updates.set("accountStatus", "Active")
-      )).void
     }
   }
 
@@ -405,26 +576,6 @@ object MongoHiringSetup {
     PublisherBridge.first(database.runCommand(command)).void
   }
 
-  private def backfillLegacyNames(database: MongoDatabase): IO[Unit] = {
-    val users = database.getCollection("users")
-    migrateUsers(users) { document =>
-      Option(document.getString("name")).filter(_.trim.nonEmpty) match {
-        case Some(name) if !document.containsKey("nameCanonical") =>
-          PublisherBridge.first(users.updateOne(
-            Filters.eq("_id", document.get("_id")),
-            Updates.set("nameCanonical", AccountName.canonical(name))
-          )).void
-        case Some(_) => IO.unit
-        case None => IO.raiseError(new IllegalStateException("users collection contains an account without a valid name"))
-      }
-    }.handleErrorWith {
-      case error: MongoCommandException if error.getErrorCode == 11000 =>
-        IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
-      case error => IO.raiseError(error)
-    }
-  }
-
-  // Each update is idempotent; a restart scans completed documents but only advances one bounded batch at a time.
   private def userMigrationBatch(
       users: com.mongodb.reactivestreams.client.MongoCollection[Document],
       after: Option[String]
@@ -435,15 +586,49 @@ object MongoHiringSetup {
       .batchSize(UserMigrationBatchSize))
 
   private def migrateUsers(
-      users: com.mongodb.reactivestreams.client.MongoCollection[Document]
-  )(update: Document => IO[Unit]): IO[Unit] = {
+      users: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      owner: String
+  ): IO[Unit] = {
+    def update(document: Document): IO[Unit] =
+      userMigrationUpdates(document).flatMap {
+        case Nil => IO.unit
+        case updates => PublisherBridge.first(users.updateOne(
+          Filters.eq("_id", document.get("_id")),
+          Updates.combine(updates*)
+        )).void
+      }
+
     def migrateAfter(lastId: Option[String]): IO[Unit] =
       userMigrationBatch(users, lastId).flatMap { documents =>
         documents.traverse_(update) *>
-          documents.lastOption.fold(IO.unit)(document => migrateAfter(Option(document.getString("_id"))))
+          documents.lastOption.fold(IO.unit) { document =>
+            persistCheckpoint(ledger, owner, document.getString("_id")) *>
+              migrateAfter(Option(document.getString("_id")))
+          }
       }
-    migrateAfter(None)
+    PublisherBridge.first(ledger.find(Filters.eq("_id", HiringUserSetupMigrationId))).flatMap {
+      case Some(record) => migrateAfter(Option(record.getString("lastProcessedId")))
+      case None => IO.raiseError(new IllegalStateException("hiring migration ledger record disappeared"))
+    }.handleErrorWith {
+      case error: MongoCommandException if error.getErrorCode == 11000 =>
+        IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
+      case error => IO.raiseError(error)
+    }
   }
+
+  private def userMigrationUpdates(document: Document): IO[List[Bson]] =
+    for {
+      profileUpdates <- profileMigrationUpdates(document)
+      nameUpdates <- IO.fromOption(Option(document.getString("name")).filter(_.trim.nonEmpty))(
+        new IllegalStateException("users collection contains an account without a valid name")
+      ).map { name =>
+        Option.when(!document.containsKey("nameCanonical"))(Updates.set("nameCanonical", AccountName.canonical(name))).toList
+      }
+    } yield {
+      val statusUpdates = Option.when(!document.containsKey("accountStatus"))(Updates.set("accountStatus", "Active")).toList
+      nameUpdates ++ statusUpdates ++ profileUpdates
+    }
 
   private def ensureAccountRegistry(database: MongoDatabase): IO[Unit] =
     PublisherBridge.first(database.getCollection("account_registry").updateOne(
@@ -455,4 +640,7 @@ object MongoHiringSetup {
       ),
       new UpdateOptions().upsert(true)
     )).void
+
+  private def sha256(value: String): String =
+    MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
 }

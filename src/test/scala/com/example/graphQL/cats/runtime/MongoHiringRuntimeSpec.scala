@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Ref}
+import scala.concurrent.duration.*
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import munit.CatsEffectSuite
 
@@ -46,5 +47,16 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
     } yield {
       assertEquals(result, (false, false, false, 1))
     }
+  }
+
+  test("readiness is immediately unavailable while setup is pending") {
+    for {
+      entered <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      setup = entered.complete(()).void *> release.get
+      ready <- SetupLifecycle.resource(setup).use { lifecycle =>
+        entered.get *> lifecycle.ready.timeout(100.millis)
+      }
+    } yield assertEquals(ready, false)
   }
 }

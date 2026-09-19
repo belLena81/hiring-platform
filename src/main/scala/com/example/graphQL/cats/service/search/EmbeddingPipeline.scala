@@ -1,31 +1,20 @@
 package com.example.graphQL.cats.service.search
 
 import cats.effect.std.Queue
-import cats.effect.{IO, Ref, Resource}
-import cats.syntax.all.*
-import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.RepositoryError
+import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
+import com.example.graphQL.cats.repository.protocol.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant
-import scala.concurrent.duration.FiniteDuration
+import java.util.UUID
+import scala.concurrent.duration.*
 
 enum EmbeddingWork {
   case JobChanged(id: JobId)
   case CandidateProfileChanged(id: UserId)
-}
-
-final class EmbeddingWorkQueue private[service] (
-    wakeups: Queue[IO, Unit],
-    pending: Ref[IO, Set[EmbeddingWork]]
-) extends EmbeddingWorkPublisher[IO] {
-  def offer(work: EmbeddingWork): IO[Unit] =
-    pending.update(_ + work) *> wakeups.tryOffer(()).void
-
-  override def publish(work: EmbeddingWork): IO[Unit] =
-    offer(work)
 }
 
 trait EmbeddingWorkPublisher[F[_]] {
@@ -37,15 +26,30 @@ object EmbeddingWorkPublisher {
     _ => cats.Applicative[F].unit
 }
 
-object EmbeddingWorkQueue {
-  def bounded(capacity: Int): IO[EmbeddingWorkQueue] =
-    (Queue.bounded[IO, Unit](capacity), Ref.of[IO, Set[EmbeddingWork]](Set.empty))
-      .mapN(new EmbeddingWorkQueue(_, _))
+final class DurableEmbeddingWorkPublisher private[search] (
+    repository: EmbeddingWorkRepository[IO],
+    wakeups: Queue[IO, Unit],
+    now: IO[Instant]
+) extends EmbeddingWorkPublisher[IO] {
+  def offer(work: EmbeddingWork): IO[Unit] =
+    now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _)).flatMap {
+      case Right(()) => wakeups.tryOffer(()).void
+      case Left(error) => IO.raiseError(new IllegalStateException(s"Embedding work enqueue failed: $error"))
+    }
+
+  override def publish(work: EmbeddingWork): IO[Unit] = offer(work)
+}
+
+object DurableEmbeddingWorkPublisher {
+  def keyFor(work: EmbeddingWork): EmbeddingWorkKey = work match {
+    case EmbeddingWork.JobChanged(id) => EmbeddingWorkKey(EmbeddingWorkKind.Job, id.value.toString)
+    case EmbeddingWork.CandidateProfileChanged(id) => EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, id.value.toString)
+  }
 }
 
 final class EmbeddingPipeline(
     wakeups: Queue[IO, Unit],
-    pending: Ref[IO, Set[EmbeddingWork]],
+    work: EmbeddingWorkRepository[IO],
     users: UserRepository[IO],
     jobs: JobRepository[IO],
     embeddings: EmbeddingService[IO],
@@ -54,23 +58,27 @@ final class EmbeddingPipeline(
     parallelism: Int,
     retryAttempts: Int,
     retryDelay: FiniteDuration,
-    now: IO[Instant]
+    leaseDuration: FiniteDuration,
+    now: IO[Instant],
+    workerId: String
 ) {
   def stream: Stream[IO, Unit] =
-    Stream.fromQueueUnterminated(wakeups).parEvalMap(parallelism)(_ => drain)
+    Stream.fromQueueUnterminated(wakeups)
+      .merge(Stream.awakeEvery[IO](retryDelay).as(()))
+      .parEvalMap(parallelism)(_ => drain)
 
   private def drain: IO[Unit] =
-    nextWork.flatMap(_.fold(IO.unit)(work => processWithRetry(work, retryAttempts) *> drain))
+    claimNext.flatMap(_.fold(IO.unit)(claim => processClaim(claim) *> drain))
 
-  private def nextWork: IO[Option[EmbeddingWork]] =
-    pending.modify { work =>
-      work.headOption.fold(work -> Option.empty[EmbeddingWork]) { next =>
-        (work - next) -> Some(next)
-      }
+  private def claimNext: IO[Option[ClaimedEmbeddingWork]] =
+    now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis))).flatMap {
+      case Right(claim) => IO.pure(claim)
+      case Left(_) => IO.pure(None)
     }
 
   private enum ProcessingOutcome {
     case Completed, Retry
+    case Terminal(failure: EmbeddingWorkFailure)
   }
 
   private enum EmbeddingOutcome {
@@ -79,46 +87,53 @@ final class EmbeddingPipeline(
     case Discarded
   }
 
-  private def processWithRetry(work: EmbeddingWork, attemptsRemaining: Int): IO[Unit] =
-    process(work).flatMap {
-      case ProcessingOutcome.Completed => IO.unit
-      case ProcessingOutcome.Retry if attemptsRemaining <= 1 => IO.unit
-      case ProcessingOutcome.Retry => IO.sleep(retryDelay) *> processWithRetry(work, attemptsRemaining - 1)
+  private def processClaim(claim: ClaimedEmbeddingWork): IO[Unit] =
+    process(claim).handleError(_ => ProcessingOutcome.Retry).flatMap {
+      case ProcessingOutcome.Completed => work.complete(claim).void
+      case ProcessingOutcome.Terminal(failure) => now.flatMap(work.fail(claim, failure, _)).void
+      case ProcessingOutcome.Retry if claim.attempts + 1 >= retryAttempts =>
+        now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _)).void
+      case ProcessingOutcome.Retry =>
+        now.map(_.plusMillis(retryDelay.toMillis)).flatMap(work.retry(claim, _)).void
     }
 
-  private def process(work: EmbeddingWork): IO[ProcessingOutcome] =
-    work match {
-      case EmbeddingWork.JobChanged(id) =>
-        jobs.find(id).flatMap {
-          case Some(job) =>
-            val text = SearchableText.job(job)
-            val hash = SourceHash.sha256(text)
-            if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
-            else embedDocument(text).flatMap {
-              case EmbeddingOutcome.Embedded(embedding) =>
-                jobs.updateEmbedding(id, job.version, embedding).map(writeOutcome)
-              case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
-              case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Completed)
-            }
-          case None => IO.pure(ProcessingOutcome.Completed)
+  private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
+    claim.key.kind match {
+      case EmbeddingWorkKind.Job =>
+        scala.util.Try(JobId(UUID.fromString(claim.key.entityId))).toOption.fold(IO.pure(ProcessingOutcome.Completed))(processJob)
+      case EmbeddingWorkKind.CandidateProfile =>
+        scala.util.Try(UserId(UUID.fromString(claim.key.entityId))).toOption.fold(IO.pure(ProcessingOutcome.Completed))(processCandidate)
+    }
+
+  private def processJob(id: JobId): IO[ProcessingOutcome] =
+    jobs.find(id).flatMap {
+      case Some(job) =>
+        val text = SearchableText.job(job)
+        val hash = SourceHash.sha256(text)
+        if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
+        else embedDocument(text).flatMap {
+          case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(id, job.version, embedding).map(writeOutcome)
+          case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
+          case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
         }
-      case EmbeddingWork.CandidateProfileChanged(id) =>
-        users.find(id).flatMap {
-          case Some(user) =>
-            user.candidateProfile match {
-              case Some(profile) =>
-                val text = SearchableText.candidate(profile)
-                val hash = SourceHash.sha256(text)
-                if (user.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
-                else embedDocument(text).flatMap {
-                  case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(id, embedding).map(writeOutcome)
-                  case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
-                  case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Completed)
-                }
-              case None => IO.pure(ProcessingOutcome.Completed)
-            }
-          case None => IO.pure(ProcessingOutcome.Completed)
-        }
+      case None => IO.pure(ProcessingOutcome.Completed)
+    }
+
+  private def processCandidate(id: UserId): IO[ProcessingOutcome] =
+    users.find(id).flatMap {
+      case Some(user) => user.candidateProfile match {
+        case Some(profile) =>
+          val text = SearchableText.candidate(profile)
+          val hash = SourceHash.sha256(text)
+          if (user.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
+          else embedDocument(text).flatMap {
+            case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(id, user.version, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
+            case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
+          }
+        case None => IO.pure(ProcessingOutcome.Completed)
+      }
+      case None => IO.pure(ProcessingOutcome.Completed)
     }
 
   private def isCurrent(embedding: EntityEmbedding, hash: String): Boolean =
@@ -133,15 +148,15 @@ final class EmbeddingPipeline(
     if (text.length > SearchableText.DocumentMaxChars) IO.pure(EmbeddingOutcome.Discarded)
     else embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Document)).flatMap {
       case Left(_) => IO.pure(EmbeddingOutcome.Retry)
-      case Right(vector) =>
-        now.map { instant =>
-          EmbeddingOutcome.Embedded(EntityEmbedding(vector.values, EmbeddingMeta(model, version, SourceHash.sha256(text), instant)))
-        }
+      case Right(vector) => now.map { instant =>
+        EmbeddingOutcome.Embedded(EntityEmbedding(vector.values, EmbeddingMeta(model, version, SourceHash.sha256(text), instant)))
+      }
     }
 }
 
 object EmbeddingPipeline {
   def resource(
+      work: EmbeddingWorkRepository[IO],
       users: UserRepository[IO],
       jobs: JobRepository[IO],
       embeddings: EmbeddingService[IO],
@@ -150,24 +165,16 @@ object EmbeddingPipeline {
       queueSize: Int,
       parallelism: Int,
       retryAttempts: Int,
-      retryDelay: FiniteDuration
-  ): Resource[IO, EmbeddingWorkQueue] =
-    Resource.eval((Queue.bounded[IO, Unit](queueSize), Ref.of[IO, Set[EmbeddingWork]](Set.empty)).tupled).flatMap {
-      case (wakeups, pending) =>
-        val publisher = new EmbeddingWorkQueue(wakeups, pending)
-        val pipeline = new EmbeddingPipeline(
-          wakeups,
-          pending,
-          users,
-          jobs,
-          embeddings,
-          model,
-          version,
-          parallelism,
-          retryAttempts,
-          retryDelay,
-          IO.realTimeInstant
-        )
-        Resource.make(pipeline.stream.compile.drain.start)(_.cancel).as(publisher)
+      retryDelay: FiniteDuration,
+      leaseDuration: FiniteDuration
+  ): Resource[IO, DurableEmbeddingWorkPublisher] =
+    Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
+      for {
+        workerId <- Resource.eval(IO.randomUUID.map(_.toString))
+        publisher = new DurableEmbeddingWorkPublisher(work, wakeups, IO.realTimeInstant)
+        pipeline = new EmbeddingPipeline(wakeups, work, users, jobs, embeddings, model, version, parallelism,
+          retryAttempts, retryDelay, leaseDuration, IO.realTimeInstant, workerId)
+        _ <- Resource.make(pipeline.stream.compile.drain.start)(_.cancel)
+      } yield publisher
     }
 }

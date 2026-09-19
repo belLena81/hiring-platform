@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.data.{EitherT, ValidatedNel}
+import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
@@ -354,29 +354,23 @@ private[graphql] object HiringGraphQLResolvers {
     }
 
   private def jobInput(input: JobGraphQLInput, status: JobStatus): Either[UseCaseError, CreateJobInput] =
-    location(input).map(location => CreateJobInput(
+    Right(CreateJobInput(
       input.title,
       input.description,
       input.requirements,
       input.skills.toSet,
-      location,
+      Location(input.country, input.city.getOrElse(""), input.remote),
       status
     ))
 
   private def updateInput(input: JobGraphQLInput): Either[UseCaseError, UpdateJobInput] =
-    location(input).map(location => UpdateJobInput(
+    Right(UpdateJobInput(
       input.title,
       input.description,
       input.requirements,
       input.skills.toSet,
-      location
+      Location(input.country, input.city.getOrElse(""), input.remote)
     ))
-
-  private def location(input: JobGraphQLInput): Either[UseCaseError, Location] =
-    (text("country", input.country), requiredText("city", input.city))
-      .mapN(Location(_, _, input.remote))
-      .toEither
-      .leftMap(UseCaseError.ValidationFailed.apply)
 
   private def signUpProfile(input: SignUpGraphQLInput): Either[UseCaseError, Option[UserProfile]] =
     input.role match {
@@ -394,37 +388,11 @@ private[graphql] object HiringGraphQLResolvers {
   ): Either[UseCaseError, UserProfile] =
     role match {
       case UserRole.Candidate =>
-        (requiredValues("skills", skills), optionalText("experienceSummary", experienceSummary), optionalText("resumeRef", resumeRef))
-          .mapN(CandidateProfile.apply)
-          .map(UserProfile.Candidate.apply)
-          .toEither
-          .leftMap(UseCaseError.ValidationFailed.apply)
+        Right(UserProfile.Candidate(CandidateProfile(skills.getOrElse(Nil).toSet, experienceSummary, resumeRef)))
       case UserRole.Recruiter =>
-        (requiredText("organizationName", organizationName), optionalText("jobTitle", jobTitle))
-          .mapN(RecruiterProfile.apply)
-          .map(UserProfile.Recruiter.apply)
-          .toEither
-          .leftMap(UseCaseError.ValidationFailed.apply)
+        Right(UserProfile.Recruiter(RecruiterProfile(organizationName.getOrElse(""), jobTitle)))
       case UserRole.Admin =>
         Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole))
-    }
-
-  private def text(field: String, value: String): ValidatedNel[DomainValidationError, String] =
-    value.trim match {
-      case "" => DomainValidationError.BlankField(field).invalidNel
-      case trimmed => trimmed.validNel
-    }
-
-  private def optionalText(field: String, value: Option[String]): ValidatedNel[DomainValidationError, Option[String]] =
-    value.traverse(text(field, _))
-
-  private def requiredText(field: String, value: Option[String]): ValidatedNel[DomainValidationError, String] =
-    value.fold(DomainValidationError.BlankField(field).invalidNel[String])(text(field, _))
-
-  private def requiredValues(field: String, values: Option[List[String]]): ValidatedNel[DomainValidationError, Set[String]] =
-    values.fold(DomainValidationError.EmptyCollection(field).invalidNel[Set[String]]) { raw =>
-      val trimmed = raw.map(_.trim).filter(_.nonEmpty).toSet
-      if (trimmed.isEmpty) DomainValidationError.EmptyCollection(field).invalidNel else trimmed.validNel
     }
 
   private def canViewApplication(

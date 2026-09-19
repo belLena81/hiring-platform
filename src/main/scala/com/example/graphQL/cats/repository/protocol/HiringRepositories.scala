@@ -10,7 +10,7 @@ import java.time.Instant
 trait UserRepository[F[_]] {
   def find(id: UserId): F[Option[User]]
   def findMany(ids: List[UserId]): F[List[User]]
-  def updateEmbedding(id: UserId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
+  def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
 trait UserAccountRepository[F[_]] {
@@ -36,6 +36,33 @@ trait JobRepository[F[_]] {
 
 trait EmbeddingService[F[_]] {
   def embed(input: EmbeddingInput): F[Either[EmbeddingError, EmbeddingVector]]
+}
+
+enum EmbeddingWorkKind {
+  case Job, CandidateProfile
+}
+
+final case class EmbeddingWorkKey(kind: EmbeddingWorkKind, entityId: String) {
+  val value: String = s"${kind.toString}:$entityId"
+}
+
+final case class ClaimedEmbeddingWork(
+    key: EmbeddingWorkKey,
+    generation: Long,
+    attempts: Int,
+    leaseToken: String
+)
+
+enum EmbeddingWorkFailure {
+  case RetryExhausted, DocumentTooLarge
+}
+
+trait EmbeddingWorkRepository[F[_]] {
+  def enqueue(key: EmbeddingWorkKey, now: Instant): F[Either[RepositoryError, Unit]]
+  def claim(workerId: String, now: Instant, leaseUntil: Instant): F[Either[RepositoryError, Option[ClaimedEmbeddingWork]]]
+  def complete(claim: ClaimedEmbeddingWork): F[Either[RepositoryError, Unit]]
+  def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): F[Either[RepositoryError, Unit]]
+  def fail(claim: ClaimedEmbeddingWork, failure: EmbeddingWorkFailure, now: Instant): F[Either[RepositoryError, Unit]]
 }
 
 enum EmbeddingInputType {

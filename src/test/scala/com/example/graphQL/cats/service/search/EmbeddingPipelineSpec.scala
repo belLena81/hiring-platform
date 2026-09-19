@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import cats.effect.Deferred
 import cats.effect.Ref
 import cats.syntax.all.*
@@ -12,6 +12,7 @@ import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.shared.pagination.JobPageRequest
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import java.util.UUID
+import java.time.Instant
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
@@ -24,7 +25,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       embeddings = CountingEmbeddingService(calls)
-      _ <- EmbeddingPipeline.resource(
+      _ <- pipelineResource(
         users,
         jobs,
         embeddings,
@@ -65,7 +66,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         users = InMemoryUsers(usersRef)
         jobs = InMemoryJobs(jobsRef)
         embeddings = CountingEmbeddingService(calls)
-        _ <- EmbeddingPipeline.resource(
+        _ <- pipelineResource(
           users,
           jobs,
           embeddings,
@@ -98,7 +99,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       embeddings = FailOnceEmbeddingService(calls)
-      _ <- EmbeddingPipeline.resource(
+      _ <- pipelineResource(
         users,
         jobs,
         embeddings,
@@ -133,7 +134,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       jobsDelegate = InMemoryJobs(jobsRef)
       jobs = RecordingEmbeddingWrites(jobsDelegate, writeResult)
       embeddings = BlockingEmbeddingService(calls, started, release)
-      _ <- EmbeddingPipeline.resource(
+      _ <- pipelineResource(
         users,
         jobs,
         embeddings,
@@ -173,7 +174,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       embeddings = BlockingEmbeddingService(calls, started, release)
-      _ <- EmbeddingPipeline.resource(
+      _ <- pipelineResource(
         users,
         jobs,
         embeddings,
@@ -202,6 +203,70 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       }
     } yield ()
   }
+
+  test("durable embedding work preserves an active lease while coalescing newer updates") {
+    val work = EmbeddingWorkKey(EmbeddingWorkKind.Job, jobId.value.toString)
+    val first = now
+    val second = now.plusSeconds(1)
+    for {
+      repository <- InMemoryEmbeddingWorkRepository.create
+      _ <- repository.enqueue(work, first)
+      claim <- repository.claim("worker-a", first, first.plusSeconds(30))
+      claimed <- IO.fromOption(claim.toOption.flatten)(new AssertionError("expected work claim"))
+      _ <- repository.enqueue(work, second)
+      completed <- repository.complete(claimed)
+      blockedClaim <- repository.claim("worker-b", second, second.plusSeconds(30))
+      nextClaim <- repository.claim("worker-b", first.plusSeconds(31), first.plusSeconds(61))
+      snapshot <- repository.snapshot
+    } yield {
+      assertEquals(completed, Left(RepositoryError.Conflict))
+      assertEquals(blockedClaim, Right(None))
+      assert(nextClaim.toOption.flatten.nonEmpty)
+      assertEquals(snapshot(work.value).generation, 2L)
+    }
+  }
+
+  test("embedding worker records terminal provider failure and continues with later work") {
+    val otherJobId = Identifiers.JobId(UUID.fromString("00000000-0000-0000-0000-000000000009"))
+    val otherJob = openJob.copy(id = otherJobId, title = "Recovery Scala Developer")
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
+      calls <- Ref.of[IO, Int](0)
+      work <- InMemoryEmbeddingWorkRepository.create
+      embeddings = new EmbeddingService[IO] {
+        override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+          calls.updateAndGet(_ + 1).map { count =>
+            if (count == 1) Left(EmbeddingError.ProviderUnavailable)
+            else Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))
+          }
+      }
+      _ <- EmbeddingPipeline.resource(work, InMemoryUsers(usersRef), InMemoryJobs(jobsRef), embeddings,
+        "voyage-4-lite", 1, 8, 1, retryAttempts = 1, retryDelay = 10.millis, leaseDuration = 1.second).use { publisher =>
+          publisher.offer(EmbeddingWork.JobChanged(jobId)) *> publisher.offer(EmbeddingWork.JobChanged(otherJobId)) *>
+            eventually(jobsRef.get.map(_.get(otherJobId).flatMap(_.embedding).nonEmpty))(identity).void
+        }
+      snapshot <- work.snapshot
+    } yield {
+      assertEquals(snapshot(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId)).value).failure,
+        Some(EmbeddingWorkFailure.RetryExhausted))
+      assert(snapshot.get(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(otherJobId)).value).isEmpty)
+    }
+  }
+
+  private def pipelineResource(
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      embeddings: EmbeddingService[IO],
+      model: String,
+      version: Int,
+      queueSize: Int,
+      parallelism: Int,
+      retryAttempts: Int,
+      retryDelay: FiniteDuration
+  ) =
+    Resource.eval(InMemoryEmbeddingWorkRepository.create).flatMap(work =>
+      EmbeddingPipeline.resource(work, users, jobs, embeddings, model, version, queueSize, parallelism, retryAttempts, retryDelay, 1.second))
 
   private def waitFor(done: IO[Boolean], remaining: Int = 20): IO[Unit] =
     done.flatMap {
@@ -272,5 +337,65 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         embedding: EntityEmbedding
     ): IO[Either[RepositoryError, Unit]] =
       delegate.updateEmbedding(id, observedVersion, embedding).flatTap(result => writeResult.complete(result).void)
+  }
+
+  private final case class StoredWork(
+      key: EmbeddingWorkKey,
+      generation: Long,
+      attempts: Int,
+      state: String,
+      availableAt: Instant,
+      leaseToken: Option[String],
+      leaseUntil: Option[Instant],
+      failure: Option[EmbeddingWorkFailure]
+  )
+
+  private final class InMemoryEmbeddingWorkRepository(ref: Ref[IO, Map[String, StoredWork]]) extends EmbeddingWorkRepository[IO] {
+    def snapshot: IO[Map[String, StoredWork]] = ref.get
+
+    override def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
+      ref.update { current =>
+        val next = current.get(key.value).fold(StoredWork(key, 1L, 0, "Ready", now, None, None, None)) { existing =>
+          if (existing.state == "Processing") existing.copy(generation = existing.generation + 1L, attempts = 0)
+          else existing.copy(generation = existing.generation + 1L, state = "Ready", availableAt = now, leaseToken = None, leaseUntil = None, failure = None)
+        }
+        current.updated(key.value, next)
+      }.as(Right(()))
+
+    override def claim(workerId: String, now: Instant, leaseUntil: Instant): IO[Either[RepositoryError, Option[ClaimedEmbeddingWork]]] =
+      IO.randomUUID.flatMap { token =>
+        ref.modify { current =>
+          current.values.toList.sortBy(_.key.value).find(work =>
+            ((work.state == "Ready" || work.state == "Retry") && !work.availableAt.isAfter(now)) ||
+              (work.state == "Processing" && work.leaseUntil.exists(_.isBefore(now)))
+          ).fold(current -> Right(None)) { found =>
+            val claimed = found.copy(state = "Processing", leaseToken = Some(token.toString), leaseUntil = Some(leaseUntil))
+            current.updated(found.key.value, claimed) -> Right(Some(ClaimedEmbeddingWork(found.key, found.generation, found.attempts, token.toString)))
+          }
+        }
+      }
+
+    override def complete(claim: ClaimedEmbeddingWork): IO[Either[RepositoryError, Unit]] =
+      transition(claim)(_ => None)
+
+    override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): IO[Either[RepositoryError, Unit]] =
+      transition(claim)(_.copy(state = "Retry", attempts = claim.attempts + 1, availableAt = availableAt, leaseToken = None, leaseUntil = None).some)
+
+    override def fail(claim: ClaimedEmbeddingWork, failure: EmbeddingWorkFailure, now: Instant): IO[Either[RepositoryError, Unit]] =
+      transition(claim)(_.copy(state = "Failed", leaseToken = None, leaseUntil = None, failure = Some(failure)).some)
+
+    private def transition(claim: ClaimedEmbeddingWork)(update: StoredWork => Option[StoredWork]): IO[Either[RepositoryError, Unit]] =
+      ref.modify { current =>
+        current.get(claim.key.value) match {
+          case Some(work) if work.generation == claim.generation && work.state == "Processing" && work.leaseToken.contains(claim.leaseToken) =>
+            current.updatedWith(claim.key.value)(_ => update(work)) -> Right(())
+          case _ => current -> Left(RepositoryError.Conflict)
+        }
+      }
+  }
+
+  private object InMemoryEmbeddingWorkRepository {
+    def create: IO[InMemoryEmbeddingWorkRepository] =
+      Ref.of[IO, Map[String, StoredWork]](Map.empty).map(new InMemoryEmbeddingWorkRepository(_))
   }
 }

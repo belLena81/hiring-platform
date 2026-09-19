@@ -53,6 +53,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("profile role compatibility is defined once for account and persistence callers") {
+    val candidate = Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+    val recruiter = Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
+
+    assert(UserProfile.matchesRole(UserRole.Candidate, candidate))
+    assert(UserProfile.matchesRole(UserRole.Recruiter, recruiter))
+    assert(UserProfile.matchesRole(UserRole.Admin, None))
+    assert(!UserProfile.matchesRole(UserRole.Candidate, recruiter))
+    assert(!UserProfile.matchesRole(UserRole.Admin, candidate))
+  }
+
   test("signup persists account and returns an access token") {
     for {
       accounts <- TestAccounts.create(initialized = true)
@@ -159,6 +170,29 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("unknown accounts use the hasher's dummy verification path") {
+    for {
+      unknownVerifications <- Ref.of[IO, Int](0)
+      accounts <- TestAccounts.create(initialized = true)
+      hasher = new PasswordHasher[IO] {
+        override def hash(password: String): IO[String] = IO.pure(s"hash:$password")
+        override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(false)
+        override def verifyUnknown(password: String): IO[Unit] = unknownVerifications.update(_ + 1)
+      }
+      service = new UserAccountService(new TestUsers(Map.empty), accounts, hasher, TestTokenIssuer)
+      result <- service.login(LoginInput("Unknown", "password-password"), now)
+      calls <- unknownVerifications.get
+    } yield {
+      assertEquals(result, Left(UseCaseError.account(AccountError.InvalidCredentials)))
+      assertEquals(calls, 1)
+    }
+  }
+
+  test("Argon2 unknown-user verification accepts arbitrary credentials without retaining their hash") {
+    val hasher = new Argon2PasswordHasher(iterations = 1, memoryKilobytes = 8192, parallelism = 1)
+    hasher.verifyUnknown("first-password").flatMap(_ => hasher.verifyUnknown("second-password")).map(assertEquals(_, ()))
+  }
+
   test("deleting an already deleted account is idempotent") {
     for {
       accounts <- TestAccounts.create(initialized = true)
@@ -182,7 +216,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
     override def find(id: UserId): IO[Option[User]] = IO.pure(values.get(id))
     override def findMany(ids: List[UserId]): IO[List[User]] = IO.pure(ids.flatMap(values.get))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private final class TestAccounts(

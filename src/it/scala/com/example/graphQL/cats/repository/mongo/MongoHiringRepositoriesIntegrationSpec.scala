@@ -147,7 +147,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     }
   }
 
-  test("setup is idempotent and creates named indexes plus migration record") {
+  test("setup is idempotent, preserves legacy migration history, and records the applied ledger entry") {
     container.use { uri =>
       MongoDatabaseProbe.clientResource(uri).use { client =>
         val database = client.getDatabase("hiring_setup")
@@ -165,8 +165,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true).sparse(true)
           ))
           _ <- MongoHiringSetup.initialize(database)
-          graphqlPerformanceMigrationAfterFirstRun <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
+          ledgerAfterFirstRun <- PublisherBridge.first(database.getCollection(MongoHiringSetup.HiringMigrationLedger)
+            .find(new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId)))
           _ <- MongoHiringSetup.initialize(database)
           users <- indexes(database.getCollection("users"))
           jobs <- indexes(database.getCollection("jobs"))
@@ -174,20 +174,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           events <- indexes(database.getCollection("application_events"))
           migration <- PublisherBridge.first(migrations
             .find(new Document("_id", MongoHiringSetup.HiringDomainMongoMigrationId)))
-          graphqlPerformanceMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.HiringGraphQLSearchIndexMigrationId)))
-          adminJobListingMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.HiringAdminJobListingIndexMigrationId)))
-          vectorSearchMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.HiringVectorSearchMigrationId)))
-          userAccountMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.UserAccountMigrationId)))
-          userAccountStatusMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.UserAccountStatusMigrationId)))
-          profileMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.UserProfileOneOfMigrationId)))
-          emailIndexMigration <- PublisherBridge.first(migrations
-            .find(new Document("_id", MongoHiringSetup.UserEmailSparseIndexMigrationId)))
+          ledger <- PublisherBridge.first(database.getCollection(MongoHiringSetup.HiringMigrationLedger)
+            .find(new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId)))
           accountRegistry <- PublisherBridge.first(database.getCollection("account_registry")
             .find(new Document("_id", "user-account-registry")))
         } yield {
@@ -201,10 +189,6 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             new Document("role", 1).append("accountStatus", 1).append("createdAt", -1).append("_id", -1), None, None)
           assertIndex(users, MongoHiringSetup.UsersAdminSingletonIndex, new Document("adminSingletonKey", 1), unique = Some(true),
             partial = Some(new Document("role", "Admin")))
-          assertEquals(userAccountMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserAccountMigrationId))
-          assertEquals(userAccountStatusMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserAccountStatusMigrationId))
-          assertEquals(profileMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserProfileOneOfMigrationId))
-          assertEquals(emailIndexMigration.map(_.getString("_id")), Some(MongoHiringSetup.UserEmailSparseIndexMigrationId))
           assertEquals(accountRegistry.map(_.getString("state")), Some("Uninitialized"))
           assertIndex(jobs, MongoHiringSetup.JobsRecruiterStatusCreatedIndex,
             new Document("recruiterId", 1).append("status", 1).append("createdAt", -1).append("_id", -1), None, None)
@@ -237,14 +221,10 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(migration.exists(_.getDate("appliedAt") == existingAppliedAt))
           assert(migration.exists(_.getString("description") == "Previously applied hiring domain MongoDB collections and indexes"))
           assert(migration.exists(_.getString("checksum") == MongoHiringSetup.HiringDomainMongoMigrationId))
-          assert(graphqlPerformanceMigrationAfterFirstRun.exists(_.containsKey("appliedAt")))
-          assertEquals(
-            graphqlPerformanceMigration.flatMap(migration => Option(migration.getDate("appliedAt"))),
-            graphqlPerformanceMigrationAfterFirstRun.flatMap(migration => Option(migration.getDate("appliedAt")))
-          )
-          assert(graphqlPerformanceMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringGraphQLSearchIndexMigrationId))
-          assert(adminJobListingMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringAdminJobListingIndexMigrationId))
-          assert(vectorSearchMigration.exists(_.getString("checksum") == MongoHiringSetup.HiringVectorSearchMigrationId))
+          assertEquals(ledgerAfterFirstRun.map(_.getString("status")), Some("Applied"))
+          assertEquals(ledger.map(_.getString("status")), Some("Applied"))
+          assert(ledger.exists(_.containsKey("checksum")))
+          assert(ledger.exists(_.containsKey("appliedAt")))
         }
       }
     }
@@ -267,6 +247,82 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(indexesAfterFailure.contains(MongoHiringSetup.UsersEmailIndex))
           assert(indexesAfterFailure(MongoHiringSetup.UsersEmailIndex).getBoolean("unique", false))
           assert(!indexesAfterFailure(MongoHiringSetup.UsersEmailIndex).getBoolean("sparse", false))
+        }
+      }
+    }
+  }
+
+  test("setup rejects a named email uniqueness index on a different key without changing it") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_wrong_email_index_key")
+        val users = database.getCollection("users")
+        for {
+          _ <- PublisherBridge.first(users.createIndex(
+            Indexes.ascending("nameCanonical"),
+            new IndexOptions().name(MongoHiringSetup.UsersEmailIndex).unique(true).sparse(true)
+          ))
+          result <- MongoHiringSetup.initialize(database).attempt
+          indexesAfterFailure <- indexes(users)
+        } yield {
+          assert(result.left.toOption.exists(_.getMessage.contains("explicit cutover migration")))
+          val preserved = indexesAfterFailure(MongoHiringSetup.UsersEmailIndex)
+          assertEquals(preserved.get("key", classOf[Document]), new Document("nameCanonical", 1))
+          assert(preserved.getBoolean("unique", false))
+          assert(preserved.getBoolean("sparse", false))
+        }
+      }
+    }
+  }
+
+  test("setup rejects a tampered forward migration ledger before applying setup actions") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_tampered_migration_ledger")
+        val ledger = database.getCollection(MongoHiringSetup.HiringMigrationLedger)
+        for {
+          _ <- PublisherBridge.first(ledger.insertOne(new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId)
+            .append("schemaVersion", 2)
+            .append("descriptor", "tampered")
+            .append("checksum", "tampered")
+            .append("status", "Pending")))
+          result <- MongoHiringSetup.initialize(database).attempt
+          collections <- PublisherBridge.all(database.listCollectionNames())
+        } yield {
+          assert(result.left.toOption.exists(_.getMessage.contains("descriptor or checksum mismatch")))
+          assert(!collections.contains("users"))
+        }
+      }
+    }
+  }
+
+  test("setup records a durable user-batch checkpoint and rejects an active migration lease") {
+    container.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_migration_lease")
+        val users = database.getCollection("users")
+        val ledger = database.getCollection(MongoHiringSetup.HiringMigrationLedger)
+        val legacyUsers = (0 to 100).map { index =>
+          new Document("_id", f"legacy-$index%03d")
+            .append("name", s"Legacy $index")
+            .append("role", "Candidate")
+            .append("profile", new Document("skills", List("Scala").asJava))
+            .append("createdAt", Date.from(now))
+        }
+        for {
+          _ <- PublisherBridge.first(users.insertMany(legacyUsers.asJava))
+          _ <- MongoHiringSetup.initialize(database)
+          applied <- PublisherBridge.first(ledger.find(new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId)))
+          _ <- PublisherBridge.first(ledger.updateOne(
+            new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId),
+            new Document("$set", new Document("status", "Applying")
+              .append("owner", "another-runner")
+              .append("leaseUntil", Date.from(now.plusSeconds(300))))
+          ))
+          result <- MongoHiringSetup.initialize(database).attempt
+        } yield {
+          assertEquals(applied.flatMap(record => Option(record.getString("lastProcessedId"))), Some("legacy-100"))
+          assert(result.left.toOption.exists(_.getMessage.contains("already applying")))
         }
       }
     }
@@ -601,10 +657,11 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             users.insert(candidateUser) *> users.insert(recruiterUser) *> jobs.create(jobFixture(jobId, JobStatus.Open)).void
           }
           authenticator = JwtActorAuthenticator(jwt, runtime.userAuthenticator, FixedTestClock.at(now))
+          _ <- eventually(runtime.hiringReadiness)(_ == com.example.graphQL.cats.service.ProbeResult.Ready)
           dependencies <- TestGraphQLSupport.dependencies(
             runtime.services,
             authenticator.authenticateDetailed,
-            runtime.ensureSetup.map(if (_) com.example.graphQL.cats.service.ProbeResult.Ready else com.example.graphQL.cats.service.ProbeResult.Unavailable)
+            runtime.hiringReadiness
           ).allocated.map(_._1)
           http = new HiringApiRoutes(HealthService(runtime.probe, Diagnostics.noop), Diagnostics.noop, admission, dependencies).app
           token = signedToken(candidateId, jwt)
@@ -620,8 +677,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             val db = client.getDatabase("hiring_served_jwt")
             for {
               indexNames <- indexes(db.getCollection("applications")).map(_.keySet)
-              migration <- PublisherBridge.first(db.getCollection("schema_migrations")
-                .find(new Document("_id", MongoHiringSetup.HiringDomainMongoMigrationId)))
+              migration <- PublisherBridge.first(db.getCollection(MongoHiringSetup.HiringMigrationLedger)
+                .find(new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId)))
             } yield (indexNames, migration)
           }
         } yield {
@@ -632,7 +689,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(duplicate.hcursor.downField("data").downField("submitApplication")
             .downField("errors").downArray.get[String]("code"), Right("DUPLICATE_APPLICATION"))
           assert(database._1.contains(MongoHiringSetup.ApplicationsCandidateJobIndex))
-          assert(database._2.exists(_.getString("checksum") == MongoHiringSetup.HiringDomainMongoMigrationId))
+          assertEquals(database._2.map(_.getString("status")), Some("Applied"))
         }
       }
     }
@@ -654,8 +711,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           JobStatus.Open
         )
         for {
-          setup <- runtime.ensureSetup
-          _ = assert(!setup)
+          setup <- runtime.hiringReadiness
+          _ = assertEquals(setup, com.example.graphQL.cats.service.ProbeResult.Unavailable)
           _ = assert(runtime.services.semanticSearchService.nonEmpty)
           _ <- MongoDatabaseProbe.clientResource(uri).use { client =>
             new MongoUserRepository(client.getDatabase("hiring_vector_runtime")).insert(recruiterUser).void

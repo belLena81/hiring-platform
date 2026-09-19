@@ -14,7 +14,13 @@ final class Argon2PasswordHasher(
     memoryKilobytes: Int,
     parallelism: Int
 ) extends PasswordHasher[IO] {
+  private val DummyPassword = "hiring-platform-invalid-password"
   private val argon2: Argon2 = Argon2Factory.create()
+  private lazy val unknownUserHash: String = {
+    val chars = DummyPassword.toCharArray
+    try argon2.hash(iterations, memoryKilobytes, parallelism, chars)
+    finally java.util.Arrays.fill(chars, '\u0000')
+  }
 
   override def hash(password: String): IO[String] =
     IO.blocking {
@@ -31,5 +37,11 @@ final class Argon2PasswordHasher(
     }
 
   override def verifyUnknown(password: String): IO[Unit] =
-    hash(password).map(_ => ())
+    IO.blocking {
+      val chars = password.toCharArray
+      try {
+        argon2.verify(unknownUserHash, chars)
+        ()
+      } finally java.util.Arrays.fill(chars, '\u0000')
+    }
 }

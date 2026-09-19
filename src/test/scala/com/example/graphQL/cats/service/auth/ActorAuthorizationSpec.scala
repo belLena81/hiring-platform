@@ -36,6 +36,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
 
       override def updateEmbedding(
           id: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+          observedVersion: Long,
           embedding: EntityEmbedding
       ): IO[Either[RepositoryError, Unit]] =
         IO.pure(Right(()))

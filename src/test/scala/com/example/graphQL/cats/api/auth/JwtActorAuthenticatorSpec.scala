@@ -125,7 +125,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   private def userRepository(values: Map[UserId, User]): UserRepository[IO] = new UserRepository[IO] {
     override def find(id: UserId): IO[Option[User]] = IO.pure(values.get(id))
     override def findMany(ids: List[UserId]): IO[List[User]] = IO.pure(ids.flatMap(values.get))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       IO.pure(Right(()))
   }
 }

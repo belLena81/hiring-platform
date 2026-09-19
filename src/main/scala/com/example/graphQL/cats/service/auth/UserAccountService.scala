@@ -20,7 +20,7 @@ final class UserAccountService(
 ) extends AccountUseCases[IO] {
   override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
     if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.account(AccountError.AdminSignupForbidden)))
-    else if (!profileShapeValid(input.role, input.profile))
+    else if (!UserProfile.matchesRole(input.role, input.profile))
       IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
     else validateRegistration(input).fold(
       errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
@@ -78,8 +78,8 @@ final class UserAccountService(
       case Some(user) if user.accountStatus != AccountStatus.Active => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
       case Some(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
       case Some(user) =>
-        if (!profileShapeValid(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
-        else validateProfile(user.role, Some(input.profile)).fold(
+        if (!UserProfile.matchesRole(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
+        else UserProfile.validateFor(user.role, Some(input.profile)).fold(
           errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
           _ => accounts.updateProfile(user.id, input.profile, now).map(_.leftMap(UseCaseError.repository))
         )
@@ -107,7 +107,7 @@ final class UserAccountService(
       .map(_.leftMap(_ => UseCaseError.availability(AvailabilityError.ServiceNotReady)).map(user -> _))
 
   private def validateRegistration(input: SignUpInput): ValidatedNel[DomainValidationError, Unit] =
-    (validateCredentials(input.name, input.password), validateProfile(input.role, input.profile)).mapN((_, _) => ())
+    (validateCredentials(input.name, input.password), UserProfile.validateFor(input.role, input.profile)).mapN((_, _) => ())
 
   private def validateCredentials(name: String, password: String): ValidatedNel[DomainValidationError, Unit] =
     (validateName(name), if (password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= 12) ().validNel else DomainValidationError.BlankField("password").invalidNel).mapN((_, _) => ())
@@ -115,21 +115,6 @@ final class UserAccountService(
   private def validateName(value: String): ValidatedNel[DomainValidationError, String] =
     val normalized = Normalizer.normalize(value.trim, Normalizer.Form.NFKC)
     if (normalized.isEmpty) DomainValidationError.BlankField("name").invalidNel else normalized.validNel
-
-  private def validateProfile(role: UserRole, profile: Option[UserProfile]): ValidatedNel[DomainValidationError, Unit] =
-    (role, profile) match {
-      case (UserRole.Candidate, Some(UserProfile.Candidate(profile))) => CandidateProfile.validate(profile.skills, profile.experienceSummary, profile.resumeRef).map(_ => ())
-      case (UserRole.Recruiter, Some(UserProfile.Recruiter(profile))) => RecruiterProfile.validate(profile.organizationName, profile.jobTitle).map(_ => ())
-      case _ => DomainValidationError.BlankField("profile").invalidNel
-    }
-
-  private def profileShapeValid(role: UserRole, profile: Option[UserProfile]): Boolean =
-    (role, profile) match {
-      case (UserRole.Candidate, Some(UserProfile.Candidate(_))) => true
-      case (UserRole.Recruiter, Some(UserProfile.Recruiter(_))) => true
-      case (UserRole.Admin, None) => true
-      case _ => false
-    }
 
   private def toUser(id: UserId, name: String, role: UserRole, profile: Option[UserProfile], now: Instant): User =
     User(id, None, Normalizer.normalize(name.trim, Normalizer.Form.NFKC), role, profile, now)

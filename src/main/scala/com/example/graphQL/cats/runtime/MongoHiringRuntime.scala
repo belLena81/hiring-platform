@@ -16,7 +16,7 @@ import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
-  MongoUserRepository, AtlasSearchIndexConfig
+  MongoUserRepository, MongoEmbeddingWorkRepository, AtlasSearchIndexConfig
 }
 import com.mongodb.reactivestreams.client.MongoDatabase
 
@@ -24,7 +24,7 @@ final case class MongoHiringRuntime(
     probe: DatabaseProbe,
     services: HiringGraphQLServices,
     userAuthenticator: UserAuthenticator[IO],
-    ensureSetup: IO[Boolean]
+    hiringReadiness: IO[ProbeResult]
 )
 
 private[runtime] final class SetupLifecycle private (
@@ -91,7 +91,7 @@ object MongoHiringRuntime {
             probe(database, metadata, diagnostics, setup.ready),
             services,
             UserAuthenticationService[IO](users),
-            setup.await
+            setup.ready.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
           )
         }
       }
@@ -137,7 +137,9 @@ object MongoHiringRuntime {
           vectorSearch.jobLexicalIndex,
           vectorSearch.numCandidates
         )
+        val embeddingWork = new MongoEmbeddingWorkRepository(database)
         EmbeddingPipeline.resource(
+          embeddingWork,
           users,
           jobs,
           embeddings,
@@ -146,7 +148,8 @@ object MongoHiringRuntime {
           vectorSearch.queueSize,
           vectorSearch.parallelism,
           vectorSearch.retryAttempts,
-          vectorSearch.retryDelayMillis.millis
+          vectorSearch.retryDelayMillis.millis,
+          (vectorSearch.timeoutMillis + vectorSearch.retryDelayMillis).millis
         ).map { queue =>
           val jobService = BoundedHiringServices.jobs(JobService[IO](users, jobs, queue), resolverTimeout)
           val applicationService = BoundedHiringServices.applications(ApplicationService[IO](users, jobs, applications), resolverTimeout)

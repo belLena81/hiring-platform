@@ -59,11 +59,12 @@ private[cats] object ServiceFixtures {
     override def findMany(ids: List[UserId]): IO[List[User]] =
       findAll(ids)
 
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       ref.modify { users =>
         users.get(id) match {
-          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+          case Some(user) if user.version == observedVersion => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
           case None => (users, Left(RepositoryError.Conflict))
+          case Some(_) => (users, Left(RepositoryError.Conflict))
         }
       }
   }

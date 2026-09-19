@@ -348,7 +348,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("Recruiter profile update rejects missing organizationName before service execution") {
+  test("Recruiter profile update delegates semantic validation to the account service") {
     for {
       updateCalls <- Ref.of[IO, Int](0)
       accountService = new RecordingAccountService(updateCalls)
@@ -365,7 +365,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       val payload = json.hcursor.downField("data").downField("updateMyProfile")
       assert(payload.downField("user").focus.contains(Json.Null))
       assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("VALIDATION_FAILED"))
-      assertEquals(calls, 0)
+      assertEquals(calls, 1)
     }
   }
 
@@ -871,11 +871,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def updateEmbedding(
         id: UserId,
+        observedVersion: Long,
         embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
     ): IO[Either[RepositoryError, Unit]] =
       ref.modify { users =>
         users.get(id) match {
-          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+          case Some(user) if user.version == observedVersion => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+          case Some(_) => (users, Left(RepositoryError.Conflict))
           case None => (users, Left(RepositoryError.Conflict))
         }
       }
@@ -913,7 +915,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       IO.pure(Left(unsupported))
 
     override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
-      updateCalls.update(_ + 1).as(Left(unsupported))
+      updateCalls.update(_ + 1) *> IO.pure(
+        UserProfile.validateFor(actor.role, Some(input.profile)).toEither
+          .leftMap(UseCaseError.ValidationFailed.apply)
+          .map(_ => recruiter)
+      )
 
     override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
       IO.pure(Left(unsupported))

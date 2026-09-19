@@ -17,6 +17,7 @@ import org.bson.Document
 import org.bson.conversions.Bson
 
 import java.time.Instant
+import scala.concurrent.duration.*
 import java.util.Date
 import scala.jdk.CollectionConverters.*
 
@@ -46,8 +47,33 @@ private[mongo] trait MongoApplicationEventInsertion {
 }
 
 private[mongo] object MongoTransactionRunner {
-  private val MaxTransactionAttempts = 3
-  private val MaxCommitAttempts = 3
+  final case class RetryPolicy(
+      maxTransactionAttempts: Int = 3,
+      maxCommitAttempts: Int = 3,
+      initialDelay: FiniteDuration = 25.millis,
+      maxDelay: FiniteDuration = 250.millis
+  )
+
+  enum RetryStage {
+    case Operation, Commit
+  }
+
+  enum RetryDecision {
+    case RetryTransaction, RetryCommit, Fail
+  }
+
+  object RetryDecision {
+    def decide(stage: RetryStage, attempt: Int, labels: Set[String], policy: RetryPolicy): RetryDecision =
+      stage match {
+        case RetryStage.Operation if labels.contains("TransientTransactionError") && attempt < policy.maxTransactionAttempts =>
+          RetryTransaction
+        case RetryStage.Commit if labels.contains("UnknownTransactionCommitResult") && attempt < policy.maxCommitAttempts =>
+          RetryCommit
+        case RetryStage.Commit if labels.contains("TransientTransactionError") && attempt < policy.maxTransactionAttempts =>
+          RetryTransaction
+        case _ => Fail
+      }
+  }
 
   private enum CommitOutcome {
     case Completed(result: Either[RepositoryError, Unit])
@@ -57,7 +83,11 @@ private[mongo] object MongoTransactionRunner {
   val noTransaction: MongoTransactionRunner =
     operation => operation(None)
 
-  def sessions(client: MongoClient, duplicateKeyError: RepositoryError): MongoTransactionRunner =
+  def sessions(
+      client: MongoClient,
+      duplicateKeyError: RepositoryError,
+      retryPolicy: RetryPolicy = RetryPolicy()
+  ): MongoTransactionRunner =
     operation => {
       def withSession[A](use: ClientSession => IO[A]): IO[A] =
         Resource.make(PublisherBridge.first(client.startSession()).flatMap {
@@ -68,25 +98,37 @@ private[mongo] object MongoTransactionRunner {
       def abort(session: ClientSession): IO[Unit] =
         PublisherBridge.first(session.abortTransaction()).attempt.void
 
+      def delay(attempt: Int): IO[Unit] = {
+        val multiplier = 1L << math.min(attempt - 1, 30)
+        IO.sleep((retryPolicy.initialDelay * multiplier).min(retryPolicy.maxDelay))
+      }
+
+      def labels(error: MongoException): Set[String] =
+        Set("TransientTransactionError", "UnknownTransactionCommitResult").filter(error.hasErrorLabel)
+
       def commit(session: ClientSession, attempt: Int): IO[CommitOutcome] =
         PublisherBridge.first(session.commitTransaction()).as(CommitOutcome.Completed(Right(()))).handleErrorWith {
-          case error: MongoException if isUnknownCommitResult(error) && attempt < MaxCommitAttempts =>
-            commit(session, attempt + 1)
-          case error: MongoException if isTransientTransactionError(error) =>
-            abort(session).as(CommitOutcome.RetryTransaction)
+          case error: MongoException => RetryDecision.decide(RetryStage.Commit, attempt, labels(error), retryPolicy) match {
+            case RetryDecision.RetryCommit => delay(attempt) *> commit(session, attempt + 1)
+            case RetryDecision.RetryTransaction => abort(session).as(CommitOutcome.RetryTransaction)
+            case RetryDecision.Fail => abort(session).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+          }
           case error => abort(session).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
         }
 
       def run(attempt: Int): IO[Either[RepositoryError, Unit]] = withSession { session =>
         IO.delay(session.startTransaction()) *> operation(Some(session)).attempt.flatMap {
           case Left(error) =>
-            abort(session) *> (if (isTransientTransactionError(error) && attempt < MaxTransactionAttempts) run(attempt + 1)
-                               else IO.pure(mapWrite(error, duplicateKeyError)))
+            error match {
+              case mongo: MongoException if RetryDecision.decide(RetryStage.Operation, attempt, labels(mongo), retryPolicy) == RetryDecision.RetryTransaction =>
+                abort(session) *> delay(attempt) *> run(attempt + 1)
+              case _ => abort(session) *> IO.pure(mapWrite(error, duplicateKeyError))
+            }
           case Right(Left(error)) =>
             abort(session).as(Left(error))
           case Right(Right(())) =>
             commit(session, 1).flatMap {
-              case CommitOutcome.RetryTransaction if attempt < MaxTransactionAttempts => run(attempt + 1)
+              case CommitOutcome.RetryTransaction if attempt < retryPolicy.maxTransactionAttempts => delay(attempt) *> run(attempt + 1)
               case CommitOutcome.RetryTransaction => IO.pure(Left(RepositoryError.Conflict))
               case CommitOutcome.Completed(result) => IO.pure(result)
             }
@@ -110,8 +152,6 @@ private[mongo] object MongoTransactionRunner {
     case _ => false
   }
 
-  private def isUnknownCommitResult(error: MongoException): Boolean =
-    error.hasErrorLabel("UnknownTransactionCommitResult")
 }
 
 private[mongo] object MongoKeysetPaging {
@@ -155,10 +195,10 @@ final class MongoUserRepository(
   override def findMany(ids: List[UserId]): IO[List[User]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
 
-  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge.first(collection.updateOne(
-      Filters.eq("_id", id.value.toString),
+      Filters.and(Filters.eq("_id", id.value.toString), Filters.eq("version", observedVersion)),
       Updates.combine(
         Updates.set("embedding", encoded.get("embedding")),
         Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
