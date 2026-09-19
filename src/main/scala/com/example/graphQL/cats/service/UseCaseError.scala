@@ -34,12 +34,6 @@ enum AvailabilityError {
   case ServiceNotReady
 }
 
-enum RepositoryError {
-  case DuplicateApplication
-  case Conflict
-  case Unavailable
-}
-
 sealed trait UseCaseError
 
 object UseCaseError {

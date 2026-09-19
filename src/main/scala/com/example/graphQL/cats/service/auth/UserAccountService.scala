@@ -30,8 +30,9 @@ final class UserAccountService(
     else validateRegistration(input).fold(
       errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
       _ => accounts.initialized.flatMap {
-        case false => IO.pure(Left(UseCaseError.account(AccountError.BootstrapRequired)))
-        case true => hasher.hash(input.password).flatMap { hash =>
+        case Left(error) => IO.pure(Left(UseCaseError.repository(error)))
+        case Right(false) => IO.pure(Left(UseCaseError.account(AccountError.BootstrapRequired)))
+        case Right(true) => hasher.hash(input.password).flatMap { hash =>
           val user = toUser(userId, input.name, input.role, input.profile, now)
           token(user, now).flatMap {
             case Left(error) => IO.pure(Left(error))

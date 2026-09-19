@@ -148,7 +148,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- started.get
-          updated <- jobs.update(openJob.copy(title = "Staff Scala Developer"))
+          updated <- jobs.update(openJob.copy(title = "Staff Scala Developer"), now)
           _ = assert(updated.exists(_.version == 1L))
           _ <- release.complete(()).void
           staleResult <- writeResult.get
@@ -186,10 +186,10 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         retryDelay = 10.millis
       ).use { queue =>
         for {
-          _ <- queue.publish(EmbeddingWork.JobChanged(jobId))
+          _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- started.get
-          _ <- queue.publish(EmbeddingWork.JobChanged(jobId))
-          saturatedPublish <- queue.publish(EmbeddingWork.JobChanged(otherJobId)).timeout(200.millis).attempt
+          _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
+          saturatedPublish <- queue.offer(EmbeddingWork.JobChanged(otherJobId)).timeout(200.millis).attempt
           _ = assertEquals(saturatedPublish, Right(()))
           _ <- release.complete(()).void
           updated <- eventually(successfulFind(jobs, otherJobId))(
@@ -254,6 +254,26 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
+  test("embedding worker marks malformed durable work keys as terminal failures") {
+    val malformedJob = EmbeddingWorkKey(EmbeddingWorkKind.Job, "not-a-uuid")
+    val malformedCandidate = EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, "also-not-a-uuid")
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+      work <- InMemoryEmbeddingWorkRepository.create
+      _ <- work.enqueue(malformedJob, now)
+      _ <- work.enqueue(malformedCandidate, now)
+      _ <- EmbeddingPipeline.resource(work, InMemoryUsers(usersRef), InMemoryJobs(jobsRef), CountingEmbeddingService.uncounted,
+        "voyage-4-lite", 1, 8, 1, retryAttempts = 1, retryDelay = 10.millis, leaseDuration = 1.second).use { publisher =>
+          publisher.wake *> eventually(work.snapshot)(snapshot =>
+            List(malformedJob, malformedCandidate).forall(key =>
+              snapshot.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.InvalidWorkKey))
+            )
+          ).void
+        }
+    } yield ()
+  }
+
   private def pipelineResource(
       users: UserRepository[IO],
       jobs: JobRepository[IO],
@@ -288,6 +308,13 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
   private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.update(_ + 1).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
+  }
+
+  private object CountingEmbeddingService {
+    val uncounted: EmbeddingService[IO] = new EmbeddingService[IO] {
+      override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+        IO.raiseError(new AssertionError("malformed work must not reach the embedding provider"))
+    }
   }
 
   private final case class FailOnceEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
@@ -328,11 +355,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def findByRecruiter(recruiterId: Identifiers.UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
       delegate.findByRecruiter(recruiterId, page)
 
-    override def create(job: Job): IO[Either[RepositoryError, Unit]] =
-      delegate.create(job)
+    override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
+      delegate.create(job, now)
 
-    override def update(job: Job): IO[Either[RepositoryError, Job]] =
-      delegate.update(job)
+    override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+      delegate.update(job, now)
 
     override def updateEmbedding(
         id: Identifiers.JobId,

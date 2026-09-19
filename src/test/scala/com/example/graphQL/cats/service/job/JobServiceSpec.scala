@@ -5,7 +5,7 @@ import cats.effect.Ref
 import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.shared.pagination.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.service.ServiceFixtures.*
-import com.example.graphQL.cats.service.search.{EmbeddingWork, EmbeddingWorkPublisher}
+import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
@@ -92,9 +92,6 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       wakes <- Ref.of[IO, Int](0)
       publisher = new EmbeddingWorkPublisher[IO] {
-        override def publish(work: EmbeddingWork): IO[Unit] =
-          IO.raiseError(new AssertionError("job service must not enqueue embedding work"))
-
         override def wake: IO[Unit] = wakes.update(_ + 1)
       }
       service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs), publisher)

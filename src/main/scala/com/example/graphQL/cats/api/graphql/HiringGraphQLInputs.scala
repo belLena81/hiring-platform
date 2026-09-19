@@ -38,9 +38,13 @@ private[graphql] object HiringGraphQLInputs {
   private def requiredInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[A] =
     fields.get(name).flatMap(extract.lift)
 
-  private def optionalInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[A] =
+  private def optionalInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[Option[A]] =
     // CoercedScalaResultMarshaller omits absent fields and stores present nullable fields as Some(value) or None.
-    fields.get(name).collect { case Some(value) => value }.flatMap(extract.lift)
+    fields.get(name) match {
+      case None | Some(None) => Some(None)
+      case Some(Some(value)) => extract.lift(value).map(Some(_))
+      case _ => None
+    }
 
   private def requiredListInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[List[A]] =
     fields.get(name).collect { case values: Seq[?] => values }
@@ -70,7 +74,7 @@ private[graphql] object HiringGraphQLInputs {
       requirements <- requiredListInput[String](fields, "requirements")
       skills <- requiredListInput[String](fields, "skills")
       country <- requiredInput[String](fields, "country")
-      city = optionalInput[String](fields, "city")
+      city <- optionalInput[String](fields, "city")
       remote <- requiredInput[Boolean](fields, "remote")
     } yield JobGraphQLInput(title, description, requirements, skills, country, city, remote)
 
@@ -82,8 +86,11 @@ private[graphql] object HiringGraphQLInputs {
     }
 
   given FromInput[JobFilterGraphQLInput] = inputAdapter(fields =>
-    optionalListInput[String](fields, "skills").map(skills =>
-      JobFilterGraphQLInput(optionalInput[String](fields, "city"), skills, optionalInput[Instant](fields, "createdAfter"))))
+    for {
+      city <- optionalInput[String](fields, "city")
+      skills <- optionalListInput[String](fields, "skills")
+      createdAfter <- optionalInput[Instant](fields, "createdAfter")
+    } yield JobFilterGraphQLInput(city, skills, createdAfter))
   given FromInput[SubmitApplicationGraphQLInput] = inputAdapter(fields =>
     requiredInput[JobId](fields, "jobId").map(SubmitApplicationGraphQLInput.apply))
   given FromInput[JobGraphQLInput] = inputAdapter(jobGraphQLInput)
@@ -98,20 +105,26 @@ private[graphql] object HiringGraphQLInputs {
   given FromInput[ApplicationActionGraphQLInput] = inputAdapter(fields =>
     requiredInput[ApplicationId](fields, "applicationId").map(ApplicationActionGraphQLInput.apply))
   given FromInput[RejectApplicationGraphQLInput] = inputAdapter(fields =>
-    requiredInput[ApplicationId](fields, "applicationId").map(applicationId =>
-      RejectApplicationGraphQLInput(applicationId, optionalInput[String](fields, "feedback"))))
+    for {
+      applicationId <- requiredInput[ApplicationId](fields, "applicationId")
+      feedback <- optionalInput[String](fields, "feedback")
+    } yield RejectApplicationGraphQLInput(applicationId, feedback))
   given FromInput[DeclineApplicationGraphQLInput] = inputAdapter(fields =>
-    requiredInput[ApplicationId](fields, "applicationId").map(applicationId =>
-      DeclineApplicationGraphQLInput(applicationId, optionalInput[String](fields, "reason"))))
+    for {
+      applicationId <- requiredInput[ApplicationId](fields, "applicationId")
+      reason <- optionalInput[String](fields, "reason")
+    } yield DeclineApplicationGraphQLInput(applicationId, reason))
   given FromInput[SignUpGraphQLInput] = inputAdapter(fields =>
     for {
       name <- requiredInput[String](fields, "name")
       role <- requiredInput[UserRole](fields, "role")
       password <- requiredInput[String](fields, "password")
       skills <- optionalListInput[String](fields, "skills")
-    } yield SignUpGraphQLInput(name, role, password, skills,
-      optionalInput[String](fields, "experienceSummary"), optionalInput[String](fields, "resumeRef"),
-      optionalInput[String](fields, "organizationName"), optionalInput[String](fields, "jobTitle")))
+      experienceSummary <- optionalInput[String](fields, "experienceSummary")
+      resumeRef <- optionalInput[String](fields, "resumeRef")
+      organizationName <- optionalInput[String](fields, "organizationName")
+      jobTitle <- optionalInput[String](fields, "jobTitle")
+    } yield SignUpGraphQLInput(name, role, password, skills, experienceSummary, resumeRef, organizationName, jobTitle))
   given FromInput[BootstrapAdminGraphQLInput] = inputAdapter(fields =>
     for {
       name <- requiredInput[String](fields, "name")
@@ -123,10 +136,13 @@ private[graphql] object HiringGraphQLInputs {
       password <- requiredInput[String](fields, "password")
     } yield LoginGraphQLInput(name, password))
   given FromInput[UpdateProfileGraphQLInput] = inputAdapter(fields =>
-    optionalListInput[String](fields, "skills").map(skills =>
-      UpdateProfileGraphQLInput(skills, optionalInput[String](fields, "experienceSummary"),
-        optionalInput[String](fields, "resumeRef"), optionalInput[String](fields, "organizationName"),
-        optionalInput[String](fields, "jobTitle"))))
+    for {
+      skills <- optionalListInput[String](fields, "skills")
+      experienceSummary <- optionalInput[String](fields, "experienceSummary")
+      resumeRef <- optionalInput[String](fields, "resumeRef")
+      organizationName <- optionalInput[String](fields, "organizationName")
+      jobTitle <- optionalInput[String](fields, "jobTitle")
+    } yield UpdateProfileGraphQLInput(skills, experienceSummary, resumeRef, organizationName, jobTitle))
 
   lazy val healthStatus: EnumType[String] =
     EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))

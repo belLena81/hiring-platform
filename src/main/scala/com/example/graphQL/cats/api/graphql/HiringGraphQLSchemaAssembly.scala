@@ -2,7 +2,10 @@ package com.example.graphQL.cats.api.graphql
 
 import com.example.graphQL.cats.api.graphql.HiringGraphQLFetchers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLAccountResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLApplicationResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLJobResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.ioField
 import com.example.graphQL.cats.domain.model.ApplicationStatus

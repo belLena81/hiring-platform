@@ -228,8 +228,10 @@ final class MongoUserRepository(
     }.handleError(mapWrite)
   }
 
-  override def initialized: IO[Boolean] =
-    PublisherBridge.first(registry.find(Filters.eq("_id", "user-account-registry"))).map(_.exists(_.getString("state", "") == "Initialized"))
+  override def initialized: IO[Either[RepositoryError, Boolean]] =
+    PublisherBridge.first(registry.find(Filters.eq("_id", "user-account-registry")))
+      .map(document => Right(document.exists(_.getString("state", "") == "Initialized")))
+      .handleError(_ => Left(RepositoryError.Unavailable))
 
   override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton) IO.pure(Left(RepositoryError.Conflict))
@@ -250,7 +252,7 @@ final class MongoUserRepository(
       }
     }.handleError(mapWrite)
 
-  override def createAccount(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
+  private def createAccountDirect(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid || user.role == UserRole.Admin) IO.pure(Left(RepositoryError.Conflict))
     else transactionRunner.run { session =>
       val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Initialized"))
@@ -268,7 +270,7 @@ final class MongoUserRepository(
 
   override def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =
     if (embeddingWork.nonEmpty && user.role == UserRole.Candidate) createAccountWithEmbeddingWork(user, passwordHash, now)
-    else createAccount(user, passwordHash)
+    else createAccountDirect(user, passwordHash)
 
   /** Candidate account creation and its embedding work share the same transaction. */
   def createAccountWithEmbeddingWork(
@@ -449,11 +451,11 @@ final class MongoJobRepository(
   override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     findMany(baseJobFilter(List(Some(Filters.eq("recruiterId", recruiterId.value.toString)), page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
-  override def create(job: Job): IO[Either[RepositoryError, Unit]] =
+  private def createDirect(job: Job): IO[Either[RepositoryError, Unit]] =
     PublisherBridge.first(collection.insertOne(MongoHiringCodecs.job(job))).as(Right(())).handleError(mapWrite)
 
   override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
-    if (embeddingWork.nonEmpty) createWithEmbeddingWork(job, now) else create(job)
+    if (embeddingWork.nonEmpty) createWithEmbeddingWork(job, now) else createDirect(job)
 
   /** Job creation and the coalesced reindex request commit together. */
   def createWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
@@ -466,7 +468,7 @@ final class MongoJobRepository(
       }.handleError(mapWrite)
     }
 
-  override def update(job: Job): IO[Either[RepositoryError, Job]] = {
+  private def updateDirect(job: Job): IO[Either[RepositoryError, Job]] = {
     val persisted = job.copy(version = job.version + 1L)
     PublisherBridge.first(collection.replaceOne(
       Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("version", job.version)),
@@ -479,7 +481,7 @@ final class MongoJobRepository(
   }
 
   override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
-    if (embeddingWork.nonEmpty) updateWithEmbeddingWork(job, now) else update(job)
+    if (embeddingWork.nonEmpty) updateWithEmbeddingWork(job, now) else updateDirect(job)
 
   /** Optimistic job replacement and the coalesced reindex request commit together. */
   def updateWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {

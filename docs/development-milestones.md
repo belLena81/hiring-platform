@@ -36,7 +36,7 @@ Production Hardening
 
 ## Phase 1 — Foundation
 
-The [Foundation specification](specs/phase-1-foundation.md) records the approved contract and current acceptance evidence. The [local runbook](foundation.md) covers the host application and Compose database workflow. This phase serves only health/readiness; hiring persistence and authorization remain later slices.
+The [Foundation specification](specs/phase-1-foundation.md) records the original foundation contract and local evidence. The [local runbook](foundation.md) covers the host application and Compose database workflow. Current source additionally serves account, hiring, authorization, cursor, and configured vector-search slices; replica-set integration and live-provider readiness are tracked as separate evidence.
 
 ### Goal
 

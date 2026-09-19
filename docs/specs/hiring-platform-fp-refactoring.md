@@ -26,15 +26,15 @@ The following existing facilities are correctly used and must be retained:
 
 ### Source facts
 
-- Job create/update persist before `EmbeddingWorkPublisher.publish`; a failed publication is raised after the aggregate may already have committed: `src/main/scala/com/example/graphQL/cats/service/job/JobService.scala:160` and `src/main/scala/com/example/graphQL/cats/service/search/EmbeddingPipeline.scala:34`.
-- Candidate signup and profile update do not publish the existing `CandidateProfileChanged` work, so candidate embeddings can remain stale: `src/main/scala/com/example/graphQL/cats/service/auth/UserAccountService.scala:21`, `src/main/scala/com/example/graphQL/cats/service/auth/UserAccountService.scala:75`, and `src/main/scala/com/example/graphQL/cats/service/search/EmbeddingPipeline.scala:15`.
+- Job and candidate changes persist their coalesced `EmbeddingWork` record in the same repository transaction; services only wake the worker after commit: `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringRepositories.scala` and `src/main/scala/com/example/graphQL/cats/service/job/JobService.scala`.
+- `EmbeddingWorkPublisher` is wake-only. The durable publisher owns explicit test/support enqueueing, and periodic scanning remains the recovery path for a dropped wakeup: `src/main/scala/com/example/graphQL/cats/service/search/EmbeddingPipeline.scala`.
 - Content negotiation chooses the maximum quality across all matching ranges instead of resolving the most-specific range for each offered representation first: `src/main/scala/com/example/graphQL/cats/api/http/HiringApiRoutes.scala:73`.
 - BSON codecs can throw for malformed IDs, enum values, missing values, or invalid profiles, while read ports cannot represent a data-integrity failure: `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringCodecs.scala:33` and `src/main/scala/com/example/graphQL/cats/repository/protocol/HiringRepositories.scala:11`.
 - Account use cases repeat a narrower version of the principal validation already centralized in `ActorAuthorization`: `src/main/scala/com/example/graphQL/cats/service/auth/UserAccountService.scala:72` and `src/main/scala/com/example/graphQL/cats/service/auth/ActorAuthorization.scala:11`.
 - Runtime composition repeats bounded/traced service construction in both vector-search branches: `src/main/scala/com/example/graphQL/cats/runtime/MongoHiringRuntime.scala:116`.
 - The reactive bridge's general collection operation requests `Long.MaxValue` and collects into a `Vector`: `src/main/scala/com/example/graphQL/cats/repository/mongo/PublisherBridge.scala:76`.
 - `UserPageRequest` keeps `pageSize` as an unvalidated `Int`, unlike the other connection ports, and Mongo passes it directly to `.limit`: `src/main/scala/com/example/graphQL/cats/domain/model/Account.scala:17` and `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringRepositories.scala:272`.
-- Embedding-work claim construction allocates `UUID.randomUUID()` before its enclosing `IO` executes: `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoEmbeddingWorkRepository.scala:54`.
+- Embedding-work claim tokens allocate with `IO.randomUUID`, preserving effect ownership: `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoEmbeddingWorkRepository.scala`.
 - The pure reciprocal-rank implementation has internal mutable state even though it need not expose mutation: `src/main/scala/com/example/graphQL/cats/shared/search/HybridRankFusion.scala:12`.
 - `JobLifecycle` uses `State[Job, Either[DomainError, Job]]` but every service caller immediately runs the transition against that same job: `src/main/scala/com/example/graphQL/cats/domain/policy/JobLifecycle.scala:18` and `src/main/scala/com/example/graphQL/cats/service/job/JobService.scala:55`.
 
@@ -173,6 +173,13 @@ README and planning text still describe a health-only/Foundation state while sou
 | AC-11 | Given embedding claim creation and malformed nested GraphQL input, when construction/execution runs, then IDs allocate only inside effects and invalid input becomes sanitized validation output. | Repository and GraphQL input execution tests | Not run |
 | AC-12 | Given documentation and served schema, when local checks run, then capability statements and GraphQL fixtures are consistent with source. | SDL/operation fixtures, link/reference check, `git diff --check` | Not run |
 
+## Implementation checkpoint
+
+- Completed: repository failure ownership moved to `repository.protocol` with a service compatibility alias; obsolete time-less account/job write port overloads removed; malformed durable work keys fail terminally instead of being deleted; Voyage HTTP uses cancellation-aware `sendAsync`; GraphQL resolvers are separated by account, job, application, and search capabilities while schema assembly remains the composition root.
+- Focused regression coverage added for malformed durable work keys and Voyage request cancellation/invalid endpoint handling. Existing GraphQL input tests remain in place; the resolver split requires a completed focused GraphQL suite for runtime proof.
+- Verification: `git diff --check` passed. Repeated local SBT attempts ended at the execution environment's 30-second observation limit while compiling 14 sources, with no test summary; unit, integration, live Voyage, and Atlas evidence therefore remain unverified.
+- Reviews: Security Engineer PASS by static review. Code Reviewer found the stale-source-fact issue above; corrected in this checkpoint. Follow-up review and independent QA remain required after a completed test run.
+
 ## Ordered implementation handoff
 
 1. **P0-A** first. Owner: Scala Developer with Data Engineer. Allowed production paths: relevant `service`, `repository/protocol`, `repository/mongo`, `runtime`, setup/migration/docs, and focused tests. Reopen schema-evolution review because stored work/backfill changes.
@@ -183,7 +190,9 @@ README and planning text still describe a health-only/Foundation state while sou
 
 Run `sbt test` after each code slice; run `sbt 'IntegrationTest / test'` for Mongo/GraphQL changes. Mongo transaction proof requires a replica set. Measure any claimed memory/latency change on a documented bounded local workload; missing live Atlas/Voyage infrastructure is unverified, not passing evidence.
 
-## Checkpoint and review
+## Historical checkpoint and review
+
+The following checkpoint predates the current implementation checkpoint above; its historical review verdicts do not describe the current working tree.
 
 - Implemented and unit-tested: transactional Mongo work upserts and resumable backfill definitions, Accept specificity and `q=0`, shared account-principal resolution, persistent input ceilings, typed account pagination, direct job lifecycle functions, immutable rank fusion, and effect-delayed embedding claim UUID allocation.
 - Unit evidence: `sbt test` passed 243 tests, 0 failures, 0 errors. This does not prove replica-set transaction rollback/backfill recovery.

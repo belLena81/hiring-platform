@@ -7,7 +7,7 @@ import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocumen
 import com.mongodb.reactivestreams.client.{ClientSession, MongoDatabase}
 import org.bson.Document
 import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.Date
 
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
 final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends EmbeddingWorkRepository[IO] {
@@ -80,7 +80,7 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
     }
 
   override def claim(workerId: String, now: Instant, leaseUntil: Instant): IO[Either[RepositoryError, Option[ClaimedEmbeddingWork]]] = {
-    IO(UUID.randomUUID().toString).flatMap { token =>
+    IO.randomUUID.map(_.toString).flatMap { token =>
       val available = Filters.and(Filters.in("state", "Ready", "Retry"), Filters.lte("availableAt", Date.from(now)))
       val expiredLease = Filters.and(Filters.eq("state", "Processing"), Filters.lt("leaseUntil", Date.from(now)))
       val update = Updates.combine(

@@ -105,8 +105,9 @@ final class HiringGraphQLInputsSpec extends CatsEffectSuite {
     )
 
     malformedInputs.foreach { input =>
+      val fromInput = summon[FromInput[HiringGraphQLModel.JobGraphQLInput]]
       val failure = intercept[RuntimeException] {
-        summon[FromInput[HiringGraphQLModel.JobGraphQLInput]].fromResult(input)
+        fromInput.fromResult(input.asInstanceOf[fromInput.marshaller.Node])
       }
       assertEquals(failure.getMessage, "Invalid GraphQL input")
       assert(!failure.isInstanceOf[ClassCastException])

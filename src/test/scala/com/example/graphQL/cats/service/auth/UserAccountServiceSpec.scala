@@ -224,8 +224,8 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       val values: Ref[IO, Map[String, AccountCredentials]]
   ) extends UserAccountRepository[IO] {
     override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
-    override def initialized: IO[Boolean] = IO.pure(initializedState)
-    override def createAccount(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
+    override def initialized: IO[Either[RepositoryError, Boolean]] = IO.pure(Right(initializedState))
+    override def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =
       values.modify { current =>
         val key = AccountName.canonical(user.name)
         if (current.contains(key)) current -> Left(RepositoryError.Conflict)

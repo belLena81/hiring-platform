@@ -8,6 +8,7 @@ import io.circe.parser.parse
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.time.Duration
+import java.util.function.BiConsumer
 
 final class VoyageEmbeddingService(
     apiKey: String,
@@ -17,18 +18,32 @@ final class VoyageEmbeddingService(
     timeoutMillis: Int,
     client: HttpClient = HttpClient.newHttpClient()
 ) extends EmbeddingService[IO] {
-  override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = {
-    val request = HttpRequest.newBuilder(URI.create(endpoint))
-      .timeout(Duration.ofMillis(timeoutMillis.toLong))
-      .header("Content-Type", "application/json")
-      .header("Authorization", s"Bearer $apiKey")
-      .POST(HttpRequest.BodyPublishers.ofString(payload(input).noSpaces))
-      .build()
-
-    IO.blocking(client.send(request, HttpResponse.BodyHandlers.ofString()))
+  override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+    request(input).flatMap(send)
       .map(response => decode(response.statusCode(), response.body()))
       .handleError(_ => Left(EmbeddingError.ProviderUnavailable))
-  }
+
+  private def request(input: EmbeddingInput): IO[HttpRequest] =
+    IO.delay(
+      HttpRequest.newBuilder(URI.create(endpoint))
+        .timeout(Duration.ofMillis(timeoutMillis.toLong))
+        .header("Content-Type", "application/json")
+        .header("Authorization", s"Bearer $apiKey")
+        .POST(HttpRequest.BodyPublishers.ofString(payload(input).noSpaces))
+        .build()
+    )
+
+  private def send(request: HttpRequest): IO[HttpResponse[String]] =
+    IO.async { callback =>
+      IO.delay {
+        val future = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
+        future.whenComplete(new BiConsumer[HttpResponse[String], Throwable] {
+          override def accept(response: HttpResponse[String], error: Throwable): Unit =
+            if (error == null) callback(Right(response)) else callback(Left(error))
+        })
+        Some(IO.delay(future.cancel(true)).void)
+      }
+    }
 
   private def payload(input: EmbeddingInput): Json =
     Json.obj(

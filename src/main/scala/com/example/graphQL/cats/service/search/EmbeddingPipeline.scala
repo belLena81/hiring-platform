@@ -18,8 +18,6 @@ enum EmbeddingWork {
 }
 
 trait EmbeddingWorkPublisher[F[_]] {
-  def publish(work: EmbeddingWork): F[Unit]
-
   /** Signals work that was atomically persisted by the mutation transaction. */
   def wake: F[Unit]
 }
@@ -27,7 +25,6 @@ trait EmbeddingWorkPublisher[F[_]] {
 object EmbeddingWorkPublisher {
   def noop[F[_]: cats.Applicative]: EmbeddingWorkPublisher[F] =
     new EmbeddingWorkPublisher[F] {
-      override def publish(work: EmbeddingWork): F[Unit] = cats.Applicative[F].unit
       override def wake: F[Unit] = cats.Applicative[F].unit
     }
 }
@@ -37,13 +34,11 @@ final class DurableEmbeddingWorkPublisher private[search] (
     wakeups: Queue[IO, Unit],
     now: IO[Instant]
 ) extends EmbeddingWorkPublisher[IO] {
-  def offer(work: EmbeddingWork): IO[Unit] =
+  private[search] def offer(work: EmbeddingWork): IO[Unit] =
     now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _)).flatMap {
       case Right(()) => wake
       case Left(error) => IO.raiseError(new IllegalStateException(s"Embedding work enqueue failed: $error"))
     }
-
-  override def publish(work: EmbeddingWork): IO[Unit] = offer(work)
 
   override def wake: IO[Unit] = wakeups.tryOffer(()).void
 }
@@ -108,9 +103,15 @@ final class EmbeddingPipeline(
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
     claim.key.kind match {
       case EmbeddingWorkKind.Job =>
-        scala.util.Try(JobId(UUID.fromString(claim.key.entityId))).toOption.fold(IO.pure(ProcessingOutcome.Completed))(processJob)
+        scala.util.Try(JobId(UUID.fromString(claim.key.entityId))).toEither.fold(
+          _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
+          processJob
+        )
       case EmbeddingWorkKind.CandidateProfile =>
-        scala.util.Try(UserId(UUID.fromString(claim.key.entityId))).toOption.fold(IO.pure(ProcessingOutcome.Completed))(processCandidate)
+        scala.util.Try(UserId(UUID.fromString(claim.key.entityId))).toEither.fold(
+          _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
+          processCandidate
+        )
     }
 
   private def processJob(id: JobId): IO[ProcessingOutcome] =

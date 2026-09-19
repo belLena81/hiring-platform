@@ -2,7 +2,7 @@
 
 Target roadmap; see [README](README.md) for implemented status, [use cases](docs/use-cases.md) for workloads, and [development milestones](docs/development-milestones.md) for phase acceptance criteria.
 
-Phase 1 contracts, bounded implementation slices, and local evidence are tracked in the [Foundation specification](docs/specs/phase-1-foundation.md). Its runtime is health-only; the domain and MongoDB hiring repositories remain Phase 2 work.
+Phase 1 contracts, bounded implementation slices, and local evidence are tracked in the [Foundation specification](docs/specs/phase-1-foundation.md). The current runtime also serves authenticated account, job, application, cursor, and configured vector-search capabilities; Mongo replica-set and live Atlas/Voyage evidence remain separate from local unit evidence.
 
 ## 1. Project Goal
 

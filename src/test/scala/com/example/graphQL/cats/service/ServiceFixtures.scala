@@ -101,10 +101,10 @@ private[cats] object ServiceFixtures {
           keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(job)(_.createdAt, _.id.value.toString)
       ).toList).map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString)).map(Right(_))
 
-    override def create(job: Job): IO[Either[RepositoryError, Unit]] =
+    override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
       ref.update(_ + (job.id -> job)).as(Right(()))
 
-    override def update(job: Job): IO[Either[RepositoryError, Job]] = {
+    override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
       val persisted = job.copy(version = job.version + 1L)
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
