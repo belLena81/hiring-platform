@@ -68,6 +68,12 @@ final class CursorCodecSpec extends FunSuite {
     assert(codec.jobCursorCodec.decode(tampered).isLeft)
   }
 
+  test("access-token signed JWTs do not decode as cursors") {
+    val accessTokenSignedCursor = JwtCirce.encode(cursorJson("job", Some(instant.toString), None, id.toString), secret, JwtAlgorithm.HS256)
+
+    assert(codec.jobCursorCodec.decode(accessTokenSignedCursor).isLeft)
+  }
+
   test("old unsigned cursors do not decode") {
     val legacy = Base64.getUrlEncoder.withoutPadding().encodeToString(Json.obj(
       "v" -> Json.fromInt(1),

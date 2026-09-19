@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.ProbeResult
 import sangria.schema.*
 import sangria.schema.Action.deferredAction
+import scala.concurrent.ExecutionContext
 
 private[graphql] object HiringGraphQLTypes {
   lazy val healthType: ObjectType[RequestContext, Unit] = ObjectType("Health", fields[RequestContext, Unit](
@@ -46,9 +47,8 @@ private[graphql] object HiringGraphQLTypes {
   lazy val userType: ObjectType[RequestContext, User] = ObjectType("User", fields[RequestContext, User](
     Field("id", IDType, resolve = _.value.id.value.toString),
     Field("email", OptionType(StringType), resolve = context =>
-      DeferredValue(emailVisibilityFetcher.deferOpt(context.value.id)).mapWithErrors { visible =>
-        (visible.flatMap(_ => context.value.email), Vector.empty[Throwable])
-      }),
+      emailVisibilityFetcher.deferOpt(context.value.id)
+        .map(_.flatMap(_ => context.value.email))(using ExecutionContext.parasitic)),
     Field("name", StringType, resolve = _.value.name),
     Field("role", userRole, resolve = _.value.role),
     Field("status", userStatus, resolve = _.value.accountStatus),

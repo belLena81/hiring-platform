@@ -127,33 +127,28 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     }
 
   private def accountOperation(request: GraphQLRequest): Option[FixedWindowRateLimiter.Operation] =
-    val fragmentsByName = request.document.fragments
     def containsField(
         selections: Vector[sangria.ast.Selection],
         visited: Set[String],
         name: String
-    ): (Boolean, Set[String]) =
-      selections.foldLeft((false, visited)) {
-        case ((true, seen), _) => (true, seen)
-        case ((false, seen), field: sangria.ast.Field) => (field.name == name, seen)
-        case ((false, seen), spread: sangria.ast.FragmentSpread) if seen(spread.name) =>
-          (false, seen)
-        case ((false, seen), spread: sangria.ast.FragmentSpread) =>
-          val expanded = seen + spread.name
-          fragmentsByName.get(spread.name) match {
-            case Some(fragment) => containsField(fragment.selections, expanded, name)
-            case None => (false, expanded)
+    ): Boolean =
+      selections.zipWithIndex.exists { case (selection, index) =>
+        val branchVisited = visited ++ selections.take(index).collect {
+          case spread: sangria.ast.FragmentSpread => spread.name
+        }
+        selection match {
+        case field: sangria.ast.Field => field.name == name
+        case spread: sangria.ast.FragmentSpread if !branchVisited(spread.name) =>
+          request.document.fragments.get(spread.name).exists { fragment =>
+            containsField(fragment.selections, branchVisited + spread.name, name)
           }
-        case ((false, seen), inline: sangria.ast.InlineFragment) =>
-          containsField(inline.selections, seen, name)
+        case inline: sangria.ast.InlineFragment => containsField(inline.selections, branchVisited, name)
+        case _ => false
+        }
       }
     def hasField(name: String): Boolean =
-      request.document.definitions.collect {
-        case operation: sangria.ast.OperationDefinition => operation.selections
-      }.foldLeft((false, Set.empty[String])) {
-        case ((true, visited), _) => (true, visited)
-        case ((false, visited), selections) => containsField(selections, visited, name)
-      }._1
+      request.document.definitions.collect { case operation: sangria.ast.OperationDefinition => operation.selections }
+        .exists(containsField(_, Set.empty, name))
 
     List(
       "signUp" -> FixedWindowRateLimiter.Operation.SignUp,

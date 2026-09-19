@@ -6,8 +6,11 @@ import com.example.graphQL.cats.domain.model.UserCursor
 import io.circe.generic.semiauto.*
 import io.circe.syntax.*
 import io.circe.{Decoder, Encoder}
+import java.nio.charset.StandardCharsets
 import java.time.Instant
-import java.util.UUID
+import java.util.{Base64, UUID}
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import pdi.jwt.{JwtAlgorithm, JwtCirce}
 import scala.util.Try
 
@@ -18,6 +21,8 @@ private[cats] trait CursorCodec[A] {
 
 private[cats] object CursorCodec {
   private val CurrentVersion = 2
+  private val HmacAlgorithm = "HmacSHA256"
+  private val KeyDerivationLabel = "hiring-platform:graphql-cursor:v2"
 
   enum CursorError {
     case Malformed(message: String)
@@ -33,7 +38,7 @@ private[cats] object CursorCodec {
 
   private final case class Cursor(v: Int, kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
 
-  final class CursorCodecs private[CursorCodec] (secret: String) {
+  final class CursorCodecs private[CursorCodec] (cursorKey: String) {
     val jobCursorCodec: CursorCodec[JobCursor] = typed(
       CursorKind.Job,
       "job",
@@ -85,11 +90,11 @@ private[cats] object CursorCodec {
           occurredAt,
           id(value)
         )
-        JwtCirce.encode(cursor.asJson, secret, JwtAlgorithm.HS256)
+        JwtCirce.encode(cursor.asJson, cursorKey, JwtAlgorithm.HS256)
       }
 
       def decode(value: String): Either[CursorError, A] =
-        CursorCodec.decodeCursor(secret, value).flatMap {
+        CursorCodec.decodeCursor(cursorKey, value).flatMap {
           case Cursor(_, actualKind, _, _, _) if actualKind != kind =>
             Left(CursorError.WrongKind(actualKind.value))
           case Cursor(_, _, createdAt, occurredAt, cursorId) =>
@@ -105,7 +110,7 @@ private[cats] object CursorCodec {
   }
 
   def fromSecret(jwtSecret: String): CursorCodecs =
-    new CursorCodecs(jwtSecret)
+    new CursorCodecs(Base64.getEncoder.encodeToString(deriveKey(jwtSecret)))
 
   private given Encoder[CursorKind] = Encoder.encodeString.contramap(_.value)
 
@@ -129,8 +134,14 @@ private[cats] object CursorCodec {
 
   private given Decoder[Cursor] = deriveDecoder[Cursor].ensure(_.v == CurrentVersion, s"Unsupported cursor version: $CurrentVersion")
 
+  private def deriveKey(secret: String): Array[Byte] = {
+    val mac = Mac.getInstance(HmacAlgorithm)
+    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HmacAlgorithm))
+    mac.doFinal(KeyDerivationLabel.getBytes(StandardCharsets.UTF_8))
+  }
+
   private def decodeCursor(secret: String, value: String): Either[CursorError, Cursor] =
     JwtCirce.decodeJson(value, secret, Seq(JwtAlgorithm.HS256)).toEither
       .left.map(error => CursorError.Malformed(error.getMessage))
-      .flatMap(_.as[Cursor].left.map(error => CursorError.Malformed(error.getMessage)))
+      .flatMap(_.asJson.as[Cursor].left.map(error => CursorError.Malformed(error.getMessage)))
 }
