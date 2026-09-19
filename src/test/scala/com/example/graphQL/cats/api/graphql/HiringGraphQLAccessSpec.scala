@@ -56,6 +56,25 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("account resolvers share the centralized unauthorized error") {
+    val me =
+      """query { me { user { id } errors { code message } } }"""
+    val users =
+      """query { users(first: 10) { edges { node { id } } errors { code message } } }"""
+    val update =
+      """mutation { updateMyProfile(input: { skills: ["Scala"] }) { user { id } errors { code message } } }"""
+    val delete =
+      """mutation { deleteMyAccount { deleted errors { code message } } }"""
+
+    (execute(me, None), execute(users, None), execute(update, None), execute(delete, None)).mapN {
+      (meJson, usersJson, updateJson, deleteJson) =>
+        assertEquals(meJson.hcursor.downField("data").downField("me").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
+        assertEquals(usersJson.hcursor.downField("data").downField("users").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
+        assertEquals(updateJson.hcursor.downField("data").downField("updateMyProfile").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
+        assertEquals(deleteJson.hcursor.downField("data").downField("deleteMyAccount").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
+    }
+  }
+
   test("application connection rejects a job cursor") {
     val cursor = TestGraphQLSupport.cursorCodec.encodeJob(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
     val query =
@@ -296,7 +315,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           |    errors { code }
           |  }
           |}""".stripMargin
-      json <- executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), Some(accountService))
+      json <- executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), accountService)
       calls <- updateCalls.get
     } yield {
       val payload = json.hcursor.downField("data").downField("updateMyProfile")
@@ -317,7 +336,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           |    errors { code message }
           |  }
           |}""".stripMargin
-      json <- executeWithUsers(query, Some(ActorContext(recruiterId, UserRole.Recruiter)), List(recruiter), Some(accountService))
+      json <- executeWithUsers(query, Some(ActorContext(recruiterId, UserRole.Recruiter)), List(recruiter), accountService)
       calls <- updateCalls.get
     } yield {
       val payload = json.hcursor.downField("data").downField("updateMyProfile")
@@ -402,7 +421,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       users = RecordingUsers(usersRef, userBatches)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
-      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec)
+      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
       request <- parseRequest(query)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)), services)
         .use(HiringGraphQLSchema.executeInContext(request, _))
@@ -655,7 +674,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |  }
         |}""".stripMargin
 
-    executeWithUsers(query, None, List(candidate, recruiter), Some(NameTakenAccountService)).map { json =>
+    executeWithUsers(query, None, List(candidate, recruiter), NameTakenAccountService).map { json =>
       val payload = json.hcursor.downField("data").downField("signUp")
       assertEquals(payload.downField("user").focus, Some(Json.Null))
       assertEquals(payload.downField("accessToken").focus, Some(Json.Null))
@@ -723,7 +742,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       variables = submitVariables),
       executeWithUsers(updateAndReject, Some(ActorContext(recruiterId, UserRole.Recruiter)), List(candidate, recruiter),
         variables = recruiterVariables),
-      executeWithUsers(signup, None, List(candidate, recruiter), Some(NameTakenAccountService), signupVariables)).mapN {
+      executeWithUsers(signup, None, List(candidate, recruiter), NameTakenAccountService, signupVariables)).mapN {
       (submitJson, recruiterJson, signupJson) =>
         val submitPayload = submitJson.hcursor.downField("data").downField("submitApplication")
         assertEquals(submitPayload.downField("application").focus, Some(Json.Null))
@@ -784,6 +803,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
       services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications),
         TestGraphQLSupport.cursorCodec,
+        TestGraphQLSupport.accountService,
         Some(searchService))
       request <- parseRequest(query)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services).use(HiringGraphQLSchema.executeInContext(request, _))
@@ -794,7 +814,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       query: String,
       actor: Option[ActorContext],
       users: List[User],
-      accountService: Option[AccountUseCases[IO]] = None,
+      accountService: AccountUseCases[IO] = TestGraphQLSupport.accountService,
       variables: Json = Json.obj()
   ): IO[Json] = {
     for {

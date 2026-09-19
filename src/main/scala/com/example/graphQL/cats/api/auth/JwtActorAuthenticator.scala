@@ -13,20 +13,12 @@ import org.typelevel.ci.CIString
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
 import io.circe.Json
 import scala.util.Try
-import scala.concurrent.duration.*
 
 enum AuthFailure {
-  case MalformedCredentials, InvalidToken, UnknownActor, InvalidConfiguration
+  case MalformedCredentials, InvalidToken, UnknownActor
 }
 
 final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
-  def this(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]) =
-    this(config, users, new EffectClock[IO] {
-      override val applicative: cats.Applicative[IO] = cats.effect.IO.asyncForIO
-      override def realTime: IO[FiniteDuration] = now.map(_.toEpochMilli.millis)
-      override def monotonic: IO[FiniteDuration] = IO.monotonic
-    })
-
   def authenticateDetailed(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
     bearerToken(request) match {
       case Right(None) => IO.pure(Right(None))
@@ -59,9 +51,6 @@ object JwtActorAuthenticator {
 
   def apply(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]): JwtActorAuthenticator =
     new JwtActorAuthenticator(config, users, clock)
-
-  def apply(config: JwtAuthConfig, users: UserAuthenticator[IO], now: IO[Instant]): JwtActorAuthenticator =
-    new JwtActorAuthenticator(config, users, now)
 
   def issue(config: JwtAuthConfig, userId: UserId, now: Instant): (String, Instant) = {
     val expiresAt = now.plusSeconds(config.accessTokenSeconds)

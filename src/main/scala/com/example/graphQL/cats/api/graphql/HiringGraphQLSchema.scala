@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
-import com.example.graphQL.cats.service.{ActorContext, HealthService, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, HealthService, ProbeResult, TraceContext}
 import io.circe.Json
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
 import sangria.marshalling.circe.*
@@ -24,9 +24,10 @@ object HiringGraphQLSchema {
       actor: Option[ActorContext],
       hiring: HiringGraphQLServices,
       ensureHiringReady: IO[ProbeResult],
-      contextFactory: RequestContextFactory
+      contextFactory: RequestContextFactory,
+      traceContext: Option[TraceContext] = None
   ): IO[Either[Failure, Json]] =
-    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady).use { context =>
+    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, traceContext).use { context =>
       executeInContext(request, context)
     }
 

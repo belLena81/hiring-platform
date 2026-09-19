@@ -3,7 +3,7 @@ package com.example.graphQL.cats.config
 import cats.data.{NonEmptyList, ValidatedNel}
 import cats.effect.IO
 import cats.syntax.all.*
-import com.comcast.ip4s.IpAddress
+import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.shared.pagination.PageSize
 import com.mongodb.ConnectionString
 import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions}
@@ -33,6 +33,7 @@ enum ConfigError(val key: String) {
   case InvalidAuthRateLimitWindow extends ConfigError("AUTH_RATE_LIMIT_WINDOW_SECONDS")
   case InvalidAuthRateLimitAttempts extends ConfigError("AUTH_RATE_LIMIT_ATTEMPTS")
   case InvalidAuthRateLimitBuckets extends ConfigError("AUTH_RATE_LIMIT_BUCKETS")
+  case InvalidTrustedProxyCidrs extends ConfigError("HTTP_TRUSTED_PROXY_CIDRS")
   case InvalidVectorSearchEnabled extends ConfigError("VECTOR_SEARCH_ENABLED")
   case InvalidVoyageApiKey extends ConfigError("VOYAGE_API_KEY")
   case InvalidVoyageEndpoint extends ConfigError("VOYAGE_ENDPOINT")
@@ -57,6 +58,7 @@ final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[Strin
 
 final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: String, accessTokenSeconds: Long = 900L)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
+final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
 
 type Port = Int :| Interval.Closed[1, 65535]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]
@@ -69,7 +71,8 @@ type Parallelism = Int :| Interval.Closed[1, 64]
 type TimeoutMs = Int :| Interval.Closed[100, 60000]
 type HttpsUrl = String :| StartWith["https://"]
 
-final case class AppConfig(host: String, port: Int, admissionPermits: Int, mongoUri: String, mongoDatabase: String,
+final case class AppConfig(host: String, port: Int, admissionPermits: Int, trustedProxy: TrustedProxyConfig,
+    mongoUri: String, mongoDatabase: String,
     maskSensitive: Boolean, jwtAuth: JwtAuthConfig, authRateLimit: AuthRateLimitConfig,
     vectorSearch: VectorSearchConfig) {
   override def toString: String = "AppConfig([REDACTED])"
@@ -103,14 +106,15 @@ object AppConfig {
     val indexes = vector.indexes
 
     (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
+      validTrustedProxyCidrs(http.trustedProxyCidrs),
       validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
       validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds), validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
       validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets), validVoyageApiKey(vector.enabled, voyage.apiKey),
       validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
       validNumCandidates(vector.numCandidates)).mapN {
-      (host, port, permits, uri, database, secret, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
+      (host, port, permits, trustedProxy, uri, database, secret, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
           pollInterval, numCandidates) =>
-        new AppConfig(host, port, permits, uri, database, raw.logging.maskSensitive,
+        new AppConfig(host, port, permits, trustedProxy, uri, database, raw.logging.maskSensitive,
           JwtAuthConfig(secret, jwt.issuer, jwt.audience),
           AuthRateLimitConfig(windowSeconds, attempts, maxBuckets),
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
@@ -138,6 +142,11 @@ object AppConfig {
     Either.cond(value >= 1 && value <= 1000, value, ConfigError.InvalidAuthRateLimitAttempts).toValidatedNel
   private def validAuthRateLimitBuckets(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 1 && value <= 100000, value, ConfigError.InvalidAuthRateLimitBuckets).toValidatedNel
+  private def validTrustedProxyCidrs(values: List[String]): ValidatedNel[ConfigError, TrustedProxyConfig] =
+    values.traverse { value =>
+      Cidr.fromString(value).filter(_.prefixBits > 0)
+        .toRight(ConfigError.InvalidTrustedProxyCidrs).toValidatedNel
+    }.map(TrustedProxyConfig.apply)
   private def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
     val normalized = value.filter(_ != "disabled")
     Either.cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey).toValidatedNel
@@ -174,6 +183,7 @@ object AppConfig {
     case "auth.rate-limit.window-seconds" => Some(ConfigError.InvalidAuthRateLimitWindow)
     case "auth.rate-limit.attempts" => Some(ConfigError.InvalidAuthRateLimitAttempts)
     case "auth.rate-limit.max-buckets" => Some(ConfigError.InvalidAuthRateLimitBuckets)
+    case "http.trusted-proxy-cidrs" => Some(ConfigError.InvalidTrustedProxyCidrs)
     case "vector-search.enabled" => Some(ConfigError.InvalidVectorSearchEnabled)
     case "vector-search.voyage.api-key" => Some(ConfigError.InvalidVoyageApiKey)
     case "vector-search.voyage.endpoint" => Some(ConfigError.InvalidVoyageEndpoint)
@@ -195,7 +205,8 @@ object AppConfig {
   private val parseOptions = ConfigParseOptions.defaults().setAllowMissing(false)
   private final case class RawAppConfig(http: RawHttpConfig, mongo: RawMongoConfig, logging: RawLoggingConfig,
       auth: RawAuthConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
-  private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits) derives ConfigReader
+  private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits,
+      trustedProxyCidrs: List[String]) derives ConfigReader
   private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig, rateLimit: RawAuthRateLimitConfig) derives ConfigReader

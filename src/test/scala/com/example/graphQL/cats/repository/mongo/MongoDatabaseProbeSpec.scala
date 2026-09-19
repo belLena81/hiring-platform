@@ -39,7 +39,10 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
             assertEquals(response.status, Status.ServiceUnavailable)
             assertEquals(body.hcursor.get[String]("status"), Right("NOT_READY"))
             assert(id.nonEmpty)
-            assert(captured.forall(_._2 == id))
+            assert(captured.filterNot { case (event, _, _) => event match {
+              case LogEvent.SpanParameters | LogEvent.SpanStarted | LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
+              case _ => false
+            }}.forall(_._2 == id))
             assertEquals(serviceRecords.size, 1)
             assert(serviceRecords.forall(_._3.get(LogField.Reason)
               .exists(Set("PROBE_TIMEOUT", "DATABASE_UNAVAILABLE").contains)))

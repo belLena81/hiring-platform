@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{UserCursor}
+import com.example.graphQL.cats.domain.model.UserCursor
 import io.circe.parser.decode
 import io.circe.syntax.*
 import io.circe.{Decoder, DecodingFailure, Encoder}

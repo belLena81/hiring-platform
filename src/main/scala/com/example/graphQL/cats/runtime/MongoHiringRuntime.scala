@@ -102,10 +102,10 @@ object MongoHiringRuntime {
       val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
       Resource.pure(HiringGraphQLServices(
         TracedHiringServices.readModel(readModel, diagnostics, traceLocal),
-        TracedHiringServices.jobs(JobService[IO](users, jobs), diagnostics),
-        TracedHiringServices.applications(ApplicationService[IO](users, jobs, applications), diagnostics),
+        TracedHiringServices.jobs(JobService[IO](users, jobs), diagnostics, traceLocal),
+        TracedHiringServices.applications(ApplicationService[IO](users, jobs, applications), diagnostics, traceLocal),
         cursorCodec,
-        accountService = Some(account),
+        accountService = account,
         traceLocal = Some(traceLocal)
       ))
     } else {
@@ -143,11 +143,11 @@ object MongoHiringRuntime {
           val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
           val services = HiringGraphQLServices(
             TracedHiringServices.readModel(readModel, diagnostics, traceLocal),
-            TracedHiringServices.jobs(jobService, diagnostics),
-            TracedHiringServices.applications(applicationService, diagnostics),
+            TracedHiringServices.jobs(jobService, diagnostics, traceLocal),
+            TracedHiringServices.applications(applicationService, diagnostics, traceLocal),
             cursorCodec,
-            Some(TracedHiringServices.search(semanticSearch, diagnostics)),
-            Some(UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth)),
+            UserAccountService(users, users, Argon2PasswordHasher(), jwtAuth),
+            Some(TracedHiringServices.search(semanticSearch, diagnostics, traceLocal)),
             Some(traceLocal)
           )
           services

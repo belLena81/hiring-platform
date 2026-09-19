@@ -3,6 +3,7 @@ package com.example.graphQL.cats.api.auth
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.service.{ActorContext, RepositoryError}
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
@@ -34,7 +35,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
       users(Map(candidateId -> recruiter)),
-      IO.pure(now)
+      FixedTestClock.at(now)
     )
     authenticator.authenticateDetailed(request(Some(token))).map { actor =>
       assertEquals(actor, Right(Some(ActorContext(candidateId, UserRole.Recruiter))))
@@ -59,7 +60,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
       users(Map(candidateId -> candidate)),
-      IO.pure(now)
+      FixedTestClock.at(now)
     )
     invalidTokens.traverse { token =>
       authenticator.authenticateDetailed(request(token)).map { result =>
@@ -76,7 +77,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
       users(Map(candidateId -> candidate)),
-      IO.pure(now)
+      FixedTestClock.at(now)
     )
     val duplicated = Request[IO](Method.POST, Uri.unsafeFromString("/graphql")).putHeaders(
       Header.Raw(CIString("Authorization"), s"Bearer $token"),
@@ -87,7 +88,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
 
   test("unknown users remain unauthenticated") {
     val token = signedToken(candidateId)
-    val enabled = new JwtActorAuthenticator(JwtAuthConfig(secret, issuer, audience), users(Map.empty), IO.pure(now))
+    val enabled = new JwtActorAuthenticator(JwtAuthConfig(secret, issuer, audience), users(Map.empty), FixedTestClock.at(now))
     enabled.authenticateDetailed(request(Some(token))).map(assertEquals(_, Left(AuthFailure.UnknownActor)))
   }
 

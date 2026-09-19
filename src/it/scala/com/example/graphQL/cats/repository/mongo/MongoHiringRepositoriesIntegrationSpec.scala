@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
@@ -577,7 +578,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             val jobs = new MongoJobRepository(database)
             users.insert(candidateUser) *> users.insert(recruiterUser) *> jobs.create(jobFixture(jobId, JobStatus.Open)).void
           }
-          authenticator = JwtActorAuthenticator(jwt, runtime.userAuthenticator, IO.pure(now))
+          authenticator = JwtActorAuthenticator(jwt, runtime.userAuthenticator, FixedTestClock.at(now))
           dependencies <- TestGraphQLSupport.dependencies(
             runtime.services,
             authenticator.authenticateDetailed,

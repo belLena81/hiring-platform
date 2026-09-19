@@ -1,12 +1,41 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{Deferred, IO, Ref, Resource}
-import com.example.graphQL.cats.service.ProbeResult
+import cats.effect.{Deferred, IO, IOLocal, Ref, Resource}
+import cats.effect.std.Dispatcher
+import com.example.graphQL.cats.service.{ProbeResult, TraceContext}
 import munit.CatsEffectSuite
 
 import scala.concurrent.duration.*
 
 final class RequestContextSpec extends CatsEffectSuite {
+  test("dispatcher trace binding restores its previous value after success, failure, and cancellation") {
+    Dispatcher.sequential[IO].use { dispatcher =>
+      for {
+        local <- IOLocal[Option[TraceContext]](None)
+        ambient <- TraceContext.root("00000000-0000-0000-0000-000000000001")
+        requestTrace <- TraceContext.root("00000000-0000-0000-0000-000000000002")
+        _ <- IO.fromFuture(IO(dispatcher.unsafeToFuture(local.set(Some(ambient)))))
+        hiring = TestGraphQLSupport.emptyServices.copy(traceLocal = Some(local))
+        contextResource = RequestContext.withDispatcher(dispatcher, IO.pure(ProbeResult.Ready), None, hiring,
+          IO.pure(ProbeResult.Ready), Some(requestTrace))
+        _ <- contextResource.use { context =>
+          for {
+            observed <- IO.fromFuture(IO(context.unsafeToFuture(local.get)))
+            _ <- IO(assertEquals(observed, Some(requestTrace)))
+            failure <- IO.fromFuture(IO(context.unsafeToFuture(IO.raiseError[Unit](new RuntimeException("expected"))))).attempt
+            _ <- IO(assert(failure.isLeft))
+            restored <- IO.fromFuture(IO(dispatcher.unsafeToFuture(local.get)))
+            _ <- IO(assertEquals(restored, Some(ambient)))
+          } yield ()
+        }
+        cancelled <- Deferred[IO, Unit]
+        _ <- contextResource.use(context => IO(context.unsafeToFuture(IO.canceled.onCancel(cancelled.complete(()).void))))
+        _ <- cancelled.get.timeout(1.second)
+        restored <- IO.fromFuture(IO(dispatcher.unsafeToFuture(local.get)))
+      } yield assertEquals(restored, Some(ambient))
+    }
+  }
+
   test("closing rejects submissions while resolver cancellation finalizers are still running") {
     for {
       entered <- Deferred[IO, Unit]

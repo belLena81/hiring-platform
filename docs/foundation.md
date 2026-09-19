@@ -56,10 +56,13 @@ For persistent local settings, keep `src/main/resources/local.conf` ignored and 
 | HTTP_HOST | `src/main/resources/local.conf` or environment | Numeric IPv4/IPv6 address |
 | HTTP_PORT | `src/main/resources/local.conf` or environment | Integer 1..65535 |
 | HTTP_ADMISSION_PERMITS | `application.conf`/`local.conf` resource or environment | Integer 1..1024; default 16 |
+| `http.trusted-proxy-cidrs` | `application.conf`/`local.conf` resource | CIDR list for immediate reverse-proxy peers; defaults to `[]` |
 | MONGODB_URI | `src/main/resources/local.conf` or environment | Valid Mongo connection string |
 | MONGODB_DATABASE | `application.conf`/`local.conf` resource | Valid nonempty database name |
 | `logging.mask-sensitive` | `application.conf`/`local.conf` resource | strict boolean; defaults to `true` |
 Malformed configuration exits unsuccessfully with a safe category and configuration key. Logback XML, not application configuration, selects TRACE/DEBUG/INFO/WARN/ERROR severity. An unavailable or unauthenticated database leaves HTTP running with NOT_READY. Application JSON logs include searchable markers, concise messages, controlled diagnostic fields and safe request correlation. Sensitive metadata is masked by default. Framework/driver raw output and request payloads remain suppressed. The IOApp runtime failure reporter always uses masked RUNTIME_FAILED diagnostics without exception messages or raw stacks. API responses include a generated X-Request-ID; incoming IDs are not trusted. See [logging flags, filters and disclosure limits](logging.md).
+
+For login and signup rate limiting, the default empty `http.trusted-proxy-cidrs` list uses the TCP peer address and ignores `Forwarded`. When the application is reachable only through known reverse proxies, configure their immediate peer CIDRs, for example `http.trusted-proxy-cidrs = ["10.0.0.0/8"]`. A configured proxy must strip or replace client-supplied `Forwarded` before appending its observed connection peer. The application uses concrete RFC 7239 `Forwarded: for=` hops only after the TCP peer matches the allowlist; malformed, unknown, obfuscated, or incomplete chains fall back to the peer address. Allowlist only networks that can directly connect to the application, restrict direct access at the network layer, and never use `/0`. The limiter remains process-local, so replicas do not share buckets.
 
 ## HTTP contract and budgets
 

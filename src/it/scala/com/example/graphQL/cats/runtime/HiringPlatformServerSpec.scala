@@ -39,7 +39,7 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
         _ => IO.pure(Right(None)),
         IO.pure(ProbeResult.Ready),
         authRateLimit,
-        5.seconds
+        requestTimeout = 5.seconds
       )
       app = new HiringApiRoutes(
         new HealthService(database, Diagnostics.noop),

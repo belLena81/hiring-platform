@@ -9,7 +9,7 @@ import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
-import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, BootstrapAdminInput, JobUseCases, LoginInput, SignUpInput, SearchUseCases}
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, BootstrapAdminInput, JobUseCases, LoginInput, SignUpInput, SearchUseCases}
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, RepositoryError, SearchError, UseCaseError}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
@@ -152,77 +152,66 @@ private[graphql] object HiringGraphQLResolvers {
   }
 
   def accountMe(context: Context[RequestContext, Unit]): IO[UserPayload] =
-    (context.ctx.actor, accountService(context)) match {
-      case (Some(actor), Right(service)) => service.me(actor).map(userPayload)
-      case (None, _) => IO.pure(UserPayload(None, List(toGraphQLError(UseCaseError.authentication(AuthenticationError.Unauthorized)))))
-      case (_, Left(error)) => IO.pure(UserPayload(None, List(toGraphQLError(error))))
+    authenticatedPayload(UserPayload(None, _))(context) { case (actor, hiring) =>
+      hiring.accountService.me(actor).map(userPayload)
     }
 
   def signUp(context: Context[RequestContext, Unit]): IO[AccountPayload] = {
     val input = context.arg(signUpInputArgument)
-    (for {
-      service <- accountService(context)
-      profile <- signUpProfile(input)
-    } yield (service, SignUpInput(input.name, input.role, input.password, profile))).fold(
+    signUpProfile(input).fold(
       error => IO.pure(accountErrorPayload(error)),
-      { case (service, request) =>
-        (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
-          service.signUp(request, now, Identifiers.UserId(id))
-        }.flatten.map(signUpPayload)
-      }
+      profile => (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
+        context.ctx.hiring.accountService.signUp(
+          SignUpInput(input.name, input.role, input.password, profile),
+          now,
+          Identifiers.UserId(id)
+        )
+      }.flatten.map(result => accountPayload(result, signUpErrorPayload))
     )
   }
 
   def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[AccountPayload] =
-    accountService(context).fold(
-      error => IO.pure(accountErrorPayload(error)),
-      service => {
-        val input = context.arg(bootstrapAdminInputArgument)
-        (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
-          service.bootstrapAdmin(BootstrapAdminInput(input.name, input.password), now, Identifiers.UserId(id))
-        }.flatten.map(accountPayload)
-      }
-    )
+    val input = context.arg(bootstrapAdminInputArgument)
+    (IO.realTimeInstant, IO.randomUUID).mapN { (now, id) =>
+      context.ctx.hiring.accountService.bootstrapAdmin(
+        BootstrapAdminInput(input.name, input.password),
+        now,
+        Identifiers.UserId(id)
+      )
+    }.flatten.map(result => accountPayload(result))
 
   def login(context: Context[RequestContext, Unit]): IO[AccountPayload] =
-    accountService(context).fold(
-      error => IO.pure(accountErrorPayload(error)),
-      service => {
-        val input = context.arg(loginInputArgument)
-        IO.realTimeInstant.flatMap(now => service.login(LoginInput(input.name, input.password), now)).map(accountPayload)
-      }
-    )
+    val input = context.arg(loginInputArgument)
+    IO.realTimeInstant.flatMap(now =>
+      context.ctx.hiring.accountService.login(LoginInput(input.name, input.password), now)
+    ).map(result => accountPayload(result))
 
   def updateMyProfile(context: Context[RequestContext, Unit]): IO[UserPayload] =
-    (context.ctx.actor, accountService(context)) match {
-      case (Some(actor), Right(service)) =>
-        val input = context.arg(updateProfileInputArgument)
-        updateProfileInput(actor.role, input).fold(
-          error => IO.pure(UserPayload(None, List(toGraphQLError(error)))),
-          profile => service.updateMyProfile(actor, profile).map(_.fold(error => UserPayload(None, List(toGraphQLError(error))), user => UserPayload(Some(user), Nil)))
-        )
-      case _ => IO.pure(UserPayload(None, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
+    authenticatedPayload(UserPayload(None, _))(context) { case (actor, hiring) =>
+      val input = context.arg(updateProfileInputArgument)
+      updateProfileInput(actor.role, input).fold(
+        error => IO.pure(UserPayload(None, List(toGraphQLError(error)))),
+        profile => hiring.accountService.updateMyProfile(actor, profile).map(userPayload)
+      )
     }
 
   def deleteMyAccount(context: Context[RequestContext, Unit]): IO[DeleteAccountPayload] =
-    (context.ctx.actor, accountService(context)) match {
-      case (Some(actor), Right(service)) => IO.realTimeInstant.flatMap(now => service.deleteMyAccount(actor, now)).map(_.fold(error => DeleteAccountPayload(false, List(toGraphQLError(error))), _ => DeleteAccountPayload(true, Nil)))
-      case _ => IO.pure(DeleteAccountPayload(false, List(GraphQLError("UNAUTHORIZED", "Authentication required"))))
+    authenticatedPayload(DeleteAccountPayload(false, _))(context) { case (actor, hiring) =>
+      IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now))
+        .map(_.fold(error => DeleteAccountPayload(false, List(toGraphQLError(error))), _ => DeleteAccountPayload(true, Nil)))
     }
 
   def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =
-    (context.ctx.actor, accountService(context)) match {
-      case (Some(actor), Right(service)) =>
-        val requested = context.arg(firstArgument)
-        val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
-        val role = context.arg(userRoleArgument)
-        userPage(context, requested, context.arg(afterArgument), status, role).flatMap {
-          case Left(validationError) => IO.pure(graphQLErrorConnection(validationError))
-          case Right((request, pageSize)) =>
-            service.listUsers(actor, request).map(_.fold(errorConnection[User], values => userConnection(context, values, pageSize)))
-        }
-      case _ => IO.pure(errorConnection(UseCaseError.authentication(AuthenticationError.Unauthorized)))
-    }
+    complete(authenticatedStep(context) { case (actor, hiring) =>
+      val requested = context.arg(firstArgument)
+      val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
+      val role = context.arg(userRoleArgument)
+      EitherT(userPage(context, requested, context.arg(afterArgument), status, role)).flatMap {
+        case (request, pageSize) =>
+          liftUseCase(hiring.accountService.listUsers(actor, request))
+            .map(values => userConnection(context, values, pageSize))
+      }
+    }, graphQLErrorConnection[User])
 
   private def liftUseCase[A](value: IO[Either[UseCaseError, A]]): GraphQLStep[A] =
     EitherT(value.map(_.leftMap(toGraphQLError)))
@@ -247,9 +236,6 @@ private[graphql] object HiringGraphQLResolvers {
         hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
       }.flatten.map(applicationPayload)
     }
-
-  private def accountService(context: Context[RequestContext, Unit]): Either[UseCaseError, AccountUseCases[IO]] =
-    context.ctx.hiring.accountService.toRight(UseCaseError.availability(AvailabilityError.ServiceNotReady))
 
   private def updateProfileInput(role: UserRole, input: UpdateProfileGraphQLInput): Either[UseCaseError, AccountProfileInput] =
     profileFor(role, input.skills, input.experienceSummary, input.resumeRef, input.organizationName, input.jobTitle)
@@ -449,9 +435,6 @@ private[graphql] object HiringGraphQLResolvers {
     Connection(nodes.map(value => Edge(value, cursor(value))), PageInfo(values.size > requested, nodes.lastOption.map(cursor)))
   }
 
-  private def errorConnection[A](error: UseCaseError): Connection[A] =
-    Connection(Nil, PageInfo(false, None), List(toGraphQLError(error)))
-
   private def graphQLErrorConnection[A](error: GraphQLError): Connection[A] =
     Connection(Nil, PageInfo(false, None), List(error))
 
@@ -470,11 +453,11 @@ private[graphql] object HiringGraphQLResolvers {
   private def userPayload(result: Either[UseCaseError, User]): UserPayload =
     result.fold(error => UserPayload(None, List(toGraphQLError(error))), user => UserPayload(Some(user), Nil))
 
-  private def accountPayload(result: Either[UseCaseError, (User, AccountToken)]): AccountPayload =
-    result.fold(accountErrorPayload, { case (user, token) => AccountPayload(Some(user), Some(token.value), Some(token.expiresAt.toString), Nil) })
-
-  private def signUpPayload(result: Either[UseCaseError, (User, AccountToken)]): AccountPayload =
-    result.fold(signUpErrorPayload, { case (user, token) => AccountPayload(Some(user), Some(token.value), Some(token.expiresAt.toString), Nil) })
+  private def accountPayload(
+      result: Either[UseCaseError, (User, AccountToken)],
+      errorPayload: UseCaseError => AccountPayload = accountErrorPayload
+  ): AccountPayload =
+    result.fold(errorPayload, { case (user, token) => AccountPayload(Some(user), Some(token.value), Some(token.expiresAt.toString), Nil) })
 
   private def accountErrorPayload(error: UseCaseError): AccountPayload =
     AccountPayload(None, None, None, List(toGraphQLError(error)))

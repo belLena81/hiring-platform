@@ -81,7 +81,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
       }.maxByOption { case (_, quality, preference) => (quality, preference) }.map(_._1)
     }
 
-  private def graphql(request: Request[IO], requestId: String, mediaType: MediaType): IO[Response[IO]] = {
+  private def graphql(request: Request[IO], requestId: String, trace: TraceContext,
+      mediaType: MediaType): IO[Response[IO]] = {
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
       rejected(Rejection.UnsupportedMedia, requestId, mediaType = mediaType)
     else admitted(requestId) {
@@ -89,7 +90,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
       _ => rejected(Rejection.InvalidRequest, requestId, mediaType = mediaType),
       parsed => {
         def limited(operation: FixedWindowRateLimiter.Operation): IO[Either[Response[IO], Unit]] =
-          dependencies.rateLimiter.permit(FixedWindowRateLimiter.Key(remoteAddress(request), operation)).flatMap {
+          dependencies.rateLimiter.permit(FixedWindowRateLimiter.Key(dependencies.clientAddressResolver.resolve(request), operation)).flatMap {
             case Right(()) => IO.pure(Right(()))
             case Left(rateLimited) =>
               rejected(Rejection.RateLimited, requestId)
@@ -99,7 +100,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
         def execute(actor: Option[ActorContext]): IO[Response[IO]] =
           HiringGraphQLSchema.execute(parsed, service, requestId, actor, dependencies.hiring,
-            dependencies.ensureHiringReady, dependencies.contextFactory).flatMap {
+            dependencies.ensureHiringReady, dependencies.contextFactory, Some(trace)).flatMap {
             case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
             case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Rejection.InvalidQuery, requestId, mediaType = mediaType)
             case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Rejection.Internal, requestId, mediaType = mediaType)
@@ -127,12 +128,13 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     }
 
   private def accountOperation(request: GraphQLRequest): Option[FixedWindowRateLimiter.Operation] =
-    if (HiringApiRoutes.SignUpPattern.findFirstIn(request.rawQuery).nonEmpty) Some(FixedWindowRateLimiter.Operation.SignUp)
-    else if (HiringApiRoutes.LoginPattern.findFirstIn(request.rawQuery).nonEmpty) Some(FixedWindowRateLimiter.Operation.Login)
+    val topLevelFields = request.document.definitions.collect {
+      case operation: sangria.ast.OperationDefinition =>
+        operation.selections.collect { case field: sangria.ast.Field => field.name }
+    }.flatten
+    if (topLevelFields.contains("signUp")) Some(FixedWindowRateLimiter.Operation.SignUp)
+    else if (topLevelFields.contains("login")) Some(FixedWindowRateLimiter.Operation.Login)
     else None
-
-  private def remoteAddress(request: Request[IO]): String =
-    request.remoteAddr.map(_.toString).getOrElse("unknown")
 
   private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
       mediaType: MediaType = GraphQLResponseMediaType): IO[Response[IO]] = {
@@ -148,7 +150,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private def requestIdOf(request: Request[IO]): String =
     request.attributes.lookup(RequestId.requestIdAttrKey).getOrElse("unknown")
 
-  private def route(request: Request[IO], id: String): IO[Response[IO]] =
+  private def route(request: Request[IO], id: String, trace: TraceContext): IO[Response[IO]] =
     HttpRoutes.of[IO] {
       case GET -> Root / "health" =>
         IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
@@ -162,7 +164,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
         }
       }
       case POST -> Root / "graphql" => responseMediaType(request) match {
-        case Some(mediaType) => graphql(request, id, mediaType)
+        case Some(mediaType) => graphql(request, id, trace, mediaType)
         case None => rejected(Rejection.NotAcceptable, id)
       }
       case _ -> Root / "graphql" => rejected(Rejection.MethodNotAllowed, id)
@@ -172,7 +174,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
   private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
     val requestId = requestIdOf(request)
-      TraceContext.root(requestId).flatMap { trace =>
+    IO.randomUUID.flatMap(traceId => TraceContext.root(traceId.toString)).flatMap { trace =>
       val method = request.method.name
       val path = request.uri.path.renderString
       val metadata = Map(LogField.Method -> (if (LogFields.validPublic(LogField.Method, method)) method else "OTHER"),
@@ -182,10 +184,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
         Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { child =>
-          val setTrace = dependencies.hiring.traceLocal.fold(IO.unit)(_.set(Some(child)))
-          val clearTrace = dependencies.hiring.traceLocal.fold(IO.unit)(_.set(None))
-          setTrace *>
-          route(request, requestId)
+          route(request, requestId, child)
           .handleErrorWith {
             case _: EntityLimiter.EntityTooLarge => rejected(Rejection.PayloadTooLarge, requestId)
             case failure => rejected(Rejection.Internal, requestId, LogFields.failure(failure))
@@ -202,7 +201,6 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
               LogField.Outcome -> (if (response.status.isSuccess) "COMPLETED" else "REJECTED")))))
           .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
             Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
-          .guarantee(clearTrace)
         }
       }
       }
@@ -227,9 +225,8 @@ object HiringApiRoutes {
       ensureHiringReady: IO[ProbeResult],
       contextFactory: RequestContextFactory,
       rateLimiter: FixedWindowRateLimiter,
+      clientAddressResolver: ClientAddressResolver,
       requestTimeout: FiniteDuration
   )
 
-  private val LoginPattern = raw"\blogin\b".r
-  private val SignUpPattern = raw"\bsignUp\b".r
 }

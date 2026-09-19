@@ -21,6 +21,7 @@ class AppConfigSpec extends FunSuite {
       |  host = "127.0.0.1"
       |  port = 8080
       |  admission-permits = 16
+      |  trusted-proxy-cidrs = []
       |}
       |mongo {
       |  uri = "mongodb://127.0.0.1:27017"
@@ -94,6 +95,7 @@ class AppConfigSpec extends FunSuite {
         |  host = "::1"
         |  port = 65535
         |  admission-permits = 64
+        |  trusted-proxy-cidrs = []
         |}
         |mongo {
         |  uri = ${MONGODB_URI}
@@ -140,7 +142,7 @@ class AppConfigSpec extends FunSuite {
     assertEquals(AppConfig.fromConfig(config, Map(
       "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
-    )), Right(AppConfig("::1", 65535, 64,
+    )), Right(AppConfig("::1", 65535, 64, TrustedProxyConfig(Nil),
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "hiring_test-2", maskSensitive = true,
       JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
@@ -172,6 +174,7 @@ class AppConfigSpec extends FunSuite {
         |  host = "127.0.0.1"
         |  port = 8080
         |  admission-permits = 16
+        |  trusted-proxy-cidrs = []
         |}
         |mongo {
         |  uri = "mongodb://127.0.0.1:27017"
@@ -234,6 +237,7 @@ class AppConfigSpec extends FunSuite {
         |  port = ${?HTTP_PORT}
         |  admission-permits = 16
         |  admission-permits = ${?HTTP_ADMISSION_PERMITS}
+        |  trusted-proxy-cidrs = []
         |}
         |mongo {
         |  uri = "mongodb://127.0.0.1:27017"
@@ -363,7 +367,7 @@ class AppConfigSpec extends FunSuite {
       assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
-      Right(AppConfig("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017", "hiring",
+      Right(AppConfig("127.0.0.1", 8080, 16, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
         maskSensitive = false, defaultJwtAuth, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false))))
   }
 
@@ -394,6 +398,18 @@ class AppConfigSpec extends FunSuite {
       ConfigError.InvalidAuthRateLimitAttempts)
     assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
       ConfigError.InvalidAuthRateLimitBuckets)
+  }
+
+  test("trusted proxy CIDRs are explicit, typed, and never global") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.trustedProxy.cidrs), Right(Nil))
+    val configured = AppConfig.fromConfig(defaultConfig +
+      "http.trusted-proxy-cidrs = [\"10.0.0.5/32\", \"2001:db8:10::5/128\"]\n", Map.empty)
+    assertEquals(configured.map(_.trustedProxy.cidrs.map(_.toString)),
+      Right(List("10.0.0.5/32", "2001:db8:10::5/128")))
+    List("not-a-cidr", "0.0.0.0/0", "::/0").foreach { cidr =>
+      assertContainsError(AppConfig.fromConfig(defaultConfig + s"http.trusted-proxy-cidrs = [\"$cidr\"]\n", Map.empty),
+        ConfigError.InvalidTrustedProxyCidrs)
+    }
   }
 
   test("VHS-AC07 vector search dimension is fixed to the configured Atlas index contract") {

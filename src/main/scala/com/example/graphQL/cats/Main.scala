@@ -3,7 +3,7 @@ package com.example.graphQL.cats
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.RequestContextFactory
-import com.example.graphQL.cats.api.http.{Admission, FixedWindowRateLimiter, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.{Admission, ClientAddressResolver, FixedWindowRateLimiter, HiringApiRoutes}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
@@ -46,6 +46,7 @@ object Main extends IOApp {
                       runtime.ensureSetup.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable),
                       contextFactory,
                       rateLimiter,
+                      ClientAddressResolver(config.trustedProxy),
                       5.seconds
                     )
                   ).app

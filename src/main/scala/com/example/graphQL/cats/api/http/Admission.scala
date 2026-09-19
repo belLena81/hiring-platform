@@ -29,7 +29,6 @@ final class Admission private (
         case true => true -> drained.get
       }.flatten
 
-  def close: IO[Unit] = close(15.seconds)
 }
 
 object Admission {

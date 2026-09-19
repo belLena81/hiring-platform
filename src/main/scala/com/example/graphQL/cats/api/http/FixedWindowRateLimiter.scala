@@ -8,6 +8,7 @@ final class FixedWindowRateLimiter private (
     state: Ref[IO, Map[FixedWindowRateLimiter.Key, FixedWindowRateLimiter.Bucket]],
     config: AuthRateLimitConfig
 ) {
+  // Buckets are process-local: this mitigates abuse on a single node, not across distributed replicas.
   import FixedWindowRateLimiter.*
 
   def permit(key: Key): IO[Either[RateLimited, Unit]] =
@@ -37,7 +38,7 @@ object FixedWindowRateLimiter {
   final case class Key(remoteAddress: String, operation: Operation)
   final case class RateLimited(retryAfter: FiniteDuration) {
     def retryAfterSeconds: Long =
-      math.max(1L, retryAfter.toSeconds + Option.when(retryAfter.toMillis % 1000 != 0)(1L).getOrElse(0L))
+      math.max(1L, (retryAfter + 999.millis).toSeconds)
   }
 
   enum Operation {

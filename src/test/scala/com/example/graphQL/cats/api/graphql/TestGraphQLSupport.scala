@@ -2,13 +2,13 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.http.{FixedWindowRateLimiter, HiringApiRoutes}
-import com.example.graphQL.cats.config.AuthRateLimitConfig
-import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.api.http.{ClientAddressResolver, FixedWindowRateLimiter, HiringApiRoutes}
+import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, ProbeResult}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
-import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, JobUseCases}
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, JobUseCases, LoginInput, SignUpInput}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import org.http4s.Request
@@ -21,6 +21,16 @@ object TestGraphQLSupport {
 
   val cursorCodec: CursorCodec =
     CursorCodec.fromSecret("test-cursor-secret-01234567890123456789")
+
+  val accountService: AccountUseCases[IO] = new AccountUseCases[IO] {
+    def signUp(input: SignUpInput, now: Instant, userId: UserId) = unsupported
+    def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId) = unsupported
+    def login(input: LoginInput, now: Instant) = unsupported
+    def me(actor: ActorContext) = unsupported
+    def updateMyProfile(actor: ActorContext, input: AccountProfileInput) = unsupported
+    def deleteMyAccount(actor: ActorContext, now: Instant) = unsupported
+    def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
+  }
 
   val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
     new HiringReadModel[IO] {
@@ -49,7 +59,8 @@ object TestGraphQLSupport {
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
       def changeStatus(actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String], eventId: ApplicationEventId, now: Instant) = unsupported
     },
-    cursorCodec
+    cursorCodec,
+    accountService
   )
 
   def context(
@@ -65,10 +76,12 @@ object TestGraphQLSupport {
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
+      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
       requestTimeout: FiniteDuration = 5.seconds
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource
       limiter <- Resource.eval(FixedWindowRateLimiter.create(authRateLimit))
-    } yield HiringApiRoutes.Dependencies(hiring, authenticate, hiringReady, factory, limiter, requestTimeout)
+    } yield HiringApiRoutes.Dependencies(hiring, authenticate, hiringReady, factory, limiter,
+      ClientAddressResolver(trustedProxy), requestTimeout)
 }

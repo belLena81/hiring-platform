@@ -29,11 +29,8 @@ private[graphql] object HiringGraphQLInputs {
     fields(name).asInstanceOf[A]
 
   private def optionalInput[A](fields: InputMap, name: String): Option[A] =
-    fields.get(name).flatMap {
-      case None => None
-      case Some(value) => Some(value.asInstanceOf[A])
-      case value => Some(value.asInstanceOf[A])
-    }
+    // CoercedScalaResultMarshaller omits absent fields and stores present nullable fields as Some(value) or None.
+    fields.get(name).collect { case Some(value) => value.asInstanceOf[A] }
 
   private def requiredListInput[A](fields: InputMap, name: String): List[A] =
     requiredInput[Seq[A]](fields, name).toList
