@@ -38,7 +38,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       service: HealthService,
       diagnostics: Diagnostics,
       admission: Admission,
-      hiring: HiringGraphQLServices = com.example.graphQL.cats.api.graphql.RequestContext.emptyServices,
+      hiring: HiringGraphQLServices = TestGraphQLSupport.emptyServices,
       authenticate: Request[IO] => IO[Either[com.example.graphQL.cats.api.auth.AuthFailure, Option[com.example.graphQL.cats.service.ActorContext]]] =
         _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),

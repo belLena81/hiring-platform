@@ -2,10 +2,9 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
-import com.example.graphQL.cats.config.{AuthRateLimitConfig, JwtAuthConfig}
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.{ActorContext, DatabaseProbe, Diagnostics, ProbeResult}
-import com.example.graphQL.cats.service.protocol.UserAuthenticator
+import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
+import com.example.graphQL.cats.config.AuthRateLimitConfig
+import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import org.http4s.server.Server
 import io.circe.Json
 import io.circe.parser.parse
@@ -26,19 +25,30 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   private val cleanupBound = 6.seconds
   private val shutdownBound = 14.seconds
   private val AdmissionPermits = 16
-  private val jwt = JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
   private val authRateLimit = AuthRateLimitConfig(60, 100, 1000)
-  private val authenticator = new UserAuthenticator[IO] {
-    def actorFor(userId: UserId): IO[Option[ActorContext]] = IO.pure(None)
-  }
 
   private def probe(result: IO[ProbeResult]): DatabaseProbe = new DatabaseProbe {
     def check: IO[ProbeResult] = result
   }
 
   private def server(host: String, port: Int, database: DatabaseProbe): Resource[IO, Server] =
-    HiringPlatformServer.resource(host, port, database, Diagnostics.noop, AdmissionPermits,
-      TestGraphQLSupport.emptyServices, jwt, authRateLimit, authenticator, IO.pure(ProbeResult.Ready), 5.seconds)
+    for {
+      admission <- Admission.resource(AdmissionPermits)
+      dependencies <- TestGraphQLSupport.dependencies(
+        TestGraphQLSupport.emptyServices,
+        _ => IO.pure(Right(None)),
+        IO.pure(ProbeResult.Ready),
+        authRateLimit,
+        5.seconds
+      )
+      app = new HiringApiRoutes(
+        new HealthService(database, Diagnostics.noop),
+        Diagnostics.noop,
+        admission,
+        dependencies
+      ).app
+      server <- HiringPlatformServer.resource(host, port, app)
+    } yield server
 
   private def request(port: Int, path: String, body: Option[String] = None): IO[HttpResponse[String]] =
     IO.fromCompletableFuture(IO {

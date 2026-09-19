@@ -47,6 +47,8 @@ Prefer one evolving GraphQL schema over automatically introducing `/v1` and `/v2
 
 The current Hiring GraphQL contract intentionally uses typed scalar IDs for jobs and applications in both inputs and outputs: `Job.id` is `JobID!` and `Application.id` is `ApplicationID!`. Clients that treated these output fields as plain `ID` should refresh generated types from the served SDL before this change is released.
 
+The `job(id:)` and `me` query fields now return `JobPayload!` and `UserPayload!` rather than nullable `Job` and `User`. Consumers must read the nested `job` or `user` field and handle payload `errors`; this preserves `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, and `SERVICE_NOT_READY` outcomes that were previously indistinguishable from absent data.
+
 Pagination cursors are signed v2 values. A cursor contains the cursor version, connection kind, pagination key, and an HMAC-SHA256 signature derived from the configured JWT HS256 secret with a cursor-specific derivation label. The server validates the signature before decoding payload fields. Valid signed cursors for the wrong connection return `WRONG_CURSOR_KIND`; malformed, tampered, unsigned, missing-version, or old-version cursors return `INVALID_CURSOR`.
 
 This is a coordinated breaking security change: old unsigned cursors are not accepted. Consumers must discard stored pagination cursors and restart pagination from the first page after deploying against this contract. Runtime configuration must provide a valid `AUTH_JWT_HS256_SECRET`; `disabled`, missing, blank, or short values fail configuration validation.

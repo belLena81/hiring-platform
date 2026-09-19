@@ -21,11 +21,11 @@ Status: implemented in the current checkout; live Mongo transaction and explain-
 ### Queries
 
 ```graphql
-me: User
+me: UserPayload!
 users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
 ```
 
-`me` returns the authenticated user's safe account and profile. `users` is Admin-only, bounded, cursor-paginated, and excludes password hashes, credentials, deleted profile content, and sensitive internal fields.
+`me` returns the authenticated user's safe account and profile in the `user` field, or a typed payload error such as `UNAUTHORIZED` when no active authenticated account is available. `users` is Admin-only, bounded, cursor-paginated, and excludes password hashes, credentials, deleted profile content, and sensitive internal fields.
 
 ### Mutations
 

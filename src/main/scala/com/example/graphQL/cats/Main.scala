@@ -1,6 +1,9 @@
 package com.example.graphQL.cats
 
-import cats.effect.{ExitCode, IO, IOApp}
+import cats.effect.{ExitCode, IO, IOApp, Resource}
+import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
+import com.example.graphQL.cats.api.graphql.RequestContextFactory
+import com.example.graphQL.cats.api.http.{Admission, FixedWindowRateLimiter, HiringApiRoutes}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
@@ -23,19 +26,32 @@ object Main extends IOApp {
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
               (vector, apiKey) => new com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService(
                 apiKey, vector.voyageEndpoint, vector.voyageModel, vector.voyageDimension, vector.timeoutMillis), config.jwtAuth)
-              .flatMap(runtime => HiringPlatformServer.resource(
-                config.host,
-                config.port,
-                runtime.probe,
-                diagnostics,
-                config.admissionPermits,
-                runtime.services,
-                config.jwtAuth,
-                config.authRateLimit,
-                runtime.userAuthenticator,
-                runtime.ensureSetup.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable),
-                5.seconds
-              ))
+              .flatMap { runtime =>
+                for {
+                  admission <- Admission.resource(config.admissionPermits)
+                  contextFactory <- RequestContextFactory.resource
+                  rateLimiter <- Resource.eval(FixedWindowRateLimiter.create(config.authRateLimit))
+                  authenticate = new JwtActorAuthenticator(
+                    config.jwtAuth,
+                    runtime.userAuthenticator,
+                    cats.effect.Clock[IO]
+                  ).authenticateDetailed
+                  routes = new HiringApiRoutes(
+                    new com.example.graphQL.cats.service.HealthService(runtime.probe, diagnostics),
+                    diagnostics,
+                    admission,
+                    HiringApiRoutes.Dependencies(
+                      runtime.services,
+                      authenticate,
+                      runtime.ensureSetup.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable),
+                      contextFactory,
+                      rateLimiter,
+                      5.seconds
+                    )
+                  ).app
+                  server <- HiringPlatformServer.resource(config.host, config.port, routes)
+                } yield server
+              }
               .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
                 LogField.HttpHost -> config.host,
                 LogField.HttpPort -> config.port.toString

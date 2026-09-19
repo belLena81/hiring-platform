@@ -4,28 +4,64 @@ import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{FixedWindowRateLimiter, HiringApiRoutes}
 import com.example.graphQL.cats.config.AuthRateLimitConfig
+import com.example.graphQL.cats.domain.model.ApplicationStatus
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, ProbeResult}
+import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
+import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, HiringReadModel, JobUseCases}
+import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
+import com.example.graphQL.cats.shared.search.JobSearchFilter
 import org.http4s.Request
+import java.time.Instant
 
 import scala.concurrent.duration.*
 
 object TestGraphQLSupport {
+  private def unsupported[A]: IO[A] = IO.raiseError(new IllegalStateException("Request context services are not configured"))
+
   val cursorCodec: CursorCodec =
     CursorCodec.fromSecret("test-cursor-secret-01234567890123456789")
 
-  val emptyServices: HiringGraphQLServices =
-    RequestContext.emptyServices
+  val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
+    new HiringReadModel[IO] {
+      def user(id: UserId) = unsupported
+      def users(ids: List[UserId]) = unsupported
+      def canViewUserEmail(actor: ActorContext, userId: UserId) = unsupported
+      def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
+      def job(id: JobId) = unsupported
+      def jobs(ids: List[JobId]) = unsupported
+      def application(id: ApplicationId) = unsupported
+      def canViewApplication(actor: ActorContext, applicationId: ApplicationId) = unsupported
+      def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest) = unsupported
+    },
+    new JobUseCases[IO] {
+      def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId) = unsupported
+      def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant) = unsupported
+      def publishJob(actor: ActorContext, jobId: JobId, now: Instant) = unsupported
+      def closeJob(actor: ActorContext, jobId: JobId, now: Instant) = unsupported
+      def viewJob(actor: ActorContext, jobId: JobId) = unsupported
+      def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest) = unsupported
+      def myJobs(actor: ActorContext, page: JobPageRequest) = unsupported
+    },
+    new ApplicationUseCases[IO] {
+      def submitApplication(actor: ActorContext, jobId: JobId, applicationId: ApplicationId, eventId: ApplicationEventId, now: Instant) = unsupported
+      def myApplications(actor: ActorContext, page: ApplicationPageRequest) = unsupported
+      def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
+      def changeStatus(actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String], eventId: ApplicationEventId, now: Instant) = unsupported
+    },
+    cursorCodec
+  )
 
   def context(
       probe: IO[ProbeResult],
       actor: Option[ActorContext] = None,
-      hiring: HiringGraphQLServices = RequestContext.emptyServices,
+      hiring: HiringGraphQLServices = emptyServices,
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready)
   ): Resource[IO, RequestContext] =
     RequestContextFactory.resource.flatMap(_.resource(probe, actor, hiring, hiringReady))
 
   def dependencies(
-      hiring: HiringGraphQLServices = RequestContext.emptyServices,
+      hiring: HiringGraphQLServices = emptyServices,
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),

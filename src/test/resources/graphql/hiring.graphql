@@ -207,13 +207,13 @@ type PayloadError {
 type Query {
   health: Health!
   readiness: Readiness!
-  me: User
+  me: UserPayload!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant): JobConnection!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!): RankedJobResults!
   recommendedJobs(first: Int!): RankedJobResults!
   candidateMatches(jobId: JobID!, first: Int!): RankedCandidateResults!
-  job(id: JobID!): Job
+  job(id: JobID!): JobPayload!
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
   jobApplications(jobId: JobID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
