@@ -29,8 +29,8 @@ object CandidateProfile {
   ): ValidatedNel[DomainValidationError, CandidateProfile] =
     (
       validateNonEmptyValues("skills", skills),
-      validateOptionalText("experienceSummary", experienceSummary),
-      validateOptionalText("resumeRef", resumeRef)
+      validateOptionalText("experienceSummary", experienceSummary, FieldLimits.LongTextMaxChars),
+      validateOptionalText("resumeRef", resumeRef, FieldLimits.ResumeRefMaxChars)
     ).mapN(CandidateProfile.apply)
 }
 
@@ -113,18 +113,32 @@ object User {
     ).mapN((validEmail, validName) => User(id, validEmail, validName, role, profile, createdAt))
 }
 
-private[domain] def validateText(field: String, value: String): ValidatedNel[DomainValidationError, String] =
+object FieldLimits {
+  val ShortTextMaxChars = 256
+  val LongTextMaxChars = 8192
+  val ResumeRefMaxChars = 2048
+  val CollectionMaxValues = 100
+  val PasswordMaxBytes = 1024
+}
+
+private[domain] def validateText(
+    field: String,
+    value: String,
+    maximum: Int = FieldLimits.ShortTextMaxChars
+): ValidatedNel[DomainValidationError, String] =
   value.trim match {
     case "" => BlankField(field).invalidNel
+    case trimmed if trimmed.length > maximum => DomainValidationError.TextTooLong(field, maximum, trimmed.length).invalidNel
     case trimmed => trimmed.validNel
   }
 
 private[domain] def validateOptionalText(
     field: String,
-    value: Option[String]
+    value: Option[String],
+    maximum: Int = FieldLimits.ShortTextMaxChars
 ): ValidatedNel[DomainValidationError, Option[String]] =
   value match {
-    case Some(raw) => validateText(field, raw).map(Some(_))
+    case Some(raw) => validateText(field, raw, maximum).map(Some(_))
     case None => none[String].validNel
   }
 
@@ -133,5 +147,8 @@ private[domain] def validateNonEmptyValues(
     values: Set[String]
 ): ValidatedNel[DomainValidationError, Set[String]] = {
   val trimmed = values.map(_.trim).filter(_.nonEmpty)
-  if (trimmed.isEmpty) EmptyCollection(field).invalidNel else trimmed.validNel
+  if (trimmed.isEmpty) EmptyCollection(field).invalidNel
+  else if (trimmed.size > FieldLimits.CollectionMaxValues)
+    DomainValidationError.TooManyValues(field, FieldLimits.CollectionMaxValues, trimmed.size).invalidNel
+  else trimmed.toList.traverse(validateText(field, _)).map(_.toSet)
 }

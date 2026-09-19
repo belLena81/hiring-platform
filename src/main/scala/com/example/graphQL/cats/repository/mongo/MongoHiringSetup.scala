@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.AccountName
+import com.example.graphQL.cats.repository.protocol.{EmbeddingWorkKey, EmbeddingWorkKind}
 import com.mongodb.MongoCommandException
 import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, IndexOptions, Indexes, ReturnDocument, SearchIndexModel, SearchIndexType, Sorts, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
@@ -29,10 +30,16 @@ object MongoHiringSetup {
   val HiringMigrationLedger = "hiring_migration_ledger"
   val HiringUserSetupMigrationId = "hiring-user-setup-v2"
   val EmbeddingWorkMigrationId = "hiring-embedding-work-v1"
+  val JobEmbeddingBackfillMigrationId = "job-embedding-work-backfill-v1"
+  val CandidateEmbeddingBackfillMigrationId = "candidate-embedding-work-backfill-v1"
   private val HiringUserSetupDescriptor = "canonical-name-account-status-profile-email-indexes-validator-atlas-v2"
   private val HiringUserSetupChecksum = sha256(HiringUserSetupDescriptor)
   private val EmbeddingWorkDescriptor = "durable-embedding-work-claim-index-v1"
   private val EmbeddingWorkChecksum = sha256(EmbeddingWorkDescriptor)
+  private val JobEmbeddingBackfillDescriptor = "enqueue-current-jobs-for-durable-embedding-v1"
+  private val JobEmbeddingBackfillChecksum = sha256(JobEmbeddingBackfillDescriptor)
+  private val CandidateEmbeddingBackfillDescriptor = "enqueue-current-candidate-profiles-for-durable-embedding-v1"
+  private val CandidateEmbeddingBackfillChecksum = sha256(CandidateEmbeddingBackfillDescriptor)
   val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
   val UsersEmailIndex = "users_emailCanonical_unique"
   val UsersNameIndex = "users_nameCanonical_unique"
@@ -64,10 +71,20 @@ object MongoHiringSetup {
   val UserEmailSparseIndexMigrationId = "user-email-canonical-sparse-v1"
 
   def initialize(database: MongoDatabase): IO[Unit] =
-    initialize(database, None)
+    initialize(database, None, vectorSearchEnabled = false)
 
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    runHiringUserSetupMigration(database, atlas) *> runEmbeddingWorkMigration(database)
+    initialize(database, atlas, vectorSearchEnabled = atlas.nonEmpty)
+
+  /** Vector work migrations are opt-in so a disabled vector runtime never creates a reindex backlog. */
+  def initialize(
+      database: MongoDatabase,
+      atlas: Option[AtlasSearchIndexConfig],
+      vectorSearchEnabled: Boolean
+  ): IO[Unit] =
+    runHiringUserSetupMigration(database, atlas) *>
+      runEmbeddingWorkMigration(database) *>
+      (if (vectorSearchEnabled) runEmbeddingBackfills(database).sequence_ else IO.unit)
 
   private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
       createIndex(database.getCollection("users"),
@@ -187,6 +204,66 @@ object MongoHiringSetup {
     }
   }
 
+  private def runEmbeddingBackfills(database: MongoDatabase): List[IO[Unit]] =
+    List(
+      runEmbeddingBackfillMigration(
+        database,
+        JobEmbeddingBackfillMigrationId,
+        JobEmbeddingBackfillDescriptor,
+        JobEmbeddingBackfillChecksum,
+        database.getCollection("jobs"),
+        new Document(),
+        EmbeddingWorkKind.Job
+      ),
+      runEmbeddingBackfillMigration(
+        database,
+        CandidateEmbeddingBackfillMigrationId,
+        CandidateEmbeddingBackfillDescriptor,
+        CandidateEmbeddingBackfillChecksum,
+        database.getCollection("users"),
+        Filters.and(
+          Filters.eq("role", "Candidate"),
+          Filters.eq("accountStatus", "Active"),
+          Filters.exists("profile")
+        ),
+        EmbeddingWorkKind.CandidateProfile
+      )
+    )
+
+  private def runEmbeddingBackfillMigration(
+      database: MongoDatabase,
+      id: String,
+      descriptor: String,
+      checksum: String,
+      source: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      sourceFilter: Bson,
+      kind: EmbeddingWorkKind
+  ): IO[Unit] = {
+    val ledger = database.getCollection(HiringMigrationLedger)
+    IO(UUID.randomUUID().toString).flatMap { owner =>
+      for {
+        now <- IO.realTimeInstant
+        _ <- ensureLedgerRecord(ledger, id, descriptor, checksum, now)
+        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", id)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("embedding backfill ledger record was not created")))
+        _ <- validateLedgerRecord(record, id, descriptor, checksum)
+        claimed <- claimMigration(ledger, id, checksum, owner, now)
+        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", id)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("embedding backfill ledger record disappeared"))))(IO.pure)
+        _ <- claimed match {
+          case None if current.getString("status") == "Applied" => verifyEmbeddingWorkIndexes(database)
+          case None => IO.raiseError(new IllegalStateException(
+            s"hiring migration '$id' is already applying; wait for its lease to expire before recovery"
+          ))
+          case Some(_) =>
+            backfillEmbeddingWork(source, sourceFilter, kind, ledger, id, checksum, owner, database) *>
+              verifyEmbeddingWorkIndexes(database) *>
+              markMigrationApplied(ledger, id, checksum, owner)
+        }
+      } yield ()
+    }
+  }
+
   private def ensureLedgerRecord(
       ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
       id: String,
@@ -241,25 +318,29 @@ object MongoHiringSetup {
 
   private def persistCheckpoint(
       ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      migrationId: String,
+      checksum: String,
       owner: String,
-      lastProcessedId: String
+      lastProcessedId: String,
+      processedCount: Int
   ): IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
       PublisherBridge.first(ledger.updateOne(
         Filters.and(
-          Filters.eq("_id", HiringUserSetupMigrationId),
-          Filters.eq("checksum", HiringUserSetupChecksum),
+          Filters.eq("_id", migrationId),
+          Filters.eq("checksum", checksum),
           Filters.eq("status", "Applying"),
           Filters.eq("owner", owner)
         ),
         Updates.combine(
           Updates.set("lastProcessedId", lastProcessedId),
+          Updates.set("processedCount", java.lang.Integer.valueOf(processedCount)),
           Updates.set("leaseUntil", Date.from(now.plusMillis(MigrationLease.toMillis))),
           Updates.set("updatedAt", Date.from(now))
         )
       )).flatMap { result =>
         if (result.exists(_.getMatchedCount == 1)) IO.unit
-        else IO.raiseError(new IllegalStateException(s"hiring migration '$HiringUserSetupMigrationId' lost its lease"))
+        else IO.raiseError(new IllegalStateException(s"hiring migration '$migrationId' lost its lease"))
       }
     }
 
@@ -603,7 +684,7 @@ object MongoHiringSetup {
       userMigrationBatch(users, lastId).flatMap { documents =>
         documents.traverse_(update) *>
           documents.lastOption.fold(IO.unit) { document =>
-            persistCheckpoint(ledger, owner, document.getString("_id")) *>
+            persistCheckpoint(ledger, HiringUserSetupMigrationId, HiringUserSetupChecksum, owner, document.getString("_id"), 0) *>
               migrateAfter(Option(document.getString("_id")))
           }
       }
@@ -614,6 +695,52 @@ object MongoHiringSetup {
       case error: MongoCommandException if error.getErrorCode == 11000 =>
         IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
       case error => IO.raiseError(error)
+    }
+  }
+
+  private def backfillEmbeddingWork(
+      source: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      sourceFilter: Bson,
+      kind: EmbeddingWorkKind,
+      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
+      migrationId: String,
+      checksum: String,
+      owner: String,
+      database: MongoDatabase
+  ): IO[Unit] = {
+    val work = new MongoEmbeddingWorkRepository(database)
+
+    def batch(after: Option[String]): IO[List[Document]] = {
+      val cursorFilter = after.fold[Option[Bson]](None)(id => Some(Filters.gt("_id", id)))
+      PublisherBridge.all(source.find(Filters.and((List(Some(sourceFilter), cursorFilter).flatten)*))
+        .sort(Sorts.ascending("_id"))
+        .limit(UserMigrationBatchSize)
+        .batchSize(UserMigrationBatchSize))
+    }
+
+    def enqueue(document: Document): IO[Unit] =
+      for {
+        id <- IO.fromOption(Option(document.getString("_id")).filter(_.nonEmpty))(
+          new IllegalStateException(s"embedding backfill '$migrationId' found a document without a string _id")
+        )
+        now <- IO.realTimeInstant
+        result <- work.enqueue(EmbeddingWorkKey(kind, id), now)
+        _ <- IO.fromEither(result.leftMap(error => new IllegalStateException(s"embedding backfill '$migrationId' enqueue failed: $error")))
+      } yield ()
+
+    def migrateAfter(after: Option[String], processed: Int): IO[Unit] =
+      batch(after).flatMap { documents =>
+        documents.traverse_(enqueue) *>
+          documents.lastOption.fold(IO.unit) { document =>
+            val lastId = document.getString("_id")
+            persistCheckpoint(ledger, migrationId, checksum, owner, lastId, processed + documents.size) *>
+              migrateAfter(Some(lastId), processed + documents.size)
+          }
+      }
+
+    PublisherBridge.first(ledger.find(Filters.eq("_id", migrationId))).flatMap {
+      case Some(record) => migrateAfter(Option(record.getString("lastProcessedId")), record.getInteger("processedCount", 0))
+      case None => IO.raiseError(new IllegalStateException(s"embedding backfill '$migrationId' ledger record disappeared"))
     }
   }
 

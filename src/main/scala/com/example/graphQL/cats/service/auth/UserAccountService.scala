@@ -18,6 +18,8 @@ final class UserAccountService(
     hasher: PasswordHasher[IO],
     tokenIssuer: AccessTokenIssuer[IO]
 ) extends AccountUseCases[IO] {
+  private val authorization = ActorAuthorization(users)
+
   override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
     if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.account(AccountError.AdminSignupForbidden)))
     else if (!UserProfile.matchesRole(input.role, input.profile))
@@ -30,7 +32,7 @@ final class UserAccountService(
           val user = toUser(userId, input.name, input.role, input.profile, now)
           token(user, now).flatMap {
             case Left(error) => IO.pure(Left(error))
-            case Right((_, accountToken)) => accounts.createAccount(user, hash).map {
+            case Right((_, accountToken)) => accounts.createAccount(user, hash, now).map {
               case Left(RepositoryError.Conflict) => Left(UseCaseError.account(AccountError.NameTaken))
               case Left(error) => Left(UseCaseError.repository(error))
               case Right(()) => Right(user -> accountToken)
@@ -70,14 +72,13 @@ final class UserAccountService(
   }
 
   override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
-    users.find(actor.userId).map(_.filter(_.accountStatus == AccountStatus.Active).toRight(UseCaseError.authentication(AuthenticationError.Unauthorized)))
+    authorization.resolve(actor)
 
   override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
-    users.find(actor.userId).flatMap {
-      case None => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
-      case Some(user) if user.accountStatus != AccountStatus.Active => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
-      case Some(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
-      case Some(user) =>
+    authorization.resolve(actor).flatMap {
+      case Left(error) => IO.pure(Left(error))
+      case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
+      case Right(user) =>
         if (!UserProfile.matchesRole(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
         else UserProfile.validateFor(user.role, Some(input.profile)).fold(
           errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
@@ -86,17 +87,17 @@ final class UserAccountService(
     }
 
   override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
-    users.find(actor.userId).flatMap {
-      case Some(user) if user.role == UserRole.Admin && user.adminSingleton => IO.pure(Left(UseCaseError.authentication(AuthenticationError.SingletonAdminViolation)))
-      case Some(user) if user.accountStatus == AccountStatus.Active =>
+    authorization.resolve(actor, allowDeleted = true).flatMap {
+      case Left(error) => IO.pure(Left(error))
+      case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.authentication(AuthenticationError.SingletonAdminViolation)))
+      case Right(user) if user.accountStatus == AccountStatus.Deleted => IO.pure(Right(()))
+      case Right(user) =>
         accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}").map(_.leftMap(UseCaseError.repository))
-      case Some(_) => IO.pure(Right(()))
-      case None => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
     }
 
   override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =
-    users.find(actor.userId).flatMap {
-      case Some(user) if user.role == UserRole.Admin && user.adminSingleton && user.accountStatus == AccountStatus.Active =>
+    authorization.resolve(actor).flatMap {
+      case Right(user) if user.role == UserRole.Admin =>
         accounts.listAccounts(page).map(_.asRight[UseCaseError])
       case _ => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
     }
@@ -110,11 +111,21 @@ final class UserAccountService(
     (validateCredentials(input.name, input.password), UserProfile.validateFor(input.role, input.profile)).mapN((_, _) => ())
 
   private def validateCredentials(name: String, password: String): ValidatedNel[DomainValidationError, Unit] =
-    (validateName(name), if (password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length >= 12) ().validNel else DomainValidationError.BlankField("password").invalidNel).mapN((_, _) => ())
+    (validateName(name), validatePassword(password)).mapN((_, _) => ())
+
+  private def validatePassword(password: String): ValidatedNel[DomainValidationError, Unit] =
+    val byteLength = password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length
+    if (byteLength < 12) DomainValidationError.BlankField("password").invalidNel
+    else if (byteLength > FieldLimits.PasswordMaxBytes)
+      DomainValidationError.ByteLengthExceeded("password", FieldLimits.PasswordMaxBytes, byteLength).invalidNel
+    else ().validNel
 
   private def validateName(value: String): ValidatedNel[DomainValidationError, String] =
     val normalized = Normalizer.normalize(value.trim, Normalizer.Form.NFKC)
-    if (normalized.isEmpty) DomainValidationError.BlankField("name").invalidNel else normalized.validNel
+    if (normalized.isEmpty) DomainValidationError.BlankField("name").invalidNel
+    else if (normalized.length > FieldLimits.ShortTextMaxChars)
+      DomainValidationError.TextTooLong("name", FieldLimits.ShortTextMaxChars, normalized.length).invalidNel
+    else normalized.validNel
 
   private def toUser(id: UserId, name: String, role: UserRole, profile: Option[UserProfile], now: Instant): User =
     User(id, None, Normalizer.normalize(name.trim, Normalizer.Form.NFKC), role, profile, now)

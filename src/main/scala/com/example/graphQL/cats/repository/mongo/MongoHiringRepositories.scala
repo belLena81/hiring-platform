@@ -180,7 +180,8 @@ private[mongo] object MongoKeysetPaging {
 
 final class MongoUserRepository(
     database: MongoDatabase,
-    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction
+    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
+    embeddingWork: Option[MongoEmbeddingWorkRepository] = None
 ) extends UserRepository[IO] with UserAccountRepository[IO] with MongoConflictWriteMapping {
   private val collection = database.getCollection("users")
   private val registry = database.getCollection("account_registry")
@@ -248,10 +249,45 @@ final class MongoUserRepository(
       }
     }.handleError(mapWrite)
 
+  override def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =
+    if (embeddingWork.nonEmpty && user.role == UserRole.Candidate) createAccountWithEmbeddingWork(user, passwordHash, now)
+    else createAccount(user, passwordHash)
+
+  /** Candidate account creation and its embedding work share the same transaction. */
+  def createAccountWithEmbeddingWork(
+      user: User,
+      passwordHash: String,
+      now: Instant
+  ): IO[Either[RepositoryError, Unit]] =
+    embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Unit])) { work =>
+      if (!user.roleProfileIsValid || user.role != UserRole.Candidate) IO.pure(Left(RepositoryError.Conflict))
+      else transactionRunner.run { session =>
+        val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Initialized"))
+        findOne(session, registry, stateFilter).flatMap {
+          case None => IO.pure(Left(RepositoryError.Conflict))
+          case Some(_) =>
+            insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)).flatMap {
+              case Some(_) => work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, user.id.value.toString), now)
+              case None => IO.pure(Left(RepositoryError.Unavailable))
+            }
+        }
+      }.handleError(mapWrite)
+    }
+
   override def findByCanonicalName(nameCanonical: String): IO[Option[AccountCredentials]] =
     PublisherBridge.first(collection.find(Filters.eq("nameCanonical", nameCanonical))).map(_.flatMap(MongoHiringCodecs.readCredentials))
 
   override def updateProfile(
+      userId: UserId,
+      profile: UserProfile,
+      now: Instant
+  ): IO[Either[RepositoryError, User]] =
+    profile match {
+      case _: UserProfile.Candidate if embeddingWork.nonEmpty => updateCandidateProfileWithEmbeddingWork(userId, profile, now)
+      case _ => updateProfileDirect(userId, profile, now)
+    }
+
+  private def updateProfileDirect(
       userId: UserId,
       profile: UserProfile,
       now: Instant
@@ -269,6 +305,36 @@ final class MongoUserRepository(
       case None => IO.pure(Left(RepositoryError.Unavailable))
     }.handleError(mapWrite)
 
+  /** Candidate profile changes and their reindex request are one durable transaction. */
+  def updateCandidateProfileWithEmbeddingWork(
+      userId: UserId,
+      profile: UserProfile,
+      now: Instant
+  ): IO[Either[RepositoryError, User]] =
+    embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, User])) { work =>
+      transactionRunner.run { session =>
+        val filter = Filters.and(
+          Filters.eq("_id", userId.value.toString),
+          Filters.eq("role", UserRole.Candidate.toString),
+          Filters.eq("accountStatus", AccountStatus.Active.toString)
+        )
+        val update = Updates.combine(
+          Updates.set("profile", MongoHiringCodecs.profile(profile)),
+          Updates.inc("version", 1L),
+          Updates.set("updatedAt", Date.from(now))
+        )
+        updateOne(session, collection, filter, update).flatMap {
+          case Some(result) if result.getMatchedCount == 1L =>
+            work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, userId.value.toString), now)
+          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+          case None => IO.pure(Left(RepositoryError.Unavailable))
+        }
+      }.flatMap {
+        case Right(()) => find(userId).map(_.toRight(RepositoryError.Unavailable))
+        case Left(error) => IO.pure(Left(error))
+      }.handleError(mapWrite)
+    }
+
   override def listAccounts(page: UserPageRequest): IO[List[User]] = {
     val filters = List(
       Some(Filters.eq("accountStatus", page.status.toString)),
@@ -276,7 +342,7 @@ final class MongoUserRepository(
       page.cursor.map(cursor => MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString))
     ).flatten
     val filter = Filters.and(filters*)
-    PublisherBridge.all(collection.find(filter).sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id"))).limit(page.pageSize)).map(_.map(MongoHiringCodecs.readUser))
+    PublisherBridge.all(collection.find(filter).sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id"))).limit(page.pageSize.value)).map(_.map(MongoHiringCodecs.readUser))
   }
 
   override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] =
@@ -300,17 +366,47 @@ final class MongoUserRepository(
         case None => IO.pure(Left(RepositoryError.Unavailable))
       }
     }.handleError(mapWrite)
+
+  private def findOne(
+      session: Option[ClientSession],
+      target: MongoCollection[Document],
+      filter: Bson
+  ): IO[Option[Document]] =
+    session.fold(PublisherBridge.first(target.find(filter)))(active => PublisherBridge.first(target.find(active, filter)))
+
+  private def insertOne(
+      session: Option[ClientSession],
+      target: MongoCollection[Document],
+      document: Document
+  ) =
+    session.fold(PublisherBridge.first(target.insertOne(document)))(active => PublisherBridge.first(target.insertOne(active, document)))
+
+  private def updateOne(
+      session: Option[ClientSession],
+      target: MongoCollection[Document],
+      filter: Bson,
+      update: Bson
+  ) =
+    session.fold(PublisherBridge.first(target.updateOne(filter, update)))(active => PublisherBridge.first(target.updateOne(active, filter, update)))
 }
 
 object MongoUserRepository {
   def standalone(database: MongoDatabase): MongoUserRepository =
     new MongoUserRepository(database)
 
-  def transactional(database: MongoDatabase, client: MongoClient): MongoUserRepository =
-    new MongoUserRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict))
+  def transactional(
+      database: MongoDatabase,
+      client: MongoClient,
+      embeddingWork: Option[MongoEmbeddingWorkRepository] = None
+  ): MongoUserRepository =
+    new MongoUserRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict), embeddingWork)
 }
 
-final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO] with MongoConflictWriteMapping {
+final class MongoJobRepository(
+    database: MongoDatabase,
+    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
+    embeddingWork: Option[MongoEmbeddingWorkRepository] = None
+) extends JobRepository[IO] with MongoConflictWriteMapping {
   private val collection = database.getCollection("jobs")
 
   override def find(id: JobId): IO[Option[Job]] =
@@ -331,6 +427,20 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
   override def create(job: Job): IO[Either[RepositoryError, Unit]] =
     PublisherBridge.first(collection.insertOne(MongoHiringCodecs.job(job))).as(Right(())).handleError(mapWrite)
 
+  override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
+    if (embeddingWork.nonEmpty) createWithEmbeddingWork(job, now) else create(job)
+
+  /** Job creation and the coalesced reindex request commit together. */
+  def createWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
+    embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Unit])) { work =>
+      transactionRunner.run { session =>
+        insertOne(session, MongoHiringCodecs.job(job)).flatMap {
+          case Some(_) => work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+          case None => IO.pure(Left(RepositoryError.Unavailable))
+        }
+      }.handleError(mapWrite)
+    }
+
   override def update(job: Job): IO[Either[RepositoryError, Job]] = {
     val persisted = job.copy(version = job.version + 1L)
     PublisherBridge.first(collection.replaceOne(
@@ -341,6 +451,28 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
       case Some(_) => Left(RepositoryError.Conflict)
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
+  }
+
+  override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+    if (embeddingWork.nonEmpty) updateWithEmbeddingWork(job, now) else update(job)
+
+  /** Optimistic job replacement and the coalesced reindex request commit together. */
+  def updateWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
+    val persisted = job.copy(version = job.version + 1L)
+    embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Job])) { work =>
+      transactionRunner.run { session =>
+        replaceOne(
+          session,
+          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("version", job.version)),
+          MongoHiringCodecs.job(persisted)
+        ).flatMap {
+          case Some(result) if result.getMatchedCount == 1L =>
+            work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+          case None => IO.pure(Left(RepositoryError.Unavailable))
+        }
+      }.map(_.as(persisted)).handleError(mapWrite)
+    }
   }
 
   override def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
@@ -376,6 +508,24 @@ final class MongoJobRepository(database: MongoDatabase) extends JobRepository[IO
     val activeFilters = (filters :+ cursorFilter).flatten
     if (activeFilters.isEmpty) new Document() else Filters.and(activeFilters*)
   }
+
+  private def insertOne(session: Option[ClientSession], document: Document) =
+    session.fold(PublisherBridge.first(collection.insertOne(document)))(active => PublisherBridge.first(collection.insertOne(active, document)))
+
+  private def replaceOne(session: Option[ClientSession], filter: Bson, document: Document) =
+    session.fold(PublisherBridge.first(collection.replaceOne(filter, document)))(active => PublisherBridge.first(collection.replaceOne(active, filter, document)))
+}
+
+object MongoJobRepository {
+  def standalone(database: MongoDatabase): MongoJobRepository =
+    new MongoJobRepository(database)
+
+  def transactional(
+      database: MongoDatabase,
+      client: MongoClient,
+      embeddingWork: Option[MongoEmbeddingWorkRepository] = None
+  ): MongoJobRepository =
+    new MongoJobRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict), embeddingWork)
 }
 
 final class MongoSemanticSearchRepository(

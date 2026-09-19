@@ -5,7 +5,6 @@ import cats.effect.Ref
 import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.shared.pagination.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.service.ServiceFixtures.*
-import com.example.graphQL.cats.service.search.{EmbeddingWork, EmbeddingWorkPublisher}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
@@ -56,7 +55,7 @@ class JobServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("VHS-AC05 createJob and updateJob enqueue embedding work only after successful writes") {
+  test("createJob and updateJob preserve their write results for durable repository handoff") {
     val updatedInput = UpdateJobInput(
       "Updated role",
       "Build updated services",
@@ -67,9 +66,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter, candidateId -> candidate))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
-      published <- Ref.of[IO, Vector[EmbeddingWork]](Vector.empty)
-      publisher = RecordingEmbeddingPublisher(published)
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs), publisher)
+      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
       input = CreateJobInput(
         "New role",
         "Build services",
@@ -81,12 +78,10 @@ class JobServiceSpec extends CatsEffectSuite {
       created <- service.createJob(ActorContext(recruiterId, UserRole.Recruiter), input, now, jobId)
       rejected <- service.createJob(ActorContext(candidateId, UserRole.Candidate), input, now, JobId(UUID.randomUUID()))
       updated <- service.updateJob(ActorContext(recruiterId, UserRole.Recruiter), jobId, updatedInput, later)
-      work <- published.get
     } yield {
       assertEquals(created.map(_.id), Right(jobId))
       assertEquals(rejected, Left(UseCaseError.domain(DomainError.Forbidden)))
       assertEquals(updated.map(_.id), Right(jobId))
-      assertEquals(work.toList, List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.JobChanged(jobId)))
     }
   }
 
@@ -174,9 +169,4 @@ class JobServiceSpec extends CatsEffectSuite {
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId)
     } yield assertEquals(result, Left(UseCaseError.domain(DomainError.Forbidden)))
   }
-}
-
-private final case class RecordingEmbeddingPublisher(ref: Ref[IO, Vector[EmbeddingWork]]) extends EmbeddingWorkPublisher[IO] {
-  override def publish(work: EmbeddingWork): IO[Unit] =
-    ref.update(_ :+ work)
 }

@@ -4,7 +4,7 @@ import cats.effect.IO
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Updates}
-import com.mongodb.reactivestreams.client.MongoDatabase
+import com.mongodb.reactivestreams.client.{ClientSession, MongoDatabase}
 import org.bson.Document
 import java.time.Instant
 import java.util.{Date, UUID}
@@ -13,7 +13,21 @@ import java.util.{Date, UUID}
 final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends EmbeddingWorkRepository[IO] {
   private val collection = database.getCollection("embedding_work")
 
-  override def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] = {
+  override def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
+    enqueue(None, key, now)
+
+  /**
+    * Persists work in the caller's Mongo transaction. This is deliberately a concrete Mongo capability:
+    * the generic work port has no transaction/session concept.
+    */
+  def enqueue(session: ClientSession, key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
+    enqueue(Some(session), key, now)
+
+  private[mongo] def enqueue(
+      session: Option[ClientSession],
+      key: EmbeddingWorkKey,
+      now: Instant
+  ): IO[Either[RepositoryError, Unit]] = {
     val readyUpdate = Updates.combine(
       Updates.setOnInsert("kind", key.kind.toString),
       Updates.setOnInsert("entityId", key.entityId),
@@ -34,40 +48,51 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
       Updates.set("attempts", java.lang.Integer.valueOf(0)),
       Updates.set("updatedAt", Date.from(now))
     )
-    PublisherBridge.first(collection.updateOne(
+    updateOne(session,
       Filters.and(Filters.eq("_id", key.value), Filters.ne("state", "Processing")),
       readyUpdate,
       new UpdateOptions().upsert(true)
-    )).flatMap {
+    ).flatMap {
       case Some(result) if result.getMatchedCount == 1L || result.getUpsertedId != null => IO.pure(Right(()))
       case _ =>
-        PublisherBridge.first(collection.updateOne(
+        updateOne(session,
           Filters.and(Filters.eq("_id", key.value), Filters.eq("state", "Processing")),
           refreshActiveLease
-        )).map {
+        ).map {
           case Some(result) if result.getMatchedCount == 1L => Right(())
           case _ => Left(RepositoryError.Conflict)
         }
     }.handleError(_ => Left(RepositoryError.Unavailable))
   }
 
+  private def updateOne(
+      session: Option[ClientSession],
+      filter: org.bson.conversions.Bson,
+      update: org.bson.conversions.Bson,
+      options: UpdateOptions = new UpdateOptions()
+  ) =
+    session.fold(PublisherBridge.first(collection.updateOne(filter, update, options))) { active =>
+      PublisherBridge.first(collection.updateOne(active, filter, update, options))
+    }
+
   override def claim(workerId: String, now: Instant, leaseUntil: Instant): IO[Either[RepositoryError, Option[ClaimedEmbeddingWork]]] = {
-    val token = UUID.randomUUID().toString
-    val available = Filters.and(Filters.in("state", "Ready", "Retry"), Filters.lte("availableAt", Date.from(now)))
-    val expiredLease = Filters.and(Filters.eq("state", "Processing"), Filters.lt("leaseUntil", Date.from(now)))
-    val update = Updates.combine(
-      Updates.set("state", "Processing"),
-      Updates.set("leaseOwner", workerId),
-      Updates.set("leaseToken", token),
-      Updates.set("leaseUntil", Date.from(leaseUntil)),
-      Updates.set("updatedAt", Date.from(now))
-    )
-    val options = new FindOneAndUpdateOptions()
-      .returnDocument(ReturnDocument.AFTER)
-      .sort(Sorts.ascending("availableAt", "_id"))
-    PublisherBridge.first(collection.findOneAndUpdate(Filters.or(available, expiredLease), update, options))
-      .map(document => Right(document.map(readClaim)))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    IO(UUID.randomUUID().toString).flatMap { token =>
+      val available = Filters.and(Filters.in("state", "Ready", "Retry"), Filters.lte("availableAt", Date.from(now)))
+      val expiredLease = Filters.and(Filters.eq("state", "Processing"), Filters.lt("leaseUntil", Date.from(now)))
+      val update = Updates.combine(
+        Updates.set("state", "Processing"),
+        Updates.set("leaseOwner", workerId),
+        Updates.set("leaseToken", token),
+        Updates.set("leaseUntil", Date.from(leaseUntil)),
+        Updates.set("updatedAt", Date.from(now))
+      )
+      val options = new FindOneAndUpdateOptions()
+        .returnDocument(ReturnDocument.AFTER)
+        .sort(Sorts.ascending("availableAt", "_id"))
+      PublisherBridge.first(collection.findOneAndUpdate(Filters.or(available, expiredLease), update, options))
+        .map(document => Right(document.map(readClaim)))
+        .handleError(_ => Left(RepositoryError.Unavailable))
+    }
   }
 
   override def complete(claim: ClaimedEmbeddingWork): IO[Either[RepositoryError, Unit]] =

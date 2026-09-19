@@ -52,8 +52,8 @@ object ApplicationEvent {
       reason: Option[String]
   ): ValidatedNel[DomainValidationError, ApplicationEvent] =
     (
-      validateOptionalText("feedback", feedback),
-      validateOptionalText("reason", reason)
+      validateOptionalText("feedback", feedback, FieldLimits.LongTextMaxChars),
+      validateOptionalText("reason", reason, FieldLimits.LongTextMaxChars)
     ).mapN { (validFeedback, validReason) =>
       ApplicationEvent(id, applicationId, previousStatus, newStatus, actorId, occurredAt, validFeedback, validReason)
     }

@@ -8,10 +8,10 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, User, UserRole}
 
 final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
-  def resolve(actor: ActorContext): F[Either[UseCaseError, User]] =
+  def resolve(actor: ActorContext, allowDeleted: Boolean = false): F[Either[UseCaseError, User]] =
     users.find(actor.userId).map {
       case None => UseCaseError.authentication(AuthenticationError.Unauthorized).asLeft[User]
-      case Some(user) if user.accountStatus != AccountStatus.Active =>
+      case Some(user) if user.accountStatus != AccountStatus.Active && !allowDeleted =>
         UseCaseError.authentication(AuthenticationError.Unauthorized).asLeft[User]
       case Some(user) if user.role != actor.role => UseCaseError.domain(DomainError.Forbidden).asLeft[User]
       case Some(user) if user.role == UserRole.Admin && !user.adminSingleton =>

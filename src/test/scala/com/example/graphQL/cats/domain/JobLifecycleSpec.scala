@@ -26,31 +26,29 @@ class JobLifecycleSpec extends FunSuite {
     createdAt
   )
 
-  test("publish moves Draft to Open through State and updates aggregate state") {
-    val (state, result) = JobLifecycle.publish(updatedAt).run(draftJob).value
+  test("publish moves Draft to Open") {
+    val result = JobLifecycle.publish(draftJob, updatedAt)
 
     assertEquals(result.map(_.status), Right(JobStatus.Open))
-    assertEquals(state.status, JobStatus.Open)
-    assertEquals(state.updatedAt, updatedAt)
+    assertEquals(result.map(_.updatedAt), Right(updatedAt))
   }
 
-  test("create rejects Closed as an initial status through State") {
+  test("create rejects Closed as an initial status") {
     val closed = draftJob.copy(status = JobStatus.Closed)
-    val (state, result) = JobLifecycle.create(closed).run(closed).value
+    val result = JobLifecycle.create(closed)
 
     assertEquals(result, Left(DomainError.InvalidInitialJobStatus(JobStatus.Closed)))
-    assertEquals(state, closed)
   }
 
-  test("rejected publish leaves aggregate state unchanged") {
+  test("rejected publish retains the original aggregate value") {
     val closed = draftJob.copy(status = JobStatus.Closed)
-    val (state, result) = JobLifecycle.publish(updatedAt).run(closed).value
+    val result = JobLifecycle.publish(closed, updatedAt)
 
     assertEquals(result, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Open)))
-    assertEquals(state, closed)
+    assertEquals(closed.status, JobStatus.Closed)
   }
 
-  test("update replaces mutable content through State without changing owner or status") {
+  test("update replaces content without changing owner or status") {
     val input = JobLifecycle.Update(
       title = "Lead Scala Developer",
       description = "Own backend services",
@@ -59,22 +57,22 @@ class JobLifecycleSpec extends FunSuite {
       location = Location("Poland", "Warsaw", remote = true),
       updatedAt = updatedAt
     )
-    val (state, result) = JobLifecycle.update(input).run(draftJob).value
+    val updated = JobLifecycle.update(draftJob, input)
 
-    assertEquals(result.map(_.title), Right("Lead Scala Developer"))
-    assertEquals(state.recruiterId, recruiterId)
-    assertEquals(state.status, JobStatus.Draft)
-    assertEquals(state.updatedAt, updatedAt)
+    assertEquals(updated.title, "Lead Scala Developer")
+    assertEquals(updated.recruiterId, recruiterId)
+    assertEquals(updated.status, JobStatus.Draft)
+    assertEquals(updated.updatedAt, updatedAt)
   }
 
   test("close moves Draft or Open to Closed and rejects already closed jobs") {
-    val (closedState, closedResult) = JobLifecycle.close(updatedAt).run(draftJob.copy(status = JobStatus.Open)).value
-    val (unchangedState, rejectedResult) = JobLifecycle.close(updatedAt).run(closedState).value
+    val closedResult = JobLifecycle.close(draftJob.copy(status = JobStatus.Open), updatedAt)
+    val closedState = closedResult.toOption.getOrElse(fail("expected job to close"))
+    val rejectedResult = JobLifecycle.close(closedState, updatedAt)
 
     assertEquals(closedResult.map(_.status), Right(JobStatus.Closed))
     assertEquals(closedState.status, JobStatus.Closed)
     assertEquals(closedState.closedAt, Some(updatedAt))
     assertEquals(rejectedResult, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed)))
-    assertEquals(unchangedState, closedState)
   }
 }

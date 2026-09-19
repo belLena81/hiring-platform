@@ -12,7 +12,6 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole
 import com.example.graphQL.cats.domain.policy.JobLifecycle
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.protocol.JobUseCases
-import com.example.graphQL.cats.service.search.{EmbeddingWork, EmbeddingWorkPublisher}
 import com.example.graphQL.cats.shared.pagination.JobPageRequest
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import java.time.Instant
@@ -36,8 +35,7 @@ final case class UpdateJobInput(
 
 final class JobService[F[_]: Monad](
     users: UserRepository[F],
-    jobs: JobRepository[F],
-    embeddingWork: EmbeddingWorkPublisher[F]
+    jobs: JobRepository[F]
 ) extends JobUseCases[F] {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
@@ -52,7 +50,7 @@ final class JobService[F[_]: Monad](
       user <- EitherT(authorization.resolve(actor))
       _ <- EitherT.cond[F](authorization.canManageJobs(user), (), UseCaseError.domain(DomainError.Forbidden))
       job <- EitherT.fromEither[F](validateNewJob(user.id, input, now, jobId))
-      created <- EitherT(persistCreatedJob(JobLifecycle.create(job).runA(job).value.widenUseCase))
+      created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase))
     } yield created).value
 
   def updateJob(
@@ -64,18 +62,18 @@ final class JobService[F[_]: Monad](
     authorizedJobs.manage(actor, jobId) { job =>
       (for {
         update <- EitherT.fromEither[F](validateUpdatedJob(job, input, now))
-        updated <- EitherT(persistUpdatedJob(JobLifecycle.update(update).runA(job).value.widenUseCase))
+        updated <- EitherT(persistUpdatedJob(Right[UseCaseError, Job](JobLifecycle.update(job, update))))
       } yield updated).value
     }
 
   def publishJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(JobLifecycle.publish(now).runA(job).value.widenUseCase)
+      persistJob(JobLifecycle.publish(job, now).widenUseCase)
     }
 
   def closeJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(JobLifecycle.close(now).runA(job).value.widenUseCase)
+      persistJob(JobLifecycle.close(job, now).widenUseCase)
     }
 
   def viewJob(actor: ActorContext, jobId: JobId): F[Either[UseCaseError, Job]] =
@@ -158,33 +156,20 @@ final class JobService[F[_]: Monad](
     result match {
       case Left(error) => error.asLeft[Job].pure[F]
       case Right(job) =>
-        jobs.create(job).map(_.widenUseCase.as(job)).flatTap {
-          case Right(created) => embeddingWork.publish(EmbeddingWork.JobChanged(created.id))
-          case Left(_) => ().pure[F]
-        }
+        jobs.create(job, job.createdAt).map(_.widenUseCase.as(job))
     }
 
   private def persistUpdatedJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
-    persistJob(result).flatTap {
-      case Right(updated) => embeddingWork.publish(EmbeddingWork.JobChanged(updated.id))
-      case Left(_) => ().pure[F]
-    }
+    persistJob(result)
 
   private def persistJob(result: Either[UseCaseError, Job]): F[Either[UseCaseError, Job]] =
     result match {
       case Left(error) => error.asLeft[Job].pure[F]
-      case Right(job) => jobs.update(job).map(_.widenUseCase)
+      case Right(job) => jobs.update(job, job.updatedAt).map(_.widenUseCase)
     }
 }
 
 object JobService {
   def apply[F[_]: Monad](users: UserRepository[F], jobs: JobRepository[F]): JobService[F] =
-    new JobService(users, jobs, EmbeddingWorkPublisher.noop[F])
-
-  def apply[F[_]: Monad](
-      users: UserRepository[F],
-      jobs: JobRepository[F],
-      embeddingWork: EmbeddingWorkPublisher[F]
-  ): JobService[F] =
-    new JobService(users, jobs, embeddingWork)
+    new JobService(users, jobs)
 }

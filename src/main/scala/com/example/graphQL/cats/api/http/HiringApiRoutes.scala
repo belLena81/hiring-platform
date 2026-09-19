@@ -71,14 +71,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     }
 
   private def responseMediaType(request: Request[IO]): Option[MediaType] =
-    request.headers.get[Accept].fold(Option(HiringApiRoutes.SupportedResponseMediaTypes.head._1)) { accept =>
-      HiringApiRoutes.SupportedResponseMediaTypes.flatMap { case (mediaType, declarationIndex) =>
-        accept.values.toList.flatMap { entry =>
-          Option.when(entry.mediaRange.satisfiedBy(mediaType) && entry.qValue > QValue.Zero)(
-            (mediaType, entry.qValue, declarationIndex))
-        }
-      }.maxByOption { case (_, quality, declarationIndex) => (quality, -declarationIndex) }.map(_._1)
-    }
+    HiringApiRoutes.selectResponseMediaType(request.headers.get[Accept])
 
   private def graphql(request: Request[IO], requestId: String, trace: TraceContext,
       mediaType: MediaType): IO[Response[IO]] = {
@@ -277,6 +270,22 @@ object HiringApiRoutes {
   ).zipWithIndex
   private val SupportedResponseMediaTypesMessage =
     SupportedResponseMediaTypes.map { case (mediaType, _) => s"${mediaType.mainType}/${mediaType.subType}" }.mkString(" or ")
+
+  private[http] def selectResponseMediaType(accept: Option[Accept]): Option[MediaType] =
+    accept.fold(Option(SupportedResponseMediaTypes.head._1)) { header =>
+      SupportedResponseMediaTypes.flatMap { case (mediaType, declarationIndex) =>
+        header.values.toList.zipWithIndex
+          .filter { case (entry, _) => entry.mediaRange.satisfiedBy(mediaType) }
+          .maxByOption { case (entry, headerIndex) => (mediaRangeSpecificity(entry.mediaRange), -headerIndex) }
+          .collect { case (entry, _) if entry.qValue > QValue.Zero => (mediaType, entry.qValue, declarationIndex) }
+      }.maxByOption { case (_, quality, declarationIndex) => (quality, -declarationIndex) }.map(_._1)
+    }
+
+  private def mediaRangeSpecificity(mediaRange: MediaRange): Int = mediaRange match {
+    case _: MediaType => 2
+    case range if range.mainType == "*" => 0
+    case _ => 1
+  }
 
   final case class Dependencies(
       hiring: HiringGraphQLServices,

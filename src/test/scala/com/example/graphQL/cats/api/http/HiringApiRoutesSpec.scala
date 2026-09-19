@@ -780,6 +780,23 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("Accept resolves each offered representation by its most-specific matching range") {
+    val cases = List(
+      ("application/*;q=1, application/graphql-response+json;q=0", Status.Ok, "application/json"),
+      ("*/*;q=1, application/json;q=0", Status.Ok, "application/graphql-response+json"),
+      ("application/*;q=1, application/graphql-response+json;q=0, application/json;q=0", Status.NotAcceptable, "application/json")
+    )
+    app(IO.pure(ProbeResult.Ready)).flatMap { http =>
+      cases.traverse_ { case (accept, expectedStatus, expectedMediaType) =>
+        http(health.putHeaders(Header.Raw(CIString("Accept"), accept))).map { response =>
+          assertEquals(response.status, expectedStatus, accept)
+          assertEquals(response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"),
+            Some(expectedMediaType), accept)
+        }
+      }
+    }
+  }
+
   test("malformed Accept segments are ignored independently") {
     val accepted = List(
       "text/html;q=invalid, application/graphql-response+json",

@@ -21,4 +21,7 @@ enum DomainValidationError {
   case BlankField(field: String)
   case EmptyCollection(field: String)
   case InvalidNumber(field: String, minimum: Int, maximum: Int, actual: Int)
+  case TextTooLong(field: String, maximum: Int, actual: Int)
+  case ByteLengthExceeded(field: String, maximum: Int, actual: Int)
+  case TooManyValues(field: String, maximum: Int, actual: Int)
 }

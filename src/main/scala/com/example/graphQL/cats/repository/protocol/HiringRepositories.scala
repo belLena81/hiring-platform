@@ -6,6 +6,7 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
 import java.time.Instant
+import scala.annotation.unused
 
 trait UserRepository[F[_]] {
   def find(id: UserId): F[Option[User]]
@@ -17,6 +18,8 @@ trait UserAccountRepository[F[_]] {
   def bootstrap(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
   def initialized: F[Boolean]
   def createAccount(user: User, passwordHash: String): F[Either[RepositoryError, Unit]]
+  def createAccount(user: User, passwordHash: String, @unused now: Instant): F[Either[RepositoryError, Unit]] =
+    createAccount(user, passwordHash)
   def findByCanonicalName(nameCanonical: String): F[Option[AccountCredentials]]
   def updateProfile(userId: UserId, profile: UserProfile, now: Instant): F[Either[RepositoryError, User]]
   def listAccounts(page: UserPageRequest): F[List[User]]
@@ -30,7 +33,9 @@ trait JobRepository[F[_]] {
   def findAll(page: JobPageRequest): F[List[Job]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[List[Job]]
   def create(job: Job): F[Either[RepositoryError, Unit]]
+  def create(job: Job, @unused now: Instant): F[Either[RepositoryError, Unit]] = create(job)
   def update(job: Job): F[Either[RepositoryError, Job]]
+  def update(job: Job, @unused now: Instant): F[Either[RepositoryError, Job]] = update(job)
   def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 

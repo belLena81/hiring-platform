@@ -55,7 +55,7 @@ object Job {
   ): ValidatedNel[DomainValidationError, Job] =
     (
       validateText("title", title),
-      validateText("description", description),
+      validateText("description", description, FieldLimits.LongTextMaxChars),
       validateRequirements(requirements),
       validateNonEmptyValues("skills", skills),
       Location.validate(location.country, location.city, location.remote)
@@ -66,6 +66,9 @@ object Job {
 
   private def validateRequirements(requirements: List[String]): ValidatedNel[DomainValidationError, List[String]] = {
     val trimmed = requirements.map(_.trim).filter(_.nonEmpty)
-    if (trimmed.isEmpty) EmptyCollection("requirements").invalidNel else trimmed.validNel
+    if (trimmed.isEmpty) EmptyCollection("requirements").invalidNel
+    else if (trimmed.size > FieldLimits.CollectionMaxValues)
+      DomainValidationError.TooManyValues("requirements", FieldLimits.CollectionMaxValues, trimmed.size).invalidNel
+    else trimmed.traverse(validateText("requirements", _))
   }
 }

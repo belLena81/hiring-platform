@@ -80,8 +80,9 @@ object MongoHiringRuntime {
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
-      val users = MongoUserRepository.transactional(database, client)
-      val jobs = new MongoJobRepository(database)
+      val embeddingWork = Option.when(vectorSearch.enabled)(new MongoEmbeddingWorkRepository(database))
+      val users = MongoUserRepository.transactional(database, client, embeddingWork)
+      val jobs = MongoJobRepository.transactional(database, client, embeddingWork)
       val applications = MongoApplicationRepository.transactional(database, client)
       Resource.eval(IOLocal[Option[com.example.graphQL.cats.service.TraceContext]](None)).flatMap { traceLocal =>
       hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, traceLocal, resolverTimeout).flatMap { services =>
@@ -137,9 +138,8 @@ object MongoHiringRuntime {
           vectorSearch.jobLexicalIndex,
           vectorSearch.numCandidates
         )
-        val embeddingWork = new MongoEmbeddingWorkRepository(database)
         EmbeddingPipeline.resource(
-          embeddingWork,
+          new MongoEmbeddingWorkRepository(database),
           users,
           jobs,
           embeddings,
@@ -150,8 +150,8 @@ object MongoHiringRuntime {
           vectorSearch.retryAttempts,
           vectorSearch.retryDelayMillis.millis,
           (vectorSearch.timeoutMillis + vectorSearch.retryDelayMillis).millis
-        ).map { queue =>
-          val jobService = BoundedHiringServices.jobs(JobService[IO](users, jobs, queue), resolverTimeout)
+        ).map { _ =>
+          val jobService = BoundedHiringServices.jobs(JobService[IO](users, jobs), resolverTimeout)
           val applicationService = BoundedHiringServices.applications(ApplicationService[IO](users, jobs, applications), resolverTimeout)
           val readModel = BoundedHiringServices.readModel(HiringReadService[IO](users, jobs, applications), resolverTimeout)
           val semanticSearch = BoundedHiringServices.search(SemanticSearchService[IO](
@@ -236,7 +236,7 @@ object MongoHiringRuntime {
       vectorSearch.voyageDimension,
       vectorSearch.indexReadyTimeoutMillis,
       vectorSearch.indexPollIntervalMillis
-    )))
+    )), vectorSearch.enabled)
 
   private val defaultPasswordHash = PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
 }

@@ -328,7 +328,7 @@ private[graphql] object HiringGraphQLResolvers {
       role: Option[UserRole],
       cursorCodec: CursorCodec[UserCursor]
   ): IO[Either[GraphQLError, (UserPageRequest, Int)]] =
-    cursorPage(first, after, cursorCodec.decode)((cursor, size) => UserPageRequest(status, role, cursor, size.value))
+    cursorPage(first, after, cursorCodec.decode)((cursor, size) => UserPageRequest(status, role, cursor, size))
 
   private def cursorPage[A, B](
       first: Int,
@@ -522,5 +522,8 @@ private[graphql] object HiringGraphQLResolvers {
       case DomainValidationError.BlankField(field) => s"$field is required"
       case DomainValidationError.EmptyCollection(field) => s"$field must not be empty"
       case DomainValidationError.InvalidNumber(field, minimum, maximum, _) => s"$field must be between $minimum and $maximum"
+      case DomainValidationError.TextTooLong(field, maximum, _) => s"$field must be at most $maximum characters"
+      case DomainValidationError.ByteLengthExceeded(field, maximum, _) => s"$field must be at most $maximum bytes"
+      case DomainValidationError.TooManyValues(field, maximum, _) => s"$field must contain at most $maximum values"
     }
 }
