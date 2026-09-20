@@ -6,6 +6,7 @@ import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobR
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, CandidateProfile, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
+import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import java.time.Instant
@@ -69,7 +70,10 @@ private[cats] object ServiceFixtures {
       }
   }
 
-  final class InMemoryJobs(protected val ref: Ref[IO, Map[JobId, Job]])
+  final class InMemoryJobs(
+      protected val ref: Ref[IO, Map[JobId, Job]],
+      operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None
+  )
       extends JobRepository[IO]
       with RefBackedLookup[JobId, Job] {
     override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
@@ -104,10 +108,25 @@ private[cats] object ServiceFixtures {
     override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
       ref.update(_ + (job.id -> job)).as(Right(()))
 
+    override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
+      create(job, now).flatTap {
+        case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
+        case Left(_) => IO.unit
+      }
+
     override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
       val persisted = job.copy(version = job.version + 1L)
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
+
+    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+      update(job, now).flatTap {
+        case Right(_) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
+        case Left(_) => IO.unit
+      }
+
+    def allOperationalEvents: IO[Vector[OperationalEventEnvelope]] =
+      operationalEvents.fold(IO.pure(Vector.empty[OperationalEventEnvelope]))(_.get)
 
     override def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       ref.modify { jobs =>
@@ -127,7 +146,9 @@ private[cats] object ServiceFixtures {
   final class InMemoryApplications(
       applications: Ref[IO, Map[ApplicationId, Application]],
       events: Ref[IO, Vector[ApplicationEvent]],
-      nextCreateError: Ref[IO, Option[RepositoryError]]
+      nextCreateError: Ref[IO, Option[RepositoryError]],
+      operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
+      nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None
   ) extends ApplicationRepository[IO] {
     override def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]] =
       applications.get.map(_.get(id)).map(Right(_))
@@ -177,6 +198,20 @@ private[cats] object ServiceFixtures {
         case None => IO.pure(Left(RepositoryError.Conflict))
       }
 
+    override def createForOpenJobWithEvents(
+        observedJob: Job,
+        application: Application,
+        initialEvent: ApplicationEvent,
+        outboxEvents: List[OperationalEventEnvelope]
+    ): IO[Either[RepositoryError, Unit]] =
+      rejectNextOperationalEvent.flatMap {
+        case Some(error) => IO.pure(Left(error))
+        case None => createForOpenJob(observedJob, application, initialEvent).flatTap {
+          case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
+          case Left(_) => IO.unit
+        }
+      }
+
     override def updateStatus(
         application: Application,
         event: ApplicationEvent
@@ -193,11 +228,33 @@ private[cats] object ServiceFixtures {
         case Left(_) => IO.unit
       }
 
+    override def updateStatusWithEvents(
+        application: Application,
+        event: ApplicationEvent,
+        outboxEvents: List[OperationalEventEnvelope]
+    ): IO[Either[RepositoryError, Unit]] =
+      rejectNextOperationalEvent.flatMap {
+        case Some(error) => IO.pure(Left(error))
+        case None => updateStatus(application, event).flatTap {
+          case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
+          case Left(_) => IO.unit
+        }
+      }
+
     def allEvents: IO[Vector[ApplicationEvent]] =
       events.get
 
+    def allOperationalEvents: IO[Vector[OperationalEventEnvelope]] =
+      operationalEvents.fold(IO.pure(Vector.empty[OperationalEventEnvelope]))(_.get)
+
     def rejectNextCreateWith(error: RepositoryError): IO[Unit] =
       nextCreateError.set(Some(error))
+
+    def rejectNextOperationalEventWith(error: RepositoryError): IO[Unit] =
+      nextOperationalEventError.fold(IO.unit)(_.set(Some(error)))
+
+    private def rejectNextOperationalEvent: IO[Option[RepositoryError]] =
+      nextOperationalEventError.fold(IO.pure(None))(_.modify(error => (None, error)))
 
     private def matches(page: ApplicationPageRequest)(application: Application): Boolean =
       page.status.forall(_ == application.status)

@@ -143,6 +143,18 @@ private[graphql] object HiringGraphQLInputs {
       organizationName <- optionalInput[String](fields, "organizationName")
       jobTitle <- optionalInput[String](fields, "jobTitle")
     } yield UpdateProfileGraphQLInput(skills, experienceSummary, resumeRef, organizationName, jobTitle))
+  given FromInput[RecordJobViewGraphQLInput] = inputAdapter(fields =>
+    for {
+      eventId <- requiredInput[String](fields, "eventId")
+      jobId <- requiredInput[JobId](fields, "jobId")
+      searchId <- optionalInput[String](fields, "searchId")
+    } yield RecordJobViewGraphQLInput(eventId, jobId, searchId))
+  given FromInput[RecordSearchResultClickGraphQLInput] = inputAdapter(fields =>
+    for {
+      eventId <- requiredInput[String](fields, "eventId")
+      searchId <- requiredInput[String](fields, "searchId")
+      resultId <- requiredInput[String](fields, "resultId")
+    } yield RecordSearchResultClickGraphQLInput(eventId, searchId, resultId))
 
   lazy val healthStatus: EnumType[String] =
     EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))
@@ -204,6 +216,7 @@ private[graphql] object HiringGraphQLInputs {
   lazy val cityArgument: Argument[Option[String]] = Argument("city", OptionInputType(StringType))
   lazy val skillsArgument: Argument[Option[Seq[String]]] = Argument("skills", OptionInputType(ListInputType(StringType)))
   lazy val createdAfterArgument: Argument[Option[Instant]] = Argument("createdAfter", OptionInputType(instantType))
+  lazy val searchIdArgument: Argument[Option[String]] = Argument("searchId", OptionInputType(StringType))
   lazy val jobStatusArgument: Argument[Option[JobStatus]] = Argument("status", OptionInputType(jobStatus))
   lazy val applicationStatusArgument: Argument[Option[ApplicationStatus]] = Argument("status", OptionInputType(applicationStatus))
   lazy val userRoleArgument: Argument[Option[UserRole]] = Argument("role", OptionInputType(userRole))
@@ -261,4 +274,13 @@ private[graphql] object HiringGraphQLInputs {
   lazy val bootstrapAdminInputArgument: Argument[BootstrapAdminGraphQLInput] = Argument("input", bootstrapAdminInputType)
   lazy val loginInputArgument: Argument[LoginGraphQLInput] = Argument("input", loginInputType)
   lazy val updateProfileInputArgument: Argument[UpdateProfileGraphQLInput] = Argument("input", updateProfileInputType)
+  lazy val recordJobViewInputType: InputObjectType[RecordJobViewGraphQLInput] =
+    InputObjectType[RecordJobViewGraphQLInput]("RecordJobViewInput", List(
+      InputField("eventId", StringType), InputField("jobId", jobIdType), InputField("searchId", OptionInputType(StringType))))
+  lazy val recordSearchResultClickInputType: InputObjectType[RecordSearchResultClickGraphQLInput] =
+    InputObjectType[RecordSearchResultClickGraphQLInput]("RecordSearchResultClickInput", List(
+      InputField("eventId", StringType), InputField("searchId", StringType), InputField("resultId", StringType)))
+  lazy val recordJobViewInputArgument: Argument[RecordJobViewGraphQLInput] = Argument("input", recordJobViewInputType)
+  lazy val recordSearchResultClickInputArgument: Argument[RecordSearchResultClickGraphQLInput] =
+    Argument("input", recordSearchResultClickInputType)
 }

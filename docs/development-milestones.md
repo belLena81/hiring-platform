@@ -440,7 +440,11 @@ eventId
 eventType
 schemaVersion
 occurredAt
+aggregateType
 aggregateId
+aggregateVersion
+sequence
+actorId
 payload
 ```
 
@@ -470,6 +474,8 @@ at-least-once delivery
 idempotent consumers
 ```
 
+Phase 5 publishes all facts to one local Kafka topic, `hiring.operational-events.v1`, through a MongoDB transactional outbox. Raw Kafka records, published outbox content, search sessions, and quarantine records are retained for seven days; non-content receipt keys are retained for eight days. Unpublished and failed outbox records remain until explicit repair.
+
 Application lifecycle events use:
 
 ```text
@@ -477,6 +483,8 @@ partition key = applicationId
 ```
 
 when ordering matters.
+
+Job facts use `jobId`, attributed search interactions use `searchId`, and candidate/recruiter search sessions use `searchId`. There is no cross-key ordering guarantee.
 
 ### Critical Architecture Requirement
 
@@ -505,7 +513,7 @@ Future cross-boundary workflows must use the Saga pattern when one business oper
 
 ### Milestone
 
-A successful domain operation eventually produces exactly one logical analytical event despite retries and duplicate delivery.
+A successful domain operation eventually produces one publication per selected logical fact despite retries and duplicate delivery. A hire intentionally emits two ordered semantic facts for one application: `APPLICATION_STATUS_CHANGED` first, then `CANDIDATE_HIRED`, with distinct event IDs.
 
 ### Done When
 

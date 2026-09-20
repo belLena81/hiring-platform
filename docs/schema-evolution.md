@@ -13,6 +13,8 @@ These are rules for future data changes, not a statement that migration infrastr
 
 Application release numbers do not prove database, GraphQL, or event compatibility. Do not apply one global version field to every boundary. Domain status enums remain valid invariants; evolution requires a deliberate data and client impact review.
 
+Phase 5 operational events use the v1 envelope on `hiring.operational-events.v1`. Readers must reject unsupported `schemaVersion` values rather than reinterpret old or future records. Envelope bytes in the outbox are immutable; a publisher retry republishes the same event ID and bytes.
+
 ## Migration slice contract
 
 Extend the current feature spec with source/target schema, supported application versions, data volumes, invariants, compatibility direction, migration owner, execution order, and recovery criteria. Include exact local commands once implemented and explicitly identify any destructive or irreversible step.

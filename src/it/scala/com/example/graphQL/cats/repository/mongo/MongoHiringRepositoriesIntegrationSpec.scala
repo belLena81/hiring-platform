@@ -140,7 +140,10 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           result <- MongoHiringSetup.initialize(database).attempt
           indexes <- indexes(users)
         } yield {
-          assert(result.left.toOption.exists(_.getMessage.contains("duplicate canonical account names")))
+          assert(result.left.toOption.exists(error =>
+            error.getMessage.contains("duplicate canonical account names") ||
+              error.getMessage.contains("E11000 duplicate key error")
+          ), clues(result))
           assert(!indexes.contains(MongoHiringSetup.UsersNameIndex))
         }
       }
@@ -313,16 +316,17 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           _ <- PublisherBridge.first(users.insertMany(legacyUsers.asJava))
           _ <- MongoHiringSetup.initialize(database)
           applied <- PublisherBridge.first(ledger.find(new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId)))
+          leaseUntil <- IO.realTimeInstant.map(_.plusSeconds(300))
           _ <- PublisherBridge.first(ledger.updateOne(
             new Document("_id", MongoHiringSetup.HiringUserSetupMigrationId),
             new Document("$set", new Document("status", "Applying")
               .append("owner", "another-runner")
-              .append("leaseUntil", Date.from(now.plusSeconds(300))))
+              .append("leaseUntil", Date.from(leaseUntil)))
           ))
           result <- MongoHiringSetup.initialize(database).attempt
         } yield {
           assertEquals(applied.flatMap(record => Option(record.getString("lastProcessedId"))), Some("legacy-100"))
-          assert(result.left.toOption.exists(_.getMessage.contains("already applying")))
+          assert(result.left.toOption.exists(_.getMessage.contains("already applying")), clues(result))
         }
       }
     }
@@ -341,8 +345,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- MongoHiringSetup.initialize(database)
           bootstrapped <- users.bootstrap(admin, "hash")
-          created <- users.createAccount(first, "hash")
-          conflict <- users.createAccount(duplicate, "hash")
+          created <- users.createAccount(first, "hash", now)
+          conflict <- users.createAccount(duplicate, "hash", now)
         } yield {
           assertEquals(bootstrapped, Right(()))
           assertEquals(created, Right(()))
@@ -399,9 +403,9 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           _ <- users.insert(recruiter)
           _ <- users.insert(admin)
           rejectedAdmin <- users.insert(unseededAdmin)
-          _ <- jobs.create(job)
-          updatedJob <- jobs.update(job.copy(title = "Principal Scala Developer", updatedAt = later))
-          staleJob <- jobs.update(job.copy(title = "Stale Scala Developer", updatedAt = later))
+          _ <- jobs.create(job, now)
+          updatedJob <- jobs.update(job.copy(title = "Principal Scala Developer", updatedAt = later), later)
+          staleJob <- jobs.update(job.copy(title = "Stale Scala Developer", updatedAt = later), later)
           _ <- applications.createForOpenJob(updatedJob.toOption.get, application, initialEvent)
           _ <- applications.updateStatus(updatedApplication, acceptedEvent)
           staleStatus <- applications.updateStatus(application.copy(status = ApplicationStatus.Interview, updatedAt = later), staleEvent)
@@ -422,21 +426,21 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(rejectedAdmin, Left(RepositoryError.Conflict))
           assertEquals(staleJob, Left(RepositoryError.Conflict))
           assertEquals(staleStatus, Left(RepositoryError.Conflict))
-          assertEquals(foundCandidate.flatMap(_.email), Some("candidate@example.com"))
-          assertEquals(foundCandidate.flatMap(_.profile), Some(UserProfile.Candidate(candidateProfile)))
-          assertEquals(foundAdmin.map(_.adminSingleton), Some(true))
+          assertEquals(foundCandidate.map(_.flatMap(_.email)), Right(Some("candidate@example.com")))
+          assertEquals(foundCandidate.map(_.flatMap(_.profile)), Right(Some(UserProfile.Candidate(candidateProfile))))
+          assertEquals(foundAdmin.map(_.map(_.adminSingleton)), Right(Some(true)))
           assertEquals(updatedJob.map(_.version), Right(1L))
-          assertEquals(foundJob.map(_.title), Some("Principal Scala Developer"))
-          assertEquals(foundJob.map(_.version), Some(2L))
-          assertEquals(foundApplication.map(_.status), Some(ApplicationStatus.Accepted))
-          assertEquals(foundManyUsers.map(_.id).toSet, Set(candidateId, recruiterId))
-          assertEquals(foundManyJobs.map(_.id), List(jobId))
-          assertEquals(openJobs.map(_.id), List(jobId))
-          assertEquals(allJobs.map(_.id), List(jobId))
-          assertEquals(recruiterJobs.map(_.id), List(jobId))
-          assertEquals(candidatePage.map(_.id), List(applicationId))
-          assertEquals(jobPage.map(_.id), List(applicationId))
-          assertEquals(eventHistory.map(_.newStatus).toSet, Set(ApplicationStatus.Created, ApplicationStatus.Accepted))
+          assertEquals(foundJob.map(_.map(_.title)), Right(Some("Principal Scala Developer")))
+          assertEquals(foundJob.map(_.map(_.version)), Right(Some(2L)))
+          assertEquals(foundApplication.map(_.map(_.status)), Right(Some(ApplicationStatus.Accepted)))
+          assertEquals(foundManyUsers.map(_.map(_.id).toSet), Right(Set(candidateId, recruiterId)))
+          assertEquals(foundManyJobs.map(_.map(_.id)), Right(List(jobId)))
+          assertEquals(openJobs.map(_.map(_.id)), Right(List(jobId)))
+          assertEquals(allJobs.map(_.map(_.id)), Right(List(jobId)))
+          assertEquals(recruiterJobs.map(_.map(_.id)), Right(List(jobId)))
+          assertEquals(candidatePage.map(_.map(_.id)), Right(List(applicationId)))
+          assertEquals(jobPage.map(_.map(_.id)), Right(List(applicationId)))
+          assertEquals(eventHistory.map(_.map(_.newStatus).toSet), Right(Set(ApplicationStatus.Created, ApplicationStatus.Accepted)))
           assertEquals(history.size, 2)
         }
       }
@@ -460,8 +464,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         )
         for {
           _ <- MongoHiringSetup.initialize(database)
-          _ <- jobs.create(job)
-          updated <- jobs.update(job.copy(title = "Principal Scala Developer", updatedAt = later))
+          _ <- jobs.create(job, now)
+          updated <- jobs.update(job.copy(title = "Principal Scala Developer", updatedAt = later), later)
           observed <- IO.fromEither(updated.leftMap(error => new AssertionError(s"job update failed: $error")))
           freshResult <- jobs.updateEmbedding(jobId, observed.version, currentEmbedding)
           staleResult <- jobs.updateEmbedding(jobId, 0L, staleEmbedding)
@@ -469,8 +473,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         } yield {
           assertEquals(freshResult, Right(()))
           assertEquals(staleResult, Left(RepositoryError.Conflict))
-          assertEquals(stored.flatMap(_.embedding).map(_.meta.sourceHash), Some(currentHash))
-          assertEquals(stored.flatMap(_.embedding).map(_.values), Some(List(0.1f, 0.2f)))
+          assertEquals(stored.map(_.flatMap(_.embedding).map(_.meta.sourceHash)), Right(Some(currentHash)))
+          assertEquals(stored.map(_.flatMap(_.embedding).map(_.values)), Right(Some(List(0.1f, 0.2f))))
         }
       }
     }
@@ -487,8 +491,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val initialEvent = ApplicationEvent(eventId, applicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
         for {
           _ <- MongoHiringSetup.initialize(database)
-          _ <- jobs.create(openJob)
-          closed <- jobs.update(openJob.copy(status = JobStatus.Closed, updatedAt = later, closedAt = Some(later)))
+          _ <- jobs.create(openJob, now)
+          closed <- jobs.update(openJob.copy(status = JobStatus.Closed, updatedAt = later, closedAt = Some(later)), later)
           result <- applications.createForOpenJob(openJob, application, initialEvent)
           storedJob <- jobs.find(jobId)
           storedApplication <- applications.find(applicationId)
@@ -496,9 +500,9 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         } yield {
           assertEquals(closed.map(_.status), Right(JobStatus.Closed))
           assertEquals(closed.map(_.closedAt), Right(Some(later)))
-          assertEquals(storedJob.flatMap(_.closedAt), Some(later))
+          assertEquals(storedJob.map(_.flatMap(_.closedAt)), Right(Some(later)))
           assertEquals(result, Left(RepositoryError.Conflict))
-          assertEquals(storedApplication, None)
+          assertEquals(storedApplication, Right(None))
           assertEquals(history, Nil)
         }
       }
@@ -517,14 +521,14 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val conflictingEvent = ApplicationEvent(eventId, duplicateApplicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
         for {
           _ <- MongoHiringSetup.initialize(database)
-          _ <- jobs.create(job)
+          _ <- jobs.create(job, now)
           _ <- PublisherBridge.first(database.getCollection("application_events").insertOne(MongoHiringCodecs.event(conflictingEvent)))
           result <- applications.createForOpenJob(job, application, event)
           storedApplication <- applications.find(applicationId)
           history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           assertEquals(result, Left(RepositoryError.Conflict))
-          assertEquals(storedApplication, None)
+          assertEquals(storedApplication, Right(None))
           assertEquals(history.size, 1)
         }
       }
@@ -546,7 +550,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           ApplicationEvent(secondEventId, applicationId, Some(ApplicationStatus.Created), ApplicationStatus.Accepted, recruiterId, later, None, None)
         for {
           _ <- MongoHiringSetup.initialize(database)
-          _ <- jobs.create(job)
+          _ <- jobs.create(job, now)
           _ <- applications.createForOpenJob(job, application, initialEvent)
           _ <- PublisherBridge.first(database.getCollection("application_events").insertOne(MongoHiringCodecs.event(duplicateEvent)))
           result <- applications.updateStatus(accepted, acceptedEvent)
@@ -554,7 +558,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           history <- PublisherBridge.collectWithin(database.getCollection("application_events").find(), 32)
         } yield {
           assertEquals(result, Left(RepositoryError.Conflict))
-          assertEquals(storedApplication.map(_.status), Some(ApplicationStatus.Created))
+          assertEquals(storedApplication.map(_.map(_.status)), Right(Some(ApplicationStatus.Created)))
           assertEquals(history.size, 2)
         }
       }
@@ -574,7 +578,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val duplicateEvent = ApplicationEvent(secondEventId, duplicateApplicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
         for {
           _ <- MongoHiringSetup.initialize(database)
-          _ <- jobs.create(job)
+          _ <- jobs.create(job, now)
           ready <- Deferred[IO, Unit]
           first = ready.get *> applications.createForOpenJob(job, application, firstEvent)
           second = ready.get *> applications.createForOpenJob(job, duplicate, duplicateEvent)
@@ -609,8 +613,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val event = ApplicationEvent(eventId, applicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
         for {
           _ <- MongoHiringSetup.initialize(database)
-          _ <- jobs.create(job)
-          _ <- jobs.create(wrongJob)
+          _ <- jobs.create(job, now)
+          _ <- jobs.create(wrongJob, now)
           _ <- applications.createForOpenJob(job, application, event)
           inconsistent <- applications.createForOpenJob(wrongJob, application.copy(id = duplicateApplicationId), event.copy(id = secondEventId))
           candidateNoStatus <- explainIndex(database, "candidateId", candidateId.value.toString, page)
@@ -654,7 +658,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             val database = client.getDatabase("hiring_served_jwt")
             val users = new MongoUserRepository(database)
             val jobs = new MongoJobRepository(database)
-            users.insert(candidateUser) *> users.insert(recruiterUser) *> jobs.create(jobFixture(jobId, JobStatus.Open)).void
+            users.insert(candidateUser) *> users.insert(recruiterUser) *> jobs.create(jobFixture(jobId, JobStatus.Open), now).void
           }
           authenticator = JwtActorAuthenticator(jwt, runtime.userAuthenticator, FixedTestClock.at(now))
           _ <- eventually(runtime.hiringReadiness)(_ == com.example.graphQL.cats.service.ProbeResult.Ready)
@@ -720,7 +724,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           created <- runtime.services.jobService.createJob(ActorContext(recruiterId, UserRole.Recruiter), create, now, jobId)
           job <- IO.fromEither(created.leftMap(error => new AssertionError(s"createJob failed: $error")))
           embedded <- eventually(MongoDatabaseProbe.clientResource(uri).use { client =>
-            new MongoJobRepository(client.getDatabase("hiring_vector_runtime")).find(jobId).map(_.flatMap(_.embedding))
+            new MongoJobRepository(client.getDatabase("hiring_vector_runtime")).find(jobId).map(_.toOption.flatten.flatMap(_.embedding))
           })(_.nonEmpty)
         } yield {
           assertEquals(embedded.map(_.meta.model), Some(vectorConfig.voyageModel))

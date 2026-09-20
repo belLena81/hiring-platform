@@ -8,7 +8,7 @@ A practical playground for functional Scala, GraphQL API design, MongoDB data mo
 
 Start with `$product-manager` to coordinate specialist work and independent reviews. See [agent workflow and usage](docs/agent-development.md) and [project rules](AGENTS.md). Local skills cover Product Manager, Software Architect, Scala Developer, Data Engineer, Big Data Engineer, QA Engineer, Security Engineer, and Code Reviewer.
 
-The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, Logback, and MUnit/Testcontainers core. Foundation supplies a health-only HTTP/GraphQL runtime with a resource-managed MongoDB client. Unused Doobie/PostgreSQL dependencies and the old user-query/demo scaffold have been removed. Hiring models, persistence, and authorization belong to Phase 2.
+The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, fs2-kafka, Logback, and MUnit/Testcontainers core. Foundation supplies a health-only HTTP/GraphQL runtime with a resource-managed MongoDB client. Unused Doobie/PostgreSQL dependencies and the old user-query/demo scaffold have been removed. Hiring models, persistence, and authorization belong to Phase 2.
 
 ## Local build
 
@@ -18,6 +18,14 @@ The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s 
 docker compose up -d mongodb
 sbt run
 ```
+
+Phase 5 event publication can also use the local Kafka broker:
+
+```bash
+docker compose up -d mongodb kafka
+```
+
+Kafka publishes to `hiring.operational-events.v1` with seven-day broker retention. MongoDB readiness and HTTP startup do not depend on Kafka availability; operational mutations write a transactional Mongo outbox first and the background publisher retries broker delivery.
 
 `GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
 

@@ -109,6 +109,9 @@ private[graphql] object HiringGraphQLTypes {
   lazy val deleteAccountPayloadType: ObjectType[RequestContext, DeleteAccountPayload] =
     ObjectType("DeleteAccountPayload", fields[RequestContext, DeleteAccountPayload](
       Field("deleted", BooleanType, resolve = _.value.deleted), Field("errors", ListType(errorType), resolve = _.value.errors)))
+  lazy val interactionPayloadType: ObjectType[RequestContext, InteractionPayload] =
+    ObjectType("InteractionPayload", fields[RequestContext, InteractionPayload](
+      Field("recorded", BooleanType, resolve = _.value.recorded), Field("errors", ListType(errorType), resolve = _.value.errors)))
   lazy val jobPayloadType: ObjectType[RequestContext, JobPayload] = ObjectType("JobPayload", fields[RequestContext, JobPayload](
     Field("job", OptionType(jobType), resolve = _.value.job),
     Field("errors", ListType(errorType), resolve = _.value.errors)))
@@ -149,5 +152,6 @@ private[graphql] object HiringGraphQLTypes {
     ObjectType(name, fields[RequestContext, Connection[A]](
       Field("edges", ListType(edgeType), resolve = _.value.edges),
       Field("pageInfo", pageInfoType, resolve = _.value.pageInfo),
+      Field("searchId", OptionType(IDType), resolve = _.value.searchId),
       Field("errors", ListType(errorType), resolve = _.value.errors)))
 }

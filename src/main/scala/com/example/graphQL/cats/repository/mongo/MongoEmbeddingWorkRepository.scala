@@ -35,7 +35,6 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
     val readyUpdate = Updates.combine(
       Updates.setOnInsert("kind", key.kind.toString),
       Updates.setOnInsert("entityId", key.entityId),
-      Updates.setOnInsert("attempts", java.lang.Integer.valueOf(0)),
       Updates.setOnInsert("createdAt", Date.from(now)),
       Updates.inc("generation", java.lang.Long.valueOf(1L)),
       Updates.set("attempts", java.lang.Integer.valueOf(0)),

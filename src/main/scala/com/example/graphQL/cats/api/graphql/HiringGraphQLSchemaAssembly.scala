@@ -4,6 +4,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLFetchers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLAccountResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLApplicationResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLInteractionResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLJobResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
@@ -33,10 +34,10 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     ioField("readiness", readinessType)(context => context.ctx.readiness),
     ioField("me", userPayloadType)(accountMe),
     ioField("users", userConnectionType, firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil)(users),
-    ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: Nil)(jobs),
-    ioField("semanticJobSearch", rankedJobResultsType, queryArgument :: jobFilterArgument :: firstArgument :: Nil)(semanticJobSearch),
-    ioField("recommendedJobs", rankedJobResultsType, firstArgument :: Nil)(recommendedJobs),
-    ioField("candidateMatches", rankedCandidateResultsType, jobIdArgument :: firstArgument :: Nil)(candidateMatches),
+    ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil)(jobs),
+    ioField("semanticJobSearch", rankedJobResultsType, queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil)(semanticJobSearch),
+    ioField("recommendedJobs", rankedJobResultsType, firstArgument :: searchIdArgument :: Nil)(recommendedJobs),
+    ioField("candidateMatches", rankedCandidateResultsType, jobIdArgument :: firstArgument :: searchIdArgument :: Nil)(candidateMatches),
     ioField("job", jobPayloadType, idArgument :: Nil)(job),
     ioField("myJobs", jobConnectionType, firstArgument :: afterArgument :: jobStatusArgument :: Nil)(myJobs),
     ioField("myApplications", applicationConnectionType, firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(myApplications),
@@ -59,7 +60,9 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     ioField("login", accountPayloadType, loginInputArgument :: Nil)(login),
     ioField("bootstrapAdmin", accountPayloadType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
     ioField("updateMyProfile", userPayloadType, updateProfileInputArgument :: Nil)(updateMyProfile),
-    ioField("deleteMyAccount", deleteAccountPayloadType)(deleteMyAccount)
+    ioField("deleteMyAccount", deleteAccountPayloadType)(deleteMyAccount),
+    ioField("recordJobView", interactionPayloadType, recordJobViewInputArgument :: Nil)(recordJobView),
+    ioField("recordSearchResultClick", interactionPayloadType, recordSearchResultClickInputArgument :: Nil)(recordSearchResultClick)
   ))
 
   lazy val schema: Schema[RequestContext, Unit] = Schema(queryType, Some(mutationType))

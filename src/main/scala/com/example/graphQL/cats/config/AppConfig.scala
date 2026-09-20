@@ -57,6 +57,17 @@ enum ConfigError(val key: String) {
   case InvalidSearchIndexReadyTimeout extends ConfigError("SEARCH_INDEX_READY_TIMEOUT_MS")
   case InvalidSearchIndexPollInterval extends ConfigError("SEARCH_INDEX_POLL_INTERVAL_MS")
   case InvalidVectorNumCandidates extends ConfigError("VECTOR_NUM_CANDIDATES")
+  case InvalidKafkaEnabled extends ConfigError("KAFKA_ENABLED")
+  case InvalidKafkaBootstrapServers extends ConfigError("KAFKA_BOOTSTRAP_SERVERS")
+  case InvalidKafkaTopic extends ConfigError("KAFKA_TOPIC")
+  case InvalidKafkaConsumerGroup extends ConfigError("KAFKA_CONSUMER_GROUP")
+  case InvalidKafkaBatchSize extends ConfigError("KAFKA_BATCH_SIZE")
+  case InvalidKafkaLeaseSeconds extends ConfigError("KAFKA_LEASE_SECONDS")
+  case InvalidKafkaRetryDelaySeconds extends ConfigError("KAFKA_RETRY_DELAY_SECONDS")
+  case InvalidKafkaMaxAttempts extends ConfigError("KAFKA_MAX_ATTEMPTS")
+  case InvalidKafkaPollInterval extends ConfigError("KAFKA_POLL_INTERVAL_MS")
+  case InvalidKafkaReceiptTtl extends ConfigError("KAFKA_RECEIPT_TTL_DAYS")
+  case InvalidKafkaQuarantineTtl extends ConfigError("KAFKA_QUARANTINE_TTL_DAYS")
 }
 
 final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
@@ -68,6 +79,11 @@ final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: Str
 final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
+final case class KafkaPublisherConfig(workerId: String, batchSize: Int, leaseSeconds: Int,
+    retryDelaySeconds: Int, maxAttempts: Int, pollIntervalMillis: Int)
+final case class KafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int)
+final case class KafkaConfig(enabled: Boolean, bootstrapServers: String, topic: String, consumerGroup: String,
+    publisher: KafkaPublisherConfig, consumer: KafkaConsumerConfig)
 
 type Port = Int :| Interval.Closed[1, 65535]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]
@@ -84,7 +100,7 @@ final case class AppConfig(host: String, port: Int, admissionPermits: Int, reque
     resolverTimeout: FiniteDuration, trustedProxy: TrustedProxyConfig,
     mongoUri: String, mongoDatabase: String,
     maskSensitive: Boolean, jwtAuth: JwtAuthConfig, passwordHash: PasswordHashConfig, authRateLimit: AuthRateLimitConfig,
-    vectorSearch: VectorSearchConfig) {
+    vectorSearch: VectorSearchConfig, kafka: KafkaConfig) {
   override def toString: String = "AppConfig([REDACTED])"
 }
 
@@ -111,30 +127,64 @@ object AppConfig {
     val mongo = raw.mongo
     val jwt = raw.auth.jwt
     val passwordHash = raw.auth.passwordHash.getOrElse(defaultPasswordHash)
+    val kafka = raw.kafka
     val vector = raw.vectorSearch
     val voyage = vector.voyage
     val embedding = vector.embedding
     val indexes = vector.indexes
 
-    (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
-      validRequestTimeout(http.requestTimeoutMs), validResolverTimeout(http.resolverTimeoutMs, http.requestTimeoutMs),
-      validTrustedProxyCidrs(http.trustedProxyCidrs),
-      validMongoUri(mongo.uri), validMongoDatabase(mongo.database), validJwtSecret(jwt.hs256Secret),
-      validPasswordHashIterations(passwordHash.iterations), validPasswordHashMemory(passwordHash.memoryKib),
-      validPasswordHashParallelism(passwordHash.parallelism), validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds), validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
-      validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets), validVoyageApiKey(vector.enabled, voyage.apiKey),
-      validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
-      validNumCandidates(vector.numCandidates), validEmbeddingRetryAttempts(embedding.retryAttempts),
-      validEmbeddingRetryDelay(embedding.retryDelayMs)).mapN {
-      (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database, secret, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets, apiKey, readyTimeout,
-          pollInterval, numCandidates, retryAttempts, retryDelay) =>
-        new AppConfig(host, port, permits, requestTimeout.millis, resolverTimeout.millis, trustedProxy, uri, database, raw.logging.maskSensitive,
-          JwtAuthConfig(secret, jwt.issuer, jwt.audience),
-          PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
-          AuthRateLimitConfig(windowSeconds, attempts, maxBuckets),
+    val transport =
+      (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
+        validRequestTimeout(http.requestTimeoutMs), validResolverTimeout(http.resolverTimeoutMs, http.requestTimeoutMs),
+        validTrustedProxyCidrs(http.trustedProxyCidrs),
+        validMongoUri(mongo.uri), validMongoDatabase(mongo.database)).mapN {
+        (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database) =>
+          (host, port, permits, requestTimeout.millis, resolverTimeout.millis, trustedProxy, uri, database)
+      }
+
+    val authConfig =
+      (validJwtSecret(jwt.hs256Secret),
+        validPasswordHashIterations(passwordHash.iterations), validPasswordHashMemory(passwordHash.memoryKib),
+        validPasswordHashParallelism(passwordHash.parallelism), validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds),
+        validAuthRateLimitAttempts(raw.auth.rateLimit.attempts), validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets)).mapN {
+        (secret, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets) =>
+          (JwtAuthConfig(secret, jwt.issuer, jwt.audience), PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
+            AuthRateLimitConfig(windowSeconds, attempts, maxBuckets))
+      }
+
+    val kafkaConfig =
+      (validKafkaBootstrapServers(kafka.bootstrapServers), validKafkaTopic(kafka.topic), validKafkaConsumerGroup(kafka.consumerGroup),
+        validKafkaBatchSize(kafka.publisher.batchSize), validKafkaLeaseSeconds(kafka.publisher.leaseSeconds),
+        validKafkaRetryDelaySeconds(kafka.publisher.retryDelaySeconds), validKafkaMaxAttempts(kafka.publisher.maxAttempts),
+        validKafkaPollInterval(kafka.publisher.pollIntervalMs), validKafkaReceiptTtl(kafka.consumer.receiptTtlDays),
+        validKafkaQuarantineTtl(kafka.consumer.quarantineTtlDays)).mapN {
+        (bootstrapServers, topic, consumerGroup, batchSize, leaseSeconds, retryDelaySeconds, maxAttempts,
+            kafkaPollInterval, receiptTtl, quarantineTtl) =>
+          KafkaConfig(kafka.enabled, bootstrapServers, topic, consumerGroup,
+            KafkaPublisherConfig(kafka.publisher.workerId, batchSize, leaseSeconds, retryDelaySeconds, maxAttempts, kafkaPollInterval),
+            KafkaConsumerConfig(kafka.consumer.enabled, receiptTtl, quarantineTtl))
+      }
+
+    val vectorConfig =
+      (validVoyageApiKey(vector.enabled, voyage.apiKey),
+        validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
+        validNumCandidates(vector.numCandidates), validEmbeddingRetryAttempts(embedding.retryAttempts),
+        validEmbeddingRetryDelay(embedding.retryDelayMs)).mapN {
+        (apiKey, readyTimeout, searchIndexPollInterval, numCandidates, retryAttempts, retryDelay) =>
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
             embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs, retryAttempts, retryDelay,
-            indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, pollInterval, numCandidates))
+            indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, searchIndexPollInterval, numCandidates)
+      }
+
+    (transport, authConfig, kafkaConfig, vectorConfig).mapN {
+      case (
+            (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database),
+            (jwtConfig, passwordHashConfig, rateLimitConfig),
+            kafkaConfig,
+            vectorSearchConfig
+          ) =>
+        AppConfig(host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database, raw.logging.maskSensitive,
+          jwtConfig, passwordHashConfig, rateLimitConfig, vectorSearchConfig, kafkaConfig)
     }
   }
 
@@ -185,6 +235,26 @@ object AppConfig {
     Either.cond(value >= 1 && value <= 10, value, ConfigError.InvalidEmbeddingRetryAttempts).toValidatedNel
   private def validEmbeddingRetryDelay(value: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidEmbeddingRetryDelay).toValidatedNel
+  private def validKafkaBootstrapServers(value: String): ValidatedNel[ConfigError, String] =
+    Either.cond(value.trim.nonEmpty && value.length <= 512, value, ConfigError.InvalidKafkaBootstrapServers).toValidatedNel
+  private def validKafkaTopic(value: String): ValidatedNel[ConfigError, String] =
+    Either.cond(value.trim.nonEmpty && value.length <= 249, value, ConfigError.InvalidKafkaTopic).toValidatedNel
+  private def validKafkaConsumerGroup(value: String): ValidatedNel[ConfigError, String] =
+    Either.cond(value.trim.nonEmpty && value.length <= 249, value, ConfigError.InvalidKafkaConsumerGroup).toValidatedNel
+  private def validKafkaBatchSize(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 500, value, ConfigError.InvalidKafkaBatchSize).toValidatedNel
+  private def validKafkaLeaseSeconds(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 3600, value, ConfigError.InvalidKafkaLeaseSeconds).toValidatedNel
+  private def validKafkaRetryDelaySeconds(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 3600, value, ConfigError.InvalidKafkaRetryDelaySeconds).toValidatedNel
+  private def validKafkaMaxAttempts(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 100, value, ConfigError.InvalidKafkaMaxAttempts).toValidatedNel
+  private def validKafkaPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidKafkaPollInterval).toValidatedNel
+  private def validKafkaReceiptTtl(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 365, value, ConfigError.InvalidKafkaReceiptTtl).toValidatedNel
+  private def validKafkaQuarantineTtl(value: Int): ValidatedNel[ConfigError, Int] =
+    Either.cond(value >= 1 && value <= 365, value, ConfigError.InvalidKafkaQuarantineTtl).toValidatedNel
 
   private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
     val errors = failures.toList.flatMap {
@@ -235,12 +305,23 @@ object AppConfig {
     case "vector-search.indexes.ready-timeout-ms" => Some(ConfigError.InvalidSearchIndexReadyTimeout)
     case "vector-search.indexes.poll-interval-ms" => Some(ConfigError.InvalidSearchIndexPollInterval)
     case "vector-search.num-candidates" => Some(ConfigError.InvalidVectorNumCandidates)
+    case "kafka.enabled" => Some(ConfigError.InvalidKafkaEnabled)
+    case "kafka.bootstrap-servers" => Some(ConfigError.InvalidKafkaBootstrapServers)
+    case "kafka.topic" => Some(ConfigError.InvalidKafkaTopic)
+    case "kafka.consumer-group" => Some(ConfigError.InvalidKafkaConsumerGroup)
+    case "kafka.publisher.batch-size" => Some(ConfigError.InvalidKafkaBatchSize)
+    case "kafka.publisher.lease-seconds" => Some(ConfigError.InvalidKafkaLeaseSeconds)
+    case "kafka.publisher.retry-delay-seconds" => Some(ConfigError.InvalidKafkaRetryDelaySeconds)
+    case "kafka.publisher.max-attempts" => Some(ConfigError.InvalidKafkaMaxAttempts)
+    case "kafka.publisher.poll-interval-ms" => Some(ConfigError.InvalidKafkaPollInterval)
+    case "kafka.consumer.receipt-ttl-days" => Some(ConfigError.InvalidKafkaReceiptTtl)
+    case "kafka.consumer.quarantine-ttl-days" => Some(ConfigError.InvalidKafkaQuarantineTtl)
     case _ => None
   }
 
   private val parseOptions = ConfigParseOptions.defaults().setAllowMissing(false)
   private final case class RawAppConfig(http: RawHttpConfig, mongo: RawMongoConfig, logging: RawLoggingConfig,
-      auth: RawAuthConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
+      auth: RawAuthConfig, kafka: RawKafkaConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
   private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits,
       requestTimeoutMs: Int, resolverTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
   private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
@@ -251,6 +332,11 @@ object AppConfig {
   private final case class RawAuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int) derives ConfigReader
   private final case class RawPasswordHashConfig(iterations: Int, memoryKib: Int, parallelism: Int) derives ConfigReader
   private val defaultPasswordHash = RawPasswordHashConfig(iterations = 2, memoryKib = 19456, parallelism = 1)
+  private final case class RawKafkaConfig(enabled: Boolean, bootstrapServers: String, topic: NonBlankStr,
+      consumerGroup: NonBlankStr, publisher: RawKafkaPublisherConfig, consumer: RawKafkaConsumerConfig) derives ConfigReader
+  private final case class RawKafkaPublisherConfig(workerId: NonBlankStr, batchSize: Int, leaseSeconds: Int,
+      retryDelaySeconds: Int, maxAttempts: Int, pollIntervalMs: Int) derives ConfigReader
+  private final case class RawKafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int) derives ConfigReader
   private final case class RawVectorSearchConfig(enabled: Boolean, voyage: RawVoyageConfig, embedding: RawEmbeddingConfig,
       indexes: RawVectorIndexesConfig, numCandidates: Int) derives ConfigReader
   private final case class RawVoyageConfig(apiKey: Option[String], endpoint: HttpsUrl, model: NonBlankStr,

@@ -12,6 +12,7 @@ import org.bson.conversions.Bson
 import java.util.Date
 import java.util.UUID
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
@@ -33,6 +34,7 @@ object MongoHiringSetup {
   val EmbeddingWorkMigrationId = "hiring-embedding-work-v1"
   val JobEmbeddingBackfillMigrationId = "job-embedding-work-backfill-v1"
   val CandidateEmbeddingBackfillMigrationId = "candidate-embedding-work-backfill-v1"
+  val OperationalEventsMigrationId = "hiring-operational-events-v1"
   private val HiringUserSetupDescriptor = "canonical-name-account-status-profile-email-indexes-validator-atlas-v2"
   private val HiringUserSetupChecksum = sha256(HiringUserSetupDescriptor)
   private val EmbeddingWorkDescriptor = "durable-embedding-work-claim-index-v1"
@@ -41,6 +43,8 @@ object MongoHiringSetup {
   private val JobEmbeddingBackfillChecksum = sha256(JobEmbeddingBackfillDescriptor)
   private val CandidateEmbeddingBackfillDescriptor = "enqueue-current-candidate-profiles-for-durable-embedding-v1"
   private val CandidateEmbeddingBackfillChecksum = sha256(CandidateEmbeddingBackfillDescriptor)
+  private val OperationalEventsDescriptor = "transactional-outbox-search-session-receipt-quarantine-v1"
+  private val OperationalEventsChecksum = sha256(OperationalEventsDescriptor)
   val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
   val UsersEmailIndex = "users_emailCanonical_unique"
   val UsersNameIndex = "users_nameCanonical_unique"
@@ -60,6 +64,16 @@ object MongoHiringSetup {
   val JobsOpenCityCreatedIndex = "jobs_open_city_created_id"
   val JobsEmbeddingMetaIndex = "jobs_embedding_meta_filters"
   val UsersEmbeddingMetaIndex = "users_embedding_meta_filters"
+  val EventOutboxClaimIndex = "event_outbox_claim"
+  val EventOutboxAggregateSequenceIndex = "event_outbox_aggregate_sequence"
+  val EventOutboxPublishedRetentionIndex = "event_outbox_published_retention"
+  val SearchSessionsActorIndex = "search_sessions_actor_created"
+  val SearchSessionsExpiryIndex = "search_sessions_expiry"
+  val ConsumerReceiptsIdIndex = "consumer_receipts_group_event"
+  val ConsumerReceiptsAggregateSequenceIndex = "consumer_receipts_aggregate_sequence"
+  val ConsumerReceiptsExpiryIndex = "consumer_receipts_expiry"
+  val EventQuarantineOffsetIndex = "event_quarantine_offset"
+  val EventQuarantineExpiryIndex = "event_quarantine_expiry"
   val HiringDomainMongoMigrationId = "phase-2-domain-mongodb-v1"
   val HiringGraphQLSearchIndexMigrationId = "hiring-graphql-search-indexes-v1"
   val HiringAdminJobListingIndexMigrationId = "hiring-admin-job-listing-indexes-v1"
@@ -77,15 +91,50 @@ object MongoHiringSetup {
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
     initialize(database, atlas, vectorSearchEnabled = atlas.nonEmpty)
 
+  def initializeTransactionalSupport(database: MongoDatabase, vectorSearchEnabled: Boolean): IO[Unit] =
+    runOperationalEventsMigration(database) *>
+      (if (vectorSearchEnabled) runEmbeddingWorkMigration(database) else IO.unit)
+
+  def initializeCore(database: MongoDatabase, vectorSearchEnabled: Boolean): IO[Unit] =
+    runOperationalEventsMigration(database) *>
+      runHiringUserSetupMigration(database, None) *>
+      (if (vectorSearchEnabled) runEmbeddingWorkMigration(database) else IO.unit)
+
   /** Vector work migrations are opt-in so a disabled vector runtime never creates a reindex backlog. */
   def initialize(
       database: MongoDatabase,
       atlas: Option[AtlasSearchIndexConfig],
       vectorSearchEnabled: Boolean
   ): IO[Unit] =
-    runHiringUserSetupMigration(database, atlas) *>
+    runOperationalEventsMigration(database) *>
+      runHiringUserSetupMigration(database, atlas) *>
       runEmbeddingWorkMigration(database) *>
       (if (vectorSearchEnabled) runEmbeddingBackfills(database).sequence_ else IO.unit)
+
+  private def runOperationalEventsMigration(database: MongoDatabase): IO[Unit] = {
+    val ledger = database.getCollection(HiringMigrationLedger)
+    IO(UUID.randomUUID().toString).flatMap { owner =>
+      for {
+        now <- IO.realTimeInstant
+        _ <- ensureLedgerRecord(ledger, OperationalEventsMigrationId, OperationalEventsDescriptor, OperationalEventsChecksum, now)
+        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", OperationalEventsMigrationId)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("operational events migration ledger record was not created")))
+        _ <- validateLedgerRecord(record, OperationalEventsMigrationId, OperationalEventsDescriptor, OperationalEventsChecksum)
+        claimed <- claimMigration(ledger, OperationalEventsMigrationId, OperationalEventsChecksum, owner, now)
+        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", OperationalEventsMigrationId)))
+          .flatMap(_.liftTo[IO](new IllegalStateException("operational events migration ledger record disappeared"))))(IO.pure)
+        _ <- claimed match {
+          case None if current.getString("status") == "Applied" => verifyOperationalEventIndexes(database)
+          case None => IO.raiseError(new IllegalStateException(
+            s"hiring migration '$OperationalEventsMigrationId' is already applying; wait for its lease to expire before recovery"
+          ))
+          case Some(_) =>
+            ensureOperationalEventIndexes(database) *> verifyOperationalEventIndexes(database) *>
+              markMigrationApplied(ledger, OperationalEventsMigrationId, OperationalEventsChecksum, owner)
+        }
+      } yield ()
+    }
+  }
 
   private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
       createIndex(database.getCollection("users"),
@@ -421,6 +470,53 @@ object MongoHiringSetup {
       Indexes.ascending("state", "availableAt", "leaseUntil"),
       new IndexOptions().name(EmbeddingWorkAvailableIndex)
     )
+
+  private def ensureOperationalEventIndexes(database: MongoDatabase): IO[Unit] =
+    List(
+      createIndex(database.getCollection("event_outbox"),
+        Indexes.ascending("state", "availableAt", "leaseUntil", "_id"),
+        new IndexOptions().name(EventOutboxClaimIndex)),
+      createIndex(database.getCollection("event_outbox"),
+        Indexes.ascending("aggregateType", "aggregateId", "sequence"),
+        new IndexOptions().name(EventOutboxAggregateSequenceIndex).unique(true)
+          .partialFilterExpression(Filters.in("aggregateType", "Job", "Application"))),
+      createIndex(database.getCollection("event_outbox"),
+        Indexes.ascending("retentionExpiresAt"),
+        new IndexOptions().name(EventOutboxPublishedRetentionIndex).expireAfter(0L, TimeUnit.SECONDS)
+          .partialFilterExpression(Filters.eq("state", "Published"))),
+      createIndex(database.getCollection("search_sessions"),
+        Indexes.compoundIndex(Indexes.ascending("actorId"), Indexes.descending("occurredAt", "_id")),
+        new IndexOptions().name(SearchSessionsActorIndex)),
+      createIndex(database.getCollection("search_sessions"),
+        Indexes.ascending("expiresAt"),
+        new IndexOptions().name(SearchSessionsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
+      createIndex(database.getCollection("consumer_receipts"),
+        Indexes.ascending("consumerGroup", "eventId"),
+        new IndexOptions().name(ConsumerReceiptsIdIndex).unique(true)),
+      createIndex(database.getCollection("consumer_receipts"),
+        Indexes.ascending("consumerGroup", "aggregateType", "aggregateId", "sequence"),
+        new IndexOptions().name(ConsumerReceiptsAggregateSequenceIndex)),
+      createIndex(database.getCollection("consumer_receipts"),
+        Indexes.ascending("expiresAt"),
+        new IndexOptions().name(ConsumerReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
+      createIndex(database.getCollection("event_quarantine"),
+        Indexes.ascending("topic", "partition", "offset"),
+        new IndexOptions().name(EventQuarantineOffsetIndex).unique(true)),
+      createIndex(database.getCollection("event_quarantine"),
+        Indexes.ascending("expiresAt"),
+        new IndexOptions().name(EventQuarantineExpiryIndex).expireAfter(0L, TimeUnit.SECONDS))
+    ).sequence_
+
+  private def verifyOperationalEventIndexes(database: MongoDatabase): IO[Unit] =
+    verifyIndexes(database.getCollection("event_outbox"), Set(
+      EventOutboxClaimIndex, EventOutboxAggregateSequenceIndex, EventOutboxPublishedRetentionIndex
+    )) *> verifyIndexes(database.getCollection("search_sessions"), Set(
+      SearchSessionsActorIndex, SearchSessionsExpiryIndex
+    )) *> verifyIndexes(database.getCollection("consumer_receipts"), Set(
+      ConsumerReceiptsIdIndex, ConsumerReceiptsAggregateSequenceIndex, ConsumerReceiptsExpiryIndex
+    )) *> verifyIndexes(database.getCollection("event_quarantine"), Set(
+      EventQuarantineOffsetIndex, EventQuarantineExpiryIndex
+    ))
 
   private def verifyEmbeddingWorkIndexes(database: MongoDatabase): IO[Unit] =
     PublisherBridge.collectWithin(database.getCollection("embedding_work").listIndexes(), IndexMetadataLimit).flatMap { indexes =>

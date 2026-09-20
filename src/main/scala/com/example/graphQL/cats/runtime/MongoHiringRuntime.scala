@@ -9,13 +9,16 @@ import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, JobUseCases, SearchUseCases, UserAuthenticator}
+import com.example.graphQL.cats.service.events.OperationalTelemetryService
 import com.example.graphQL.cats.service.search.{EmbeddingPipeline, SemanticSearchService}
-import com.example.graphQL.cats.config.{JwtAuthConfig, PasswordHashConfig, VectorSearchConfig}
+import com.example.graphQL.cats.config.{JwtAuthConfig, KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig, PasswordHashConfig, VectorSearchConfig}
 import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
+import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
-  MongoApplicationRepository, MongoDatabaseProbe, MongoHiringSetup, MongoJobRepository, MongoSemanticSearchRepository,
+  MongoApplicationRepository, MongoConsumerReceiptRepository, MongoDatabaseProbe, MongoEventQuarantineRepository, MongoHiringSetup, MongoJobRepository,
+  MongoOperationalEventOutboxRepository, MongoSearchSessionRepository, MongoSemanticSearchRepository,
   MongoUserRepository, MongoEmbeddingWorkRepository, AtlasSearchIndexConfig
 }
 import com.mongodb.reactivestreams.client.MongoDatabase
@@ -76,7 +79,8 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
       jwtAuth: JwtAuthConfig,
       resolverTimeout: FiniteDuration,
-      passwordHash: PasswordHashConfig = defaultPasswordHash
+      passwordHash: PasswordHashConfig = defaultPasswordHash,
+      kafka: KafkaConfig = disabledKafka
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
@@ -84,9 +88,15 @@ object MongoHiringRuntime {
       val users = MongoUserRepository.transactional(database, client, embeddingWork)
       val jobs = MongoJobRepository.transactional(database, client, embeddingWork)
       val applications = MongoApplicationRepository.transactional(database, client)
+      val searchSessions = MongoSearchSessionRepository.transactional(database, client)
+      val outbox = new MongoOperationalEventOutboxRepository(database)
+      val receipts = new MongoConsumerReceiptRepository(database)
+      val quarantine = new MongoEventQuarantineRepository(database)
+      Resource.eval(MongoHiringSetup.initializeCore(database, vectorSearch.enabled)) *>
       Resource.eval(IOLocal[Option[com.example.graphQL.cats.service.TraceContext]](None)).flatMap { traceLocal =>
-      hiringServices(database, users, jobs, applications, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, traceLocal, resolverTimeout).flatMap { services =>
-        SetupLifecycle.resource(setupEffect(database, vectorSearch)).map { setup =>
+      hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, traceLocal, resolverTimeout).flatMap { services =>
+        SetupLifecycle.resource(setupEffect(database, vectorSearch)).flatMap { setup =>
+          OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
           MongoHiringRuntime(
             probe(database, metadata, diagnostics, setup.ready),
@@ -94,6 +104,7 @@ object MongoHiringRuntime {
             UserAuthenticationService[IO](users),
             setup.ready.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
           )
+          }
         }
       }
       }
@@ -104,6 +115,7 @@ object MongoHiringRuntime {
       users: MongoUserRepository,
       jobs: MongoJobRepository,
       applications: MongoApplicationRepository,
+      searchSessions: MongoSearchSessionRepository,
       vectorSearch: VectorSearchConfig,
       embeddingService: (VectorSearchConfig, String) => EmbeddingService[IO],
       diagnostics: Diagnostics,
@@ -116,6 +128,7 @@ object MongoHiringRuntime {
     val tokenIssuer = new JwtAccessTokenIssuer(jwtAuth)
     val readModel = BoundedHiringServices.readModel(HiringReadService[IO](users, jobs, applications), resolverTimeout)
     val applicationService = BoundedHiringServices.applications(ApplicationService[IO](users, jobs, applications), resolverTimeout)
+    val interactionService = OperationalTelemetryService[IO](users, jobs, searchSessions)
     val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
 
     def assemble(
@@ -130,6 +143,8 @@ object MongoHiringRuntime {
         cursorCodec,
         TracedHiringServices.accounts(accountService, diagnostics, traceLocal),
         semanticSearch.map(TracedHiringServices.search(_, diagnostics, traceLocal)),
+        interactionService,
+        searchSessions,
         Some(traceLocal)
       )
 
@@ -239,4 +254,14 @@ object MongoHiringRuntime {
     )), vectorSearch.enabled)
 
   private val defaultPasswordHash = PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
+
+  private val disabledKafka: KafkaConfig =
+    KafkaConfig(
+      enabled = false,
+      bootstrapServers = "127.0.0.1:9092",
+      topic = "hiring.operational-events.v1",
+      consumerGroup = "hiring-phase5-consumer",
+      KafkaPublisherConfig("local-publisher", batchSize = 25, leaseSeconds = 30, retryDelaySeconds = 5, maxAttempts = 10, pollIntervalMillis = 500),
+      KafkaConsumerConfig(enabled = false, receiptTtlDays = 8, quarantineTtlDays = 7)
+    )
 }

@@ -3,6 +3,9 @@ package com.example.graphQL.cats.repository.mongo
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
+import com.example.graphQL.cats.shared.events.*
+import io.circe.Json
+import io.circe.parser.parse
 import org.bson.Document
 
 import java.time.Instant
@@ -87,6 +90,7 @@ private[mongo] object MongoHiringCodecs {
     new Document("_id", application.id.value.toString).append("schemaVersion", 1).append("candidateId", application.candidateId.value.toString)
       .append("jobId", application.jobId.value.toString).append("status", application.status.toString)
       .append("createdAt", Date.from(application.createdAt)).append("updatedAt", Date.from(application.updatedAt))
+      .append("version", java.lang.Long.valueOf(application.version))
 
   def readApplication(document: Document): Either[StoredDocumentError, Application] =
     for {
@@ -96,7 +100,8 @@ private[mongo] object MongoHiringCodecs {
       status <- enumValue(document, "status", ApplicationStatus.values)
       createdAt <- instant(document, "createdAt")
       updatedAt <- instant(document, "updatedAt")
-    } yield Application(id, candidateId, jobId, status, createdAt, updatedAt)
+      version <- optionalLong(document, "version").map(_.getOrElse(0L))
+    } yield Application(id, candidateId, jobId, status, createdAt, updatedAt, version)
 
   def event(event: ApplicationEvent): Document =
     appendOptionalString(appendOptionalString(appendOptionalString(new Document("_id", event.id.value.toString)
@@ -114,6 +119,76 @@ private[mongo] object MongoHiringCodecs {
       feedback <- optionalString(document, "feedback")
       reason <- optionalString(document, "reason")
     } yield ApplicationEvent(id, applicationId, previousStatus, newStatus, actorId, occurredAt, feedback, reason)
+
+  def operationalEvent(value: OperationalEventEnvelope): Document =
+    new Document("_id", value.eventId.toString)
+      .append("schemaVersion", value.schemaVersion)
+      .append("topic", OperationalEventEnvelope.Topic)
+      .append("eventType", value.eventType.toString)
+      .append("occurredAt", Date.from(value.occurredAt))
+      .append("aggregateType", value.aggregateType.toString)
+      .append("aggregateId", value.aggregateId)
+      .append("aggregateVersion", java.lang.Long.valueOf(value.aggregateVersion))
+      .append("sequence", java.lang.Long.valueOf(value.sequence))
+      .append("actorId", value.actorId.value.toString)
+      .append("payload", value.payload.noSpaces)
+      .append("envelopeBytes", OperationalEventJson.bytes(value))
+      .append("partitionKey", value.partitionKey)
+
+  def readOperationalEvent(document: Document): Either[StoredDocumentError, OperationalEventEnvelope] =
+    for {
+      eventId <- uuid(document, "_id")
+      eventType <- enumValue(document, "eventType", OperationalEventType.values)
+      schemaVersion <- requiredInt(document, "schemaVersion")
+      _ <- Either.cond(schemaVersion == OperationalEventEnvelope.SchemaVersion, (), InvalidField("schemaVersion"))
+      occurredAt <- instant(document, "occurredAt")
+      aggregateType <- enumValue(document, "aggregateType", OperationalAggregateType.values)
+      aggregateId <- requiredString(document, "aggregateId")
+      aggregateVersion <- requiredLong(document, "aggregateVersion")
+      sequence <- requiredLong(document, "sequence")
+      actorId <- uuid(document, "actorId").map(UserId.apply)
+      payload <- requiredString(document, "payload").flatMap(json("payload"))
+    } yield OperationalEventEnvelope(eventId, eventType, schemaVersion, occurredAt, aggregateType, aggregateId, aggregateVersion, sequence, actorId, payload)
+
+  def outboxRecord(value: OperationalEventEnvelope, now: Instant): Document =
+    operationalEvent(value)
+      .append("state", "Retryable")
+      .append("attempts", java.lang.Integer.valueOf(0))
+      .append("availableAt", Date.from(now))
+      .append("leaseOwner", null)
+      .append("leaseToken", null)
+      .append("createdAt", Date.from(now))
+      .append("updatedAt", Date.from(now))
+
+  def searchSession(value: SearchSession): Document =
+    new Document("_id", value.id.toString)
+      .append("actorId", value.actorId.value.toString)
+      .append("searchKind", value.searchKind)
+      .append("query", value.query.orNull)
+      .append("filter", value.filter.noSpaces)
+      .append("model", value.model.orNull)
+      .append("modelVersion", value.modelVersion.map(Int.box).orNull)
+      .append("results", value.results.map(result =>
+        new Document("resultId", result.resultId)
+          .append("rank", java.lang.Integer.valueOf(result.rank))
+          .append("score", java.lang.Double.valueOf(result.score))
+      ).asJava)
+      .append("occurredAt", Date.from(value.occurredAt))
+      .append("expiresAt", Date.from(value.expiresAt))
+
+  def readSearchSession(document: Document): Either[StoredDocumentError, SearchSession] =
+    for {
+      id <- uuid(document, "_id")
+      actorId <- uuid(document, "actorId").map(UserId.apply)
+      searchKind <- requiredString(document, "searchKind")
+      query <- optionalString(document, "query")
+      filter <- requiredString(document, "filter").flatMap(json("filter"))
+      model <- optionalString(document, "model")
+      modelVersion <- optionalInt(document, "modelVersion")
+      results <- resultList(document, "results")
+      occurredAt <- instant(document, "occurredAt")
+      expiresAt <- instant(document, "expiresAt")
+    } yield SearchSession(id, actorId, searchKind, query, filter, model, modelVersion, results, occurredAt, expiresAt)
 
   private def location(location: Location): Document = new Document("country", location.country).append("city", location.city).append("remote", location.remote)
 
@@ -195,6 +270,12 @@ private[mongo] object MongoHiringCodecs {
   private def requiredInt(document: Document, field: String): Either[StoredDocumentError, Int] = Option(document.get(field)) match {
     case Some(value: Number) => Right(value.intValue); case None => Left(MissingField(field)); case _ => Left(InvalidField(field))
   }
+  private def optionalInt(document: Document, field: String): Either[StoredDocumentError, Option[Int]] = Option(document.get(field)) match {
+    case None => Right(None); case Some(value: Number) => Right(Some(value.intValue)); case Some(_) => Left(InvalidField(field))
+  }
+  private def requiredLong(document: Document, field: String): Either[StoredDocumentError, Long] = Option(document.get(field)) match {
+    case Some(value: Number) => Right(value.longValue); case None => Left(MissingField(field)); case _ => Left(InvalidField(field))
+  }
   private def nestedDocument(document: Document, field: String): Either[StoredDocumentError, Document] = optionalDocument(document, field).flatMap(_.toRight(MissingField(field)))
   private def optionalDocument(document: Document, field: String): Either[StoredDocumentError, Option[Document]] = Option(document.get(field)) match {
     case None => Right(None); case Some(value: Document) => Right(Some(value)); case Some(_) => Left(InvalidField(field))
@@ -208,6 +289,22 @@ private[mongo] object MongoHiringCodecs {
     case Some(values: java.util.List[?]) => values.asScala.toList.traverse { case value: Number => Right(value); case _ => Left(InvalidField(field)) }.map(Some(_))
     case _ => Left(InvalidField(field))
   }
+  private def resultList(document: Document, field: String): Either[StoredDocumentError, List[SearchSessionResult]] = Option(document.get(field)) match {
+    case Some(values: java.util.List[?]) =>
+      values.asScala.toList.traverse {
+        case value: Document =>
+          (requiredString(value, "resultId"), requiredInt(value, "rank"), requiredNumber(value, "score"))
+            .mapN((id, rank, score) => SearchSessionResult(id, rank, score.doubleValue))
+        case _ => Left(InvalidField(field))
+      }
+    case None => Left(MissingField(field))
+    case _ => Left(InvalidField(field))
+  }
+  private def requiredNumber(document: Document, field: String): Either[StoredDocumentError, Number] = Option(document.get(field)) match {
+    case Some(value: Number) => Right(value); case None => Left(MissingField(field)); case _ => Left(InvalidField(field))
+  }
+  private def json(field: String)(value: String): Either[StoredDocumentError, Json] =
+    parse(value).leftMap(_ => InvalidField(field))
   private def attempt[A](field: String)(value: => A): Either[StoredDocumentError, A] = try Right(value) catch { case NonFatal(_) => Left(InvalidField(field)) }
 
   private def appendOptionalString(document: Document, field: String, value: Option[String]): Document = { value.foreach(document.append(field, _)); document }

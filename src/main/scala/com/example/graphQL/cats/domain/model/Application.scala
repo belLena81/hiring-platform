@@ -16,7 +16,8 @@ final case class Application(
   jobId: JobId,
   status: ApplicationStatus,
   createdAt: Instant,
-  updatedAt: Instant
+  updatedAt: Instant,
+  version: Long = 0L
 )
 
 object Application {

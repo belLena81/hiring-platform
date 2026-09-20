@@ -4,6 +4,8 @@ lazy val catsVersion           = "2.13.0"
 lazy val catsEffectVersion     = "3.7.1"
 lazy val circeVersion          = "0.14.16"
 lazy val fs2Version            = "3.14.0"
+lazy val fs2KafkaVersion       = "3.9.1"
+lazy val kafkaClientsVersion   = "3.9.2"
 lazy val http4sVersion         = "0.23.37"
 lazy val jwtScalaVersion       = "11.0.4"
 lazy val argon2Version         = "2.12"
@@ -42,6 +44,8 @@ lazy val root = (project in file("."))
       "org.typelevel"       %% "cats-effect"            % catsEffectVersion,
       "co.fs2"              %% "fs2-core"               % fs2Version,
       "co.fs2"              %% "fs2-io"                 % fs2Version,
+      "com.github.fd4s"     %% "fs2-kafka"              % fs2KafkaVersion,
+      "org.apache.kafka"     % "kafka-clients"          % kafkaClientsVersion,
       "org.sangria-graphql" %% "sangria"                % sangriaVersion,
       "org.sangria-graphql" %% "sangria-circe"          % sangriaCirceVersion,
       "org.http4s"          %% "http4s-dsl"             % http4sVersion,

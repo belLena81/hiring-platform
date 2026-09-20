@@ -5,7 +5,8 @@ import cats.effect.std.Dispatcher
 import com.example.graphQL.cats.service.{ActorContext, ProbeResult, TraceContext}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
-import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, JobUseCases, SearchUseCases}
+import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
+import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, InteractionUseCases, JobUseCases, SearchUseCases}
 import com.example.graphQL.cats.service.UseCaseError
 import scala.util.control.NoStackTrace
 
@@ -16,6 +17,8 @@ final case class HiringGraphQLServices(
     cursorCodec: CursorCodec.CursorCodecs,
     accountService: AccountUseCases[IO],
     semanticSearchService: Option[SearchUseCases[IO]] = None,
+    interactionService: InteractionUseCases[IO] = InteractionUseCases.noop[IO],
+    searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO],
     traceLocal: Option[IOLocal[Option[com.example.graphQL.cats.service.TraceContext]]] = None
 )
 

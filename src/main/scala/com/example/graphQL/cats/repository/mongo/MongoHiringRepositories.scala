@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
+import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, OperationalEventType, OperationalEvents}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
@@ -43,6 +44,24 @@ private[mongo] trait MongoApplicationEventInsertion {
       PublisherBridge.first(events.insertOne(MongoHiringCodecs.event(event)))
     ) { active =>
       PublisherBridge.first(events.insertOne(active, MongoHiringCodecs.event(event)))
+    }
+}
+
+private[mongo] trait MongoOperationalEventInsertion {
+  protected final def insertOperationalEvents(
+      outbox: MongoCollection[Document],
+      session: Option[ClientSession],
+      events: List[OperationalEventEnvelope],
+      now: Instant
+  ): IO[Either[RepositoryError, Unit]] =
+    events.traverse_ { event =>
+      val document = MongoHiringCodecs.outboxRecord(event, now)
+      session.fold(PublisherBridge.first(outbox.insertOne(document)))(active =>
+        PublisherBridge.first(outbox.insertOne(active, document))
+      )
+    }.as(Right(())).handleError {
+      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
+      case _ => Left(RepositoryError.Unavailable)
     }
 }
 
@@ -197,9 +216,11 @@ final class MongoUserRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
     embeddingWork: Option[MongoEmbeddingWorkRepository] = None
-) extends UserRepository[IO] with UserAccountRepository[IO] with MongoConflictWriteMapping {
+) extends UserRepository[IO] with UserAccountRepository[IO] with MongoConflictWriteMapping with MongoOperationalEventInsertion {
   private val collection = database.getCollection("users")
   private val registry = database.getCollection("account_registry")
+  private val outbox = database.getCollection("event_outbox")
+  private val MaxJobsClosedByAccountDeletion = 1000
 
   def insert(user: User): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid) IO.pure(Left(RepositoryError.Conflict))
@@ -385,8 +406,47 @@ final class MongoUserRepository(
       userWrite.flatMap {
         case Some(result) if result.getMatchedCount == 1L =>
           val jobFilter = Filters.and(Filters.eq("recruiterId", userId.value.toString), Filters.eq("status", JobStatus.Open.toString))
-          val jobUpdate = Updates.combine(Updates.set("status", JobStatus.Closed.toString), Updates.set("closedAt", Date.from(now)), Updates.set("updatedAt", Date.from(now)), Updates.inc("version", 1L))
-          session.fold(PublisherBridge.first(database.getCollection("jobs").updateMany(jobFilter, jobUpdate)))(active => PublisherBridge.first(database.getCollection("jobs").updateMany(active, jobFilter, jobUpdate))).as(Right(()))
+          val jobs = database.getCollection("jobs")
+          val findJobs = session.fold(PublisherBridge.collectWithin(jobs.find(jobFilter), MaxJobsClosedByAccountDeletion)) { active =>
+            PublisherBridge.collectWithin(jobs.find(active, jobFilter), MaxJobsClosedByAccountDeletion)
+          }
+          findJobs.flatMap { documents =>
+            MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readJob)) match {
+              case Left(error) => IO.pure(Left(error))
+              case Right(openJobs) =>
+                openJobs.traverse_ { job =>
+                  val closed = job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now, version = job.version + 1L)
+                  session.fold(
+                    PublisherBridge.first(jobs.replaceOne(
+                      Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("status", JobStatus.Open.toString), Filters.eq("version", job.version)),
+                      MongoHiringCodecs.job(closed)
+                    ))
+                  )(active => PublisherBridge.first(jobs.replaceOne(
+                    active,
+                    Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("status", JobStatus.Open.toString), Filters.eq("version", job.version)),
+                    MongoHiringCodecs.job(closed)
+                  ))).flatMap {
+                    case Some(jobResult) if jobResult.getMatchedCount == 1L => IO.unit
+                    case Some(_) => IO.raiseError(new IllegalStateException("job changed while closing account"))
+                    case None => IO.raiseError(new IllegalStateException("job close write returned no result"))
+                  }
+                }.attempt.flatMap {
+                  case Left(_) => IO.pure(Left(RepositoryError.Conflict))
+                  case Right(_) =>
+                    val closeEvents = openJobs.map { job =>
+                      val closed = job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now, version = job.version + 1L)
+                      OperationalEvents.jobEvent(
+                        OperationalEventType.JOB_CLOSED,
+                        java.util.UUID.nameUUIDFromBytes(s"job:${job.id.value}:JOB_CLOSED:${closed.version}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                        closed,
+                        userId,
+                        now
+                      )
+                    }
+                    insertOperationalEvents(outbox, session, closeEvents, now)
+                }
+            }
+          }
         case Some(_) => IO.pure(Left(RepositoryError.Conflict))
         case None => IO.pure(Left(RepositoryError.Unavailable))
       }
@@ -431,8 +491,9 @@ final class MongoJobRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
     embeddingWork: Option[MongoEmbeddingWorkRepository] = None
-) extends JobRepository[IO] with MongoConflictWriteMapping {
+) extends JobRepository[IO] with MongoConflictWriteMapping with MongoOperationalEventInsertion {
   private val collection = database.getCollection("jobs")
+  private val outbox = database.getCollection("event_outbox")
 
   override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
     PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString)))
@@ -456,6 +517,21 @@ final class MongoJobRepository(
 
   override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
     if (embeddingWork.nonEmpty) createWithEmbeddingWork(job, now) else createDirect(job)
+
+  override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
+    if (events.isEmpty) create(job, now)
+    else transactionRunner.run { session =>
+      insertOne(session, MongoHiringCodecs.job(job)).flatMap {
+        case Some(_) =>
+          embeddingWork.fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
+            _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+          ).flatMap {
+            case Right(()) => insertOperationalEvents(outbox, session, events, now)
+            case Left(error) => IO.pure(Left(error))
+          }
+        case None => IO.pure(Left(RepositoryError.Unavailable))
+      }
+    }.handleError(mapWrite)
 
   /** Job creation and the coalesced reindex request commit together. */
   def createWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
@@ -482,6 +558,29 @@ final class MongoJobRepository(
 
   override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
     if (embeddingWork.nonEmpty) updateWithEmbeddingWork(job, now) else updateDirect(job)
+
+  override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+    if (events.isEmpty) update(job, now)
+    else {
+      val persisted = job.copy(version = job.version + 1L)
+      transactionRunner.run { session =>
+        replaceOne(
+          session,
+          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("version", job.version)),
+          MongoHiringCodecs.job(persisted)
+        ).flatMap {
+          case Some(result) if result.getMatchedCount == 1L =>
+            embeddingWork.fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
+              _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+            ).flatMap {
+              case Right(()) => insertOperationalEvents(outbox, session, events, now)
+              case Left(error) => IO.pure(Left(error))
+            }
+          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+          case None => IO.pure(Left(RepositoryError.Unavailable))
+        }
+      }.map(_.as(persisted)).handleError(mapWrite)
+    }
 
   /** Optimistic job replacement and the coalesced reindex request commit together. */
   def updateWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
@@ -686,10 +785,11 @@ private[mongo] object MongoSemanticSearchResult {
 final class MongoApplicationRepository private (
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner
-) extends ApplicationRepository[IO] with MongoApplicationEventInsertion {
+) extends ApplicationRepository[IO] with MongoApplicationEventInsertion with MongoOperationalEventInsertion {
   private val collection = database.getCollection("applications")
   private val events = database.getCollection("application_events")
   private val jobs = database.getCollection("jobs")
+  private val outbox = database.getCollection("event_outbox")
 
   override def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]] =
     PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString)))
@@ -713,7 +813,23 @@ final class MongoApplicationRepository private (
     if (!isConsistentSubmit(observedJob, application, initialEvent)) IO.pure(Left(RepositoryError.Conflict))
     else submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2)
 
+  override def createForOpenJobWithEvents(
+      observedJob: Job,
+      application: Application,
+      initialEvent: ApplicationEvent,
+      operationalEvents: List[OperationalEventEnvelope]
+  ): IO[Either[RepositoryError, Unit]] =
+    if (!isConsistentSubmit(observedJob, application, initialEvent)) IO.pure(Left(RepositoryError.Conflict))
+    else submitWithRetry(observedJob, application, initialEvent, operationalEvents, remainingRetries = 2)
+
   override def updateStatus(application: Application, event: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
+    updateStatusWithEvents(application, event, Nil)
+
+  override def updateStatusWithEvents(
+      application: Application,
+      event: ApplicationEvent,
+      operationalEvents: List[OperationalEventEnvelope]
+  ): IO[Either[RepositoryError, Unit]] =
     transactionRunner.run { session =>
       val statusGuard = event.previousStatus.map(status => Filters.eq("status", status.toString)).getOrElse(Filters.exists("status"))
       val filter = Filters.and(Filters.eq("_id", application.id.value.toString), statusGuard)
@@ -724,9 +840,9 @@ final class MongoApplicationRepository private (
       }
       update.flatMap {
         case Some(result) if result.getMatchedCount == 1L =>
-          insertApplicationEvent(events, session, event).attempt.map {
-            case Right(_) => Right(())
-            case Left(error) => mapDuplicateAs(RepositoryError.Conflict)(error)
+          insertApplicationEvent(events, session, event).attempt.flatMap {
+            case Right(_) => insertOperationalEvents(outbox, session, operationalEvents, application.updatedAt)
+            case Left(error) => IO.pure(mapDuplicateAs(RepositoryError.Conflict)(error))
           }
         case Some(_) => IO.pure(Left(RepositoryError.Conflict))
         case None => IO.pure(Left(RepositoryError.Unavailable))
@@ -757,10 +873,19 @@ final class MongoApplicationRepository private (
       initialEvent: ApplicationEvent,
       remainingRetries: Int
   ): IO[Either[RepositoryError, Unit]] =
-    submitOnce(observedJob, application, initialEvent).flatMap {
+    submitWithRetry(observedJob, application, initialEvent, Nil, remainingRetries)
+
+  private def submitWithRetry(
+      observedJob: Job,
+      application: Application,
+      initialEvent: ApplicationEvent,
+      operationalEvents: List[OperationalEventEnvelope],
+      remainingRetries: Int
+  ): IO[Either[RepositoryError, Unit]] =
+    submitOnce(observedJob, application, initialEvent, operationalEvents).flatMap {
       case Left(RepositoryError.Conflict) if remainingRetries > 0 =>
         currentOpenJob(observedJob.id).flatMap {
-          case Right(Some(current)) => submitWithRetry(current, application, initialEvent, remainingRetries - 1)
+          case Right(Some(current)) => submitWithRetry(current, application, initialEvent, operationalEvents, remainingRetries - 1)
           case Right(None) => IO.pure(Left(RepositoryError.Conflict))
           case Left(error) => IO.pure(Left(error))
         }
@@ -777,7 +902,8 @@ final class MongoApplicationRepository private (
   private def submitOnce(
       observedJob: Job,
       application: Application,
-      initialEvent: ApplicationEvent
+      initialEvent: ApplicationEvent,
+      operationalEvents: List[OperationalEventEnvelope]
   ): IO[Either[RepositoryError, Unit]] =
     transactionRunner.run { session =>
       val guardFilter = Filters.and(
@@ -792,7 +918,7 @@ final class MongoApplicationRepository private (
       }
       guard.flatMap {
         case Some(result) if result.getMatchedCount == 1L =>
-          insertApplicationAndEvent(session, application, initialEvent)
+          insertApplicationAndEvent(session, application, initialEvent, operationalEvents)
         case Some(_) => IO.pure(Left(RepositoryError.Conflict))
         case None => IO.pure(Left(RepositoryError.Unavailable))
       }
@@ -801,7 +927,8 @@ final class MongoApplicationRepository private (
   private def insertApplicationAndEvent(
       session: Option[ClientSession],
       application: Application,
-      initialEvent: ApplicationEvent
+      initialEvent: ApplicationEvent,
+      operationalEvents: List[OperationalEventEnvelope]
   ): IO[Either[RepositoryError, Unit]] = {
     val insertApplication = session.fold(
       PublisherBridge.first(collection.insertOne(MongoHiringCodecs.application(application)))
@@ -812,9 +939,9 @@ final class MongoApplicationRepository private (
     insertApplication.attempt.flatMap {
       case Left(error) => IO.pure(mapDuplicateAs(RepositoryError.DuplicateApplication)(error))
       case Right(_) =>
-        insertEvent.attempt.map {
-          case Right(_) => Right(())
-          case Left(error) => mapDuplicateAs(RepositoryError.Conflict)(error)
+        insertEvent.attempt.flatMap {
+          case Right(_) => insertOperationalEvents(outbox, session, operationalEvents, application.createdAt)
+          case Left(error) => IO.pure(mapDuplicateAs(RepositoryError.Conflict)(error))
         }
     }
   }

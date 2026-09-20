@@ -1,7 +1,9 @@
 package com.example.graphQL.cats.repository.protocol
 
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{AccountCredentials, Application, ApplicationEvent, EntityEmbedding, Job, User, UserPageRequest, UserProfile}
+import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
 import java.time.Instant
@@ -29,7 +31,9 @@ trait JobRepository[F[_]] {
   def findAll(page: JobPageRequest): F[Either[RepositoryError, List[Job]]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): F[Either[RepositoryError, List[Job]]]
   def create(job: Job, now: Instant): F[Either[RepositoryError, Unit]]
+  def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): F[Either[RepositoryError, Unit]]
   def update(job: Job, now: Instant): F[Either[RepositoryError, Job]]
+  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): F[Either[RepositoryError, Job]]
   def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
@@ -82,6 +86,63 @@ trait SemanticSearchRepository[F[_]] {
   def candidateMatches(query: VectorSearchQuery): F[Either[RepositoryError, List[RankedCandidate]]]
 }
 
+trait SearchSessionRepository[F[_]] {
+  def save(session: SearchSession, event: OperationalEventEnvelope): F[Either[RepositoryError, Unit]]
+  def find(id: java.util.UUID): F[Either[RepositoryError, Option[SearchSession]]]
+  def recordInteraction(event: OperationalEventEnvelope): F[Either[RepositoryError, Boolean]]
+}
+
+final case class ClaimedOperationalEvent(
+    event: OperationalEventEnvelope,
+    envelopeBytes: Array[Byte],
+    partitionKey: String,
+    leaseToken: String,
+    attempts: Int
+)
+
+enum OperationalEventFailureCategory {
+  case MalformedEnvelope, UnsupportedVersion, InvalidOrdering, ConsumerFailure
+}
+
+trait OperationalEventOutboxRepository[F[_]] {
+  def claim(workerId: String, now: Instant, leaseUntil: Instant, limit: Int): F[Either[RepositoryError, List[ClaimedOperationalEvent]]]
+  def markPublished(eventId: java.util.UUID, leaseToken: String, now: Instant, retentionExpiresAt: Instant): F[Either[RepositoryError, Unit]]
+  def releaseForRetry(eventId: java.util.UUID, leaseToken: String, now: Instant, availableAt: Instant): F[Either[RepositoryError, Unit]]
+  def markFailed(eventId: java.util.UUID, leaseToken: String, now: Instant, reason: String): F[Either[RepositoryError, Unit]]
+}
+
+trait ConsumerReceiptRepository[F[_]] {
+  def exists(consumerGroup: String, eventId: java.util.UUID): F[Either[RepositoryError, Boolean]]
+  def latestSequence(consumerGroup: String, aggregateType: String, aggregateId: String): F[Either[RepositoryError, Option[Long]]]
+  def record(consumerGroup: String, event: OperationalEventEnvelope, now: Instant, expiresAt: Instant): F[Either[RepositoryError, Boolean]]
+}
+
+final case class EventQuarantineRecord(
+    topic: String,
+    partition: Int,
+    offset: Long,
+    category: OperationalEventFailureCategory,
+    reason: String,
+    rawBytes: Array[Byte],
+    occurredAt: Instant,
+    expiresAt: Instant
+)
+
+trait EventQuarantineRepository[F[_]] {
+  def save(record: EventQuarantineRecord): F[Either[RepositoryError, Unit]]
+}
+
+object SearchSessionRepository {
+  def noop[F[_]](using cats.Applicative[F]): SearchSessionRepository[F] = new SearchSessionRepository[F] {
+    override def save(session: SearchSession, event: OperationalEventEnvelope): F[Either[RepositoryError, Unit]] =
+      Right(()).pure[F]
+    override def find(id: java.util.UUID): F[Either[RepositoryError, Option[SearchSession]]] =
+      Right(None).pure[F]
+    override def recordInteraction(event: OperationalEventEnvelope): F[Either[RepositoryError, Boolean]] =
+      Right(true).pure[F]
+  }
+}
+
 trait ApplicationRepository[F[_]] {
   def find(id: ApplicationId): F[Either[RepositoryError, Option[Application]]]
   def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): F[Either[RepositoryError, List[Application]]]
@@ -92,5 +153,16 @@ trait ApplicationRepository[F[_]] {
       application: Application,
       initialEvent: ApplicationEvent
   ): F[Either[RepositoryError, Unit]]
+  def createForOpenJobWithEvents(
+      observedJob: Job,
+      application: Application,
+      initialEvent: ApplicationEvent,
+      events: List[OperationalEventEnvelope]
+  ): F[Either[RepositoryError, Unit]]
   def updateStatus(application: Application, event: ApplicationEvent): F[Either[RepositoryError, Unit]]
+  def updateStatusWithEvents(
+      application: Application,
+      event: ApplicationEvent,
+      events: List[OperationalEventEnvelope]
+  ): F[Either[RepositoryError, Unit]]
 }

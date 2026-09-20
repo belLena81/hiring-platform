@@ -9,6 +9,7 @@ import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.shared.events.OperationalEventType
 import java.util.UUID
 import munit.CatsEffectSuite
 
@@ -105,6 +106,28 @@ class JobServiceSpec extends CatsEffectSuite {
     } yield {
       assertEquals(result.map(_.id), Right(jobId))
       assertEquals(wakeCount, 1)
+    }
+  }
+
+  test("createJob hands a JOB_CREATED fact to the durable repository boundary") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
+      jobRepository = InMemoryJobs(jobs, Some(outbox))
+      service = JobService[IO](InMemoryUsers(users), jobRepository)
+      result <- service.createJob(
+        ActorContext(recruiterId, UserRole.Recruiter),
+        CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Open),
+        now,
+        jobId
+      )
+      events <- jobRepository.allOperationalEvents
+    } yield {
+      assertEquals(result.map(_.id), Right(jobId))
+      assertEquals(events.map(_.eventType), Vector(OperationalEventType.JOB_CREATED))
+      assertEquals(events.map(_.aggregateId), Vector(jobId.value.toString))
+      assert(!events.head.payload.noSpaces.contains("recruiter@example.com"))
     }
   }
 

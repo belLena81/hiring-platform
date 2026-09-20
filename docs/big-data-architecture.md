@@ -119,15 +119,17 @@ Kafka acts as the boundary between transactional and analytical workloads.
 
 Partition keys must preserve ordering where ordering is required.
 
-Application lifecycle events use:
+Phase 5 uses one local topic:
 
 ```text
-key = applicationId
+hiring.operational-events.v1
 ```
 
-This guarantees that events for one application are assigned to the same partition.
+Application lifecycle events use `key = applicationId`, job facts use `key = jobId`, and search/session interaction facts use `key = searchId`. This guarantees that events for one aggregate key are assigned to the same partition. There is no ordering guarantee across different keys.
 
 Different applications can still be processed concurrently.
+
+Operational services write MongoDB state and immutable outbox records in the same transaction. A resource-owned fs2-kafka publisher uses an idempotent producer with `acks=all`; acknowledgement-loss retry republishes the same `eventId`. The Phase 5 consumer records a Mongo receipt keyed by `(consumerGroup, eventId)` before committing the Kafka offset. Malformed, unsupported-version, or invalid-ordering records are written to a seven-day quarantine with topic, partition, offset, category, and raw bytes.
 
 Important concepts intentionally demonstrated:
 

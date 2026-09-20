@@ -44,6 +44,25 @@ class AppConfigSpec extends FunSuite {
       |  attempts = 20
       |  max-buckets = 10000
       |}
+      |kafka {
+      |  enabled = false
+      |  bootstrap-servers = "127.0.0.1:9092"
+      |  topic = "hiring.operational-events.v1"
+      |  consumer-group = "hiring-phase5-consumer"
+      |  publisher {
+      |    worker-id = "local-publisher"
+      |    batch-size = 25
+      |    lease-seconds = 30
+      |    retry-delay-seconds = 5
+      |    max-attempts = 10
+      |    poll-interval-ms = 500
+      |  }
+      |  consumer {
+      |    enabled = false
+      |    receipt-ttl-days = 8
+      |    quarantine-ttl-days = 7
+      |  }
+      |}
       |vector-search {
       |  enabled = false
       |  voyage {
@@ -97,6 +116,22 @@ class AppConfigSpec extends FunSuite {
     PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
   private val defaultAuthRateLimit =
     AuthRateLimitConfig(windowSeconds = 60, attempts = 20, maxBuckets = 10000)
+  private val defaultKafka =
+    KafkaConfig(
+      enabled = false,
+      bootstrapServers = "127.0.0.1:9092",
+      topic = "hiring.operational-events.v1",
+      consumerGroup = "hiring-phase5-consumer",
+      publisher = KafkaPublisherConfig(
+        workerId = "local-publisher",
+        batchSize = 25,
+        leaseSeconds = 30,
+        retryDelaySeconds = 5,
+        maxAttempts = 10,
+        pollIntervalMillis = 500
+      ),
+      consumer = KafkaConsumerConfig(enabled = false, receiptTtlDays = 8, quarantineTtlDays = 7)
+    )
 
   test("P1-AC01 loads grouped HOCON settings and resolves env placeholders") {
     val config =
@@ -125,6 +160,25 @@ class AppConfigSpec extends FunSuite {
         |  window-seconds = 30
         |  attempts = 10
         |  max-buckets = 500
+        |}
+        |kafka {
+        |  enabled = false
+        |  bootstrap-servers = "127.0.0.1:9092"
+        |  topic = "hiring.operational-events.v1"
+        |  consumer-group = "hiring-phase5-consumer"
+        |  publisher {
+        |    worker-id = "local-publisher"
+        |    batch-size = 25
+        |    lease-seconds = 30
+        |    retry-delay-seconds = 5
+        |    max-attempts = 10
+        |    poll-interval-ms = 500
+        |  }
+        |  consumer {
+        |    enabled = false
+        |    receipt-ttl-days = 8
+        |    quarantine-ttl-days = 7
+        |  }
         |}
         |vector-search {
         |  enabled = false
@@ -161,7 +215,8 @@ class AppConfigSpec extends FunSuite {
       JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
       defaultPasswordHash,
       AuthRateLimitConfig(30, 10, 500),
-      defaultVectorSearch)))
+      defaultVectorSearch,
+      defaultKafka)))
   }
 
   test("VHS-AC07 rejects a vector candidate budget below the maximum page size") {
@@ -277,6 +332,25 @@ class AppConfigSpec extends FunSuite {
         |  attempts = 20
         |  max-buckets = 10000
         |}
+        |kafka {
+        |  enabled = false
+        |  bootstrap-servers = "127.0.0.1:9092"
+        |  topic = "hiring.operational-events.v1"
+        |  consumer-group = "hiring-phase5-consumer"
+        |  publisher {
+        |    worker-id = "local-publisher"
+        |    batch-size = 25
+        |    lease-seconds = 30
+        |    retry-delay-seconds = 5
+        |    max-attempts = 10
+        |    poll-interval-ms = 500
+        |  }
+        |  consumer {
+        |    enabled = false
+        |    receipt-ttl-days = 8
+        |    quarantine-ttl-days = 7
+        |  }
+        |}
         |vector-search {
         |  enabled = false
         |  voyage {
@@ -388,7 +462,7 @@ class AppConfigSpec extends FunSuite {
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
       Right(AppConfig("127.0.0.1", 8080, 16, 5.seconds, 4.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
-        maskSensitive = false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false))))
+        maskSensitive = false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false), defaultKafka)))
   }
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {

@@ -14,6 +14,7 @@ input ApplicationActionInput {
 type ApplicationConnection {
   edges: [ApplicationEdge!]!
   pageInfo: PageInfo!
+  searchId: ID
   errors: [PayloadError!]!
 }
 
@@ -35,6 +36,7 @@ type ApplicationEvent {
 type ApplicationEventConnection {
   edges: [ApplicationEventEdge!]!
   pageInfo: PageInfo!
+  searchId: ID
   errors: [PayloadError!]!
 }
 
@@ -108,6 +110,11 @@ enum HealthStatus {
 
 scalar Instant
 
+type InteractionPayload {
+  recorded: Boolean!
+  errors: [PayloadError!]!
+}
+
 type Job {
   id: JobID!
   title: String!
@@ -128,6 +135,7 @@ input JobActionInput {
 type JobConnection {
   edges: [JobEdge!]!
   pageInfo: PageInfo!
+  searchId: ID
   errors: [PayloadError!]!
 }
 
@@ -192,6 +200,8 @@ type Mutation {
   bootstrapAdmin(input: BootstrapAdminInput!): AuthPayload!
   updateMyProfile(input: UpdateMyProfileInput!): UserPayload!
   deleteMyAccount: DeleteAccountPayload!
+  recordJobView(input: RecordJobViewInput!): InteractionPayload!
+  recordSearchResultClick(input: RecordSearchResultClickInput!): InteractionPayload!
 }
 
 type PageInfo {
@@ -209,10 +219,10 @@ type Query {
   readiness: Readiness!
   me: UserPayload!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
-  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant): JobConnection!
-  semanticJobSearch(query: String!, filter: JobFilter, first: Int!): RankedJobResults!
-  recommendedJobs(first: Int!): RankedJobResults!
-  candidateMatches(jobId: JobID!, first: Int!): RankedCandidateResults!
+  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: String): JobConnection!
+  semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: String): RankedJobResults!
+  recommendedJobs(first: Int!, searchId: String): RankedJobResults!
+  candidateMatches(jobId: JobID!, first: Int!, searchId: String): RankedCandidateResults!
   job(id: JobID!): JobPayload!
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
@@ -255,6 +265,18 @@ type Readiness {
 enum ReadinessStatus {
   READY
   NOT_READY
+}
+
+input RecordJobViewInput {
+  eventId: String!
+  jobId: JobID!
+  searchId: String
+}
+
+input RecordSearchResultClickInput {
+  eventId: String!
+  searchId: String!
+  resultId: String!
 }
 
 type RecruiterProfile {
@@ -314,6 +336,7 @@ type User {
 type UserConnection {
   edges: [UserEdge!]!
   pageInfo: PageInfo!
+  searchId: ID
   errors: [PayloadError!]!
 }
 

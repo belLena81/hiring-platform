@@ -9,6 +9,7 @@ import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
+import com.example.graphQL.cats.shared.events.OperationalEventType
 import java.util.UUID
 import munit.CatsEffectSuite
 
@@ -75,6 +76,44 @@ class ApplicationServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("hireApplication emits status-change before candidate-hired with distinct event IDs") {
+    val interviewApplication = createdApplication.copy(status = ApplicationStatus.Interview, version = 7L)
+    withServices(Map(jobId -> openJob), Map(applicationId -> interviewApplication)).flatMap { case (_, applications, service) =>
+      for {
+        result <- service.changeStatus(
+          ActorContext(recruiterId, UserRole.Recruiter),
+          applicationId,
+          ApplicationStatus.Hired,
+          None,
+          None,
+          eventId,
+          later
+        )
+        outbox <- applications.allOperationalEvents
+      } yield {
+        assertEquals(result.map(_.version), Right(8L))
+        assertEquals(outbox.map(_.eventType), Vector(OperationalEventType.APPLICATION_STATUS_CHANGED, OperationalEventType.CANDIDATE_HIRED))
+        assertEquals(outbox.map(_.sequence), Vector(8L, 9L))
+        assert(outbox.map(_.eventId).distinct.size == 2)
+      }
+    }
+  }
+
+  test("outbox failure rolls back application submission at the repository boundary") {
+    withServices(Map(jobId -> openJob), Map.empty).flatMap { case (_, applications, service) =>
+      for {
+        _ <- applications.rejectNextOperationalEventWith(RepositoryError.Unavailable)
+        result <- service.submitApplication(ActorContext(candidateId, UserRole.Candidate), jobId, applicationId, eventId, now)
+        events <- applications.allEvents
+        outbox <- applications.allOperationalEvents
+      } yield {
+        assertEquals(result, Left(UseCaseError.repository(RepositoryError.Unavailable)))
+        assertEquals(events, Vector.empty)
+        assertEquals(outbox, Vector.empty)
+      }
+    }
+  }
+
   test("invalid status change returns typed error and does not append history") {
     withServices(Map(jobId -> openJob), Map(applicationId -> createdApplication)).flatMap { case (_, applications, service) =>
       for {
@@ -134,8 +173,10 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](jobs)
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](applications)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
+      operationalEvents <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
       nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      nextOperationalEventError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       jobRepository = InMemoryJobs(jobsRef)
-      applicationRepository = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
+      applicationRepository = InMemoryApplications(applicationsRef, eventsRef, nextCreateError, Some(operationalEvents), Some(nextOperationalEventError))
     } yield (jobRepository, applicationRepository, ApplicationService[IO](InMemoryUsers(usersRef), jobRepository, applicationRepository))
 }

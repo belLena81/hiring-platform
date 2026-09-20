@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service.protocol
 
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
@@ -76,4 +77,22 @@ trait SearchUseCases[F[_]] {
       first: PageSize,
       searchId: UUID
   ): F[Either[UseCaseError, List[RankedCandidate]]]
+}
+
+trait InteractionUseCases[F[_]] {
+  def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant): F[Either[UseCaseError, Unit]]
+  def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant): F[Either[UseCaseError, Unit]]
+}
+
+object InteractionUseCases {
+  def noop[F[_]](using cats.Applicative[F]): InteractionUseCases[F] = new InteractionUseCases[F] {
+    override def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant): F[Either[UseCaseError, Unit]] = {
+      val _ = (actor, eventId, jobId, searchId, now)
+      Right(()).pure[F]
+    }
+    override def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant): F[Either[UseCaseError, Unit]] = {
+      val _ = (actor, eventId, searchId, resultId, now)
+      Right(()).pure[F]
+    }
+  }
 }
