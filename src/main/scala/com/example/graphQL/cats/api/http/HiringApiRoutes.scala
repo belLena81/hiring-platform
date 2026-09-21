@@ -16,11 +16,13 @@ import org.http4s.server.middleware.EntityLimiter
 import org.http4s.server.middleware.RequestId
 import org.http4s.syntax.all.*
 import org.typelevel.ci.CIString
+import org.typelevel.otel4s.context.propagation.TextMapGetter
+import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.vault.Key
 import scala.concurrent.duration.*
 
 final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, admission: Admission,
-    dependencies: HiringApiRoutes.Dependencies) {
+    dependencies: HiringApiRoutes.Dependencies, tracer: Tracer[IO] = Tracer.noop[IO]) {
   private val MaxRequestBytes = 64 * 1024
   private val dsl = new Http4sDsl[IO] {}
   import dsl.*
@@ -184,6 +186,11 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
   private val requestScopeKey: Key[RequestScope] = new Key[RequestScope](new Unique.Token())
 
+  private given TextMapGetter[Headers] with
+    def get(headers: Headers, key: String): Option[String] =
+      headers.get(CIString(key)).map(_.head.value)
+    def keys(headers: Headers): Iterable[String] = headers.headers.map(_.name.toString)
+
   private def requestScope(request: Request[IO]): IO[RequestScope] =
     IO.fromOption(request.attributes.lookup(requestScopeKey))(
       new IllegalStateException("Missing HTTP request scope"))
@@ -219,7 +226,9 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
   private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
     val requestId = requestIdOf(request)
-    IO.randomUUID.flatMap(traceId => TraceContext.root(traceId.toString)).flatMap { trace =>
+    tracer.joinOrRoot(request.headers) {
+      tracer.span("http.request").surround {
+      IO.randomUUID.flatMap(traceId => TraceContext.root(traceId.toString)).flatMap { trace =>
       val method = request.method.name
       val path = request.uri.path.renderString
       val metadata = Map(LogField.Method -> (if (LogFields.validPublic(LogField.Method, method)) method else "OTHER"),
@@ -228,7 +237,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
         def timedFields: IO[Map[LogField, String]] = IO.monotonic.map { now =>
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
-        Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { child =>
+        {
+          val child = trace
           val scopedRequest = request.withAttribute(requestScopeKey, RequestScope(requestId, child))
           routedApp(scopedRequest)
           .handleErrorWith {
@@ -249,6 +259,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
             Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
         }
       }
+    }
+    }
     }
   }
 

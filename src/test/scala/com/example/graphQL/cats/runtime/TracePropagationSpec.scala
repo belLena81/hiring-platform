@@ -62,7 +62,7 @@ final class TracePropagationSpec extends CatsEffectSuite {
   }
 
   private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics = new Diagnostics {
-    def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] =
+    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
       records.update(_ :+ ((event, requestId, fields)))
   }
 

@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
-import cats.effect.{IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.*
@@ -34,6 +34,11 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       UUID.randomUUID(), eventType, schemaVersion, now, OperationalAggregateType.Job,
       aggregateId, sequence, sequence, actor, Json.obj("value" -> Json.fromString("fixture"))
     )
+
+  private def claim(partitionKey: String, sequence: Long): ClaimedOperationalEvent = {
+    val value = event(OperationalEventType.JOB_UPDATED, aggregateId = partitionKey, sequence = sequence)
+    ClaimedOperationalEvent(value, OperationalEventJson.bytes(value), partitionKey, s"lease-$partitionKey-$sequence", 1)
+  }
 
   private final case class Fakes(
       receipts: ConsumerReceiptRepository[IO],
@@ -115,5 +120,28 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         }
       }
     }
+  }
+
+  test("publisher preserves ordering within each partition key") {
+    for {
+      seen <- Ref.of[IO, Vector[Long]](Vector.empty)
+      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", 0), claim("job-1", 1))) { value =>
+        seen.update(_ :+ value.event.sequence)
+      }
+      result <- seen.get
+    } yield assertEquals(result, Vector(0L, 1L))
+  }
+
+  test("publisher overlaps independent partition keys") {
+    for {
+      arrivals <- Ref.of[IO, Int](0)
+      barrier <- Deferred[IO, Unit]
+      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", 0), claim("job-2", 0))) { value =>
+        arrivals.modify(count => (count + 1, count + 1)).flatMap { count =>
+          if (count == 2) barrier.complete(()).void else barrier.get
+        } *> IO(assert(value.event.aggregateId == "job-1" || value.event.aggregateId == "job-2"))
+      }
+      count <- arrivals.get
+    } yield assertEquals(count, 2)
   }
 }

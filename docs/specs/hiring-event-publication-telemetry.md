@@ -18,6 +18,7 @@ No Spark, Delta, managed Kafka, Saga workflow, account/profile events, historica
 - `AC-04`: Duplicate delivery and consumer restart yield one receipt; invalid or unsupported records quarantine without a successful offset commit.
 - `AC-05`: v1 fixtures decode unchanged; unknown versions are not reinterpreted; application ordering includes status-change before candidate-hired.
 - `AC-06`: Local Compose integration evidence uses 100 events, a disposable replica set, and one broker; latency is local evidence only against the UC11 30-second p95 target.
+- `AC-07`: A claimed publisher batch overlaps distinct Kafka partition keys while preserving claim order within each key; concurrency is bounded by the configured batch size.
 
 ## Current Checkpoint
 
@@ -27,5 +28,6 @@ No Spark, Delta, managed Kafka, Saga workflow, account/profile events, historica
 - Local Mongo integration evidence: `sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec'` passed 18 tests on 2026-09-20 after fixing stale repository API calls and vector transactional setup.
 - Local Mongo integration evidence: `sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec'` passed 19 tests on 2026-09-20, including transactional job rollback when the outbox insert conflicts.
 - Kafka handler evidence: `sbt testOnly com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntimeSpec` passed the 267-test unit suite, covering malformed/unsupported quarantine, duplicate acknowledgement, sequence gaps, and first-observed hire rejection.
+- Publisher ordering/concurrency coverage: `OperationalEventKafkaRuntimeSpec` verifies sequential same-key publication and deterministic overlap for independent keys. The runtime groups claims by partition key and parallelizes only the groups, with at most `publisher.batchSize` active claims.
 - Compose evidence: with `docker compose up -d`, `PHASE5_COMPOSE_EVIDENCE=true sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.OperationalEventComposeIntegrationSpec'` passed one test on 2026-09-20 using 100 events from one writer, a disposable replica set, and one broker; clean-topic commit-to-receipt p95 was 8,061 ms. This is local evidence only.
 - Remaining evidence: broker-outage/restart/lost-ack and consumer-restart/quarantine offset-discipline scenarios still require live failure-injection runs; full `IntegrationTest / test` still has the unrelated `MongoDatabaseProbeIntegrationSpec` diagnostic-correlation failure. Independent Code Reviewer, Security Engineer, and QA verdicts must be rerun after these changes.

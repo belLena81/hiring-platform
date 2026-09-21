@@ -7,25 +7,27 @@ import com.example.graphQL.cats.api.http.{Admission, ClientAddressResolver, Fixe
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
+import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
 
 object Main extends IOApp {
   override protected def reportFailure(error: Throwable): IO[Unit] =
-    SafeDiagnostics.configure().flatMap { diagnostics =>
-      Diagnostics.emit(diagnostics, LogEvent.RuntimeFailed, fields = LogFields.failure(error))
-    }
+    val logger = Slf4jLogger.getLoggerFromName[IO]("hiring.foundation")
+    logger.error(Map("errorType" -> error.getClass.getName))("Unhandled runtime failure")
 
   def run(args: List[String]): IO[ExitCode] =
     AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
-      SafeDiagnostics.configure(maskSensitive).flatMap { fallback =>
+      val tracingEnabled = sys.env.get("OTEL_TRACES_EXPORTER").exists(value => value.nonEmpty && value != "none")
+      TelemetryRuntime.resource(tracingEnabled).use { telemetry =>
+      SafeDiagnostics.configure(maskSensitive, telemetry.tracer).flatMap { fallback =>
         AppConfig.load.flatMap {
           case Left(errors) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
             fields = Map(LogField.ConfigKey -> errors.head.key)).as(ExitCode.Error)
-          case Right(config) => SafeDiagnostics.configure(config.maskSensitive).flatMap { diagnostics =>
+          case Right(config) => SafeDiagnostics.configure(config.maskSensitive, telemetry.tracer).flatMap { diagnostics =>
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
-              (vector, apiKey) => new com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService(
-                apiKey, vector.voyageEndpoint, vector.voyageModel, vector.voyageDimension, vector.timeoutMillis), config.jwtAuth,
-              config.resolverTimeout, config.passwordHash, config.kafka)
+              config.jwtAuth,
+              config.resolverTimeout, config.passwordHash, config.kafka, telemetry.tracer)
               .flatMap { runtime =>
                 for {
                   admission <- Admission.resource(config.admissionPermits)
@@ -48,7 +50,8 @@ object Main extends IOApp {
                       rateLimiter,
                       ClientAddressResolver(config.trustedProxy),
                       config.requestTimeout
-                    )
+                    ),
+                    telemetry.tracer
                   ).app
                   server <- HiringPlatformServer.resource(config.host, config.port, routes)
                 } yield server
@@ -63,6 +66,7 @@ object Main extends IOApp {
           }
         }.handleErrorWith(error => Diagnostics.emit(fallback, LogEvent.StartupFailed,
           fields = LogFields.failure(error)).as(ExitCode.Error))
+      }
       }
     }
 }

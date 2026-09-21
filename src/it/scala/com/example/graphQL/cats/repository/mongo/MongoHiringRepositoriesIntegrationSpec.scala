@@ -19,7 +19,7 @@ import com.example.graphQL.cats.shared.search.JobSearchFilter
 import com.example.graphQL.cats.config.{JwtAuthConfig, VectorSearchConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
-  Application, ApplicationEvent, ApplicationStatus, CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location,
+  AccountStatus, Application, ApplicationEvent, ApplicationStatus, CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location,
   RecruiterProfile, SearchableText, User, UserProfile, UserRole
 }
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
@@ -81,6 +81,46 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(collections.contains("users"))
           assert(userIndexes.contains(MongoHiringSetup.UsersEmailIndex))
           assert(userIndexes.contains(MongoHiringSetup.UsersNameIndex))
+        }
+      }
+    }
+  }
+
+  test("account deletion closes every open job across bounded batches") {
+    replicaSetContainer.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_account_many_jobs")
+        val users = MongoUserRepository.transactional(database, client)
+        val jobs = database.getCollection("jobs")
+        val recruiter = User(
+          recruiterId,
+          Some("many-jobs-recruiter@example.com"),
+          "Many Jobs Recruiter",
+          UserRole.Recruiter,
+          Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
+          now
+        )
+        val jobDocuments = (0 until 1001).toList.map { index =>
+          val id = JobId(UUID.nameUUIDFromBytes(s"many-jobs-$index".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+          MongoHiringCodecs.job(jobFixture(id, JobStatus.Open))
+        }
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          _ <- users.insert(recruiter)
+          _ <- PublisherBridge.first(jobs.insertMany(jobDocuments.asJava))
+          result <- users.deleteAccount(recruiterId, later, s"deleted-${recruiterId.value}")
+          storedUser <- users.find(recruiterId)
+          storedJobs <- PublisherBridge.collectWithin(jobs.find(Filters.eq("recruiterId", recruiterId.value.toString)), 1100)
+          closeEvents <- PublisherBridge.collectWithin(
+            database.getCollection("event_outbox").find(new Document("eventType", OperationalEventType.JOB_CLOSED.toString)),
+            1100
+          )
+        } yield {
+          assertEquals(result, Right(()))
+          assertEquals(storedUser.map(_.map(_.accountStatus)), Right(Some(AccountStatus.Deleted)))
+          assertEquals(storedJobs.size, 1001)
+          assert(storedJobs.forall(_.getString("status") == JobStatus.Closed.toString))
+          assertEquals(closeEvents.size, 1001)
         }
       }
     }
@@ -734,7 +774,7 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
     replicaSetContainer.use { uri =>
       val jwt = JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
       MongoHiringRuntime.resource(uri, "hiring_vector_runtime", Diagnostics.noop, vectorConfig,
-        (config, _) => FakeEmbeddingService(config), jwt).use { runtime =>
+        (config, _) => Resource.pure[IO, EmbeddingService[IO]](FakeEmbeddingService(config)), jwt).use { runtime =>
         val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
           Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
         val create = CreateJobInput(

@@ -4,8 +4,8 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.repository.protocol.{
-  ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository, OperationalEventFailureCategory,
-  OperationalEventOutboxRepository
+  ClaimedOperationalEvent, ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository,
+  OperationalEventFailureCategory, OperationalEventOutboxRepository
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventJson}
@@ -67,7 +67,7 @@ object OperationalEventKafkaRuntime {
       outbox.claim(config.publisher.workerId, now, leaseUntil, config.publisher.batchSize).flatMap {
         case Left(_) => IO.unit
         case Right(claims) =>
-          claims.traverse_ { claim =>
+          publishClaims(claims) { claim =>
             val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
             producer.produce(ProducerRecords.one(record)).flatten.attempt.flatMap {
               case Right(_) =>
@@ -85,6 +85,12 @@ object OperationalEventKafkaRuntime {
           }
       }
     }
+
+  /** Preserve ordering for one Kafka key while overlapping independent keys. */
+  private[kafka] def publishClaims(
+      claims: List[ClaimedOperationalEvent]
+  )(publish: ClaimedOperationalEvent => IO[Unit]): IO[Unit] =
+    claims.groupBy(_.partitionKey).values.toList.parTraverse_(_.traverse_(publish))
 
   private def consumerResource(
       config: KafkaConfig,

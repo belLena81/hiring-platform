@@ -407,46 +407,64 @@ final class MongoUserRepository(
         case Some(result) if result.getMatchedCount == 1L =>
           val jobFilter = Filters.and(Filters.eq("recruiterId", userId.value.toString), Filters.eq("status", JobStatus.Open.toString))
           val jobs = database.getCollection("jobs")
-          val findJobs = session.fold(PublisherBridge.collectWithin(jobs.find(jobFilter), MaxJobsClosedByAccountDeletion)) { active =>
-            PublisherBridge.collectWithin(jobs.find(active, jobFilter), MaxJobsClosedByAccountDeletion)
-          }
-          findJobs.flatMap { documents =>
-            MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readJob)) match {
-              case Left(error) => IO.pure(Left(error))
-              case Right(openJobs) =>
-                openJobs.traverse_ { job =>
-                  val closed = job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now, version = job.version + 1L)
-                  session.fold(
-                    PublisherBridge.first(jobs.replaceOne(
-                      Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("status", JobStatus.Open.toString), Filters.eq("version", job.version)),
-                      MongoHiringCodecs.job(closed)
-                    ))
-                  )(active => PublisherBridge.first(jobs.replaceOne(
-                    active,
-                    Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("status", JobStatus.Open.toString), Filters.eq("version", job.version)),
-                    MongoHiringCodecs.job(closed)
-                  ))).flatMap {
-                    case Some(jobResult) if jobResult.getMatchedCount == 1L => IO.unit
-                    case Some(_) => IO.raiseError(new IllegalStateException("job changed while closing account"))
-                    case None => IO.raiseError(new IllegalStateException("job close write returned no result"))
-                  }
-                }.attempt.flatMap {
-                  case Left(_) => IO.pure(Left(RepositoryError.Conflict))
-                  case Right(_) =>
-                    val closeEvents = openJobs.map { job =>
-                      val closed = job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now, version = job.version + 1L)
-                      OperationalEvents.jobEvent(
-                        OperationalEventType.JOB_CLOSED,
-                        java.util.UUID.nameUUIDFromBytes(s"job:${job.id.value}:JOB_CLOSED:${closed.version}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-                        closed,
-                        userId,
-                        now
-                      )
+          def closeJobs(afterId: Option[String]): IO[Either[RepositoryError, Unit]] = {
+            val batchFilter = Filters.and(List(
+              Some(jobFilter),
+              afterId.map(id => Filters.gt("_id", id))
+            ).flatten*)
+            val findJobs = session.fold(
+              PublisherBridge.collectWithin(
+                jobs.find(batchFilter).sort(Sorts.ascending("_id")).limit(MaxJobsClosedByAccountDeletion),
+                MaxJobsClosedByAccountDeletion
+              )
+            ) { active =>
+              PublisherBridge.collectWithin(
+                jobs.find(active, batchFilter).sort(Sorts.ascending("_id")).limit(MaxJobsClosedByAccountDeletion),
+                MaxJobsClosedByAccountDeletion
+              )
+            }
+            findJobs.flatMap { documents =>
+              MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readJob)) match {
+                case Left(error) => IO.pure(Left(error))
+                case Right(Nil) => IO.pure(Right(()))
+                case Right(openJobs) =>
+                  val closedJobs = openJobs.map(job =>
+                    job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now, version = job.version + 1L)
+                  )
+                  openJobs.zip(closedJobs).traverse_ { case (job, closed) =>
+                    val filter = Filters.and(
+                      Filters.eq("_id", job.id.value.toString),
+                      Filters.eq("status", JobStatus.Open.toString),
+                      Filters.eq("version", job.version)
+                    )
+                    session.fold(
+                      PublisherBridge.first(jobs.replaceOne(filter, MongoHiringCodecs.job(closed)))
+                    )(active => PublisherBridge.first(jobs.replaceOne(active, filter, MongoHiringCodecs.job(closed)))).flatMap {
+                      case Some(jobResult) if jobResult.getMatchedCount == 1L => IO.unit
+                      case Some(_) => IO.raiseError(new IllegalStateException("job changed while closing account"))
+                      case None => IO.raiseError(new IllegalStateException("job close write returned no result"))
                     }
-                    insertOperationalEvents(outbox, session, closeEvents, now)
-                }
+                  }.attempt.flatMap {
+                    case Left(_) => IO.pure(Left(RepositoryError.Conflict))
+                    case Right(_) =>
+                      val closeEvents = closedJobs.map { closed =>
+                        OperationalEvents.jobEvent(
+                          OperationalEventType.JOB_CLOSED,
+                          java.util.UUID.nameUUIDFromBytes(s"job:${closed.id.value}:JOB_CLOSED:${closed.version}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                          closed,
+                          userId,
+                          now
+                        )
+                      }
+                      insertOperationalEvents(outbox, session, closeEvents, now).flatMap {
+                        case Left(error) => IO.pure(Left(error))
+                        case Right(()) => closeJobs(Some(openJobs.last.id.value.toString))
+                      }
+                  }
+              }
             }
           }
+          closeJobs(None)
         case Some(_) => IO.pure(Left(RepositoryError.Conflict))
         case None => IO.pure(Left(RepositoryError.Unavailable))
       }

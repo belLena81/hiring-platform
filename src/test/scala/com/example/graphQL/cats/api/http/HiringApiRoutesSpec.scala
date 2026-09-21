@@ -100,7 +100,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   }
 
   private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics = new Diagnostics {
-    def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+    def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
       records.update(_ :+ ((event, id, fields)))
   }
 
@@ -560,7 +560,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           records.update(_ :+ ((event, id, fields)))
       }
       parsed <- IO.fromEither(Json.obj(
@@ -599,7 +599,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       val attempts = new java.util.concurrent.atomic.AtomicReference(Vector.empty[(DiagnosticRecord, Boolean)])
       val finalized = new java.util.concurrent.atomic.AtomicBoolean(false)
       val sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] = {
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] = {
           def record(): Unit = {
             val _ = attempts.updateAndGet(_ :+ (((event, id, fields), finalized.get())))
           }
@@ -724,7 +724,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       finish <- Deferred[IO, Unit]
       finalized <- Ref.of[IO, Boolean](false)
       sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           (if (event == LogEvent.RequestCancelled) finalized.get.flatMap(done => IO(assert(done))) else IO.unit) *>
             records.update(_ :+ ((event, id, fields)))
       }
@@ -762,7 +762,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("sync and effectful sink failures preserve successful, rejected and unexpected-error responses") {
     List(true, false).traverse_ { synchronous =>
       val sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           if (synchronous) throw new IllegalStateException("synthetic-diagnostics-secret")
           else IO.raiseError(new IllegalStateException("synthetic-diagnostics-secret"))
       }
@@ -1024,7 +1024,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)
       diagnostics = new Diagnostics {
-        def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] = events.update(_ :+ (event -> requestId))
+        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = events.update(_ :+ (event -> requestId))
       }
       http <- app(IO.pure(ProbeResult.Ready), diagnostics)
       response <- http(health.withEntity(Json.obj(
@@ -1052,7 +1052,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)
       diagnostics = new Diagnostics {
-        def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] = events.update(_ :+ (event -> requestId))
+        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = events.update(_ :+ (event -> requestId))
       }
       http <- app(IO.pure(ProbeResult.Ready), diagnostics)
       response <- http(health.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException(secret))))
@@ -1078,7 +1078,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       calls <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)
       diagnostics = new Diagnostics {
-        def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] =
+        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           events.update(_ :+ (event -> requestId)) *>
             (if (event == LogEvent.MongoUnavailable) IO.raiseError(new IllegalStateException(secret)) else IO.unit)
       }

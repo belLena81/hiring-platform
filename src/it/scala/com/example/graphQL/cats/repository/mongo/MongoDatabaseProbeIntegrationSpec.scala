@@ -113,7 +113,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           _ <- ready(authenticated)
           records <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
           diagnostics = new Diagnostics {
-            def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+            def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
               records.update(_ :+ (event, id, fields))
           }
           requestId = Some("fe211944-7015-4e73-8dc1-000000000001")
@@ -157,7 +157,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
             }
           }
           throwing = new Diagnostics {
-            def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+            def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
               throw new IllegalStateException("synthetic-sink-secret")
           }
           unchanged <- MongoDatabaseProbe.resource(invalid, "foundation", throwing).use(_.check(requestId))

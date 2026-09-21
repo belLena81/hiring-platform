@@ -8,10 +8,19 @@ import io.circe.parser.parse
 import java.time.Instant
 import munit.CatsEffectSuite
 import org.slf4j.LoggerFactory
+import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 class SafeDiagnosticsSpec extends CatsEffectSuite {
+  test("LOG-01 disabled levels do not evaluate structured field thunks") {
+    val evaluated = new AtomicBoolean(false)
+    SafeDiagnostics().event(LogEvent.SpanStarted, fields = {
+      evaluated.set(true)
+      Map(LogField.SpanName -> "startup")
+    }).as(assert(!evaluated.get()))
+  }
+
   test("LOG-01 actual SLF4J events carry the matching severity and marker") {
     val logger = LoggerFactory.getLogger("hiring.foundation").asInstanceOf[ch.qos.logback.classic.Logger]
     val requestId = "fe211944-7015-4e73-8dc1-000000000099"
@@ -179,7 +188,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   test("LOG-04 synchronous and effectful diagnostic failures are swallowed without swallowing cancellation") {
     val secret = new IllegalStateException("synthetic-sink-secret")
     val throwing = new Diagnostics {
-      def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] = throw secret
+      def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = throw secret
     }
     for {
       _ <- Diagnostics.emit(throwing, LogEvent.Started)

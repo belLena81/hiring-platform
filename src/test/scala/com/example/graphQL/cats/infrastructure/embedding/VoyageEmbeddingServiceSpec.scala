@@ -1,69 +1,91 @@
 package com.example.graphQL.cats.infrastructure.embedding
 
 import cats.effect.IO
-import com.example.graphQL.cats.repository.protocol.{EmbeddingInput, EmbeddingInputType}
-import java.net.{Authenticator, CookieHandler, ProxySelector}
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.time.Duration
-import java.util.Optional
-import java.util.concurrent.{CompletableFuture, CountDownLatch, Executor, TimeUnit}
-import java.util.concurrent.atomic.AtomicReference
-import javax.net.ssl.{SSLContext, SSLParameters}
+import cats.data.Kleisli
+import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingInputType, EmbeddingVector}
+import io.circe.Json
 import munit.CatsEffectSuite
+import org.http4s.{Header, HttpApp, Method, Request, Response, Status, Uri}
+import org.http4s.client.Client
+import org.http4s.circe.CirceEntityCodec.*
+import org.typelevel.ci.CIString
+
+import scala.concurrent.duration.*
 
 final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
-  test("cancelling an embedding request cancels the underlying HTTP future") {
+  private val input = EmbeddingInput("Scala", EmbeddingInputType.Document)
+  private val endpoint = Uri.unsafeFromString("https://example.test/embed")
+
+  test("encodes the Voyage request and decodes a successful response") {
+    val app: HttpApp[IO] = Kleisli { (request: Request[IO]) =>
+      for {
+        body <- request.as[Json]
+        _ = assertEquals(request.method, Method.POST)
+        _ = assert(request.headers.get(CIString("Authorization")).nonEmpty)
+        _ = assertEquals(body.hcursor.get[String]("input"), Right("Scala"))
+        _ = assertEquals(body.hcursor.get[String]("input_type"), Right("document"))
+        _ = assertEquals(body.hcursor.get[Int]("output_dimension"), Right(2))
+      } yield Response[IO](Status.Ok).withEntity(
+        Json.obj(
+          "data" -> Json.arr(Json.obj("embedding" -> Json.arr(Json.fromFloatOrNull(0.1f), Json.fromFloatOrNull(0.2f)))),
+          "model" -> Json.fromString("voyage-4-lite")
+        )
+      )
+    }
+    val client = Client.fromHttpApp[IO](app)
+    val service = new VoyageEmbeddingService(client, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
+
+    service.embed(input).map { result =>
+      assertEquals(result, Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
+    }
+  }
+
+  test("maps non-success provider responses to provider unavailability") {
+    val app: HttpApp[IO] = Kleisli { (_: Request[IO]) => IO.pure(Response[IO](Status.TooManyRequests)) }
+    val client = Client.fromHttpApp[IO](app)
+    val service = new VoyageEmbeddingService(client, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
+
+    service.embed(input).map(result => assertEquals(result, Left(EmbeddingError.ProviderUnavailable)))
+  }
+
+  test("maps malformed or dimension-mismatched responses to invalid response") {
+    val malformedApp: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+      IO.pure(jsonResponse(Status.Ok, "not-json"))
+    }
+    val wrongDimensionApp: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+      IO.pure(jsonResponse(Status.Ok,
+        """{"data":[{"embedding":[0.1]}],"model":"voyage-4-lite"}"""
+      ))
+    }
+    val malformed = Client.fromHttpApp[IO](malformedApp)
+    val wrongDimension = Client.fromHttpApp[IO](wrongDimensionApp)
+    val malformedService = new VoyageEmbeddingService(malformed, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
+    val wrongDimensionService = new VoyageEmbeddingService(wrongDimension, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
+
     for {
-      client = new HangingHttpClient
-      service = new VoyageEmbeddingService("test-key", "https://example.test/embed", "voyage-4-lite", 2, 1000, client)
-      fiber <- service.embed(EmbeddingInput("Scala", EmbeddingInputType.Document)).start
-      future <- client.awaitFuture
-      _ <- fiber.cancel
-      _ = assert(future.isCancelled)
-    } yield ()
-  }
-
-  test("an invalid configured endpoint is reported as provider unavailability") {
-    val service = new VoyageEmbeddingService("test-key", "not a URI", "voyage-4-lite", 2, 1000)
-    service.embed(EmbeddingInput("Scala", EmbeddingInputType.Document)).map { result =>
-      assertEquals(result, Left(com.example.graphQL.cats.repository.protocol.EmbeddingError.ProviderUnavailable))
+      malformedResult <- malformedService.embed(input)
+      wrongDimensionResult <- wrongDimensionService.embed(input)
+    } yield {
+      assertEquals(malformedResult, Left(EmbeddingError.InvalidResponse))
+      assertEquals(wrongDimensionResult, Left(EmbeddingError.InvalidResponse))
     }
   }
 
-  private final class HangingHttpClient extends HttpClient {
-    val future = new AtomicReference[CompletableFuture[HttpResponse[String]]]()
-    private val started = new CountDownLatch(1)
+  test("maps client timeouts to provider unavailability") {
+    val app: HttpApp[IO] = Kleisli { (_: Request[IO]) => IO.never[Response[IO]] }
+    val client = Client.fromHttpApp[IO](app)
+    val service = new VoyageEmbeddingService(client, "test-key", endpoint, "voyage-4-lite", 2, 20.millis)
 
-    def awaitFuture: IO[CompletableFuture[HttpResponse[String]]] = IO.blocking {
-      if (!started.await(3, TimeUnit.SECONDS))
-        throw new AssertionError("HTTP request did not start")
-      Option(future.get).getOrElse(throw new AssertionError("HTTP future was not published"))
-    }
-
-    override def cookieHandler: Optional[CookieHandler] = Optional.empty()
-    override def connectTimeout: Optional[Duration] = Optional.empty()
-    override def followRedirects: HttpClient.Redirect = HttpClient.Redirect.NEVER
-    override def proxy: Optional[ProxySelector] = Optional.empty()
-    override def sslContext: SSLContext = SSLContext.getDefault
-    override def sslParameters: SSLParameters = new SSLParameters()
-    override def authenticator: Optional[Authenticator] = Optional.empty()
-    override def version: HttpClient.Version = HttpClient.Version.HTTP_1_1
-    override def executor: Optional[Executor] = Optional.empty()
-
-    override def send[T](request: HttpRequest, handler: HttpResponse.BodyHandler[T]): HttpResponse[T] =
-      throw new UnsupportedOperationException("synchronous send is not used")
-
-    override def sendAsync[T](request: HttpRequest, handler: HttpResponse.BodyHandler[T]): CompletableFuture[HttpResponse[T]] = {
-      val future = new CompletableFuture[HttpResponse[String]]()
-      this.future.set(future)
-      started.countDown()
-      future.asInstanceOf[CompletableFuture[HttpResponse[T]]]
-    }
-
-    override def sendAsync[T](
-        request: HttpRequest,
-        handler: HttpResponse.BodyHandler[T],
-        pushHandler: HttpResponse.PushPromiseHandler[T]
-    ): CompletableFuture[HttpResponse[T]] = sendAsync(request, handler)
+    service.embed(input).map(result => assertEquals(result, Left(EmbeddingError.ProviderUnavailable)))
   }
+
+  test("rejects an invalid endpoint while constructing the provider resource") {
+    VoyageEmbeddingService.resource("test-key", "not a URI", "voyage-4-lite", 2, 1.second)
+      .use(_ => IO.raiseError[Unit](new AssertionError("invalid endpoint was accepted")))
+      .attempt
+      .map(result => assert(result.isLeft))
+  }
+
+  private def jsonResponse(status: Status, body: String): Response[IO] =
+    Response[IO](status).withEntity(body).putHeaders(Header.Raw(CIString("Content-Type"), "application/json"))
 }

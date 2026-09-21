@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service
 
 import cats.effect.{IO, IOLocal}
 import cats.syntax.all.*
+import org.typelevel.otel4s.trace.Tracer
 
 enum LogLevel {
   case Trace, Debug, Info, Warn, Error
@@ -135,12 +136,15 @@ object LogFields {
 }
 
 trait Diagnostics {
-  def event(event: LogEvent, requestId: Option[String] = None, fields: Map[LogField, String] = Map.empty): IO[Unit]
+  def event(event: LogEvent, requestId: Option[String] = None, fields: => Map[LogField, String] = Map.empty): IO[Unit]
+
+  /** Compatibility seam for legacy adapters; new boundaries receive Tracer directly. */
+  def tracer: Tracer[IO] = Tracer.noop[IO]
 }
 
 object Diagnostics {
   val noop: Diagnostics = new Diagnostics {
-    def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] = IO.unit
+    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO.unit
   }
 
   def emit(diagnostics: Diagnostics, event: LogEvent, requestId: Option[String] = None,
@@ -164,7 +168,7 @@ object Diagnostics {
           def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
             emit(diagnostics, event, Some(child.traceId), base + (LogField.DurationMs -> (now - started).toMillis.toString))
           }
-          action(child).guaranteeCase {
+          diagnostics.tracer.span(name).surround(action(child)).guaranteeCase {
             case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
             case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
             case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)

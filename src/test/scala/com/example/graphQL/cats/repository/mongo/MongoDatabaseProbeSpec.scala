@@ -20,7 +20,7 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
       for {
         events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
         sink = new Diagnostics {
-          def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+          def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
             events.update(_ :+ ((event, id, fields)))
         }
         _ <- MongoDatabaseProbe.resource(s"mongodb://127.0.0.1:${socket.getLocalPort}", "foundation", sink).use { probe =>
@@ -80,7 +80,7 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
       for {
         events <- Ref.of[IO, Vector[(LogEvent, Option[String], Map[LogField, String])]](Vector.empty)
         sink = new Diagnostics {
-          def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+          def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
             events.update(_ :+ ((event, id, fields))) *> IO.raiseError(new IllegalStateException("synthetic-sink-secret"))
         }
         id = Some("fe211944-7015-4e73-8dc1-000000000001")

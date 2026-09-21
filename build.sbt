@@ -7,6 +7,8 @@ lazy val fs2Version            = "3.14.0"
 lazy val fs2KafkaVersion       = "3.9.1"
 lazy val kafkaClientsVersion   = "3.9.2"
 lazy val http4sVersion         = "0.23.37"
+lazy val otel4sVersion         = "1.1.0"
+lazy val opentelemetryVersion  = "1.64.0"
 lazy val jwtScalaVersion       = "11.0.4"
 lazy val argon2Version         = "2.12"
 lazy val log4catsVersion       = "2.8.0"
@@ -44,13 +46,19 @@ lazy val root = (project in file("."))
       "org.typelevel"       %% "cats-effect"            % catsEffectVersion,
       "co.fs2"              %% "fs2-core"               % fs2Version,
       "co.fs2"              %% "fs2-io"                 % fs2Version,
+      "co.fs2"              %% "fs2-reactive-streams"    % fs2Version,
       "com.github.fd4s"     %% "fs2-kafka"              % fs2KafkaVersion,
       "org.apache.kafka"     % "kafka-clients"          % kafkaClientsVersion,
       "org.sangria-graphql" %% "sangria"                % sangriaVersion,
       "org.sangria-graphql" %% "sangria-circe"          % sangriaCirceVersion,
       "org.http4s"          %% "http4s-dsl"             % http4sVersion,
+      "org.http4s"          %% "http4s-ember-client"    % http4sVersion,
       "org.http4s"          %% "http4s-ember-server"    % http4sVersion,
       "org.http4s"          %% "http4s-circe"           % http4sVersion,
+      "org.typelevel"       %% "otel4s-oteljava"        % otel4sVersion,
+      "org.typelevel"       %% "otel4s-oteljava-context-storage" % otel4sVersion,
+      "io.opentelemetry"    % "opentelemetry-exporter-otlp" % opentelemetryVersion % Runtime,
+      "io.opentelemetry"    % "opentelemetry-sdk-extension-autoconfigure" % opentelemetryVersion % Runtime,
       "io.circe"            %% "circe-core"             % circeVersion,
       "io.circe"            %% "circe-generic"           % circeVersion,
       "io.circe"            %% "circe-parser"           % circeVersion,

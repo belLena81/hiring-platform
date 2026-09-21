@@ -59,7 +59,7 @@ Status: in progress
 
 ## Checkpoint and review
 
-- Completed criteria and changed files: added additive GraphQL vector/hybrid search contract, search/embedding domain metadata, semantic search service, bounded embedding pipeline, Voyage adapter/config, production runtime wiring, Mongo embedding codec/update/vector query paths, stale-result filtering, metadata indexes, SDL fixture, setup lifecycle isolation, and focused tests.
+- Completed criteria and changed files: added additive GraphQL vector/hybrid search contract, search/embedding domain metadata, semantic search service, bounded embedding pipeline, an http4s-native Voyage adapter with resource-owned pooled client, production runtime wiring, Mongo embedding codec/update/vector query paths, stale-result filtering, metadata indexes, SDL fixture, setup lifecycle isolation, and focused tests.
 - Latest commands/results and their scope: hybrid search/configuration focused tests passed 31/31, `sbt test` passed 170/170 unit tests, and the runtime lifecycle tests verify readiness does not cancel setup and setup failures do not trigger probe retries. Full live Voyage/Atlas verification remains unrun; the broader integration task stalled in the local Testcontainers environment.
 - Blockers and next concrete action: live credentialed Voyage + Atlas hybrid search/index-readiness verification remains unrun; production identity-provider integration and token issuance remain separately scoped.
 - Code Reviewer, Security Engineer, Data Engineer, and final QA verdicts: pending independent review of this remediation; live Voyage/Atlas behavior remains unverified.

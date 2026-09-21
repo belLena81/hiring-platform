@@ -7,7 +7,7 @@
 - Coordinator: Product Manager. Implementation owners: Scala Developer and Data Engineer for persistence work.
 - User outcome: Preserve the current Hiring API while making important writes durable, boundaries total and typed, and framework interop smaller and easier to test.
 - Authorized scope: Scala/Cats Effect, FS2, http4s, Sangria, MongoDB reactive driver, Circe, PureConfig/Iron, and current tests/docs.
-- Non-goals: new dependencies, a generic repository/service framework, effect-system migration, changing public GraphQL names, Kafka/Saga work, a cache, or a broad rewrite of stable custom components.
+- Non-goals: unrelated dependencies, a generic repository/service framework, effect-system migration, changing public GraphQL names, Kafka/Saga work, a cache, or a broad rewrite of stable custom components.
 - Dependencies: P0-A needs replica-set Mongo integration infrastructure and a Data Engineer migration review. Every implementation slice needs current Code Reviewer, Security Engineer, and independent QA verdicts.
 
 ## Verified context and decisions
@@ -32,7 +32,7 @@ The following existing facilities are correctly used and must be retained:
 - BSON codecs can throw for malformed IDs, enum values, missing values, or invalid profiles, while read ports cannot represent a data-integrity failure: `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringCodecs.scala:33` and `src/main/scala/com/example/graphQL/cats/repository/protocol/HiringRepositories.scala:11`.
 - Account use cases repeat a narrower version of the principal validation already centralized in `ActorAuthorization`: `src/main/scala/com/example/graphQL/cats/service/auth/UserAccountService.scala:72` and `src/main/scala/com/example/graphQL/cats/service/auth/ActorAuthorization.scala:11`.
 - Runtime composition repeats bounded/traced service construction in both vector-search branches: `src/main/scala/com/example/graphQL/cats/runtime/MongoHiringRuntime.scala:116`.
-- The reactive bridge's general collection operation requests `Long.MaxValue` and collects into a `Vector`: `src/main/scala/com/example/graphQL/cats/repository/mongo/PublisherBridge.scala:76`.
+- The reactive bridge now delegates Mongo driver publishers to fs2 reactive-streams interop with bounded collection and first-element operations: `src/main/scala/com/example/graphQL/cats/repository/mongo/PublisherBridge.scala`.
 - `UserPageRequest` keeps `pageSize` as an unvalidated `Int`, unlike the other connection ports, and Mongo passes it directly to `.limit`: `src/main/scala/com/example/graphQL/cats/domain/model/Account.scala:17` and `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringRepositories.scala:272`.
 - Embedding-work claim tokens allocate with `IO.randomUUID`, preserving effect ownership: `src/main/scala/com/example/graphQL/cats/repository/mongo/MongoEmbeddingWorkRepository.scala`.
 - The pure reciprocal-rank implementation has internal mutable state even though it need not expose mutation: `src/main/scala/com/example/graphQL/cats/shared/search/HybridRankFusion.scala:12`.
@@ -116,9 +116,9 @@ No measured bottleneck, production dataset, concurrent workload, SLO breach, or 
 
 **Problem.** `PublisherBridge.all` has no cardinality contract and makes unsafe collection easy to introduce later.
 
-**Smallest viable design.** Retain the current cancellation-safe driver bridge because `fs2-reactive-streams` is not a declared dependency. Split `first` from a bounded `collect(maxItems)` API and introduce a paged/streaming adapter only where a real unbounded task requires it. Call sites state their bound.
+**Smallest viable design.** Use the maintained `fs2-reactive-streams` adapter already aligned with the project's fs2 version. Keep `first` and bounded `collectWithin(maximum)` operations so every collection call states its cap, and let fs2 own demand, cancellation, and subscription lifecycle.
 
-**Plan.** Audit every `all` call, retain known-small metadata paths with an explicit cap, and use existing keyset/batched reads for scalable paths. Treat a cap breach as typed infrastructure/data error, never a partial success.
+**Plan.** Audit every bounded collection call, retain known-small metadata paths with an explicit cap, and use existing keyset/batched reads for scalable paths. Treat a cap breach as typed infrastructure/data error, never a partial success. Verify overflow, upstream failure, and cancellation through the fs2-backed bridge tests and Mongo integration suite.
 
 ### P2-C: Business-owned persistence limits
 
@@ -166,7 +166,7 @@ README and planning text still describe a health-only/Foundation state while sou
 | AC-04 | Given malformed BSON, when a read/list executes, then no raw exception/PII reaches GraphQL and the result is typed, deterministic, and diagnosed safely. | Codec/repository/GraphQL unit plus disposable Mongo tests | Not run |
 | AC-05 | Given deleted, role-mismatched, or non-singleton-Admin actors, when any account operation runs, then it is denied consistently; valid account flows retain their current result. | `UserAccountServiceSpec`, JWT, and GraphQL access tests | Not run |
 | AC-06 | Given enabled and disabled vector search, when runtime resources acquire/release, then common services behave equivalently and every fiber/client finalizes. | Runtime resource/finalization tests | Not run |
-| AC-07 | Given a collection path, when result size exceeds its declared cap, then no unbounded accumulation or partial success occurs. | `PublisherBridgeSpec` demand/cancellation/cap tests | Not run |
+| AC-07 | Given a collection path, when result size exceeds its declared cap, then no unbounded accumulation or partial success occurs. | `PublisherBridgeSpec` demand/cancellation/cap tests | Focused bridge suite PASS: 7 tests; full suite blocked by unrelated dirty Voyage/runtime compile errors |
 | AC-08 | Given boundary-size persistent inputs, when validation runs through GraphQL, then accepted values persist and one-over-limit values produce existing sanitized validation payloads with no writes. | Domain, GraphQL, and Mongo integration tests | Not run |
 | AC-09 | Given an account list request, when it crosses any port, then page size is a valid `PageSize` and Mongo ordering/limit remain unchanged. | Account resolver/service/repository tests | Not run |
 | AC-10 | Given identical rank inputs and lifecycle transitions, when the direct pure functions run, then scores, tie ordering, statuses, and errors match current behavior without mutable state or unnecessary `State`. | `HybridRankFusionSpec` and lifecycle tests | Not run |
@@ -175,8 +175,9 @@ README and planning text still describe a health-only/Foundation state while sou
 
 ## Implementation checkpoint
 
-- Completed: repository failure ownership moved to `repository.protocol` with a service compatibility alias; obsolete time-less account/job write port overloads removed; malformed durable work keys fail terminally instead of being deleted; Voyage HTTP uses cancellation-aware `sendAsync`; GraphQL resolvers are separated by account, job, application, and search capabilities while schema assembly remains the composition root.
-- Focused regression coverage added for malformed durable work keys and Voyage request cancellation/invalid endpoint handling. Existing GraphQL input tests remain in place; the resolver split requires a completed focused GraphQL suite for runtime proof.
+- Completed: repository failure ownership moved to `repository.protocol` with a service compatibility alias; obsolete time-less account/job write port overloads removed; malformed durable work keys fail terminally instead of being deleted; Voyage HTTP now uses an http4s `Client[IO]` with resource-owned Ember pooling; GraphQL resolvers are separated by account, job, application, and search capabilities while schema assembly remains the composition root.
+- Completed: `PublisherBridge` now uses the pinned fs2 reactive-streams adapter with buffered demand, bounded collection overflow detection, and stream-managed cancellation; focused bridge evidence passes.
+- Focused regression coverage added for malformed durable work keys, typed Voyage request/response handling, timeout/error mapping, and invalid endpoint handling. Existing GraphQL input tests remain in place; the resolver split requires a completed focused GraphQL suite for runtime proof.
 - Verification: `git diff --check` passed. Repeated local SBT attempts ended at the execution environment's 30-second observation limit while compiling 14 sources, with no test summary; unit, integration, live Voyage, and Atlas evidence therefore remain unverified.
 - Reviews: Security Engineer PASS by static review. Code Reviewer found the stale-source-fact issue above; corrected in this checkpoint. Follow-up review and independent QA remain required after a completed test run.
 

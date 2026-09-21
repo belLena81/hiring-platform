@@ -6,7 +6,9 @@ import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermission
-import org.slf4j.{Logger, LoggerFactory, MarkerFactory}
+import org.slf4j.{LoggerFactory, MarkerFactory}
+import org.typelevel.log4cats.slf4j.Slf4jLogger
+import org.typelevel.otel4s.trace.Tracer
 import scala.jdk.CollectionConverters.*
 
 /** The application classifies records; Logback is the sole severity policy. */
@@ -14,10 +16,10 @@ object SafeDiagnostics {
   private val loggerName = "hiring.foundation"
   private val DefaultLogDirectory = Paths.get("_logs")
 
-  def configure(maskSensitive: Boolean = true): IO[Diagnostics] =
+  def configure(maskSensitive: Boolean = true, tracer: Tracer[IO] = Tracer.noop[IO]): IO[Diagnostics] =
     IO.blocking {
       Files.createDirectories(DefaultLogDirectory)
-      val diagnostics = apply(maskSensitive)
+      val diagnostics = apply(maskSensitive, tracer)
       if (!maskSensitive) {
         restrictToCurrentUser(DefaultLogDirectory)
         activeLogFiles.foreach(restrictToCurrentUser)
@@ -28,9 +30,10 @@ object SafeDiagnostics {
       if (maskSensitive) IO.unit else Diagnostics.emit(diagnostics, LogEvent.LocalUnmasked)
     }
 
-  def apply(maskSensitive: Boolean = true): Diagnostics = {
+  def apply(maskSensitive: Boolean = true, tracer: Tracer[IO] = Tracer.noop[IO]): Diagnostics = {
     val logger = LoggerFactory.getLogger(loggerName)
-    withEventSink(maskSensitive, enabled(logger, _), (event, message) => IO.blocking {
+    val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
+    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) => IO.blocking {
       val marker = MarkerFactory.getMarker(event.marker)
       event.level match {
         case LogLevel.Trace => logger.trace(marker, message)
@@ -39,13 +42,13 @@ object SafeDiagnostics {
         case LogLevel.Warn => logger.warn(marker, message)
         case LogLevel.Error => logger.error(marker, message)
       }
-    })
+    }, tracer)
   }
 
   private[logging] def withSink(sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =
-    withEventSink(maskSensitive, _ => true, (_, message) => sink(message))
+    withEventSink(maskSensitive, _ => IO.pure(true), (_, message) => sink(message))
 
-  private def enabled(logger: Logger, level: LogLevel): Boolean = level match {
+  private def levelEnabled(logger: org.typelevel.log4cats.SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] = level match {
     case LogLevel.Trace => logger.isTraceEnabled
     case LogLevel.Debug => logger.isDebugEnabled
     case LogLevel.Info => logger.isInfoEnabled
@@ -113,11 +116,14 @@ object SafeDiagnostics {
 
   private def withEventSink(
       maskSensitive: Boolean,
-      isEnabled: LogLevel => Boolean,
-      sink: (LogEvent, String) => IO[Unit]
+      isEnabled: LogLevel => IO[Boolean],
+      sink: (LogEvent, String) => IO[Unit],
+      traceProvider: Tracer[IO] = Tracer.noop[IO]
   ): Diagnostics = new Diagnostics {
-    def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] = IO.defer {
-      if (!isEnabled(event.level)) IO.unit
+    override val tracer: Tracer[IO] = traceProvider
+    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO.defer {
+      isEnabled(event.level).flatMap { enabled =>
+      if (!enabled) IO.unit
       else IO.realTimeInstant.flatMap { timestamp =>
         val safeId = requestId.filter(isUuid)
         val details = fields.toList.sortBy(_._1.ordinal).take(12).map { case (field, value) =>
@@ -142,6 +148,7 @@ object SafeDiagnostics {
         val line = if (encoded.getBytes(StandardCharsets.UTF_8).length <= 8192) encoded
           else record.mapObject(_.add("details", Json.obj())).noSpaces
         sink(event, line)
+      }
       }
     }.handleError(_ => ())
   }

@@ -10,7 +10,7 @@ class HealthServiceSpec extends CatsEffectSuite {
 
   private def diagnostics(events: Ref[IO, Vector[(LogEvent, Option[String])]]): Diagnostics =
     new Diagnostics {
-      def event(event: LogEvent, requestId: Option[String], fields: Map[LogField, String]): IO[Unit] =
+      def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
         events.update(_ :+ (event -> requestId))
     }
 
@@ -28,7 +28,7 @@ class HealthServiceSpec extends CatsEffectSuite {
           forwarded.set(id) *> IO.raiseError(new IllegalStateException("synthetic-service-secret"))
       }
       sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] = recorded.set(fields)
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] = recorded.set(fields)
       }
       result <- new HealthService(contextual, sink).readiness(requestId)
       id <- forwarded.get
@@ -47,7 +47,7 @@ class HealthServiceSpec extends CatsEffectSuite {
   test("synchronous and effectful diagnostic failures cannot change probe outcomes") {
     List(true, false).traverse_ { synchronous =>
       val sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           if (synchronous) throw new IllegalStateException("synthetic-sink-secret")
           else IO.raiseError(new IllegalStateException("synthetic-sink-secret"))
       }
@@ -63,7 +63,7 @@ class HealthServiceSpec extends CatsEffectSuite {
       finalized <- Ref.of[IO, Boolean](false)
       captured <- Ref.of[IO, Map[LogField, String]](Map.empty)
       sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: Map[LogField, String]): IO[Unit] =
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           finalized.get.flatMap(done => IO(assert(done))) *> captured.set(fields)
       }
       result <- new HealthService(probe(IO.never[ProbeResult].onCancel(finalized.set(true))), sink).readiness(requestId)

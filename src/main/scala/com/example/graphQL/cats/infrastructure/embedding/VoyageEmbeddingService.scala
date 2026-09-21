@@ -1,79 +1,132 @@
 package com.example.graphQL.cats.infrastructure.embedding
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingInputType, EmbeddingService, EmbeddingVector}
-import io.circe.Json
-import io.circe.parser.parse
-import java.net.URI
-import java.net.http.{HttpClient, HttpRequest, HttpResponse}
-import java.time.Duration
-import java.util.function.BiConsumer
+import io.circe.{Decoder, Encoder}
+import io.circe.generic.semiauto.deriveDecoder
+import org.http4s.{AuthScheme, Credentials, Headers, Method, Request, Uri}
+import org.http4s.client.Client
+import org.http4s.circe.CirceEntityCodec.*
+import org.http4s.ember.client.EmberClientBuilder
+import org.http4s.headers.Authorization
+import org.typelevel.otel4s.context.propagation.TextMapUpdater
+import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.ci.CIString
+
+import scala.concurrent.duration.*
 
 final class VoyageEmbeddingService(
+    client: Client[IO],
     apiKey: String,
-    endpoint: String,
+    endpoint: Uri,
     model: String,
     dimension: Int,
-    timeoutMillis: Int,
-    client: HttpClient = HttpClient.newHttpClient()
+    timeout: FiniteDuration,
+    tracer: Tracer[IO] = Tracer.noop[IO]
 ) extends EmbeddingService[IO] {
-  override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
-    request(input).flatMap(send)
-      .map(response => decode(response.statusCode(), response.body()))
-      .handleError(_ => Left(EmbeddingError.ProviderUnavailable))
+  private given TextMapUpdater[Headers] with
+    def updated(headers: Headers, key: String, value: String): Headers =
+      headers.put(org.http4s.Header.Raw(CIString(key), value))
 
-  private def request(input: EmbeddingInput): IO[HttpRequest] =
-    IO.delay(
-      HttpRequest.newBuilder(URI.create(endpoint))
-        .timeout(Duration.ofMillis(timeoutMillis.toLong))
-        .header("Content-Type", "application/json")
-        .header("Authorization", s"Bearer $apiKey")
-        .POST(HttpRequest.BodyPublishers.ofString(payload(input).noSpaces))
-        .build()
-    )
+  override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = {
+    val request = Request[IO](Method.POST, endpoint)
+      .withHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, apiKey)))
+      .withEntity(VoyageEmbeddingRequest(
+        input = input.text,
+        model = model,
+        inputType = inputType(input.inputType),
+        outputDimension = dimension,
+        outputDtype = "float",
+        truncation = true
+      ))
 
-  private def send(request: HttpRequest): IO[HttpResponse[String]] =
-    IO.async { callback =>
-      IO.delay {
-        val future = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
-        future.whenComplete(new BiConsumer[HttpResponse[String], Throwable] {
-          override def accept(response: HttpResponse[String], error: Throwable): Unit =
-            if (error == null) callback(Right(response)) else callback(Left(error))
-        })
-        Some(IO.delay(future.cancel(true)).void)
+    tracer.span("voyage.embeddings").surround {
+      tracer.propagate(request.headers).flatMap { propagatedHeaders =>
+      client.run(request.withHeaders(propagatedHeaders)).use { response =>
+      if (!response.status.isSuccess)
+        IO.pure(Left(EmbeddingError.ProviderUnavailable))
+      else
+        response.attemptAs[VoyageEmbeddingResponse].value.map { decoded =>
+          decoded.leftMap(_ => EmbeddingError.InvalidResponse).flatMap(validate)
+        }
+      }.timeout(timeout).handleError(_ => Left(EmbeddingError.ProviderUnavailable))
       }
     }
+  }
 
-  private def payload(input: EmbeddingInput): Json =
-    Json.obj(
-      "input" -> Json.fromString(input.text),
-      "model" -> Json.fromString(model),
-      "input_type" -> Json.fromString(inputType(input.inputType)),
-      "output_dimension" -> Json.fromInt(dimension),
-      "output_dtype" -> Json.fromString("float"),
-      "truncation" -> Json.fromBoolean(true)
-    )
+  private def validate(response: VoyageEmbeddingResponse): Either[EmbeddingError, EmbeddingVector] =
+    response.data.headOption
+      .map { item =>
+        val values = item.embedding
+        Either.cond(
+          values.size == dimension,
+          EmbeddingVector(values, response.model.getOrElse(model), values.size),
+          EmbeddingError.InvalidResponse
+        )
+      }
+      .getOrElse(Left(EmbeddingError.InvalidResponse))
 
   private def inputType(inputType: EmbeddingInputType): String =
     inputType match {
       case EmbeddingInputType.Query => "query"
       case EmbeddingInputType.Document => "document"
     }
+}
 
-  private def decode(status: Int, body: String): Either[EmbeddingError, EmbeddingVector] =
-    if (status < 200 || status >= 300) Left(EmbeddingError.ProviderUnavailable)
-    else {
-      parse(body).flatMap { json =>
-        val cursor = json.hcursor
-        for {
-          data <- cursor.downField("data").as[List[Json]]
-          first <- data.headOption.toRight(io.circe.DecodingFailure("missing embedding", cursor.history))
-          values <- first.hcursor.downField("embedding").as[List[Float]]
-          responseModel <- cursor.downField("model").as[Option[String]]
-        } yield EmbeddingVector(values, responseModel.getOrElse(model), values.size)
-      }.leftMap(_ => EmbeddingError.InvalidResponse).flatMap { vector =>
-        Either.cond(vector.dimension == dimension, vector, EmbeddingError.InvalidResponse)
-      }
+private final case class VoyageEmbeddingRequest(
+    input: String,
+    model: String,
+    inputType: String,
+    outputDimension: Int,
+    outputDtype: String,
+    truncation: Boolean
+)
+
+private object VoyageEmbeddingRequest {
+  given Encoder[VoyageEmbeddingRequest] = Encoder.forProduct6(
+    "input", "model", "input_type", "output_dimension", "output_dtype", "truncation"
+  )(request => (
+    request.input,
+    request.model,
+    request.inputType,
+    request.outputDimension,
+    request.outputDtype,
+    request.truncation
+  ))
+}
+
+private final case class VoyageEmbeddingItem(embedding: List[Float])
+
+private object VoyageEmbeddingItem {
+  given Decoder[VoyageEmbeddingItem] = deriveDecoder
+}
+
+private final case class VoyageEmbeddingResponse(
+    data: List[VoyageEmbeddingItem],
+    model: Option[String]
+)
+
+private object VoyageEmbeddingResponse {
+  given Decoder[VoyageEmbeddingResponse] = deriveDecoder
+}
+
+object VoyageEmbeddingService {
+  def resource(
+      apiKey: String,
+      endpoint: String,
+      model: String,
+      dimension: Int,
+      timeout: FiniteDuration,
+      tracer: Tracer[IO] = Tracer.noop[IO]
+  ): Resource[IO, EmbeddingService[IO]] =
+    Resource.eval(IO.fromEither(
+      Uri.fromString(endpoint).leftMap(_ => new IllegalArgumentException("Invalid Voyage embedding endpoint"))
+    )).flatMap { uri =>
+      EmberClientBuilder.default[IO]
+        .withTimeout(timeout)
+        .build
+        .map(client => new VoyageEmbeddingService(client, apiKey, uri, model, dimension, timeout, tracer))
     }
+
 }
