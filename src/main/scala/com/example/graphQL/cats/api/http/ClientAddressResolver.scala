@@ -3,13 +3,13 @@ package com.example.graphQL.cats.api.http
 import com.comcast.ip4s.{Cidr, IpAddress}
 import com.example.graphQL.cats.config.TrustedProxyConfig
 import org.http4s.Request
-import org.http4s.headers.Forwarded
+import org.http4s.headers.{Forwarded, `X-Forwarded-For`}
 
 final class ClientAddressResolver private (trustedProxyCidrs: List[Cidr[IpAddress]]) {
-  def resolve[F[_]](request: Request[F]): String =
-    request.remoteAddr.fold("unknown") { peer =>
-      if (!isTrusted(peer)) peer.toString
-      else forwardedAddress(request).fold(peer)(identity).toString
+  def resolve[F[_]](request: Request[F]): Option[IpAddress] =
+    request.remoteAddr.flatMap { peer =>
+      if (!isTrusted(peer)) Some(peer)
+      else forwardedAddress(request).orElse(xForwardedForAddress(request)).orElse(Some(peer))
     }
 
   private def isTrusted(address: IpAddress): Boolean =
@@ -17,10 +17,16 @@ final class ClientAddressResolver private (trustedProxyCidrs: List[Cidr[IpAddres
 
   private def forwardedAddress[F[_]](request: Request[F]): Option[IpAddress] =
     request.headers.get[Forwarded].flatMap { header =>
-      header.values.toList.reverse.iterator.map(concreteAddress).collectFirst {
-        case Some(address) if !isTrusted(address) => address
-      }
+      firstClientAddress(header.values.toList.reverse.iterator.map(concreteAddress))
     }
+
+  private def xForwardedForAddress[F[_]](request: Request[F]): Option[IpAddress] =
+    request.headers.get[`X-Forwarded-For`].flatMap { header =>
+      firstClientAddress(header.values.toList.reverseIterator)
+    }
+
+  private def firstClientAddress(addresses: Iterator[Option[IpAddress]]): Option[IpAddress] =
+    addresses.collectFirst { case Some(address) if !isTrusted(address) => address }
 
   private def concreteAddress(element: Forwarded.Element): Option[IpAddress] =
     element.maybeFor.flatMap { node =>

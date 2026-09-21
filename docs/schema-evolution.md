@@ -55,7 +55,7 @@ Pagination cursors are signed v2 values. A cursor contains the cursor version, c
 
 This is a coordinated breaking security change: old unsigned cursors are not accepted. Consumers must discard stored pagination cursors and restart pagination from the first page after deploying against this contract. Runtime configuration must provide a valid `AUTH_JWT_HS256_SECRET`; `disabled`, missing, blank, or short values fail configuration validation.
 
-Login and signup now pass through a configured process-local fixed-window limiter keyed by remote address and operation. Consumers should treat HTTP 429 with `Retry-After` as a transport-level retry signal for account operations. Public signup no longer exposes canonical-name collisions as `NAME_TAKEN`; unauthenticated registration collisions return generic `REGISTRATION_FAILED` to avoid account enumeration.
+Login, signup, and admin bootstrap now pass through configured process-local token buckets keyed by typed remote address and operation. Consumers should treat HTTP 429 with `Retry-After` as a transport-level retry signal for account operations. Public signup no longer exposes canonical-name collisions as `NAME_TAKEN`; unauthenticated registration collisions return generic `REGISTRATION_FAILED` to avoid account enumeration.
 
 ## Events and analytical schemas
 

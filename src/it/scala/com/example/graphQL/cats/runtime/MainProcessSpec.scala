@@ -61,8 +61,9 @@ class MainProcessSpec extends CatsEffectSuite {
         val childEnvironment = builder.environment()
         childEnvironment.clear()
         (Map(
-          "MONGODB_URI" -> s"mongodb://test-user:$secret@127.0.0.1:1/?authSource=admin"
-        ) ++ environment.filter { case (key, _) => key == "MONGODB_URI" }).foreach { case (key, value) =>
+          "MONGODB_URI" -> s"mongodb://test-user:$secret@127.0.0.1:1/?authSource=admin",
+          "OTEL_SDK_DISABLED" -> "true"
+        ) ++ environment.filter { case (key, _) => key == "MONGODB_URI" || key.startsWith("OTEL_") }).foreach { case (key, value) =>
           val _ = childEnvironment.put(key, value)
         }
         builder.start()
@@ -185,7 +186,8 @@ class MainProcessSpec extends CatsEffectSuite {
     listeningSocket().use { socket =>
       runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString)).map { result =>
         assert(result.exitCode != 0)
-        val _ = assertSanitized(result, "STARTUP_FAILED")
+        val events = assertSanitized(result, "STARTUP_FAILED")
+        assertEquals(events.count(_.hcursor.get[String]("category") == Right("STARTUP_FAILED")), 1)
         assert(!result.stdout.contains("STARTED"))
         assert(!socket.isClosed)
       }

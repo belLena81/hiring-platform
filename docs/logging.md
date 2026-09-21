@@ -11,7 +11,7 @@ rg 'http.request|voyage.embeddings' _logs/hiring-platform.log
 
 ## Tracing
 
-Tracing is disabled unless `OTEL_TRACES_EXPORTER` is set to a value other than `none`. When enabled, the OpenTelemetry Java SDK uses its standard environment configuration, including `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_TRACES_EXPORTER`. The application enables Cats Effect fiber-context propagation before initializing otel4s, so no additional JVM property is required. Incoming W3C `traceparent` headers are joined, and child spans propagate through the http4s request boundary. Mongo/HTTP readiness does not depend on a collector being available.
+Tracing is initialized through the OpenTelemetry Java SDK's standard environment configuration, including `OTEL_SDK_DISABLED`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_TRACES_EXPORTER`. Disable the SDK with `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none`; the application does not duplicate those controls. Cats Effect fiber-context propagation is enabled before initializing otel4s, so no additional JVM property is required. Incoming W3C `traceparent` headers are joined, and child spans propagate through the http4s request boundary. Mongo/HTTP readiness does not depend on a collector being available.
 
 ## Disclosure policy
 

@@ -60,9 +60,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       .withEntity(Json.obj("query" -> Json.fromString(query), "operationName" -> Json.fromString(operationName)))
 
   private def proxiedRequest(query: String, peer: String, forwarded: String): Request[IO] = {
+    proxiedHeaderRequest(query, peer, "Forwarded", forwarded)
+  }
+
+  private def proxiedHeaderRequest(query: String, peer: String, headerName: String, value: String): Request[IO] = {
     val socket = if (peer.contains(':')) s"[$peer]:12345" else s"$peer:12345"
     request(query)
-      .putHeaders(Header.Raw(CIString("Forwarded"), forwarded))
+      .putHeaders(Header.Raw(CIString(headerName), value))
       .withAttribute(Request.Keys.ConnectionInfo, Request.Connection(
         SocketAddress.fromStringIp("127.0.0.1:8080").get,
         SocketAddress.fromStringIp(socket).get,
@@ -541,6 +545,28 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(first.status, Status.Ok)
       assertEquals(limited.status, Status.TooManyRequests)
+    }
+  }
+
+  test("trusted X-Forwarded-For client addresses isolate auth rate-limit buckets") {
+    val login =
+      """mutation {
+        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |}""".stripMargin
+    val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
+
+    for {
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
+        trustedProxy = trustedProxy).flatMap(defaultApp)
+      first <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))
+      limited <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))
+      second <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.11"))
+    } yield {
+      assertEquals(first.status, Status.Ok)
+      assertEquals(limited.status, Status.TooManyRequests)
+      assertEquals(second.status, Status.Ok)
     }
   }
 

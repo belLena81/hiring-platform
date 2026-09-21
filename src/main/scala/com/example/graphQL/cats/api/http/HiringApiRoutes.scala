@@ -75,8 +75,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
       request.attemptAs[GraphQLRequest].foldF(
       _ => rejected(Rejection.InvalidRequest, requestId, mediaType = mediaType),
       parsed => {
-        def limited(operation: FixedWindowRateLimiter.Operation): IO[Either[Response[IO], Unit]] =
-          dependencies.rateLimiter.permit(FixedWindowRateLimiter.Key(dependencies.clientAddressResolver.resolve(request), operation)).flatMap {
+        def limited(operation: AuthRateLimiter.Operation): IO[Either[Response[IO], Unit]] =
+          dependencies.rateLimiter.permit(AuthRateLimiter.Key(dependencies.clientAddressResolver.resolve(request), operation)).flatMap {
             case Right(()) => IO.pure(Right(()))
             case Left(rateLimited) =>
               rejected(Rejection.RateLimited, requestId)
@@ -117,15 +117,15 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
 
   private enum AccountOperation {
     case None
-    case Single(operation: FixedWindowRateLimiter.Operation)
+    case Single(operation: AuthRateLimiter.Operation)
     case Multiple
   }
 
   private object AccountOperation {
-    val byFieldName: Map[String, FixedWindowRateLimiter.Operation] = Map(
-      "signUp" -> FixedWindowRateLimiter.Operation.SignUp,
-      "login" -> FixedWindowRateLimiter.Operation.Login,
-      "bootstrapAdmin" -> FixedWindowRateLimiter.Operation.BootstrapAdmin
+    val byFieldName: Map[String, AuthRateLimiter.Operation] = Map(
+      "signUp" -> AuthRateLimiter.Operation.SignUp,
+      "login" -> AuthRateLimiter.Operation.Login,
+      "bootstrapAdmin" -> AuthRateLimiter.Operation.BootstrapAdmin
     )
   }
 
@@ -136,8 +136,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
       case None => Option.when(operations.size == 1)(operations.head)
     }
 
-    def sensitiveFields(selections: Vector[sangria.ast.Selection], expanding: Set[String]): Vector[FixedWindowRateLimiter.Operation] =
-      selections.foldLeft(Vector.empty[FixedWindowRateLimiter.Operation]) { (found, selection) =>
+    def sensitiveFields(selections: Vector[sangria.ast.Selection], expanding: Set[String]): Vector[AuthRateLimiter.Operation] =
+      selections.foldLeft(Vector.empty[AuthRateLimiter.Operation]) { (found, selection) =>
         if (found.size >= 2) found
         else {
           val next = selection match {
@@ -319,7 +319,7 @@ object HiringApiRoutes {
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]],
       ensureHiringReady: IO[ProbeResult],
       contextFactory: RequestContextFactory,
-      rateLimiter: FixedWindowRateLimiter,
+      rateLimiter: AuthRateLimiter,
       clientAddressResolver: ClientAddressResolver
   )
 

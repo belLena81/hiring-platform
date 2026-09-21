@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.http.{ClientAddressResolver, FixedWindowRateLimiter, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.{AuthRateLimiter, ClientAddressResolver, HiringApiRoutes}
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
@@ -81,7 +81,7 @@ object TestGraphQLSupport {
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource
-      limiter <- Resource.eval(FixedWindowRateLimiter.create(authRateLimit))
+      limiter <- Resource.eval(AuthRateLimiter.create(authRateLimit))
     } yield HiringApiRoutes.Dependencies(hiring, authenticate, hiringReady, factory, limiter,
       ClientAddressResolver(trustedProxy))
 }
