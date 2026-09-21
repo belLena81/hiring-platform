@@ -9,6 +9,7 @@ import com.example.graphQL.cats.repository.protocol.{
 }
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventJson}
 import fs2.Stream
 import fs2.kafka.*

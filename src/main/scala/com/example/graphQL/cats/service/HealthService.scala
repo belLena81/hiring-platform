@@ -2,6 +2,7 @@ package com.example.graphQL.cats.service
 
 import cats.effect.IO
 import scala.concurrent.duration.*
+import Diagnostics.*
 
 private final case class ProbeOutcome(result: ProbeResult, failure: Map[LogField, String], elapsed: FiniteDuration)
 

@@ -700,7 +700,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       body <- response.as[Json]
       captured <- records.get
     } yield {
-      val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val id = Some("unknown")
       assertEquals(response.status, Status.NotFound)
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Not found")))))
       assert(captured.filterNot(record => spanEvent(record._1)).forall(_._2 == id))
@@ -719,7 +719,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       response <- http(request("query LocalCheck { readiness { status } }"))
       captured <- records.get
     } yield {
-      val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val id = Some("unknown")
       assertEquals(response.status, Status.Ok)
       assertEquals(captured.map(_._1), Vector(LogEvent.MongoUnavailable, LogEvent.GraphQLCompleted))
       assert(captured.filterNot(record => spanEvent(record._1)).forall(_._2 == id))
@@ -729,7 +729,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("an inbound request ID is ignored and each response receives its own correlation ID") {
+  test("an inbound request ID is not used as application correlation") {
     val inboundId = "00000000-0000-0000-0000-000000000123"
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
@@ -738,14 +738,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       second <- http(health.putHeaders(Header.Raw(CIString("X-Request-ID"), inboundId)))
       captured <- records.get
     } yield {
-      val firstId = first.headers.get(CIString("X-Request-ID")).map(_.head.value)
-      val secondId = second.headers.get(CIString("X-Request-ID")).map(_.head.value)
-      assert(firstId.exists(_.matches("[0-9a-fA-F-]{36}")))
-      assert(secondId.exists(_.matches("[0-9a-fA-F-]{36}")))
-      assertNotEquals(firstId, Some(inboundId))
-      assertNotEquals(secondId, Some(inboundId))
-      assertNotEquals(firstId, secondId)
+      assert(first.headers.get(CIString("X-Request-ID")).isEmpty)
+      assert(second.headers.get(CIString("X-Request-ID")).isEmpty)
       assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted, LogEvent.GraphQLCompleted))
+      assert(captured.forall(_._2 == Some("unknown")))
     }
   }
 
@@ -908,7 +904,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(response.status, Status.Ok)
       assertEquals(body.hcursor.downField("data").downField("health").get[String]("status"), Right("UP"))
       assertEquals(calls, 0)
-      assert(response.headers.get(CIString("X-Request-ID")).isDefined)
+      assert(response.headers.get(CIString("X-Request-ID")).isEmpty)
       assert(response.headers.get(CIString("Access-Control-Allow-Origin")).isEmpty)
     }
   }
@@ -1049,7 +1045,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       body <- response.as[String]
       captured <- events.get
     } yield {
-      val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val requestId = Some("unknown")
       assertEquals(response.status, Status.BadRequest)
       assert(requestId.exists(value => scala.util.Try(java.util.UUID.fromString(value)).isSuccess))
       assertEquals(captured.filterNot(record => spanEvent(record._1)), List(LogEvent.RequestRejected -> requestId))
@@ -1073,7 +1069,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(response.status, Status.InternalServerError)
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Request failed")))))
-      val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val requestId = Some("unknown")
       assertEquals(captured.filterNot(record => spanEvent(record._1)), List(LogEvent.RequestRejected -> requestId))
       assert(!body.noSpaces.contains(secret))
       assert(!response.headers.toString.contains(secret))
@@ -1101,7 +1097,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(count, 1)
       assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
       assert(!body.hcursor.downField("errors").succeeded)
-      val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val requestId = Some("unknown")
       assertEquals(captured.filterNot(record => spanEvent(record._1)), List(
         LogEvent.MongoUnavailable -> requestId,
         LogEvent.GraphQLCompleted -> requestId
@@ -1127,7 +1123,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(large.status, Status.PayloadTooLarge)
       assertEquals(response.status, Status.GatewayTimeout)
       assertEquals(successful.status, Status.Ok)
-      val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val id = Some("unknown")
       val deadline = captured.filter(record => !spanEvent(record._1) && record._2 == id)
       assertEquals(deadline.map(_._1), Vector(LogEvent.RequestRejected))
       assert(deadline.filter(_._1 == LogEvent.RequestRejected).forall(_._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED")))

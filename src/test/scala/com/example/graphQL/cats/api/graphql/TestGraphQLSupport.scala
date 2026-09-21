@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.Kleisli
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{AuthRateLimiter, ClientAddressResolver, HiringApiRoutes}
@@ -82,6 +83,6 @@ object TestGraphQLSupport {
     for {
       factory <- RequestContextFactory.resource
       limiter <- Resource.eval(AuthRateLimiter.create(authRateLimit))
-    } yield HiringApiRoutes.Dependencies(hiring, authenticate, hiringReady, factory, limiter,
+    } yield HiringApiRoutes.Dependencies(hiring, Kleisli(authenticate), hiringReady, factory, limiter,
       ClientAddressResolver(trustedProxy))
 }

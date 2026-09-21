@@ -3,6 +3,7 @@ package com.example.graphQL.cats.infrastructure.logging
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.AppConfig
 import io.circe.parser.parse
 import java.time.Instant
@@ -204,13 +205,13 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = throw secret
     }
     for {
-      _ <- Diagnostics.emit(throwing, LogEvent.Started)
+      _ <- throwing.emit(LogEvent.Started)
       _ <- SafeDiagnostics.withSink(_ => IO.raiseError(secret)).event(LogEvent.Started)
       _ <- SafeDiagnostics.withSink(_ => throw secret).event(LogEvent.Started)
       entered <- Deferred[IO, Unit]
       finalized <- Deferred[IO, Unit]
       waiting = SafeDiagnostics.withSink(_ => (entered.complete(()) *> IO.never[Unit]).onCancel(finalized.complete(()).void))
-      _ <- Diagnostics.emit(waiting, LogEvent.Started).start.bracket { fiber =>
+      _ <- waiting.emit(LogEvent.Started).start.bracket { fiber =>
         for {
           _ <- entered.get.timeout(1.second)
           _ <- fiber.cancel

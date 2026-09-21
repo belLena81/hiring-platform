@@ -7,7 +7,6 @@ import com.example.graphQL.cats.api.graphql.{HiringGraphQLServices, RequestConte
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogFields, ProbeResult}
 import org.http4s.*
 import org.http4s.circe.*
-import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
 import org.http4s.headers.Accept
 import org.typelevel.otel4s.trace.Tracer
@@ -18,18 +17,19 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
   private val dsl = new Http4sDsl[IO] {}
   import dsl.*
 
-  private def requestId(request: Request[IO]): String =
-    request.attributes.lookup(org.http4s.server.middleware.RequestId.requestIdAttrKey).getOrElse("unknown")
-
   private val healthRoutes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case GET -> Root / "health" =>
-      IO.pure(Response[IO](Status.Ok).withEntity(io.circe.Json.obj("status" -> io.circe.Json.fromString("UP"))))
+      IO.pure(Response[IO](Status.Ok).withEntity(io.circe.Json.obj("status" -> io.circe.Json.fromString("UP")))
+        (using jsonEncoderOf[IO, io.circe.Json]))
     case request @ GET -> Root / "ready" =>
-      tracer.currentSpanContext.map(_.fold(requestId(request))(_.traceIdHex)).flatMap { correlationId =>
+      tracer.currentSpanContext.map(_.fold(
+        request.attributes.lookup(org.http4s.server.middleware.RequestId.requestIdAttrKey).getOrElse("unknown")
+      )(_.traceIdHex)).flatMap { correlationId =>
         service.readiness(Some(correlationId)).map { result =>
           val ready = result == ProbeResult.Ready
           Response[IO](if (ready) Status.Ok else Status.ServiceUnavailable)
             .withEntity(io.circe.Json.obj("status" -> io.circe.Json.fromString(if (ready) "READY" else "NOT_READY")))
+            (using jsonEncoderOf[IO, io.circe.Json])
         }
       }
   }

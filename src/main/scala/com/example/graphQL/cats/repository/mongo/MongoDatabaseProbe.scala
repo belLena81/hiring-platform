@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.mongodb.{ConnectionString, MongoClientSettings, MongoSecurityException, MongoSocketException, MongoTimeoutException}
 import com.mongodb.reactivestreams.client.{MongoClient, MongoClients, MongoDatabase}
 import org.bson.Document

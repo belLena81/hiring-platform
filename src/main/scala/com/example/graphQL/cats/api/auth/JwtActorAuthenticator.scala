@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.api.auth
 
 import cats.effect.{Clock as EffectClock, IO}
-import cats.data.Kleisli
+import cats.data.EitherT
+import cats.syntax.all.*
 import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
@@ -19,23 +20,22 @@ enum AuthFailure {
 }
 
 final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
-  def authenticate: Kleisli[IO, Request[IO], Either[AuthFailure, Option[ActorContext]]] =
-    Kleisli(authenticateDetailed)
+  def authenticate(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
+    authenticateDetailed(request)
 
   def authenticateDetailed(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
-    bearerToken(request) match {
-      case Right(None) => IO.pure(Right(None))
-      case Left(failure) => IO.pure(Left(failure))
-      case Right(Some(token)) =>
-        JwtActorAuthenticator.verify(token, config.hmacSecret, config.issuer, config.audience, clock).flatMap {
-          case None => IO.pure(Left(AuthFailure.InvalidToken))
-          case Some(userId) => users.actorFor(userId).map {
-            case Left(_) => Left(AuthFailure.Unavailable)
-            case Right(Some(actor)) => Right(Some(actor))
-            case Right(None) => Left(AuthFailure.UnknownActor)
-          }
-        }
-    }
+    (for {
+      token <- EitherT.fromEither[IO](bearerToken(request))
+      actor <- token.traverse { value =>
+        for {
+          userId <- EitherT.fromOptionF(
+            JwtActorAuthenticator.verify(value, config.hmacSecret, config.issuer, config.audience, clock),
+            AuthFailure.InvalidToken)
+          actor <- EitherT(users.actorFor(userId).map(_.leftMap(_ => AuthFailure.Unavailable)
+            .flatMap(_.toRight(AuthFailure.UnknownActor))))
+        } yield actor
+      }
+    } yield actor).value
 
   private def bearerToken(request: Request[IO]): Either[AuthFailure, Option[String]] =
     request.headers.get(Authorization.headerInstance.name).map(_.toList) match {

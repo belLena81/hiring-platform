@@ -7,7 +7,7 @@ import io.circe.{Decoder, Encoder}
 import io.circe.generic.semiauto.deriveDecoder
 import org.http4s.{AuthScheme, Credentials, Headers, Method, Request, Uri}
 import org.http4s.client.Client
-import org.http4s.circe.CirceEntityCodec.*
+import org.http4s.circe.*
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.headers.Authorization
 import org.typelevel.otel4s.context.propagation.TextMapUpdater
@@ -39,7 +39,7 @@ final class VoyageEmbeddingService(
         outputDimension = dimension,
         outputDtype = "float",
         truncation = true
-      ))
+      ))(using jsonEncoderOf[IO, VoyageEmbeddingRequest])
 
     tracer.span("voyage.embeddings").surround {
       tracer.propagate(request.headers).flatMap { propagatedHeaders =>
@@ -47,7 +47,7 @@ final class VoyageEmbeddingService(
       if (!response.status.isSuccess)
         IO.pure(Left(EmbeddingError.ProviderUnavailable))
       else
-        response.attemptAs[VoyageEmbeddingResponse].value.map { decoded =>
+        response.attemptAs[VoyageEmbeddingResponse](using jsonOf[IO, VoyageEmbeddingResponse]).value.map { decoded =>
           decoded.leftMap(_ => EmbeddingError.InvalidResponse).flatMap(validate)
         }
       }.timeout(timeout).handleError(_ => Left(EmbeddingError.ProviderUnavailable))

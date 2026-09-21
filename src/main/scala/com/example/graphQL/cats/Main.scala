@@ -2,10 +2,12 @@ package com.example.graphQL.cats
 
 import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
+import cats.data.Kleisli
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.RequestContextFactory
 import com.example.graphQL.cats.api.http.{AuthRateLimiter, ClientAddressResolver, HiringApiRoutes}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.{AppConfig, ConfigError}
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
@@ -24,18 +26,19 @@ object Main extends IOApp {
     }
 
   private def program: Resource[IO, Unit] = for {
+    mask <- Resource.eval(AppConfig.loadMaskSensitive)
     telemetry <- TelemetryRuntime.resource
     config <- Resource.eval(AppConfig.load.flatMap(_.fold(
       errors => IO.raiseError[AppConfig](ConfigInvalid(errors)),
       IO.pure
     )))
-    diagnostics <- Resource.eval(SafeDiagnostics.configure(config.maskSensitive))
+    diagnostics <- Resource.eval(SafeDiagnostics.configure(mask && config.maskSensitive))
     runtime <- MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
       config.jwtAuth, config.resolverTimeout, config.passwordHash, config.kafka, telemetry.tracer)
     contextFactory <- RequestContextFactory.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
-    authenticate = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
-      .authenticate
+    authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
+    authenticate = Kleisli(authenticator.authenticate)
     routeBuilder = new HiringApiRoutes(
       new com.example.graphQL.cats.service.HealthService(runtime.probe, diagnostics),
       diagnostics,

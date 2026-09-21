@@ -81,10 +81,8 @@ final class TracePropagationSpec extends CatsEffectSuite {
         val resolverSpan = span(captured, "service.job.searchOpen")
 
         assertEquals(response.status, Status.Ok)
-        val correlation = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
-        assert(correlation.exists(_.matches("[0-9a-f]{32}")))
-        assertEquals(Some(resolverSpan(LogField.TraceId)), correlation)
-        assert(response.headers.get(CIString("traceparent")).isDefined)
+        val traceparent = response.headers.get(CIString("traceparent")).map(_.head.value)
+        assert(traceparent.exists(_.contains(resolverSpan(LogField.TraceId))))
         assert(!records.exists(_._3.get(LogField.SpanName).contains("http.request")))
         assert(!resolverSpan.keys.exists(_.key == "sequence"))
       }

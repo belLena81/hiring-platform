@@ -2,7 +2,7 @@
 
 Application diagnostics are single-line JSON records in `_logs/hiring-platform.log` at the project root. The packaged [logback.xml](../src/main/resources/logback.xml) is the only severity filter: it defaults to `INFO`, writes synchronously, rolls at 20 MiB, and retains ten previous `.log` files. To investigate an incident with `DEBUG` or `TRACE`, change the packaged logger level, rebuild, and redeploy. There is no application `LOG_LEVEL` setting and no live reload.
 
-The application uses log4cats `StructuredLogger` for structured fields and otel4s for tracing. The active OpenTelemetry trace ID is the request correlation ID and is returned as the `X-Request-ID` compatibility alias. HTTP server spans, W3C propagation, active-request metrics and duration metrics are owned by the http4s otel4s middleware. Application diagnostics retain bounded rejection, GraphQL, readiness and child-operation records without synthetic HTTP completion/cancellation events.
+The application uses log4cats `StructuredLogger` for structured fields and otel4s for tracing. The active OpenTelemetry trace ID is the request correlation ID. HTTP server spans, W3C propagation, active-request metrics and duration metrics are owned by the http4s otel4s middleware. Application diagnostics retain bounded rejection, GraphQL, readiness and child-operation records without synthetic HTTP completion/cancellation events.
 
 ```bash
 rg '"requestId":"YOUR-RESPONSE-REQUEST-ID"' _logs/hiring-platform.log

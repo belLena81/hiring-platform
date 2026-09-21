@@ -3,158 +3,40 @@ package com.example.graphQL.cats.api.graphql
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
-import cats.syntax.all.*
-import sangria.marshalling.{CoercedScalaResultMarshaller, FromInput}
+import io.circe.Decoder
+import io.circe.generic.semiauto.deriveDecoder
+import sangria.marshalling.circe.*
 import sangria.schema.*
 import sangria.validation.ValueCoercionViolation
 
 import java.time.Instant
 import java.util.{Locale, UUID}
+import scala.util.Try
 
 private[graphql] object HiringGraphQLInputs {
   private final case class IdCoercionViolation(typeName: String)
       extends ValueCoercionViolation(s"Invalid $typeName value")
   private final case class InstantCoercionViolation()
       extends ValueCoercionViolation("Invalid Instant value; expected ISO-8601")
-  private final class InvalidInput extends RuntimeException("Invalid GraphQL input", null, false, false)
+  private given Decoder[JobId] = Decoder.decodeUUID.map(JobId.apply)
+  private given Decoder[ApplicationId] = Decoder.decodeUUID.map(ApplicationId.apply)
+  private given Decoder[UserRole] = Decoder.decodeString.emapTry(value => Try(UserRole.valueOf(value)))
+  private given Decoder[Instant] = Decoder.decodeString.emapTry(value => Try(Instant.parse(value)))
 
-  private type InputMap = Map[String, Any]
-
-  private def inputAdapter[A](build: InputMap => Option[A]): FromInput[A] = new FromInput[A] {
-    override val marshaller: CoercedScalaResultMarshaller = CoercedScalaResultMarshaller.default
-    override def fromResult(node: marshaller.Node): A =
-      inputMap(node).flatMap(build).getOrElse(invalidInput)
-  }
-
-  private def inputMap(value: Any): Option[InputMap] = value match {
-    case fields: Map[?, ?] if fields.keys.forall(_.isInstanceOf[String]) =>
-      Some(fields.iterator.collect { case (name: String, fieldValue) => name -> fieldValue }.toMap)
-    case _ => None
-  }
-
-  private def invalidInput[A]: A =
-    throw new InvalidInput
-
-  private def requiredInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[A] =
-    fields.get(name).flatMap(extract.lift)
-
-  private def optionalInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[Option[A]] =
-    // CoercedScalaResultMarshaller omits absent fields and stores present nullable fields as Some(value) or None.
-    fields.get(name) match {
-      case None | Some(None) => Some(None)
-      case Some(Some(value)) => extract.lift(value).map(Some(_))
-      case _ => None
-    }
-
-  private def requiredListInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[List[A]] =
-    fields.get(name).collect { case values: Seq[?] => values }
-      .flatMap(values => values.foldRight(Option(List.empty[A]))((value, result) =>
-        extract.lift(value).flatMap(element => result.map(element :: _))))
-
-  private def optionalListInput[A](fields: InputMap, name: String)(using extract: PartialFunction[Any, A]): Option[Option[List[A]]] =
-    fields.get(name) match {
-      case None | Some(None) => Some(None)
-      case Some(Some(values: Seq[?])) =>
-        values.foldRight(Option(List.empty[A]))((value, result) =>
-          extract.lift(value).flatMap(element => result.map(element :: _))).map(Some(_))
-      case _ => None
-    }
-
-  private given stringInput: PartialFunction[Any, String] = { case value: String => value }
-  private given booleanInput: PartialFunction[Any, Boolean] = { case value: Boolean => value }
-  private given jobIdInput: PartialFunction[Any, JobId] = { case value: UUID => JobId(value) }
-  private given applicationIdInput: PartialFunction[Any, ApplicationId] = { case value: UUID => ApplicationId(value) }
-  private given userRoleInput: PartialFunction[Any, UserRole] = { case value: UserRole => value }
-  private given instantInput: PartialFunction[Any, Instant] = { case value: Instant => value }
-
-  private def jobGraphQLInput(fields: InputMap): Option[JobGraphQLInput] =
-    for {
-      title <- requiredInput[String](fields, "title")
-      description <- requiredInput[String](fields, "description")
-      requirements <- requiredListInput[String](fields, "requirements")
-      skills <- requiredListInput[String](fields, "skills")
-      country <- requiredInput[String](fields, "country")
-      city <- optionalInput[String](fields, "city")
-      remote <- requiredInput[Boolean](fields, "remote")
-    } yield JobGraphQLInput(title, description, requirements, skills, country, city, remote)
-
-  private def jobGraphQLInput(value: Any): Option[JobGraphQLInput] =
-    value match {
-      case input: JobGraphQLInput => Some(input)
-      case fields: Map[?, ?] => inputMap(fields).flatMap(jobGraphQLInput)
-      case _ => None
-    }
-
-  given FromInput[JobFilterGraphQLInput] = inputAdapter(fields =>
-    for {
-      city <- optionalInput[String](fields, "city")
-      skills <- optionalListInput[String](fields, "skills")
-      createdAfter <- optionalInput[Instant](fields, "createdAfter")
-    } yield JobFilterGraphQLInput(city, skills, createdAfter))
-  given FromInput[SubmitApplicationGraphQLInput] = inputAdapter(fields =>
-    requiredInput[JobId](fields, "jobId").map(SubmitApplicationGraphQLInput.apply))
-  given FromInput[JobGraphQLInput] = inputAdapter(jobGraphQLInput)
-  given FromInput[UpdateJobGraphQLInput] = inputAdapter(fields =>
-    for {
-      id <- requiredInput[JobId](fields, "id")
-      patchValue <- fields.get("patch")
-      patch <- jobGraphQLInput(patchValue)
-    } yield UpdateJobGraphQLInput(id, patch))
-  given FromInput[JobActionGraphQLInput] = inputAdapter(fields =>
-    requiredInput[JobId](fields, "jobId").map(JobActionGraphQLInput.apply))
-  given FromInput[ApplicationActionGraphQLInput] = inputAdapter(fields =>
-    requiredInput[ApplicationId](fields, "applicationId").map(ApplicationActionGraphQLInput.apply))
-  given FromInput[RejectApplicationGraphQLInput] = inputAdapter(fields =>
-    for {
-      applicationId <- requiredInput[ApplicationId](fields, "applicationId")
-      feedback <- optionalInput[String](fields, "feedback")
-    } yield RejectApplicationGraphQLInput(applicationId, feedback))
-  given FromInput[DeclineApplicationGraphQLInput] = inputAdapter(fields =>
-    for {
-      applicationId <- requiredInput[ApplicationId](fields, "applicationId")
-      reason <- optionalInput[String](fields, "reason")
-    } yield DeclineApplicationGraphQLInput(applicationId, reason))
-  given FromInput[SignUpGraphQLInput] = inputAdapter(fields =>
-    for {
-      name <- requiredInput[String](fields, "name")
-      role <- requiredInput[UserRole](fields, "role")
-      password <- requiredInput[String](fields, "password")
-      skills <- optionalListInput[String](fields, "skills")
-      experienceSummary <- optionalInput[String](fields, "experienceSummary")
-      resumeRef <- optionalInput[String](fields, "resumeRef")
-      organizationName <- optionalInput[String](fields, "organizationName")
-      jobTitle <- optionalInput[String](fields, "jobTitle")
-    } yield SignUpGraphQLInput(name, role, password, skills, experienceSummary, resumeRef, organizationName, jobTitle))
-  given FromInput[BootstrapAdminGraphQLInput] = inputAdapter(fields =>
-    for {
-      name <- requiredInput[String](fields, "name")
-      password <- requiredInput[String](fields, "password")
-    } yield BootstrapAdminGraphQLInput(name, password))
-  given FromInput[LoginGraphQLInput] = inputAdapter(fields =>
-    for {
-      name <- requiredInput[String](fields, "name")
-      password <- requiredInput[String](fields, "password")
-    } yield LoginGraphQLInput(name, password))
-  given FromInput[UpdateProfileGraphQLInput] = inputAdapter(fields =>
-    for {
-      skills <- optionalListInput[String](fields, "skills")
-      experienceSummary <- optionalInput[String](fields, "experienceSummary")
-      resumeRef <- optionalInput[String](fields, "resumeRef")
-      organizationName <- optionalInput[String](fields, "organizationName")
-      jobTitle <- optionalInput[String](fields, "jobTitle")
-    } yield UpdateProfileGraphQLInput(skills, experienceSummary, resumeRef, organizationName, jobTitle))
-  given FromInput[RecordJobViewGraphQLInput] = inputAdapter(fields =>
-    for {
-      eventId <- requiredInput[String](fields, "eventId")
-      jobId <- requiredInput[JobId](fields, "jobId")
-      searchId <- optionalInput[String](fields, "searchId")
-    } yield RecordJobViewGraphQLInput(eventId, jobId, searchId))
-  given FromInput[RecordSearchResultClickGraphQLInput] = inputAdapter(fields =>
-    for {
-      eventId <- requiredInput[String](fields, "eventId")
-      searchId <- requiredInput[String](fields, "searchId")
-      resultId <- requiredInput[String](fields, "resultId")
-    } yield RecordSearchResultClickGraphQLInput(eventId, searchId, resultId))
+  given Decoder[JobFilterGraphQLInput] = deriveDecoder
+  given Decoder[SubmitApplicationGraphQLInput] = deriveDecoder
+  given Decoder[JobGraphQLInput] = deriveDecoder
+  given Decoder[UpdateJobGraphQLInput] = deriveDecoder
+  given Decoder[JobActionGraphQLInput] = deriveDecoder
+  given Decoder[ApplicationActionGraphQLInput] = deriveDecoder
+  given Decoder[RejectApplicationGraphQLInput] = deriveDecoder
+  given Decoder[DeclineApplicationGraphQLInput] = deriveDecoder
+  given Decoder[SignUpGraphQLInput] = deriveDecoder
+  given Decoder[BootstrapAdminGraphQLInput] = deriveDecoder
+  given Decoder[LoginGraphQLInput] = deriveDecoder
+  given Decoder[UpdateProfileGraphQLInput] = deriveDecoder
+  given Decoder[RecordJobViewGraphQLInput] = deriveDecoder
+  given Decoder[RecordSearchResultClickGraphQLInput] = deriveDecoder
 
   lazy val healthStatus: EnumType[String] =
     EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))

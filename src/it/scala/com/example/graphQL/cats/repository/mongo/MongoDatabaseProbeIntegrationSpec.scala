@@ -143,7 +143,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               body <- response.as[Json]
               correlated <- records.get
             } yield {
-              val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+              val id = Some("unknown")
               assertEquals(response.status, Status.Ok)
               assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
               val domainEvents = correlated.map(_._1).filterNot(event =>

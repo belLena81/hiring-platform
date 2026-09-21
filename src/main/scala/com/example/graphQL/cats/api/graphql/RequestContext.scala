@@ -3,6 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.effect.{IO, Resource}
 import cats.effect.std.Dispatcher
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
@@ -18,7 +19,7 @@ final case class HiringGraphQLServices(
     cursorCodec: CursorCodec.CursorCodecs,
     accountService: AccountUseCases[IO],
     semanticSearchService: Option[SearchUseCases[IO]] = None,
-    interactionService: Option[InteractionUseCases[IO]] = Some(InteractionUseCases.noop[IO]),
+    interactionService: Option[InteractionUseCases[IO]] = None,
     searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO]
 )
 

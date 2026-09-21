@@ -1,19 +1,20 @@
 package com.example.graphQL.cats.api.http
 
+import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContextFactory}
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.Rejection as LogRejection
 import io.circe.Json
 import org.http4s.*
 import org.http4s.circe.*
-import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
 import org.http4s.headers.{Accept, Allow, `Content-Type`, `Retry-After`, `WWW-Authenticate`}
+import org.http4s.server.AuthMiddleware
 import org.http4s.syntax.all.*
 import org.typelevel.otel4s.trace.Tracer
-import scala.concurrent.duration.*
 
 private[http] enum HttpRejection(val status: Status, val message: String, val reason: LogRejection) {
   case InvalidRequest extends HttpRejection(Status.BadRequest, "Invalid GraphQL request", LogRejection.InvalidRequest)
@@ -22,7 +23,7 @@ private[http] enum HttpRejection(val status: Status, val message: String, val re
   case NotAcceptable extends HttpRejection(Status.NotAcceptable,
     s"Expected ${MediaTypeNegotiation.supportedMessage}", LogRejection.NotAcceptable)
   case AuthenticationFailed extends HttpRejection(Status.Unauthorized, "Authentication failed", LogRejection.AuthenticationFailed)
-  case Unavailable extends HttpRejection(Status.ServiceUnavailable, "Service unavailable", LogRejection.DatabaseUnavailable)
+  case Unavailable extends HttpRejection(Status.ServiceUnavailable, "Service unavailable", LogRejection.InternalError)
   case RateLimited extends HttpRejection(Status.TooManyRequests, "Too many authentication attempts", LogRejection.RateLimited)
   case PayloadTooLarge extends HttpRejection(Status.PayloadTooLarge, "Request body too large", LogRejection.PayloadTooLarge)
   case Overloaded extends HttpRejection(Status.ServiceUnavailable, "Server busy", LogRejection.Overloaded)
@@ -37,7 +38,8 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
   private val dsl = new Http4sDsl[IO] {}
   import dsl.*
 
-  private def json(status: Status, body: Json): Response[IO] = Response[IO](status).withEntity(body)
+  private def json(status: Status, body: Json): Response[IO] =
+    Response[IO](status).withEntity(body)(using jsonEncoderOf[IO, Json])
 
   private def error(status: Status, message: String, mediaType: MediaType): Response[IO] =
     json(status, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString(message)))))
@@ -53,11 +55,12 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
       failure ++ Map(LogField.Reason -> rejection.reason.reason, LogField.Status -> rejection.status.code.toString))
       .as(error(rejection.status, rejection.message, mediaType))
 
-  private def graphql(request: Request[IO], requestId: String, mediaType: MediaType): IO[Response[IO]] = {
+  private def graphql(request: Request[IO], requestId: String, mediaType: MediaType,
+      actor: Option[ActorContext]): IO[Response[IO]] = {
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
       rejected(HttpRejection.UnsupportedMedia, requestId, mediaType = mediaType)
     else {
-      request.attemptAs[GraphQLRequest].foldF(
+      request.attemptAs[GraphQLRequest](using jsonOf[IO, GraphQLRequest]).foldF(
         _ => rejected(HttpRejection.InvalidRequest, requestId, mediaType = mediaType),
         parsed => {
           def limited(operation: AuthRateLimiter.Operation): IO[Either[Response[IO], Unit]] =
@@ -69,7 +72,7 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
                   .map(Left(_))
             }
 
-          def execute(actor: Option[ActorContext]): IO[Response[IO]] =
+          def execute: IO[Response[IO]] =
             HiringGraphQLSchema.execute(parsed, service, requestId, actor, dependencies.hiring,
               dependencies.ensureHiringReady, dependencies.contextFactory, tracer, diagnostics).flatMap {
               case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
@@ -81,24 +84,15 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
             case AccountOperation.Single(operation) =>
               limited(operation).flatMap {
                 case Left(response) => IO.pure(response)
-                case Right(()) => authenticateAndExecute(request, requestId, mediaType, execute)
+                case Right(()) => execute
               }
             case AccountOperation.Multiple => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
-            case AccountOperation.None => authenticateAndExecute(request, requestId, mediaType, execute)
+            case AccountOperation.None => execute
           }
         }
       )
     }
   }
-
-  private def authenticateAndExecute(request: Request[IO], requestId: String, mediaType: MediaType,
-      execute: Option[ActorContext] => IO[Response[IO]]): IO[Response[IO]] =
-    dependencies.authenticate.run(request).flatMap {
-      case Left(AuthFailure.Unavailable) => rejected(HttpRejection.Unavailable, requestId, mediaType = mediaType)
-      case Left(_) => rejected(HttpRejection.AuthenticationFailed, requestId, mediaType = mediaType)
-        .map(_.putHeaders(`WWW-Authenticate`(Challenge("Bearer", "hiring"))))
-      case Right(actor) => execute(actor)
-    }
 
   private enum AccountOperation {
     case None
@@ -156,28 +150,61 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
       .as(graphqlJson(Status.Ok, result, mediaType))
   }
 
-  private def requestIdOf(request: Request[IO]): String =
-    request.attributes.lookup(org.http4s.server.middleware.RequestId.requestIdAttrKey).getOrElse("unknown")
-
   private def correlationId(request: Request[IO]): IO[String] =
-    tracer.currentSpanContext.map(_.fold(requestIdOf(request))(_.traceIdHex))
+    tracer.currentSpanContext.map(_.fold(
+      request.attributes.lookup(org.http4s.server.middleware.RequestId.requestIdAttrKey).getOrElse("unknown")
+    )(_.traceIdHex))
 
-  def routes: HttpRoutes[IO] = HttpRoutes.of[IO] {
-    case GET -> Root / "schema.graphql" =>
-      IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
-    case request @ POST -> Root / "graphql" => correlationId(request).flatMap { requestId =>
-      MediaTypeNegotiation.selectResponseMediaType(request.headers.get[Accept]) match {
-        case Some(mediaType) => graphql(request, requestId, mediaType)
-        case None => rejected(HttpRejection.NotAcceptable, requestId)
+  private val authenticationFailures: AuthedRoutes[AuthFailure, IO] = AuthedRoutes.of {
+    case request as failure =>
+      correlationId(request.req).flatMap { requestId =>
+        MediaTypeNegotiation.selectResponseMediaType(request.req.headers.get[Accept]) match {
+          case None => rejected(HttpRejection.NotAcceptable, requestId)
+          case Some(mediaType) =>
+            val rejection = failure match {
+              case AuthFailure.Unavailable => HttpRejection.Unavailable
+              case _ => HttpRejection.AuthenticationFailed
+            }
+            rejected(rejection, requestId, mediaType = mediaType).map { response =>
+              if (failure == AuthFailure.Unavailable) response
+              else response.putHeaders(`WWW-Authenticate`(Challenge("Bearer", "hiring")))
+            }
+        }
       }
+  }
+
+  private val authenticatedGraphQL: HttpRoutes[IO] = {
+    val graphqlRoutes: AuthedRoutes[Option[ActorContext], IO] = AuthedRoutes.of {
+      case request @ POST -> Root / "graphql" as actor =>
+        correlationId(request.req).flatMap { requestId =>
+          MediaTypeNegotiation.selectResponseMediaType(request.req.headers.get[Accept]) match {
+            case Some(mediaType) => graphql(request.req, requestId, mediaType, actor)
+            case None => rejected(HttpRejection.NotAcceptable, requestId)
+          }
+        }
     }
-    case request @ _ -> Root / "graphql" => correlationId(request).flatMap { requestId =>
-      rejected(HttpRejection.MethodNotAllowed, requestId).map(_.putHeaders(Allow(Method.POST)))
+    val middleware = AuthMiddleware(dependencies.authenticate, authenticationFailures)(graphqlRoutes)
+    Kleisli { request =>
+      if (request.method == Method.POST && request.uri.path.renderString == "/graphql") middleware(request)
+      else OptionT.none[IO, Response[IO]]
     }
-    case request => correlationId(request).flatMap { requestId => rejected(HttpRejection.NotFound, requestId) }
+  }
+
+  def routes: HttpRoutes[IO] = {
+    val schema = HttpRoutes.of[IO] {
+      case GET -> Root / "schema.graphql" =>
+        IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
+    }
+    val fallback = HttpRoutes.of[IO] {
+      case request @ _ -> Root / "graphql" => correlationId(request).flatMap { requestId =>
+        rejected(HttpRejection.MethodNotAllowed, requestId).map(_.putHeaders(Allow(Method.POST)))
+      }
+      case request => correlationId(request).flatMap { requestId => rejected(HttpRejection.NotFound, requestId) }
+    }
+    schema <+> authenticatedGraphQL <+> fallback
   }
 
   private[http] def rejection(rejection: HttpRejection, request: Request[IO],
       failure: Map[LogField, String] = Map.empty): IO[Response[IO]] =
-    rejected(rejection, requestIdOf(request), failure)
+    correlationId(request).flatMap(id => rejected(rejection, id, failure))
 }

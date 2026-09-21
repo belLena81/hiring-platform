@@ -7,7 +7,7 @@ import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.{Header, HttpApp, Method, Request, Response, Status, Uri}
 import org.http4s.client.Client
-import org.http4s.circe.CirceEntityCodec.*
+import org.http4s.circe.*
 import org.typelevel.ci.CIString
 
 import scala.concurrent.duration.*
@@ -19,7 +19,7 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
   test("encodes the Voyage request and decodes a successful response") {
     val app: HttpApp[IO] = Kleisli { (request: Request[IO]) =>
       for {
-        body <- request.as[Json]
+        body <- request.as[Json](using jsonOf[IO, Json])
         _ = assertEquals(request.method, Method.POST)
         _ = assert(request.headers.get(CIString("Authorization")).nonEmpty)
         _ = assertEquals(body.hcursor.get[String]("input"), Right("Scala"))
@@ -30,7 +30,7 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
           "data" -> Json.arr(Json.obj("embedding" -> Json.arr(Json.fromFloatOrNull(0.1f), Json.fromFloatOrNull(0.2f)))),
           "model" -> Json.fromString("voyage-4-lite")
         )
-      )
+      )(using jsonEncoderOf[IO, Json])
     }
     val client = Client.fromHttpApp[IO](app)
     val service = new VoyageEmbeddingService(client, "test-key", endpoint, "voyage-4-lite", 2, 1.second)

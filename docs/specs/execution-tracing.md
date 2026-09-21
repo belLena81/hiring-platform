@@ -17,7 +17,7 @@ When masking is disabled, only an explicit approved field set is revealed: UUID 
 ## Source facts and implementation boundary
 
 - `SafeDiagnostics` remains the compatibility sanitizer for legacy public log fields; application log emission is delegated to log4cats.
-- http4s otel4s `ServerMiddleware` joins an incoming W3C `traceparent` or creates the server span, owns span lifecycle and response propagation, and exposes the active trace ID as the response correlation alias. OTel-backed http4s metrics own active-request and duration measurement. Mongo publisher bridge, http4s concurrency middleware, setup, and embedding pipeline remain concurrency boundaries.
+- http4s otel4s `ServerMiddleware` joins an incoming W3C `traceparent` or creates the server span, owns span lifecycle and response propagation, and makes the active trace ID the request correlation value. OTel-backed http4s metrics own active-request and duration measurement. Mongo publisher bridge, http4s concurrency middleware, setup, and embedding pipeline remain concurrency boundaries.
 - The domain remains pure and does not receive a tracing dependency. Instrumentation belongs in transport, service/repository decorators, and infrastructure adapters.
 
 ## Acceptance and evidence

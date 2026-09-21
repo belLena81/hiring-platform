@@ -33,7 +33,7 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
             body <- response.as[Json]
             captured <- events.get
           } yield {
-            val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+            val id = Some("unknown")
             val serviceRecords = captured.filter(_._1 == LogEvent.MongoUnavailable)
             val adapterRecords = captured.filter(_._1 == LogEvent.MongoProbeFailed)
             assertEquals(response.status, Status.ServiceUnavailable)

@@ -2,6 +2,7 @@ package com.example.graphQL.cats.infrastructure.logging
 
 import cats.effect.IO
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, LogLevel}
+import com.example.graphQL.cats.service.Diagnostics.*
 import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
