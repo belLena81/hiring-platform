@@ -14,7 +14,6 @@ import com.example.graphQL.cats.shared.search.JobSearchFilter
 import org.http4s.Request
 import java.time.Instant
 
-import scala.concurrent.duration.*
 
 object TestGraphQLSupport {
   private def unsupported[A]: IO[A] = IO.raiseError(new IllegalStateException("Request context services are not configured"))
@@ -78,12 +77,11 @@ object TestGraphQLSupport {
       authenticate: Request[IO] => IO[Either[AuthFailure, Option[ActorContext]]] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
-      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
-      requestTimeout: FiniteDuration = 5.seconds
+      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil)
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource
       limiter <- Resource.eval(FixedWindowRateLimiter.create(authRateLimit))
     } yield HiringApiRoutes.Dependencies(hiring, authenticate, hiringReady, factory, limiter,
-      ClientAddressResolver(trustedProxy), requestTimeout)
+      ClientAddressResolver(trustedProxy))
 }

@@ -11,6 +11,8 @@ import pdi.jwt.{JwtAlgorithm, JwtCirce}
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.{Base64, UUID}
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 final class CursorCodecSpec extends FunSuite {
   private val secret = "test-cursor-secret-01234567890123456789"
@@ -94,7 +96,10 @@ final class CursorCodecSpec extends FunSuite {
       "id" -> Json.fromString(id.toString)
     )
 
-    codec.jobCursorCodec.decode(encode(versionOne)) match {
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
+    val cursorKey = Base64.getEncoder.encodeToString(mac.doFinal("hiring-platform:graphql-cursor:v2".getBytes(StandardCharsets.UTF_8)))
+    codec.jobCursorCodec.decode(JwtCirce.encode(versionOne, cursorKey, JwtAlgorithm.HS256)) match {
       case Left(CursorCodec.CursorError.Malformed(message)) => assert(message.contains("Unsupported cursor version: 1"))
       case other => fail(s"Expected unsupported-version failure, received $other")
     }

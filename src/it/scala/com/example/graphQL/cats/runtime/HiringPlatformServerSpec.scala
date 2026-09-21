@@ -2,7 +2,7 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
-import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.config.AuthRateLimitConfig
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import org.http4s.server.Server
@@ -33,20 +33,17 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
 
   private def server(host: String, port: Int, database: DatabaseProbe): Resource[IO, Server] =
     for {
-      admission <- Admission.resource(AdmissionPermits)
       dependencies <- TestGraphQLSupport.dependencies(
         TestGraphQLSupport.emptyServices,
         _ => IO.pure(Right(None)),
         IO.pure(ProbeResult.Ready),
         authRateLimit,
-        requestTimeout = 5.seconds
       )
-      app = new HiringApiRoutes(
+      app <- Resource.eval(new HiringApiRoutes(
         new HealthService(database, Diagnostics.noop),
         Diagnostics.noop,
-        admission,
         dependencies
-      ).app
+      ).httpApp(HiringApiRoutes.HttpConfig(AdmissionPermits, 5.seconds)))
       server <- HiringPlatformServer.resource(host, port, app)
     } yield server
 

@@ -21,7 +21,7 @@ The following existing facilities are correctly used and must be retained:
 - `Resource` owns Mongo, Ember, Dispatcher, setup, and embedding-pipeline fibers.
 - FS2 uses a bounded `Queue` and bounded `parEvalMap` for embedding processing.
 - Sangria deferred fetchers batch nested users/jobs, reducers bound depth/complexity, and the execution error limit is set.
-- http4s provides entity limiting and request IDs; Cats Effect provides admission, timeouts, cancellation, `Ref`, `Deferred`, and `IOLocal`.
+- http4s provides entity limiting, request IDs, concurrency limits, and request deadlines; Cats Effect provides cancellation, `Ref`, `Deferred`, and `IOLocal`.
 - PureConfig plus Iron own configuration decoding and basic refinements. The custom cross-field/IP/JWT rules are justified, not duplicated parsing to remove.
 
 ### Source facts

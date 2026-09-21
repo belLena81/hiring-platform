@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
-import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
 import com.github.dockerjava.api.model.ExposedPort
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
@@ -135,9 +135,9 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           _ <- records.set(Vector.empty)
           _ <- MongoDatabaseProbe.resource(invalid, "foundation", diagnostics).use { rejected =>
             for {
-              admission <- Admission.create(16)
               dependencies <- TestGraphQLSupport.dependencies().allocated.map(_._1)
-              http = new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, admission, dependencies).app
+              http <- new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, dependencies)
+                .httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
               response <- http(Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
                 .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }"))))
               body <- response.as[Json]

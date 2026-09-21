@@ -21,4 +21,4 @@ With masking disabled, diagnostics may reveal approved typed values only: UUID a
 
 Credentials, authorization and cookie headers, JWTs, raw GraphQL documents, request bodies/variables, descriptions, requirements, feedback, decline reasons, resumes, search text, vectors, BSON filters, Mongo URIs, raw exception messages, and stack traces are never emitted, even with masking disabled. Trace attributes follow the same restriction.
 
-Logging remains best effort: a failing sink cannot change an HTTP result, cancellation, resource finalizer, or admission permit release. Output is synchronous by the selected operational policy, so TRACE can add storage latency during a short investigation; the rolling-file retention bound limits disk use but does not guarantee a latency SLO.
+Logging remains best effort: a failing sink cannot change an HTTP result, cancellation, resource finalizer, or http4s concurrency middleware cleanup. Output is synchronous by the selected operational policy, so TRACE can add storage latency during a short investigation; the rolling-file retention bound limits disk use but does not guarantee a latency SLO.

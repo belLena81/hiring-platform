@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, TestGraphQLSupport}
-import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.application.ApplicationService
@@ -24,32 +24,32 @@ import pdi.jwt.JwtCirce
 import scala.concurrent.duration.*
 
 final class HiringApiRoutesSpec extends CatsEffectSuite {
-  private val DefaultAdmissionPermits = 16
+  private val DefaultAdmissionPermits = 16L
 
   private def app(
       effect: IO[ProbeResult],
       diagnostics: Diagnostics = Diagnostics.noop,
-      admissionPermits: Int = DefaultAdmissionPermits
+      admissionPermits: Long = DefaultAdmissionPermits
   ): IO[HttpApp[IO]] =
-    Admission.create(admissionPermits).flatMap { admission =>
-      val probe = new DatabaseProbe { def check: IO[ProbeResult] = effect }
-      buildRoutes(new HealthService(probe, diagnostics), diagnostics, admission).map(_.app)
-    }
+    val probe = new DatabaseProbe { def check: IO[ProbeResult] = effect }
+    buildRoutes(new HealthService(probe, diagnostics), diagnostics)
+      .flatMap(_.httpApp(HiringApiRoutes.HttpConfig(admissionPermits, 5.seconds)))
 
   private def buildRoutes(
       service: HealthService,
       diagnostics: Diagnostics,
-      admission: Admission,
       hiring: HiringGraphQLServices = TestGraphQLSupport.emptyServices,
       authenticate: Request[IO] => IO[Either[com.example.graphQL.cats.api.auth.AuthFailure, Option[com.example.graphQL.cats.service.ActorContext]]] =
         _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
       trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
-      requestTimeout: FiniteDuration = 5.seconds
   ): IO[HiringApiRoutes] =
-    TestGraphQLSupport.dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy, requestTimeout).allocated
-      .map { case (dependencies, _) => new HiringApiRoutes(service, diagnostics, admission, dependencies) }
+    TestGraphQLSupport.dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy).allocated
+      .map { case (dependencies, _) => new HiringApiRoutes(service, diagnostics, dependencies) }
+
+  private def defaultApp(routes: HiringApiRoutes): IO[HttpApp[IO]] =
+    routes.httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
 
   private def request(query: String): Request[IO] =
     Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
@@ -76,14 +76,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("authentication repository unavailability returns a sanitized service-unavailable response") {
     for {
-      admission <- Admission.create(DefaultAdmissionPermits)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(
         new HealthService(probe, Diagnostics.noop),
         Diagnostics.noop,
-        admission,
         authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.Unavailable))
-      ).map(_.app)
+      ).flatMap(defaultApp)
       response <- http(request("{ health { status } }"))
       body <- response.as[Json]
     } yield {
@@ -145,14 +143,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission, services, authenticator.authenticateDetailed).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
+        authenticate = authenticator.authenticateDetailed).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Admin)
       submitted <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
       listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
@@ -186,15 +184,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission, services,
-        authenticator.authenticateDetailed, IO.pure(ProbeResult.Unavailable)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
+        authenticate = authenticator.authenticateDetailed, hiringReady = IO.pure(ProbeResult.Unavailable)).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       response <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       body <- response.as[Json]
@@ -219,15 +216,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       setupChecks <- Ref.of[IO, Int](0)
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Unavailable) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission, services,
-        authenticator.authenticateDetailed, setupChecks.update(_ + 1).as(ProbeResult.Unavailable)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
+        authenticate = authenticator.authenticateDetailed,
+        hiringReady = setupChecks.update(_ + 1).as(ProbeResult.Unavailable)).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       authenticatedHealth <- http(health.putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       healthBody <- authenticatedHealth.as[Json]
@@ -252,9 +249,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
          |  }
          |}""".stripMargin
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop).flatMap(defaultApp)
       response <- http(request(mutation))
       body <- response.as[Json]
     } yield {
@@ -280,11 +276,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       diagnostics = capture(records)
-      http <- buildRoutes(new HealthService(probe, diagnostics), diagnostics, admission,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, diagnostics), diagnostics,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       firstLogin <- http(request(login))
       limitedLogin <- http(request(login))
       firstSignup <- http(request(signup))
@@ -332,10 +327,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       authenticationCalls <- Ref.of[IO, Int](0)
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        authenticate = _ => authenticationCalls.updateAndGet(_ + 1).as(Right(None))).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authenticate = _ => authenticationCalls.updateAndGet(_ + 1).as(Right(None))).flatMap(defaultApp)
       aliasResponse <- http(request(repeatedAliases))
       mixedResponse <- http(request(mixedOperations))
       cyclicResponse <- http(request(cyclicFragments))
@@ -372,10 +366,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       harmlessFirst <- http(request(document, "Harmless"))
       harmlessSecond <- http(request(document, "Harmless"))
       sensitiveFirst <- http(request(document, "SelectedSingle"))
@@ -417,10 +410,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       firstNamedLogin <- http(request(namedLogin))
       limitedNamedLogin <- http(request(namedLogin))
       firstInlineSignup <- http(request(inlineSignup))
@@ -454,10 +446,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
                             |${fragments.mkString("\n")}""".stripMargin
 
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       first <- http(request(fragmentBomb))
       second <- http(request(fragmentBomb))
     } yield {
@@ -488,10 +479,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       firstCreate <- http(request(createJob))
       secondCreate <- http(request(createJob))
       firstNamed <- http(request(operationNamedLogin))
@@ -516,11 +506,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
         authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
-        trustedProxy = trustedProxy).map(_.app)
+        trustedProxy = trustedProxy).flatMap(defaultApp)
       firstClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.10"))
       limitedClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.10"))
       secondClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.11"))
@@ -544,10 +533,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       first <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.10"))
       limited <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.11"))
     } yield {
@@ -577,12 +565,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       ).as[GraphQLRequest].leftMap(error => new IllegalArgumentException("Invalid test query", error)))
       execution <- TestGraphQLSupport.context(IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")), diagnostics = executionSink,
         requestId = Some("00000000-0000-0000-0000-000000000901")).use { context =>
-        HiringGraphQLSchema.executeInContext(parsed, context).flatTap(_ => executionFailure.get.timeout(2.seconds))
+        HiringGraphQLSchema.executeInContext(parsed, context).flatTap(_ => executionFailure.get.timeout(5.seconds))
       }
       result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      routes <- buildRoutes(new HealthService(probe, sink), sink, admission)
+      routes <- buildRoutes(new HealthService(probe, sink), sink)
       id <- IO.randomUUID.map(_.toString)
       response <- routes.completedGraphQL(parsed, result, id)
       body <- response.as[Json]
@@ -607,7 +594,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("throwing cancellation sinks preserve cleanup, cancellation and admission capacity") {
+  test("throwing cancellation sinks preserve cleanup and cancellation") {
     List(true, false).traverse_ { synchronous =>
       val attempts = new java.util.concurrent.atomic.AtomicReference(Vector.empty[(DiagnosticRecord, Boolean)])
       val finalized = new java.util.concurrent.atomic.AtomicBoolean(false)
@@ -627,23 +614,16 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         entered <- Deferred[IO, Unit]
         finalizing <- Deferred[IO, Unit]
         finish <- Deferred[IO, Unit]
-        admission <- Admission.create(16)
         probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-        http <- buildRoutes(new HealthService(probe, sink), sink, admission).map(_.app)
+        http <- buildRoutes(new HealthService(probe, sink), sink).flatMap(defaultApp)
         slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
           .onFinalize(finalizing.complete(()) *> finish.get *> IO.delay(finalized.set(true))))
-        _ <- List.fill(15)(admission.permit).sequence.use { held =>
-          IO(assert(held.forall(identity))) *>
-            Resource.make(http(slow).start)(fiber => finish.complete(()).void *> fiber.cancel).use { fiber =>
+        _ <- Resource.make(http(slow).start)(fiber => finish.complete(()).void *> fiber.cancel).use { fiber =>
               entered.get.timeout(2.seconds) *> fiber.cancel.background.use { joined =>
                 (for {
                   _ <- finalizing.get.timeout(2.seconds)
                   during <- IO(attempts.get())
-                  saturated <- http(health)
-                  _ <- IO {
-                    assert(during.isEmpty)
-                    assertEquals(saturated.status, Status.ServiceUnavailable)
-                  }
+                  _ <- IO(assert(during.isEmpty))
                   _ <- finish.complete(())
                   _ <- joined.flatMap(_.embedNever)
                   outcome <- fiber.join
@@ -660,7 +640,6 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
                 }).guarantee(finish.complete(()).void)
               }
             }
-        }
       } yield ()
     }
   }
@@ -852,32 +831,25 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("readiness bypasses admission while the request permits are occupied") {
+  test("readiness bypasses the GraphQL concurrency cap") {
     for {
-      admission <- Admission.create(16)
-      entered <- Deferred[IO, Unit]
-      cancelled <- Deferred[IO, Unit]
+      graphqlEntered <- Deferred[IO, Unit]
+      readinessEntered <- Deferred[IO, Unit]
+      calls <- Ref.of[IO, Int](0)
       probe = new DatabaseProbe {
-        def check: IO[ProbeResult] = entered.complete(()) *> IO.never[ProbeResult]
+        def check: IO[ProbeResult] = calls.updateAndGet(_ + 1).flatMap {
+          case 1 => graphqlEntered.complete(()) *> IO.never[ProbeResult]
+          case _ => readinessEntered.complete(()) *> IO.pure(ProbeResult.Ready)
+        }
       }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
-      _ <- List.fill(16)(admission.permit).sequence.use { held =>
-        for {
-          _ <- IO(assert(held.forall(identity)))
-          _ <- Resource.make(http(Request[IO](Method.GET, Uri.unsafeFromString("/ready"))).start)(_.cancel).use { requestFiber =>
-            for {
-              _ <- entered.get.timeout(2.seconds)
-              _ <- (requestFiber.cancel *> cancelled.complete(()).void).background.use { _ =>
-                for {
-                  _ <- cancelled.get.timeout(2.seconds)
-                  recovered <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
-                  _ <- IO(assertEquals(recovered.status, Status.Ok))
-                } yield ()
-              }
-            } yield ()
-          }
-        } yield ()
-      }
+      routes <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop)
+      http <- routes.httpApp(HiringApiRoutes.HttpConfig(1L, 5.seconds))
+      graphqlFiber <- http(request("{ readiness { status } }")).start
+      _ <- graphqlEntered.get.timeout(2.seconds)
+      readiness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready")))
+      _ <- readinessEntered.get.timeout(2.seconds)
+      _ <- graphqlFiber.cancel
+      _ <- IO(assertEquals(readiness.status, Status.Ok))
     } yield ()
   }
 
@@ -1140,49 +1112,26 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("saturation rejects work, preserves liveness, and cancellation returns every permit") {
+  test("saturation rejects work and preserves probe liveness") {
     for {
       started <- Ref.of[IO, Int](0)
       allStarted <- Deferred[IO, Unit]
-      canceled <- Ref.of[IO, Int](0)
-      http <- app(IO.pure(ProbeResult.Ready))
-      slow = health.withBodyStream(fs2.Stream.eval(
+      release <- Deferred[IO, Unit]
+      http <- app(
         started.updateAndGet(_ + 1).flatMap(count => if (count == 16) allStarted.complete(()).void else IO.unit) *>
-          IO.never[Byte]).onFinalize(canceled.update(_ + 1)))
-      _ <- List.fill(16)(Resource.make(http(slow).start)(_.cancel)).sequence.use { fibers =>
+          release.get.as(ProbeResult.Ready))
+      _ <- List.fill(16)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use { fibers =>
         for {
-          _ <- allStarted.get.timeout(2.seconds)
+          _ <- allStarted.get.timeout(5.seconds)
           rejected <- http(health)
           liveness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
-          _ <- fibers.traverse_(_.cancel)
-          canceledCount <- canceled.get
+          _ <- release.complete(())
+          _ <- fibers.traverse_(_.joinWithNever)
           _ <- IO {
             assertEquals(rejected.status, Status.ServiceUnavailable)
             assertEquals(liveness.status, Status.Ok)
-            assertEquals(canceledCount, 16)
           }
         } yield ()
-      }
-      replacementCount <- Ref.of[IO, Int](0)
-      replacementsEntered <- Deferred[IO, Unit]
-      releaseReplacements <- Deferred[IO, Unit]
-      replacement = health.withBodyStream(fs2.Stream.eval(
-        replacementCount.updateAndGet(_ + 1).flatMap { count =>
-          if (count == 16) replacementsEntered.complete(()).void else IO.unit
-        } *> releaseReplacements.get).drain ++ health.body)
-      _ <- List.fill(16)(Resource.make(http(replacement).start)(_.cancel)).sequence.use { fibers =>
-        (for {
-          _ <- replacementsEntered.get.timeout(2.seconds)
-          enteredCount <- replacementCount.get
-          overflow <- http(health)
-          _ <- IO {
-            assertEquals(enteredCount, 16)
-            assertEquals(overflow.status, Status.ServiceUnavailable)
-          }
-          _ <- releaseReplacements.complete(())
-          successful <- fibers.traverse(_.joinWithNever)
-          _ <- IO(assert(successful.forall(_.status == Status.Ok)))
-        } yield ()).guarantee(releaseReplacements.complete(()).void)
       }
     } yield ()
   }
@@ -1192,11 +1141,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       started <- Ref.of[IO, Int](0)
       bothStarted <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
-      http <- app(IO.pure(ProbeResult.Ready), admissionPermits = 2)
-      slow = health.withBodyStream(fs2.Stream.eval(
+      http <- app(
         started.updateAndGet(_ + 1).flatMap(count => if (count == 2) bothStarted.complete(()).void else IO.unit) *>
-          release.get).drain ++ health.body)
-      _ <- List.fill(2)(Resource.make(http(slow).start)(_.cancel)).sequence.use { fibers =>
+          release.get *> IO.pure(ProbeResult.Ready), admissionPermits = 2)
+      _ <- List.fill(2)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use { fibers =>
         (for {
           _ <- bothStarted.get.timeout(2.seconds)
           overflow <- http(health)
@@ -1209,20 +1157,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("UI and assets are absent, and closing admission preserves liveness") {
+  test("UI and assets are absent, and probes remain live") {
     for {
-      admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop).flatMap(defaultApp)
       ui <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql")))
       asset <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphiql/assets/graphiql.js")))
-      _ <- admission.close()
       work <- http(health)
       live <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
     } yield {
       assertEquals(ui.status, Status.NotFound)
       assertEquals(asset.status, Status.NotFound)
-      assertEquals(work.status, Status.ServiceUnavailable)
+      assertEquals(work.status, Status.Ok)
       assertEquals(live.status, Status.Ok)
     }
   }

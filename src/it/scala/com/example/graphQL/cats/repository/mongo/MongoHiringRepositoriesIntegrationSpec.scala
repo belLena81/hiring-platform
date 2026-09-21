@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
-import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService}
 import com.example.graphQL.cats.repository.protocol.{
   EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector
@@ -762,7 +762,6 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
         val recruiterUser = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
           Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
         for {
-          admission <- Admission.create(16)
           _ <- MongoDatabaseProbe.clientResource(uri).use { client =>
             val database = client.getDatabase("hiring_served_jwt")
             val users = new MongoUserRepository(database)
@@ -776,7 +775,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
             authenticator.authenticateDetailed,
             runtime.hiringReadiness
           ).allocated.map(_._1)
-          http = new HiringApiRoutes(HealthService(runtime.probe, Diagnostics.noop), Diagnostics.noop, admission, dependencies).app
+          http <- new HiringApiRoutes(HealthService(runtime.probe, Diagnostics.noop), Diagnostics.noop, dependencies)
+            .httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
           token = signedToken(candidateId, jwt)
           submit = s"""mutation {
                       |  submitApplication(input: { jobId: "${jobId.value}" }) {

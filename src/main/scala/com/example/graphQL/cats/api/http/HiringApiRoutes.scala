@@ -12,8 +12,7 @@ import org.http4s.circe.*
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.Http4sDsl
 import org.http4s.headers.{Accept, Allow, `Content-Type`}
-import org.http4s.server.middleware.EntityLimiter
-import org.http4s.server.middleware.RequestId
+import org.http4s.server.middleware.{EntityLimiter, ErrorHandling, MaxActiveRequests, RequestId, Timeout}
 import org.http4s.syntax.all.*
 import org.typelevel.ci.CIString
 import org.typelevel.otel4s.context.propagation.TextMapGetter
@@ -21,7 +20,7 @@ import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.vault.Key
 import scala.concurrent.duration.*
 
-final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, admission: Admission,
+final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
     dependencies: HiringApiRoutes.Dependencies, tracer: Tracer[IO] = Tracer.noop[IO]) {
   private val MaxRequestBytes = 64 * 1024
   private val dsl = new Http4sDsl[IO] {}
@@ -66,20 +65,13 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
       failure ++ Map(LogField.Reason -> rejection.reason.toString, LogField.Status -> rejection.status.code.toString))
       .as(error(rejection.status, rejection.message, mediaType))
 
-  private def admitted(requestId: String)(action: IO[Response[IO]]): IO[Response[IO]] =
-    admission.permit.use { allowed =>
-      // Sangria leaf actions run as Futures; this deadline cannot cancel them after the bridge.
-      if (allowed) action.timeoutTo(dependencies.requestTimeout, rejected(Rejection.DeadlineExceeded, requestId))
-      else rejected(Rejection.Overloaded, requestId)
-    }
-
   private def responseMediaType(request: Request[IO]): Option[MediaType] =
     HiringApiRoutes.selectResponseMediaType(request.headers.get[Accept])
 
   private def graphql(request: Request[IO], requestId: String, mediaType: MediaType): IO[Response[IO]] = {
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
       rejected(Rejection.UnsupportedMedia, requestId, mediaType = mediaType)
-    else admitted(requestId) {
+    else {
       request.attemptAs[GraphQLRequest].foldF(
       _ => rejected(Rejection.InvalidRequest, requestId, mediaType = mediaType),
       parsed => {
@@ -194,11 +186,9 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     IO.fromOption(request.attributes.lookup(requestScopeKey))(
       new IllegalStateException("Missing HTTP request scope"))
 
-  private val routedApp: HttpApp[IO] = HttpRoutes.of[IO] {
+  private val probeRoutes: HttpRoutes[IO] = HttpRoutes.of[IO] {
     case GET -> Root / "health" =>
       IO.pure(json(Status.Ok, Json.obj("status" -> Json.fromString("UP"))))
-    case GET -> Root / "schema.graphql" =>
-      IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
     case request @ GET -> Root / "ready" => requestScope(request).flatMap { scope =>
       service.readiness(Some(scope.requestId)).map { result =>
         val ready = result == ProbeResult.Ready
@@ -206,6 +196,11 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
           Json.obj("status" -> Json.fromString(if (ready) "READY" else "NOT_READY")))
       }
     }
+  }
+
+  private val graphqlRoutes: HttpRoutes[IO] = HttpRoutes.of[IO] {
+    case GET -> Root / "schema.graphql" =>
+      IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
     case request @ POST -> Root / "graphql" => requestScope(request).flatMap { scope =>
       responseMediaType(request) match {
         case Some(mediaType) => graphql(request, scope.requestId, mediaType)
@@ -219,9 +214,16 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     case request => requestScope(request).flatMap { scope =>
       rejected(Rejection.NotFound, scope.requestId)
     }
-  }.orNotFound
+  }
 
-  private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
+  private def errorHandling(next: HttpApp[IO]): HttpApp[IO] = Kleisli { request =>
+    ErrorHandling.Custom.recoverWith(next) {
+      case _: EntityLimiter.EntityTooLarge => rejected(Rejection.PayloadTooLarge, requestIdOf(request))
+      case failure => rejected(Rejection.Internal, requestIdOf(request), LogFields.failure(failure))
+    }.run(request)
+  }
+
+  private def tracing(next: HttpApp[IO]): HttpApp[IO] = Kleisli { request =>
     val requestId = requestIdOf(request)
     tracer.joinOrRoot(request.headers) {
       val method = request.method.name
@@ -233,39 +235,58 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
         Diagnostics.spanWith(diagnostics, "http.request", metadata, requestId = Some(requestId))({
-          val scopedRequest = request.withAttribute(requestScopeKey, RequestScope(requestId))
-          routedApp(scopedRequest)
-          .handleErrorWith {
-            case _: EntityLimiter.EntityTooLarge => rejected(Rejection.PayloadTooLarge, requestId)
-            case failure => rejected(Rejection.Internal, requestId, LogFields.failure(failure))
-          }
-          .map(_.putHeaders(
-            Header.Raw(CIString("X-Request-ID"), requestId),
-            Header.Raw(CIString("X-Content-Type-Options"), "nosniff"),
-            Header.Raw(CIString("Cache-Control"), "no-store"),
-            Header.Raw(CIString("Content-Security-Policy"),
-              "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
-          ))
-          .flatTap(response => timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCompleted,
-            Some(requestId), fields ++ Map(LogField.Status -> response.status.code.toString,
-              LogField.Outcome -> (if (response.status.isSuccess) "COMPLETED" else "REJECTED")))))
-          .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
-            Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
+          next(request.withAttribute(requestScopeKey, RequestScope(requestId)))
+            .map(_.putHeaders(
+              Header.Raw(CIString("X-Request-ID"), requestId),
+              Header.Raw(CIString("X-Content-Type-Options"), "nosniff"),
+              Header.Raw(CIString("Cache-Control"), "no-store"),
+              Header.Raw(CIString("Content-Security-Policy"),
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+            ))
+            .flatTap { response =>
+              val rejection = response.status match {
+                case Status.GatewayTimeout => Diagnostics.emit(diagnostics, LogEvent.RequestRejected, Some(requestId),
+                  Map(LogField.Reason -> RejectionReason.DEADLINE_EXCEEDED.toString,
+                    LogField.Status -> response.status.code.toString))
+                case _ => IO.unit
+              }
+              rejection *> timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCompleted,
+                Some(requestId), fields ++ Map(LogField.Status -> response.status.code.toString,
+                  LogField.Outcome -> (if (response.status.isSuccess) "COMPLETED" else "REJECTED"))))
+            }
+            .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
+              Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
         })(using tracer)
       }
     }
   }
 
-  private val requestIdApp: HttpApp[IO] = RequestId.httpApp(tracedApp)
-
-  private val rawApp: HttpApp[IO] = Kleisli { request =>
-    val validRequestId = request.headers.get(CIString("X-Request-ID")).exists { header =>
-      scala.util.Try(java.util.UUID.fromString(header.head.value)).isSuccess
+  def httpApp(config: HiringApiRoutes.HttpConfig): IO[HttpApp[IO]] = {
+    val graphql = graphqlRoutes.orNotFound
+    val timeoutResponse = IO.pure(error(Rejection.DeadlineExceeded.status, Rejection.DeadlineExceeded.message,
+      MediaType.application.json))
+    MaxActiveRequests.forHttpApp[IO](config.admissionPermits,
+      error(Rejection.Overloaded.status, Rejection.Overloaded.message, MediaType.application.json)).map { limitActive =>
+      val guarded = limitActive(Timeout.httpApp[IO](config.requestTimeout, timeoutResponse)(graphql))
+      val mounted: HttpApp[IO] = Kleisli { request =>
+        probeRoutes(request).value.flatMap(_.fold(guarded(request))(IO.pure))
+      }
+      val requestId: HttpApp[IO] => HttpApp[IO] = next => Kleisli { request =>
+        val validRequestId = request.headers.get(CIString("X-Request-ID")).exists { header =>
+          scala.util.Try(java.util.UUID.fromString(header.head.value)).isSuccess
+        }
+        RequestId.httpApp[IO](next).run(if (validRequestId) request else request.removeHeader(CIString("X-Request-ID")))
+      }
+      Function.chain[HttpApp[IO]](List(
+        identity,
+        errorHandling,
+        tracing,
+        requestId,
+        EntityLimiter.httpApp(_, MaxRequestBytes)
+      ))(mounted)
     }
-    requestIdApp(if (validRequestId) request else request.removeHeader(CIString("X-Request-ID")))
   }
 
-  val app: HttpApp[IO] = EntityLimiter.httpApp(rawApp, MaxRequestBytes)
 }
 
 object HiringApiRoutes {
@@ -299,8 +320,9 @@ object HiringApiRoutes {
       ensureHiringReady: IO[ProbeResult],
       contextFactory: RequestContextFactory,
       rateLimiter: FixedWindowRateLimiter,
-      clientAddressResolver: ClientAddressResolver,
-      requestTimeout: FiniteDuration
+      clientAddressResolver: ClientAddressResolver
   )
+
+  final case class HttpConfig(admissionPermits: Long, requestTimeout: FiniteDuration)
 
 }

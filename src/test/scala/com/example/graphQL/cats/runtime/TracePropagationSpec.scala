@@ -2,7 +2,7 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.{HiringGraphQLServices, TestGraphQLSupport}
-import com.example.graphQL.cats.api.http.{Admission, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, DatabaseProbe, Diagnostics, HealthService, HiringReadService, LogEvent, LogField, ProbeResult, ServiceFixtures}
@@ -14,6 +14,7 @@ import org.http4s.{Method, Request, Status}
 import org.http4s.circe.*
 import org.http4s.syntax.literals.*
 import org.typelevel.otel4s.oteljava.OtelJava
+import scala.concurrent.duration.*
 
 final class TracePropagationSpec extends CatsEffectSuite {
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
@@ -32,7 +33,6 @@ final class TracePropagationSpec extends CatsEffectSuite {
         applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map.empty)
         eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
         createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
-        admission <- Admission.create(1)
         users = ServiceFixtures.InMemoryUsers(usersRef)
         jobs = ServiceFixtures.InMemoryJobs(jobsRef)
         applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
@@ -49,10 +49,13 @@ final class TracePropagationSpec extends CatsEffectSuite {
           hiring = services,
           authenticate = _ => IO.pure(Right(Some(ActorContext(ServiceFixtures.candidateId, UserRole.Candidate))))
         ).use { dependencies =>
-          val http = new HiringApiRoutes(new HealthService(probe, diagnostics), diagnostics, admission, dependencies, tracer).app
-          http(Request[IO](Method.POST, uri"/graphql").withEntity(Json.obj(
-            "query" -> Json.fromString("{ jobs(first: 1) { edges { node { id } } } }")
-          ))).flatMap(response => IO(assertEquals(response.status, Status.Ok)) *> records.get)
+          for {
+            http <- new HiringApiRoutes(new HealthService(probe, diagnostics), diagnostics, dependencies, tracer)
+              .httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
+            captured <- http(Request[IO](Method.POST, uri"/graphql").withEntity(Json.obj(
+              "query" -> Json.fromString("{ jobs(first: 1) { edges { node { id } } } }")
+            ))).flatMap(response => IO(assertEquals(response.status, Status.Ok)) *> records.get)
+          } yield captured
         }
       } yield {
         val httpSpan = span(captured, "http.request")
