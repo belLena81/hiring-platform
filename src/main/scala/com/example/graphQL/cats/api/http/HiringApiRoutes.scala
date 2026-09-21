@@ -227,7 +227,6 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
     val requestId = requestIdOf(request)
     tracer.joinOrRoot(request.headers) {
-      tracer.span("http.request").surround {
       IO.randomUUID.flatMap(traceId => TraceContext.root(traceId.toString)).flatMap { trace =>
       val method = request.method.name
       val path = request.uri.path.renderString
@@ -237,8 +236,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
         def timedFields: IO[Map[LogField, String]] = IO.monotonic.map { now =>
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
-        {
-          val child = trace
+        Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { child =>
           val scopedRequest = request.withAttribute(requestScopeKey, RequestScope(requestId, child))
           routedApp(scopedRequest)
           .handleErrorWith {
@@ -259,7 +257,6 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
             Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
         }
       }
-    }
     }
     }
   }

@@ -6,7 +6,7 @@ import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermission
-import org.slf4j.{LoggerFactory, MarkerFactory}
+import org.slf4j.LoggerFactory
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.typelevel.otel4s.trace.Tracer
 import scala.jdk.CollectionConverters.*
@@ -31,18 +31,15 @@ object SafeDiagnostics {
     }
 
   def apply(maskSensitive: Boolean = true, tracer: Tracer[IO] = Tracer.noop[IO]): Diagnostics = {
-    val logger = LoggerFactory.getLogger(loggerName)
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
-    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) => IO.blocking {
-      val marker = MarkerFactory.getMarker(event.marker)
+    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) =>
       event.level match {
-        case LogLevel.Trace => logger.trace(marker, message)
-        case LogLevel.Debug => logger.debug(marker, message)
-        case LogLevel.Info => logger.info(marker, message)
-        case LogLevel.Warn => logger.warn(marker, message)
-        case LogLevel.Error => logger.error(marker, message)
-      }
-    }, tracer)
+        case LogLevel.Trace => structuredLogger.trace(Map("category" -> event.category))(message)
+        case LogLevel.Debug => structuredLogger.debug(Map("category" -> event.category))(message)
+        case LogLevel.Info => structuredLogger.info(Map("category" -> event.category))(message)
+        case LogLevel.Warn => structuredLogger.warn(Map("category" -> event.category))(message)
+        case LogLevel.Error => structuredLogger.error(Map("category" -> event.category))(message)
+      }, tracer)
   }
 
   private[logging] def withSink(sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =

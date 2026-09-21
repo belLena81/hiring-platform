@@ -189,6 +189,9 @@ object AppConfig {
   }
 
   // HTTP_HOST is a bind address, so hostnames such as localhost are intentionally rejected.
+  private def bounded[A: Ordering](min: A, max: A, error: ConfigError)(value: A): ValidatedNel[ConfigError, A] =
+    Either.cond(Ordering[A].lteq(min, value) && Ordering[A].lteq(value, max), value, error).toValidatedNel
+
   private def validHost(value: String): ValidatedNel[ConfigError, String] =
     Either.cond(IpAddress.fromString(value).isDefined, value, ConfigError.InvalidHost).toValidatedNel
   private def validMongoUri(value: String): ValidatedNel[ConfigError, String] =
@@ -202,19 +205,19 @@ object AppConfig {
       Either.cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, secret, ConfigError.InvalidJwtSecret).toValidatedNel
     }
   private def validAuthRateLimitWindow(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 3600, value, ConfigError.InvalidAuthRateLimitWindow).toValidatedNel
+    bounded(1, 3600, ConfigError.InvalidAuthRateLimitWindow)(value)
   private def validAuthRateLimitAttempts(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 1000, value, ConfigError.InvalidAuthRateLimitAttempts).toValidatedNel
+    bounded(1, 1000, ConfigError.InvalidAuthRateLimitAttempts)(value)
   private def validAuthRateLimitBuckets(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 100000, value, ConfigError.InvalidAuthRateLimitBuckets).toValidatedNel
+    bounded(1, 100000, ConfigError.InvalidAuthRateLimitBuckets)(value)
   private def validPasswordHashIterations(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 10, value, ConfigError.InvalidPasswordHashIterations).toValidatedNel
+    bounded(1, 10, ConfigError.InvalidPasswordHashIterations)(value)
   private def validPasswordHashMemory(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 8192 && value <= 1048576, value, ConfigError.InvalidPasswordHashMemory).toValidatedNel
+    bounded(8192, 1048576, ConfigError.InvalidPasswordHashMemory)(value)
   private def validPasswordHashParallelism(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 16, value, ConfigError.InvalidPasswordHashParallelism).toValidatedNel
+    bounded(1, 16, ConfigError.InvalidPasswordHashParallelism)(value)
   private def validRequestTimeout(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidRequestTimeout).toValidatedNel
+    bounded(100, 60000, ConfigError.InvalidRequestTimeout)(value)
   private def validResolverTimeout(value: Int, requestTimeout: Int): ValidatedNel[ConfigError, Int] =
     Either.cond(value >= 100 && value < requestTimeout, value, ConfigError.InvalidResolverTimeout).toValidatedNel
   private def validTrustedProxyCidrs(values: List[String]): ValidatedNel[ConfigError, TrustedProxyConfig] =
@@ -226,15 +229,15 @@ object AppConfig {
     val normalized = value.filter(_ != "disabled")
     Either.cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey).toValidatedNel
   private def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= PageSize.Max && value <= 10000, value, ConfigError.InvalidVectorNumCandidates).toValidatedNel
+    bounded(PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates)(value)
   private def validIndexReadyTimeout(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1000 && value <= 600000, value, ConfigError.InvalidSearchIndexReadyTimeout).toValidatedNel
+    bounded(1000, 600000, ConfigError.InvalidSearchIndexReadyTimeout)(value)
   private def validIndexPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 100 && value <= 10000, value, ConfigError.InvalidSearchIndexPollInterval).toValidatedNel
+    bounded(100, 10000, ConfigError.InvalidSearchIndexPollInterval)(value)
   private def validEmbeddingRetryAttempts(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 10, value, ConfigError.InvalidEmbeddingRetryAttempts).toValidatedNel
+    bounded(1, 10, ConfigError.InvalidEmbeddingRetryAttempts)(value)
   private def validEmbeddingRetryDelay(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidEmbeddingRetryDelay).toValidatedNel
+    bounded(100, 60000, ConfigError.InvalidEmbeddingRetryDelay)(value)
   private def validKafkaBootstrapServers(value: String): ValidatedNel[ConfigError, String] =
     Either.cond(value.trim.nonEmpty && value.length <= 512, value, ConfigError.InvalidKafkaBootstrapServers).toValidatedNel
   private def validKafkaTopic(value: String): ValidatedNel[ConfigError, String] =
@@ -242,19 +245,19 @@ object AppConfig {
   private def validKafkaConsumerGroup(value: String): ValidatedNel[ConfigError, String] =
     Either.cond(value.trim.nonEmpty && value.length <= 249, value, ConfigError.InvalidKafkaConsumerGroup).toValidatedNel
   private def validKafkaBatchSize(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 500, value, ConfigError.InvalidKafkaBatchSize).toValidatedNel
+    bounded(1, 500, ConfigError.InvalidKafkaBatchSize)(value)
   private def validKafkaLeaseSeconds(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 3600, value, ConfigError.InvalidKafkaLeaseSeconds).toValidatedNel
+    bounded(1, 3600, ConfigError.InvalidKafkaLeaseSeconds)(value)
   private def validKafkaRetryDelaySeconds(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 3600, value, ConfigError.InvalidKafkaRetryDelaySeconds).toValidatedNel
+    bounded(1, 3600, ConfigError.InvalidKafkaRetryDelaySeconds)(value)
   private def validKafkaMaxAttempts(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 100, value, ConfigError.InvalidKafkaMaxAttempts).toValidatedNel
+    bounded(1, 100, ConfigError.InvalidKafkaMaxAttempts)(value)
   private def validKafkaPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 100 && value <= 60000, value, ConfigError.InvalidKafkaPollInterval).toValidatedNel
+    bounded(100, 60000, ConfigError.InvalidKafkaPollInterval)(value)
   private def validKafkaReceiptTtl(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 365, value, ConfigError.InvalidKafkaReceiptTtl).toValidatedNel
+    bounded(1, 365, ConfigError.InvalidKafkaReceiptTtl)(value)
   private def validKafkaQuarantineTtl(value: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 1 && value <= 365, value, ConfigError.InvalidKafkaQuarantineTtl).toValidatedNel
+    bounded(1, 365, ConfigError.InvalidKafkaQuarantineTtl)(value)
 
   private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
     val errors = failures.toList.flatMap {

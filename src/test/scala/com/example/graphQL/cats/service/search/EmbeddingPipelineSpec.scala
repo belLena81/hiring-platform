@@ -9,6 +9,7 @@ import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
+import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
 import com.example.graphQL.cats.shared.pagination.JobPageRequest
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import java.util.UUID
@@ -358,8 +359,14 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
       delegate.create(job, now)
 
+    override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
+      delegate.createWithEvents(job, now, events)
+
     override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
       delegate.update(job, now)
+
+    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+      delegate.updateWithEvents(job, now, events)
 
     override def updateEmbedding(
         id: Identifiers.JobId,

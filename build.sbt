@@ -5,17 +5,18 @@ lazy val catsEffectVersion     = "3.7.1"
 lazy val circeVersion          = "0.14.16"
 lazy val fs2Version            = "3.14.0"
 lazy val fs2KafkaVersion       = "3.9.1"
-lazy val kafkaClientsVersion   = "3.9.2"
+lazy val kafkaClientsVersion   = "4.3.1"
 lazy val http4sVersion         = "0.23.37"
 lazy val otel4sVersion         = "1.1.0"
-lazy val opentelemetryVersion  = "1.64.0"
+lazy val opentelemetryVersion  = "1.66.0"
 lazy val jwtScalaVersion       = "11.0.4"
 lazy val argon2Version         = "2.12"
 lazy val log4catsVersion       = "2.8.0"
+lazy val catsRetryVersion      = "4.0.0"
 lazy val logbackVersion        = "1.6.3"
 lazy val mongoVersion          = "5.12.0"
 lazy val munitVersion          = "1.3.6"
-lazy val munitCatsEffectVersion = "2.2.0"
+lazy val munitCatsEffectVersion = "2.2.1"
 lazy val pureConfigVersion     = "0.17.10"
 lazy val ironVersion           = "3.3.2"
 lazy val sangriaVersion        = "4.2.19"
@@ -69,6 +70,7 @@ lazy val root = (project in file("."))
       "io.github.iltotore"    %% "iron"                  % ironVersion,
       "io.github.iltotore"    %% "iron-pureconfig"        % ironVersion,
       "org.typelevel"       %% "log4cats-slf4j"         % log4catsVersion,
+      "com.github.cb372"    %% "cats-retry"             % catsRetryVersion,
       "ch.qos.logback"       % "logback-classic"        % logbackVersion % Runtime,
       "org.scalameta"       %% "munit"                  % munitVersion % Test,
       "org.typelevel"       %% "munit-cats-effect"       % munitCatsEffectVersion % Test,

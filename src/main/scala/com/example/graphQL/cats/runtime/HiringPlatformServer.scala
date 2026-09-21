@@ -6,13 +6,15 @@ import org.http4s.{HttpApp, Response, Status}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.Server
 import org.typelevel.log4cats.noop.NoOpLogger
+import org.typelevel.log4cats.StructuredLogger
 import scala.concurrent.duration.*
 
 object HiringPlatformServer {
   def resource(
       host: String,
       port: Int,
-      app: HttpApp[IO]
+      app: HttpApp[IO],
+      logger: StructuredLogger[IO] = NoOpLogger[IO]
   ): Resource[IO, Server] =
     for {
       address <- Resource.eval(IO.fromOption(Host.fromString(host))(new IllegalArgumentException("Invalid bind address")))
@@ -22,7 +24,7 @@ object HiringPlatformServer {
           .withHost(address)
           .withPort(bindPort)
           .withHttpApp(app)
-          .withLogger(NoOpLogger[IO])
+          .withLogger(logger)
           .withShutdownTimeout(10.seconds)
           .withIdleTimeout(10.seconds)
           .withRequestHeaderReceiveTimeout(5.seconds)

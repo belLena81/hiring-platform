@@ -27,7 +27,7 @@ object Main extends IOApp {
           case Right(config) => SafeDiagnostics.configure(config.maskSensitive, telemetry.tracer).flatMap { diagnostics =>
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
               config.jwtAuth,
-              config.resolverTimeout, config.passwordHash, config.kafka, telemetry.tracer)
+              config.resolverTimeout, config.passwordHash, config.kafka)
               .flatMap { runtime =>
                 for {
                   admission <- Admission.resource(config.admissionPermits)
@@ -53,7 +53,7 @@ object Main extends IOApp {
                     ),
                     telemetry.tracer
                   ).app
-                  server <- HiringPlatformServer.resource(config.host, config.port, routes)
+                  server <- HiringPlatformServer.resource(config.host, config.port, routes, telemetry.logger)
                 } yield server
               }
               .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(

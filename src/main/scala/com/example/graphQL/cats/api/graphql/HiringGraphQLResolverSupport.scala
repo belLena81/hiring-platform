@@ -6,12 +6,19 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.model.*
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, RepositoryError, SearchError, UseCaseError}
+import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
+import com.example.graphQL.cats.shared.search.JobSearchFilter
+import io.circe.Json
 import sangria.schema.Context
 
 import java.time.Instant
+import java.nio.charset.StandardCharsets
 import java.util.UUID
+import scala.concurrent.duration.*
+import scala.util.Try
 
 private[graphql] object HiringGraphQLResolverSupport {
   def liftUseCase[A](value: IO[Either[UseCaseError, A]]): GraphQLStep[A] =
@@ -19,6 +26,56 @@ private[graphql] object HiringGraphQLResolverSupport {
 
   def timestamped[A](f: (Instant, UUID) => IO[A]): IO[A] =
     (IO.realTimeInstant, IO.randomUUID).mapN(f).flatten
+
+  def searchIdValue(value: Option[String]): IO[Either[GraphQLError, UUID]] =
+    value match {
+      case Some(raw) => IO.pure(Try(UUID.fromString(raw)).toEither.leftMap(_ => GraphQLError("INVALID_ID", "Invalid UUID")))
+      case None => IO.randomUUID.map(Right(_))
+    }
+
+  def searchEventId(searchId: UUID): UUID =
+    UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))
+
+  def jobFilter(value: Option[JobFilterGraphQLInput]): JobSearchFilter =
+    value match {
+      case None => JobSearchFilter(None, Set.empty, None)
+      case Some(filter) => JobSearchFilter(filter.city, filter.skills.fold(Set.empty[String])(_.toSet), filter.createdAfter)
+    }
+
+  def filterJson(value: JobSearchFilter): Json =
+    Json.obj(
+      "city" -> value.city.fold(Json.Null)(Json.fromString),
+      "skills" -> Json.arr(value.skills.toList.sorted.map(Json.fromString)*),
+      "createdAfter" -> value.createdAfter.fold(Json.Null)(instant => Json.fromString(instant.toString))
+    )
+
+  def saveSearchSession[A](
+      hiring: HiringGraphQLServices,
+      actorId: UserId,
+      kind: String,
+      searchId: UUID,
+      filter: Json,
+      model: Option[String] = None,
+      version: Option[Int] = None
+  )(results: List[A])(idOf: A => String, scoreOf: A => Double): GraphQLStep[Unit] =
+    EitherT(IO.realTimeInstant.flatMap { now =>
+      val session = SearchSession(
+        searchId,
+        actorId,
+        kind,
+        None,
+        filter,
+        model,
+        version,
+        results.zipWithIndex.map { case (result, index) =>
+          SearchSessionResult(idOf(result), index + 1, scoreOf(result))
+        },
+        now,
+        now.plusSeconds(7.days.toSeconds)
+      )
+      hiring.searchSessions.save(session, OperationalEvents.searchPerformed(searchEventId(searchId), session))
+        .map(_.leftMap(error => toGraphQLError(UseCaseError.repository(error))))
+    })
 
   def complete[A](value: GraphQLStep[A], onError: GraphQLError => A): IO[A] =
     value.value.map(_.fold(onError, identity))

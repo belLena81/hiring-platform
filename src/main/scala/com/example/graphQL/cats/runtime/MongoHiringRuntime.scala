@@ -2,7 +2,6 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Resource, IOLocal}
 import cats.syntax.all.*
-import org.typelevel.otel4s.trace.Tracer
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogField, ProbeResult}
@@ -70,11 +69,10 @@ object MongoHiringRuntime {
       jwtAuth: JwtAuthConfig,
       resolverTimeout: FiniteDuration,
       passwordHash: PasswordHashConfig,
-      kafka: KafkaConfig,
-      tracer: Tracer[IO] = Tracer.noop[IO]
+      kafka: KafkaConfig
   ): Resource[IO, MongoHiringRuntime] =
     resource(uri, databaseName, diagnostics, vectorSearch, voyageEmbeddingService, jwtAuth,
-      resolverTimeout, passwordHash, kafka, tracer)
+      resolverTimeout, passwordHash, kafka)
 
   def resource(
       uri: String,
@@ -84,8 +82,7 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService[IO]],
       jwtAuth: JwtAuthConfig
   ): Resource[IO, MongoHiringRuntime] =
-    resource(uri, databaseName, diagnostics, vectorSearch, embeddingService, jwtAuth, 4.seconds,
-      tracer = Tracer.noop[IO])
+    resource(uri, databaseName, diagnostics, vectorSearch, embeddingService, jwtAuth, 4.seconds)
 
   def resource(
       uri: String,
@@ -96,8 +93,7 @@ object MongoHiringRuntime {
       jwtAuth: JwtAuthConfig,
       resolverTimeout: FiniteDuration,
       passwordHash: PasswordHashConfig = defaultPasswordHash,
-      kafka: KafkaConfig = disabledKafka,
-      tracer: Tracer[IO]
+      kafka: KafkaConfig = disabledKafka
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
@@ -111,7 +107,7 @@ object MongoHiringRuntime {
       val quarantine = new MongoEventQuarantineRepository(database)
       Resource.eval(MongoHiringSetup.initializeCore(database, vectorSearch.enabled)) *>
       Resource.eval(IOLocal[Option[com.example.graphQL.cats.service.TraceContext]](None)).flatMap { traceLocal =>
-        hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, traceLocal, resolverTimeout, tracer).flatMap { services =>
+        hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, traceLocal, resolverTimeout).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, vectorSearch)).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
@@ -139,8 +135,7 @@ object MongoHiringRuntime {
       jwtAuth: JwtAuthConfig,
       passwordHash: PasswordHashConfig,
       traceLocal: IOLocal[Option[com.example.graphQL.cats.service.TraceContext]],
-      resolverTimeout: FiniteDuration,
-      tracer: Tracer[IO]
+      resolverTimeout: FiniteDuration
   ): Resource[IO, HiringGraphQLServices] =
     val hasher = new Argon2PasswordHasher(passwordHash.iterations, passwordHash.memoryKilobytes, passwordHash.parallelism)
     val tokenIssuer = new JwtAccessTokenIssuer(jwtAuth)

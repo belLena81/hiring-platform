@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.config
 
+import com.example.graphQL.cats.shared.pagination.PageSize
 import munit.FunSuite
 import cats.data.NonEmptyList
 import scala.concurrent.duration.*
@@ -510,6 +511,23 @@ class AppConfigSpec extends FunSuite {
       ConfigError.InvalidPasswordHashMemory)
     assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("parallelism = 2", "parallelism = 0"), Map.empty),
       ConfigError.InvalidPasswordHashParallelism)
+  }
+
+  test("shared bounded validation keeps inclusive numeric boundaries") {
+    val bounded = List(
+      ("auth.rate-limit.window-seconds", 1, 3600, ConfigError.InvalidAuthRateLimitWindow),
+      ("kafka.publisher.batch-size", 1, 500, ConfigError.InvalidKafkaBatchSize),
+      ("vector-search.num-candidates", PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates),
+      ("vector-search.indexes.ready-timeout-ms", 1000, 600000, ConfigError.InvalidSearchIndexReadyTimeout),
+      ("vector-search.embedding.retry-delay-ms", 100, 60000, ConfigError.InvalidEmbeddingRetryDelay)
+    )
+
+    bounded.foreach { case (path, minimum, maximum, error) =>
+      assert(AppConfig.fromConfig(defaultConfig + s"$path = $minimum\n", Map.empty).isRight, clues(path, minimum))
+      assert(AppConfig.fromConfig(defaultConfig + s"$path = $maximum\n", Map.empty).isRight, clues(path, maximum))
+      assertContainsError(AppConfig.fromConfig(defaultConfig + s"$path = ${minimum - 1}\n", Map.empty), error)
+      assertContainsError(AppConfig.fromConfig(defaultConfig + s"$path = ${maximum + 1}\n", Map.empty), error)
+    }
   }
 
   test("resolver timeout is positive, bounded, and strictly below the request deadline") {
