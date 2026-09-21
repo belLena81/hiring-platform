@@ -38,6 +38,7 @@ lazy val root = (project in file("."))
     IntegrationTest / resourceDirectory := baseDirectory.value / "src" / "it" / "resources",
     IntegrationTest / parallelExecution := false,
     Test / fork := true,
+    Test / javaOptions += "-Dcats.effect.trackFiberContext=true",
     scalacOptions ++= Seq(
       "-encoding", "utf-8", "-release:17", "-deprecation", "-feature",
       "-unchecked", "-Wunused:all", "-Wvalue-discard", "-Werror"

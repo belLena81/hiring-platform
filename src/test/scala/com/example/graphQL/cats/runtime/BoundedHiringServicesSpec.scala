@@ -3,7 +3,8 @@ package com.example.graphQL.cats.runtime
 import cats.effect.{Deferred, IO}
 import com.example.graphQL.cats.domain.model.{AccountToken, User, UserPageRequest, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, BootstrapAdminInput, LoginInput, SignUpInput}
 import java.time.Instant
 import java.util.UUID
@@ -25,6 +26,6 @@ final class BoundedHiringServicesSpec extends CatsEffectSuite {
       }, 20.millis)
       result <- service.me(ActorContext(UserId(UUID.randomUUID()), UserRole.Candidate))
       _ <- cancelled.get.timeout(1.second)
-    } yield assertEquals(result, Left(UseCaseError.repository(RepositoryError.Unavailable)))
+    } yield assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Unavailable)))
   }
 }

@@ -4,7 +4,8 @@ import cats.effect.{Deferred, IO, Ref}
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.shared.events.*
 import io.circe.Json
 import munit.CatsEffectSuite

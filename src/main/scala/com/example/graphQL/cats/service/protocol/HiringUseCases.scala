@@ -6,7 +6,8 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.time.Instant
 import java.util.UUID

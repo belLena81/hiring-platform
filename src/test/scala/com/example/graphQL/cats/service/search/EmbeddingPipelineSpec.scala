@@ -5,7 +5,7 @@ import cats.effect.Deferred
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.crypto.SourceHash

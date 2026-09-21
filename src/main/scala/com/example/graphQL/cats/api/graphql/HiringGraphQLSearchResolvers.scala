@@ -19,7 +19,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         size     <- EitherT(pageSize(context.arg(firstArgument)))
         searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         results  <- liftUseCase(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
-        _        <- saveSearchSession(
+        _        <- EitherT.liftF(saveSearchSession(
                       hiring,
                       actor.userId,
                       "semanticJobSearch",
@@ -27,7 +27,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
                       filterJson(filter),
                       results.headOption.map(_.meta.model),
                       results.headOption.map(_.meta.version)
-                    )(results)(_.job.id.value.toString, _.score)
+                    )(results)(_.job.id.value.toString, _.score))
       } yield rankedJobResults(results)
     }, error => RankedJobResults(Nil, List(error)))
 
@@ -37,7 +37,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         size     <- EitherT(pageSize(context.arg(firstArgument)))
         searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         results  <- liftUseCase(service.recommendedJobs(actor, size, searchId))
-        _        <- saveSearchSession(
+        _        <- EitherT.liftF(saveSearchSession(
                       hiring,
                       actor.userId,
                       "recommendedJobs",
@@ -45,7 +45,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
                       Json.obj(),
                       results.headOption.map(_.meta.model),
                       results.headOption.map(_.meta.version)
-                    )(results)(_.job.id.value.toString, _.score)
+                    )(results)(_.job.id.value.toString, _.score))
       } yield rankedJobResults(results)
     }, error => RankedJobResults(Nil, List(error)))
 
@@ -56,7 +56,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         size     <- EitherT(pageSize(context.arg(firstArgument)))
         searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         results  <- liftUseCase(service.candidateMatches(actor, jobId, size, searchId))
-        _        <- saveSearchSession(
+        _        <- EitherT.liftF(saveSearchSession(
                       hiring,
                       actor.userId,
                       "candidateMatches",
@@ -64,7 +64,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
                       Json.obj("jobId" -> Json.fromString(jobId.value.toString)),
                       results.headOption.map(_.meta.model),
                       results.headOption.map(_.meta.version)
-                    )(results)(_.candidate.id.value.toString, _.score)
+                    )(results)(_.candidate.id.value.toString, _.score))
       } yield rankedCandidateResults(results)
     }, error => RankedCandidateResults(Nil, List(error)))
 

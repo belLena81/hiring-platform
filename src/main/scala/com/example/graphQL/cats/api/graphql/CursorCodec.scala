@@ -132,7 +132,9 @@ private[cats] object CursorCodec {
 
   private given Encoder[Cursor] = deriveEncoder[Cursor]
 
-  private given Decoder[Cursor] = deriveDecoder[Cursor].ensure(_.v == CurrentVersion, s"Unsupported cursor version: $CurrentVersion")
+  private given Decoder[Cursor] = deriveDecoder[Cursor].ensure { cursor =>
+    if cursor.v == CurrentVersion then Nil else List(s"Unsupported cursor version: ${cursor.v}")
+  }
 
   private def deriveKey(secret: String): Array[Byte] = {
     val mac = Mac.getInstance(HmacAlgorithm)

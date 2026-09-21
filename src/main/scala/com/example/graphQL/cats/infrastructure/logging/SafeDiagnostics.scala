@@ -6,7 +6,7 @@ import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermission
-import org.slf4j.LoggerFactory
+import org.slf4j.{LoggerFactory, MarkerFactory, MDC}
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scala.jdk.CollectionConverters.*
 
@@ -30,15 +30,21 @@ object SafeDiagnostics {
     }
 
   def apply(maskSensitive: Boolean = true): Diagnostics = {
+    val logger = LoggerFactory.getLogger(loggerName)
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
-    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) =>
-      event.level match {
-        case LogLevel.Trace => structuredLogger.trace(Map("category" -> event.category))(message)
-        case LogLevel.Debug => structuredLogger.debug(Map("category" -> event.category))(message)
-        case LogLevel.Info => structuredLogger.info(Map("category" -> event.category))(message)
-        case LogLevel.Warn => structuredLogger.warn(Map("category" -> event.category))(message)
-        case LogLevel.Error => structuredLogger.error(Map("category" -> event.category))(message)
-      })
+    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) => IO.blocking {
+      val previousCategory = MDC.get("category")
+      MDC.put("category", event.category)
+      try event.level match {
+        case LogLevel.Trace => logger.trace(MarkerFactory.getMarker(event.marker), message)
+        case LogLevel.Debug => logger.debug(MarkerFactory.getMarker(event.marker), message)
+        case LogLevel.Info => logger.info(MarkerFactory.getMarker(event.marker), message)
+        case LogLevel.Warn => logger.warn(MarkerFactory.getMarker(event.marker), message)
+        case LogLevel.Error => logger.error(MarkerFactory.getMarker(event.marker), message)
+      } finally {
+        if (previousCategory == null) MDC.remove("category") else MDC.put("category", previousCategory)
+      }
+    })
   }
 
   private[logging] def withSink(sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =

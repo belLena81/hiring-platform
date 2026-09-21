@@ -40,6 +40,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
         captured.zip(events).foreach { case (record, event) =>
           assertEquals(record.getLevel.toString, event.severity)
           assertEquals(record.getMarkerList.asScala.map(_.getName).toList, List(event.marker))
+          assertEquals(record.getMDCPropertyMap.get("category"), event.category)
         }
       }
     }
@@ -160,9 +161,21 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       assert(lines.forall(!_.contains(secret)))
       val first = parse(lines.head).toOption.getOrElse(fail("Invalid JSON")).hcursor.downField("details")
       assertEquals(first.get[String]("errorType"), Right("java.lang.IllegalStateException"))
-      assertEquals(first.get[String]("errorLocation"), Right("Main.scala:25"))
+      assertEquals(first.get[String]("errorLocation"), Right("[FILTERED]"))
       assert(lines.last.contains("[FILTERED]"))
     }
+  }
+
+  test("LOG-04 stack locations use the bounded Scala filename contract") {
+    val failure = new IllegalStateException("synthetic-location-secret")
+    failure.setStackTrace(Array(new StackTraceElement(
+      "com.example.graphQL.cats.api.graphql.HiringGraphQLSchema", "execute", "ResolverFile.scala", 25)))
+    val fields = LogFields.failure(failure)
+    assertEquals(fields.get(LogField.ErrorLocation), Some("ResolverFile.scala:25"))
+    assert(LogFields.validPublic(LogField.ErrorLocation, "ResolverFile.scala:25"))
+    assert(!LogFields.validPublic(LogField.ErrorLocation, "Resolver-File.scala:25"))
+    assert(!LogFields.validPublic(LogField.ErrorLocation, "ResolverFile.scala:0"))
+    assert(!LogFields.validPublic(LogField.ErrorLocation, "ResolverFile.scala:1000000"))
   }
 
   test("LOG-01 records have bounded details and cannot inject additional log lines") {

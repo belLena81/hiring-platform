@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service
 import cats.effect.IO
 import cats.effect.Ref
 import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, CandidateProfile, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
 import com.example.graphQL.cats.shared.events.OperationalEventEnvelope

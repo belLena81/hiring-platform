@@ -2,7 +2,8 @@ package com.example.graphQL.cats.service.search
 
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, SearchError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
@@ -37,7 +38,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         JobSearchFilter(None, Set.empty, None), pageSize, searchId)
     } yield {
       assertEquals(accepted.map(_.map(_.job.id)), Right(List(jobId)))
-      assertEquals(rejected.left.toOption, Some(UseCaseError.domain(DomainError.CandidateRequired)))
+      assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.CandidateRequired)))
     }
   }
 
@@ -75,7 +76,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         JobSearchFilter(None, Set.empty, None), pageSize, searchId)
       callCount <- calls.get
     } yield {
-      assertEquals(result.left.toOption, Some(UseCaseError.domain(DomainError.Forbidden)))
+      assertEquals(result.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
       assertEquals(callCount, 0)
     }
   }
@@ -92,7 +93,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         JobSearchFilter(None, Set.empty, None), pageSize, searchId)
       callCount <- calls.get
     } yield {
-      assertEquals(result.left.toOption, Some(UseCaseError.search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))))
+      assertEquals(result.left.toOption, Some(UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))))
       assertEquals(callCount, 0)
     }
   }
@@ -120,9 +121,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       staleResult <- staleService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
       staleModelResult <- staleModelService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
     } yield {
-      assertEquals(missing.left.toOption, Some(UseCaseError.search(SearchError.MissingEmbedding("candidate"))))
-      assertEquals(staleResult.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("candidate"))))
-      assertEquals(staleModelResult.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("candidate"))))
+      assertEquals(missing.left.toOption, Some(UseCaseError.Search(SearchError.MissingEmbedding("candidate"))))
+      assertEquals(staleResult.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("candidate"))))
+      assertEquals(staleModelResult.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("candidate"))))
     }
   }
 
@@ -143,7 +144,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       rejected <- service.candidateMatches(ActorContext(otherRecruiter, UserRole.Recruiter), jobId, pageSize, searchId)
     } yield {
       assertEquals(accepted.map(_.map(_.candidate.id)), Right(List(candidateId)))
-      assertEquals(rejected.left.toOption, Some(UseCaseError.domain(DomainError.Forbidden)))
+      assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
     }
   }
 
@@ -161,8 +162,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       result <- service.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
       staleModelResult <- staleModelService.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
     } yield {
-      assertEquals(result.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("job"))))
-      assertEquals(staleModelResult.left.toOption, Some(UseCaseError.search(SearchError.StaleEmbedding("job"))))
+      assertEquals(result.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("job"))))
+      assertEquals(staleModelResult.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("job"))))
     }
   }
 

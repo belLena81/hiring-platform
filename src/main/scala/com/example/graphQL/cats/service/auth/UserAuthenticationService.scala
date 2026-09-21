@@ -4,7 +4,8 @@ import cats.Functor
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.UserRepository
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
 
 final class UserAuthenticationService[F[_]: Functor](users: UserRepository[F]) extends UserAuthenticator[F] {

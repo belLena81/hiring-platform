@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import cats.data.NonEmptyList
 import java.time.Instant
 import java.util.{Date, UUID}

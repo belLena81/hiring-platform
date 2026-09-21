@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.{ClientSession, MongoDatabase}
 import org.bson.Document

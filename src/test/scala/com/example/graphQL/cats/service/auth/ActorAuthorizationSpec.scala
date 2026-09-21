@@ -3,7 +3,8 @@ package com.example.graphQL.cats.service.auth
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.repository.protocol.UserRepository
-import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, RepositoryError, ServiceFixtures, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, ServiceFixtures, UseCaseError}
 import munit.CatsEffectSuite
 
 final class ActorAuthorizationSpec extends CatsEffectSuite {
@@ -14,7 +15,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
     val authorization = ActorAuthorization[IO](repository(Map(deletedUser.id -> deletedUser)))
 
     authorization.resolve(ActorContext(deletedUser.id, UserRole.Recruiter)).map { result =>
-      assertEquals(result, Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
+      assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
     }
   }
 

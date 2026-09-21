@@ -102,7 +102,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       case UserRole.Recruiter =>
         Right(UserProfile.Recruiter(RecruiterProfile(organizationName.getOrElse(""), jobTitle)))
       case UserRole.Admin =>
-        Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole))
+        Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole))
     }
 
   private def userPayload(result: Either[UseCaseError, User]): UserPayload =

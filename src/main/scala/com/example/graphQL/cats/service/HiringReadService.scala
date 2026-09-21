@@ -5,7 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, User, UserRole}
-import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, RepositoryError, UserRepository}
 import com.example.graphQL.cats.service.protocol.HiringReadModel
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.shared.pagination.ApplicationEventPageRequest
@@ -51,7 +51,7 @@ final class HiringReadService[F[_]: Monad](
       case Right(user) =>
         read(applications.find(applicationId)).flatMap {
           case Left(error) => error.asLeft[Unit].pure[F]
-          case Right(None) => UseCaseError.domain(DomainError.NotFound("application")).asLeft[Unit].pure[F]
+          case Right(None) => UseCaseError.Domain(DomainError.NotFound("application")).asLeft[Unit].pure[F]
           case Right(Some(application)) if application.candidateId == user.id && user.role == UserRole.Candidate =>
             ().asRight[UseCaseError].pure[F]
           case Right(Some(_)) if user.role == UserRole.Admin && user.adminSingleton =>
@@ -60,10 +60,10 @@ final class HiringReadService[F[_]: Monad](
             read(jobs.find(application.jobId)).map {
               case Left(error) => Left(error)
               case Right(Some(job)) if job.recruiterId == user.id => Right(())
-              case Right(Some(_)) => Left(UseCaseError.domain(DomainError.Forbidden))
-              case Right(None) => Left(UseCaseError.domain(DomainError.NotFound("job")))
+              case Right(Some(_)) => Left(UseCaseError.Domain(DomainError.Forbidden))
+              case Right(None) => Left(UseCaseError.Domain(DomainError.NotFound("job")))
             }
-          case Right(Some(_)) => UseCaseError.domain(DomainError.Forbidden).asLeft[Unit].pure[F]
+          case Right(Some(_)) => UseCaseError.Domain(DomainError.Forbidden).asLeft[Unit].pure[F]
         }
     }
 
@@ -71,7 +71,7 @@ final class HiringReadService[F[_]: Monad](
     read(applications.history(applicationId, page))
 
   private def read[A](value: F[Either[RepositoryError, A]]): F[Either[UseCaseError, A]] =
-    value.map(_.leftMap(UseCaseError.repository))
+    value.map(_.leftMap(UseCaseError.Repository.apply))
 }
 
 object HiringReadService {

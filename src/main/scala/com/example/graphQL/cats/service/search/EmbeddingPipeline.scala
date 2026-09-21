@@ -5,7 +5,7 @@ import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant

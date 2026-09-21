@@ -80,23 +80,14 @@ object LogFields {
     "com.mongodb.MongoTimeoutException", "com.mongodb.MongoSocketException", "com.mongodb.MongoSocketOpenException",
     "com.mongodb.MongoSocketReadException", "com.mongodb.MongoSocketReadTimeoutException", "com.mongodb.MongoCommandException"
   )
-  private val locations = Map(
-    "com.example.graphQL.cats.Main" -> "Main.scala",
-    "com.example.graphQL.cats.transport.http.HiringApiRoutes" -> "HiringApiRoutes.scala",
-    "com.example.graphQL.cats.transport.graphql.HiringGraphQLSchema" -> "HiringGraphQLSchema.scala",
-    "com.example.graphQL.cats.transport.graphql.RequestContext" -> "RequestContext.scala",
-    "com.example.graphQL.cats.service.HealthService" -> "HealthService.scala",
-    "com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe" -> "MongoDatabaseProbe.scala",
-    "com.example.graphQL.cats.repository.mongo.PublisherBridge" -> "PublisherBridge.scala",
-    "com.example.graphQL.cats.runtime.HiringPlatformServer" -> "HiringPlatformServer.scala"
-  )
+  private val Root = "com.example.graphQL.cats."
 
   def failure(error: Throwable): Map[LogField, String] = scala.util.Try {
     val errorType = error.getClass.getName
-    val location = error.getStackTrace.iterator.take(32).flatMap { frame =>
-      locations.get(frame.getClassName.takeWhile(_ != '$')).filter(_ => frame.getLineNumber > 0 && frame.getLineNumber <= 999999)
-        .map(file => s"$file:${frame.getLineNumber}")
-    }.take(1).toList.headOption.getOrElse("unavailable")
+    val location = error.getStackTrace.iterator.take(32)
+      .find(frame => frame.getClassName.startsWith(Root))
+      .filter(frame => frame.getFileName != null && frame.getLineNumber > 0)
+      .fold("unavailable")(frame => s"${frame.getFileName}:${frame.getLineNumber}")
     Map(LogField.ErrorType -> (if (errorTypes.contains(errorType)) errorType else "OtherException"),
       LogField.ErrorLocation -> location)
   }.getOrElse(Map(LogField.ErrorType -> "OtherException", LogField.ErrorLocation -> "unavailable"))
@@ -118,9 +109,7 @@ object LogFields {
       "CANDIDATE_VECTOR_INDEX", "VECTOR_NUM_CANDIDATES"
     ).contains(value)
     case LogField.ErrorType => errorTypes.contains(value) || value == "OtherException"
-    case LogField.ErrorLocation => value == "unavailable" || locations.values.exists { file =>
-      value.startsWith(s"$file:") && value.drop(file.length + 1).matches("[1-9][0-9]{0,5}")
-    }
+    case LogField.ErrorLocation => value == "unavailable" || value.matches("[A-Za-z]+\\.scala:[1-9][0-9]{0,5}")
     case LogField.Environment => Set("local", "production").contains(value)
     case LogField.TraceId => value.matches("[0-9a-fA-F]{32}")
     case LogField.SpanId => value.matches("[0-9a-fA-F]{16}")

@@ -5,8 +5,8 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices}
 import com.example.graphQL.cats.service.{ActorContext, HiringReadService, ProbeResult, UseCaseError}
-import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector, SemanticSearchRepository, UserRepository}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector, SearchSessionRepository, SemanticSearchRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.job.JobService
@@ -15,6 +15,7 @@ import com.example.graphQL.cats.service.search.SemanticSearchService
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.search.{RankedCandidate, RankedJob, VectorSearchQuery}
+import com.example.graphQL.cats.shared.events.SearchSession
 import io.circe.Json
 import munit.CatsEffectSuite
 
@@ -440,7 +441,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](
         List(application, secondApplication).map(application => application.id -> application).toMap)
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
-      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       users = RecordingUsers(usersRef, userBatches)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
@@ -647,6 +648,22 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
+  test("search results survive best-effort search-session persistence failures") {
+    val semanticQuery =
+      """query { semanticJobSearch(query: "scala", first: 5) { results { job { id } } errors { code } } }"""
+    val jobsQuery =
+      """query { jobs(first: 5) { edges { node { id } } errors { code } } }"""
+    for {
+      semantic <- executeWithSemanticSearch(semanticQuery, Some(ActorContext(candidateId, UserRole.Candidate)), FailingSearchSessions)
+      jobs <- executeWithUsers(jobsQuery, Some(ActorContext(candidateId, UserRole.Candidate)), List(candidate, recruiter), searchSessions = FailingSearchSessions)
+    } yield {
+      assertEquals(semantic.hcursor.downField("data").downField("semanticJobSearch").downField("results").downArray.downField("job").get[String]("id"), Right(jobId.value.toString))
+      assert(!semantic.hcursor.downField("errors").succeeded)
+      assertEquals(jobs.hcursor.downField("data").downField("jobs").downField("edges").downArray.downField("node").get[String]("id"), Right(jobId.value.toString))
+      assert(!jobs.hcursor.downField("errors").succeeded)
+    }
+  }
+
   test("VHS-AC04 candidateMatches projection does not expose email or resumeRef") {
     val query =
       s"""query {
@@ -799,6 +816,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       .leftMap(error => new IllegalArgumentException("Invalid GraphQL test request", error)))
 
   private def executeWithSemanticSearch(query: String, actor: Option[ActorContext]): IO[Json] = {
+    executeWithSemanticSearch(query, actor, SearchSessionRepository.noop[IO])
+  }
+
+  private def executeWithSemanticSearch(
+      query: String,
+      actor: Option[ActorContext],
+      searchSessions: SearchSessionRepository[IO]
+  ): IO[Json] = {
     val meta = EmbeddingMeta("voyage-4-lite", 1, "hash", now)
     val embeddedJob = openJob.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), meta)))
     for {
@@ -827,7 +852,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications),
         TestGraphQLSupport.cursorCodec,
         TestGraphQLSupport.accountService,
-        Some(searchService))
+        Some(searchService),
+        searchSessions = searchSessions)
       request <- parseRequest(query)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services).use(HiringGraphQLSchema.executeInContext(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
@@ -839,18 +865,19 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       users: List[User],
       accountService: AccountUseCases[IO] = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
-      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready)
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
+      searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO]
   ): IO[Json] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
       jobsRef <- Ref.of[IO, Map[JobId, Job]](List(openJob, closedJob).map(job => job.id -> job).toMap)
       applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map(application.id -> application))
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
-      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
-      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, accountService = accountService)
+      services = HiringGraphQLServices(HiringReadService[IO](users, jobs, applications), JobService[IO](users, jobs), ApplicationService[IO](users, jobs, applications), TestGraphQLSupport.cursorCodec, accountService = accountService, searchSessions = searchSessions)
       request <- parseRequest(query, variables)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services, hiringReady).use(HiringGraphQLSchema.executeInContext(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
@@ -899,8 +926,17 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       IO.pure(Right(Nil))
   }
 
+  private object FailingSearchSessions extends SearchSessionRepository[IO] {
+    override def save(session: SearchSession, event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+    override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
+      IO.pure(Right(None))
+    override def recordInteraction(event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
+      IO.pure(Right(true))
+  }
+
   private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases[IO] {
-    private val unsupported: UseCaseError = UseCaseError.account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
+    private val unsupported: UseCaseError = UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
     override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
       IO.pure(Left(unsupported))
@@ -947,10 +983,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   private object NameTakenAccountService extends AccountUseCases[IO] {
-    private val unsupported: UseCaseError = UseCaseError.account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
+    private val unsupported: UseCaseError = UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
     override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
-      IO.pure(Left(UseCaseError.account(com.example.graphQL.cats.service.AccountError.NameTaken)))
+      IO.pure(Left(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.NameTaken)))
 
     override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
       IO.pure(Left(unsupported))

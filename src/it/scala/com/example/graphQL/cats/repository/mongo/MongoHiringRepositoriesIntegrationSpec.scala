@@ -10,10 +10,10 @@ import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthServic
 import com.example.graphQL.cats.repository.protocol.{
   EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector
 }
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.job.CreateJobInput
 import com.example.graphQL.cats.shared.crypto.SourceHash
-import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents}
+import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import com.example.graphQL.cats.config.{JwtAuthConfig, VectorSearchConfig}
@@ -81,6 +81,44 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assert(collections.contains("users"))
           assert(userIndexes.contains(MongoHiringSetup.UsersEmailIndex))
           assert(userIndexes.contains(MongoHiringSetup.UsersNameIndex))
+        }
+      }
+    }
+  }
+
+  test("repeated search session writes are idempotent for the same actor and ID") {
+    replicaSetContainer.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_search_session_retry")
+        val repository = MongoSearchSessionRepository.transactional(database, client)
+        val searchId = UUID.fromString("00000000-0000-0000-0000-000000000120")
+        val eventId = UUID.fromString("00000000-0000-0000-0000-000000000121")
+        val firstSession = SearchSession(
+          searchId,
+          candidateId,
+          "jobs",
+          None,
+          Json.obj(),
+          None,
+          None,
+          List(SearchSessionResult("job-1", 1, 1d)),
+          now,
+          later
+        )
+        val repeatedSession = firstSession.copy(results = List(SearchSessionResult("job-2", 2, 0.5d)))
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          first <- repository.save(firstSession, OperationalEvents.searchPerformed(eventId, firstSession))
+          repeated <- repository.save(repeatedSession, OperationalEvents.searchPerformed(eventId, repeatedSession))
+          stored <- repository.find(searchId)
+          events <- PublisherBridge.collectWithin(
+            database.getCollection("event_outbox").find(Filters.eq("_id", eventId.toString)), 2
+          )
+        } yield {
+          assertEquals(first, Right(()))
+          assertEquals(repeated, Right(()))
+          assertEquals(stored, Right(Some(firstSession)))
+          assertEquals(events.size, 1)
         }
       }
     }

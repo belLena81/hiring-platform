@@ -4,7 +4,8 @@ import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{UserAccountRepository, UserRepository}
-import com.example.graphQL.cats.service.{AccountError, ActorContext, RepositoryError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{AccountError, ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.protocol.*
 import munit.CatsEffectSuite
 
@@ -25,7 +26,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       accounts <- TestAccounts.create(initialized = true)
       service = new UserAccountService(new TestUsers(Map.empty), accounts, TestHasher, TestTokenIssuer)
       result <- service.signUp(SignUpInput("Admin", UserRole.Admin, "password-password", None), now, userId)
-    } yield assertEquals(result, Left(UseCaseError.account(AccountError.AdminSignupForbidden)))
+    } yield assertEquals(result, Left(UseCaseError.Account(AccountError.AdminSignupForbidden)))
   }
 
   test("signup rejects a profile belonging to another role") {
@@ -38,7 +39,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         "password-password",
         Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
       ), now, userId)
-    } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
+    } yield assertEquals(result, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
   }
 
   test("candidate and recruiter signup require their matching profile") {
@@ -48,8 +49,8 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       candidate <- service.signUp(SignUpInput("Candidate", UserRole.Candidate, "password-password", None), now, userId)
       recruiter <- service.signUp(SignUpInput("Recruiter", UserRole.Recruiter, "password-password", None), now, recruiterId)
     } yield {
-      assertEquals(candidate, Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
-      assertEquals(recruiter, Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
+      assertEquals(candidate, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
+      assertEquals(recruiter, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
     }
   }
 
@@ -108,7 +109,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       )
       stored <- accounts.values.get
     } yield {
-      assertEquals(result, Left(UseCaseError.availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
+      assertEquals(result, Left(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
       assertEquals(stored, Map.empty)
     }
   }
@@ -121,7 +122,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         ActorContext(recruiter.id, UserRole.Recruiter),
         AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now
       )
-    } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileRoleMismatch)))
+    } yield assertEquals(result, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
   }
 
   test("profile update rejects the profile-less Admin role") {
@@ -132,7 +133,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         ActorContext(admin.id, UserRole.Admin),
         AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now
       )
-    } yield assertEquals(result, Left(UseCaseError.account(AccountError.ProfileUnsupportedForRole)))
+    } yield assertEquals(result, Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole)))
   }
 
   test("valid recruiter signup remains supported") {
@@ -166,7 +167,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       ), now, recruiterId)
     } yield {
       assert(first.isRight)
-      assertEquals(duplicate, Left(UseCaseError.account(AccountError.NameTaken)))
+      assertEquals(duplicate, Left(UseCaseError.Account(AccountError.NameTaken)))
     }
   }
 
@@ -183,7 +184,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       result <- service.login(LoginInput("Unknown", "password-password"), now)
       calls <- unknownVerifications.get
     } yield {
-      assertEquals(result, Left(UseCaseError.account(AccountError.InvalidCredentials)))
+      assertEquals(result, Left(UseCaseError.Account(AccountError.InvalidCredentials)))
       assertEquals(calls, 1)
     }
   }

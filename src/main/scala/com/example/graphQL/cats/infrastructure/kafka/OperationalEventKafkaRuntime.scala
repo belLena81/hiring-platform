@@ -7,7 +7,8 @@ import com.example.graphQL.cats.repository.protocol.{
   ClaimedOperationalEvent, ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository,
   OperationalEventFailureCategory, OperationalEventOutboxRepository
 }
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventJson}
 import fs2.Stream
 import fs2.kafka.*

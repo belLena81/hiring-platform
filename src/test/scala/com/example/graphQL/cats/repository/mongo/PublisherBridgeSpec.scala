@@ -41,6 +41,17 @@ class PublisherBridgeSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("cancellation before onSubscribe cancels a late subscription") {
+    val publisher = new Controlled
+    for {
+      fiber <- PublisherBridge.first(publisher).start
+      _ <- publisher.awaitRegistration
+      _ <- fiber.cancel
+      _ <- publisher.attach
+      _ <- IO(assertEquals(publisher.cancellations.get(), 1))
+    } yield ()
+  }
+
   test("first value cancels upstream and ignores late terminal signals") {
     val publisher = new Controlled
     for {

@@ -94,7 +94,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
         def execute(actor: Option[ActorContext]): IO[Response[IO]] =
           HiringGraphQLSchema.execute(parsed, service, requestId, actor, dependencies.hiring,
-            dependencies.ensureHiringReady, dependencies.contextFactory, tracer).flatMap {
+            dependencies.ensureHiringReady, dependencies.contextFactory, tracer, diagnostics).flatMap {
             case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
             case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Rejection.InvalidQuery, requestId, mediaType = mediaType)
             case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Rejection.Internal, requestId, mediaType = mediaType)
@@ -200,12 +200,10 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     case GET -> Root / "schema.graphql" =>
       IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
     case request @ GET -> Root / "ready" => requestScope(request).flatMap { scope =>
-      admitted(scope.requestId) {
-        service.readiness(Some(scope.requestId)).map { result =>
-          val ready = result == ProbeResult.Ready
-          json(if (ready) Status.Ok else Status.ServiceUnavailable,
-            Json.obj("status" -> Json.fromString(if (ready) "READY" else "NOT_READY")))
-        }
+      service.readiness(Some(scope.requestId)).map { result =>
+        val ready = result == ProbeResult.Ready
+        json(if (ready) Status.Ok else Status.ServiceUnavailable,
+          Json.obj("status" -> Json.fromString(if (ready) "READY" else "NOT_READY")))
       }
     }
     case request @ POST -> Root / "graphql" => requestScope(request).flatMap { scope =>

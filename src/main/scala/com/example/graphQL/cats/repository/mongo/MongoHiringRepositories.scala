@@ -4,7 +4,7 @@ import cats.data.{NonEmptyList, ValidatedNel}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, OperationalEventType, OperationalEvents}
 import com.example.graphQL.cats.shared.pagination.*

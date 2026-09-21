@@ -7,7 +7,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, RepositoryError, SearchError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, SearchError, UseCaseError}
 import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.JobSearchFilter
@@ -57,8 +58,8 @@ private[graphql] object HiringGraphQLResolverSupport {
       filter: Json,
       model: Option[String] = None,
       version: Option[Int] = None
-  )(results: List[A])(idOf: A => String, scoreOf: A => Double): GraphQLStep[Unit] =
-    EitherT(IO.realTimeInstant.flatMap { now =>
+  )(results: List[A])(idOf: A => String, scoreOf: A => Double): IO[Unit] =
+    IO.realTimeInstant.flatMap { now =>
       val session = SearchSession(
         searchId,
         actorId,
@@ -73,9 +74,8 @@ private[graphql] object HiringGraphQLResolverSupport {
         now,
         now.plusSeconds(7.days.toSeconds)
       )
-      hiring.searchSessions.save(session, OperationalEvents.searchPerformed(searchEventId(searchId), session))
-        .map(_.leftMap(error => toGraphQLError(UseCaseError.repository(error))))
-    })
+      hiring.searchSessions.save(session, OperationalEvents.searchPerformed(searchEventId(searchId), session)).void
+    }.handleError(_ => ())
 
   def complete[A](value: GraphQLStep[A], onError: GraphQLError => A): IO[A] =
     value.value.map(_.fold(onError, identity))
@@ -99,14 +99,14 @@ private[graphql] object HiringGraphQLResolverSupport {
   ): IO[A] =
     context.ctx.hiringAvailable.flatMap {
       case ProbeResult.Ready => action(context.ctx.hiring)
-      case _ => IO.pure(unavailable(List(toGraphQLError(UseCaseError.availability(AvailabilityError.ServiceNotReady)))))
+      case _ => IO.pure(unavailable(List(toGraphQLError(UseCaseError.Availability(AvailabilityError.ServiceNotReady)))))
     }
 
   def authenticatedSearch(
       context: Context[RequestContext, Unit]
   ): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases[IO])]] =
     authenticated(context).map(_.flatMap { case (actor, hiring) =>
-      hiring.semanticSearchService.map(service => (actor, hiring, service)).toRight(UseCaseError.search(SearchError.VectorSearchUnavailable))
+      hiring.semanticSearchService.map(service => (actor, hiring, service)).toRight(UseCaseError.Search(SearchError.VectorSearchUnavailable))
     })
 
   def page(
@@ -193,9 +193,9 @@ private[graphql] object HiringGraphQLResolverSupport {
         val hiring = context.ctx.hiring
         context.ctx.hiringAvailable.map {
           case ProbeResult.Ready => Right((actor, hiring))
-          case _ => Left(UseCaseError.availability(AvailabilityError.ServiceNotReady))
+          case _ => Left(UseCaseError.Availability(AvailabilityError.ServiceNotReady))
         }
-      case None => IO.pure(Left(UseCaseError.authentication(AuthenticationError.Unauthorized)))
+      case None => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
     }
 
   private def cursorPage[A, B](

@@ -12,6 +12,8 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
 
 object Main extends IOApp {
+  System.setProperty("cats.effect.trackFiberContext", "true")
+
   override protected def reportFailure(error: Throwable): IO[Unit] =
     val logger = Slf4jLogger.getLoggerFromName[IO]("hiring.foundation")
     logger.error(Map("errorType" -> error.getClass.getName))("Unhandled runtime failure")

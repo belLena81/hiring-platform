@@ -3,6 +3,7 @@ package com.example.graphQL.cats.service
 import cats.data.NonEmptyList
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 
 enum AuthenticationError {
   case Unauthorized
@@ -84,10 +85,4 @@ object UseCaseError {
   extension [E, A](value: Either[E, A])(using widen: Widen[E])
     def widenUseCase: Either[UseCaseError, A] = value.leftMap(widen.apply)
 
-  def domain(error: DomainError): UseCaseError = Domain(error)
-  def repository(error: RepositoryError): UseCaseError = Repository(error)
-  def authentication(error: AuthenticationError): UseCaseError = Authentication(error)
-  def account(error: AccountError): UseCaseError = Account(error)
-  def search(error: SearchError): UseCaseError = Search(error)
-  def availability(error: AvailabilityError): UseCaseError = Availability(error)
 }

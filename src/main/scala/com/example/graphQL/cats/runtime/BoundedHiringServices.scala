@@ -3,7 +3,8 @@ package com.example.graphQL.cats.runtime
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User, UserPageRequest}
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.*
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
@@ -15,7 +16,7 @@ import scala.concurrent.duration.FiniteDuration
 /** Bounds resolver-owned effects before they cross Sangria's non-cancellable Future boundary. */
 private[runtime] object BoundedHiringServices {
   private def typed[A](timeout: FiniteDuration)(action: IO[Either[UseCaseError, A]]): IO[Either[UseCaseError, A]] =
-    action.timeoutTo(timeout, IO.pure(Left(UseCaseError.repository(RepositoryError.Unavailable))))
+    action.timeoutTo(timeout, IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable))))
 
   def readModel(delegate: HiringReadModel[IO], timeout: FiniteDuration): HiringReadModel[IO] = new HiringReadModel[IO] {
     def user(id: UserId): IO[Either[UseCaseError, Option[User]]] = typed(timeout)(delegate.user(id))

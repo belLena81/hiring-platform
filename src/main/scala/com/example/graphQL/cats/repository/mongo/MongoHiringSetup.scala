@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.AccountName
 import com.example.graphQL.cats.repository.protocol.{EmbeddingWorkKey, EmbeddingWorkKind}
+import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.mongodb.MongoCommandException
 import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, IndexOptions, Indexes, ReturnDocument, SearchIndexModel, SearchIndexType, Sorts, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoDatabase
@@ -11,7 +12,6 @@ import org.bson.Document
 import org.bson.conversions.Bson
 import java.util.Date
 import java.util.UUID
-import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -865,6 +865,5 @@ object MongoHiringSetup {
       new UpdateOptions().upsert(true)
     )).void
 
-  private def sha256(value: String): String =
-    MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)).map("%02x".format(_)).mkString
+  private def sha256(value: String): String = SourceHash.sha256(value)
 }

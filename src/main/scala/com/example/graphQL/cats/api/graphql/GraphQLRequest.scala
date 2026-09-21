@@ -5,7 +5,7 @@ import io.circe.{Decoder, DecodingFailure}
 import sangria.ast.Document
 import sangria.parser.QueryParser
 
-final case class GraphQLRequest(document: Document, variables: Json, operationName: Option[String], rawQuery: String)
+final case class GraphQLRequest(document: Document, variables: Json, operationName: Option[String])
 
 object GraphQLRequest {
   given Decoder[GraphQLRequest] = Decoder.instance { json =>
@@ -21,6 +21,6 @@ object GraphQLRequest {
         case Some(value) => value.asString.map(Some(_)).toRight(DecodingFailure("GraphQL operationName must be a string", Nil))
       }
       document <- QueryParser.parse(query).toEither.left.map(_ => DecodingFailure("Invalid GraphQL query", Nil))
-    } yield GraphQLRequest(document, variables, operationName, query)
+    } yield GraphQLRequest(document, variables, operationName)
   }
 }

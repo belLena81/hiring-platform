@@ -4,7 +4,7 @@ import cats.effect.IO
 import cats.effect.Ref
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.shared.pagination.{ApplicationPageRequest, PageSize}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
@@ -36,7 +36,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         result <- service.submitApplication(ActorContext(candidateId, UserRole.Candidate), jobId, applicationId, eventId, now)
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(UseCaseError.domain(DomainError.JobMustBeOpen)))
+        assertEquals(result, Left(UseCaseError.Domain(DomainError.JobMustBeOpen)))
         assertEquals(events, Vector.empty)
       }
     }
@@ -49,7 +49,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         result <- service.submitApplication(ActorContext(candidateId, UserRole.Candidate), jobId, applicationId, eventId, now)
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(UseCaseError.repository(RepositoryError.Conflict)))
+        assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Conflict)))
         assertEquals(events, Vector.empty)
       }
     }
@@ -107,7 +107,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         events <- applications.allEvents
         outbox <- applications.allOperationalEvents
       } yield {
-        assertEquals(result, Left(UseCaseError.repository(RepositoryError.Unavailable)))
+        assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Unavailable)))
         assertEquals(events, Vector.empty)
         assertEquals(outbox, Vector.empty)
       }
@@ -128,7 +128,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         )
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(UseCaseError.domain(DomainError.InvalidStatusTransition(ApplicationStatus.Created, ApplicationStatus.Hired))))
+        assertEquals(result, Left(UseCaseError.Domain(DomainError.InvalidStatusTransition(ApplicationStatus.Created, ApplicationStatus.Hired))))
         assertEquals(events, Vector.empty)
       }
     }
@@ -148,7 +148,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         )
         events <- applications.allEvents
       } yield {
-        assertEquals(result, Left(UseCaseError.domain(DomainError.RejectionFeedbackRequired)))
+        assertEquals(result, Left(UseCaseError.Domain(DomainError.RejectionFeedbackRequired)))
         assertEquals(events, Vector.empty)
       }
     }
@@ -174,8 +174,8 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](applications)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       operationalEvents <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
-      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
-      nextOperationalEventError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+      nextOperationalEventError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       jobRepository = InMemoryJobs(jobsRef)
       applicationRepository = InMemoryApplications(applicationsRef, eventsRef, nextCreateError, Some(operationalEvents), Some(nextOperationalEventError))
     } yield (jobRepository, applicationRepository, ApplicationService[IO](InMemoryUsers(usersRef), jobRepository, applicationRepository))

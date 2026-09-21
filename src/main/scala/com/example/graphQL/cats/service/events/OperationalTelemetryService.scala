@@ -30,8 +30,8 @@ final class OperationalTelemetryService[F[_]: Monad](
   ): F[Either[UseCaseError, Unit]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.domain(DomainError.Forbidden))
+      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
       rank <- EitherT(searchId match {
         case Some(id) => verifiedSearchResult(actor, id, jobId.value.toString).map(_.map(Some(_)))
         case None => Monad[F].pure(Right(None))
@@ -59,12 +59,12 @@ final class OperationalTelemetryService[F[_]: Monad](
       resultId: String
   ): F[Either[UseCaseError, Int]] =
     searchSessions.find(searchId).map(_.widenUseCase.flatMap {
-      case None => UseCaseError.domain(DomainError.NotFound("search session")).asLeft[Int]
-      case Some(session) if session.actorId != actor.userId => UseCaseError.domain(DomainError.Forbidden).asLeft[Int]
+      case None => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[Int]
+      case Some(session) if session.actorId != actor.userId => UseCaseError.Domain(DomainError.Forbidden).asLeft[Int]
       case Some(session) =>
         session.results.find(_.resultId == resultId)
           .map(result => result.rank.asRight[UseCaseError])
-          .getOrElse(UseCaseError.domain(DomainError.Forbidden).asLeft[Int])
+          .getOrElse(UseCaseError.Domain(DomainError.Forbidden).asLeft[Int])
     })
 }
 

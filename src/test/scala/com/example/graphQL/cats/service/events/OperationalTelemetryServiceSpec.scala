@@ -4,7 +4,8 @@ import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.UserRole
 import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, OperationalEventType, SearchSession, SearchSessionResult}
 import io.circe.Json
@@ -44,8 +45,8 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         forgedActor <- service.recordSearchResultClick(otherActor, clickEventId, searchId, jobId.value.toString, now)
         forgedResult <- service.recordSearchResultClick(actor, clickEventId, searchId, "not-a-result", now)
       } yield {
-        assertEquals(forgedActor, Left(UseCaseError.domain(DomainError.Forbidden)))
-        assertEquals(forgedResult, Left(UseCaseError.domain(DomainError.Forbidden)))
+        assertEquals(forgedActor, Left(UseCaseError.Domain(DomainError.Forbidden)))
+        assertEquals(forgedResult, Left(UseCaseError.Domain(DomainError.Forbidden)))
       }
     }
   }
@@ -62,7 +63,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         conflict <- service.recordJobView(actor, eventId, conflictingJobId, None, later)
       } yield {
         assertEquals(first, Right(()))
-        assertEquals(conflict, Left(UseCaseError.repository(RepositoryError.Conflict)))
+        assertEquals(conflict, Left(UseCaseError.Repository(RepositoryError.Conflict)))
       }
     }
   }

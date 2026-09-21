@@ -4,7 +4,8 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.FixedTestClock
-import com.example.graphQL.cats.service.{ActorContext, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.repository.protocol.UserRepository

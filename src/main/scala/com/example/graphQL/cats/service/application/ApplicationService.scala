@@ -37,8 +37,8 @@ final class ApplicationService[F[_]: Monad](
   ): F[Either[UseCaseError, Application]] =
     (for {
       candidate <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](candidate.role == UserRole.Candidate, (), UseCaseError.domain(DomainError.Forbidden))
-      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
+      _ <- EitherT.cond[F](candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
+      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
       application <- EitherT.fromEither[F](ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase)
       initialEvent = ApplicationEvent(eventId, application.id, None, application.status, candidate.id, now, None, None)
       event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
@@ -51,7 +51,7 @@ final class ApplicationService[F[_]: Monad](
   ): F[Either[UseCaseError, List[Application]]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](user.role == UserRole.Candidate, (), UseCaseError.domain(DomainError.Forbidden))
+      _ <- EitherT.cond[F](user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
       applications <- EitherT(this.applications.findByCandidate(user.id, page).map(_.widenUseCase))
     } yield applications).value
 
@@ -75,9 +75,9 @@ final class ApplicationService[F[_]: Monad](
   ): F[Either[UseCaseError, Application]] =
     (for {
       actorUser <- EitherT(authorization.resolve(actor))
-      application <- EitherT(applications.find(applicationId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("application"))))
-      job <- EitherT(jobs.find(application.jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canManage(actorUser, job), (), UseCaseError.domain(DomainError.Forbidden))
+      application <- EitherT(applications.find(applicationId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
+      job <- EitherT(jobs.find(application.jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- EitherT.cond[F](authorization.canManage(actorUser, job), (), UseCaseError.Domain(DomainError.Forbidden))
       change <- EitherT.fromEither[F](
         ApplicationLifecycle.changeStatus(application, target, actorUser.id, now, feedback, reason).widenUseCase
       )

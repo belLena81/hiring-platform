@@ -144,7 +144,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       )
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
-      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
@@ -185,7 +185,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       )
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
-      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
@@ -217,7 +217,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](Map.empty)
       applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
-      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       setupChecks <- Ref.of[IO, Int](0)
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Unavailable) }
@@ -559,17 +559,26 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("validated Sangria field errors retain their response and emit correlated completion diagnostics") {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
+      executionRecords <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
+      executionFailure <- Deferred[IO, Unit]
       sink = new Diagnostics {
         def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           records.update(_ :+ ((event, id, fields)))
+      }
+      executionSink = new Diagnostics {
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          executionRecords.update(_ :+ ((event, id, fields))) *>
+            (if event == LogEvent.RuntimeFailed then executionFailure.complete(()).void else IO.unit)
       }
       parsed <- IO.fromEither(Json.obj(
         "query" -> Json.fromString("query Selected($include: Boolean!) { readiness @include(if: $include) { status } } # synthetic-field-comment-secret"),
         "operationName" -> Json.fromString("Selected"),
         "variables" -> Json.obj("include" -> Json.True, "password" -> Json.fromString("synthetic-field-value-secret"))
       ).as[GraphQLRequest].leftMap(error => new IllegalArgumentException("Invalid test query", error)))
-      closed <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(IO.pure)
-      execution <- HiringGraphQLSchema.executeInContext(parsed, closed)
+      execution <- TestGraphQLSupport.context(IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")), diagnostics = executionSink,
+        requestId = Some("00000000-0000-0000-0000-000000000901")).use { context =>
+        HiringGraphQLSchema.executeInContext(parsed, context).flatTap(_ => executionFailure.get.timeout(2.seconds))
+      }
       result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
       admission <- Admission.create(16)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
@@ -578,6 +587,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       response <- routes.completedGraphQL(parsed, result, id)
       body <- response.as[Json]
       captured <- records.get
+      executionCaptured <- executionRecords.get
     } yield {
       assertEquals(response.status, Status.Ok)
       assertEquals(body, result)
@@ -590,6 +600,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted))
       assert(captured.forall(_._2.contains(id)))
       assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall(_._3.get(LogField.Outcome).contains("FIELD_ERROR")))
+      assertEquals(executionCaptured.map(_._1), Vector(LogEvent.RuntimeFailed))
+      assertEquals(executionCaptured.head._2, Some("00000000-0000-0000-0000-000000000901"))
+      assert(executionCaptured.head._3.get(LogField.ErrorLocation).exists(LogFields.validPublic(LogField.ErrorLocation, _)))
       assert(!body.noSpaces.contains("Request context is closed"))
     }
   }
@@ -634,7 +647,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
                   _ <- finish.complete(())
                   _ <- joined.flatMap(_.embedNever)
                   outcome <- fiber.join
-                  recovered <- http(health)
+                  recovered <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
                   after <- IO(attempts.get())
                 } yield {
                   assert(outcome.isCanceled)
@@ -839,7 +852,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("readiness cancellation releases admission capacity") {
+  test("readiness bypasses admission while the request permits are occupied") {
     for {
       admission <- Admission.create(16)
       entered <- Deferred[IO, Unit]
@@ -848,7 +861,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         def check: IO[ProbeResult] = entered.complete(()) *> IO.never[ProbeResult]
       }
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, admission).map(_.app)
-      _ <- List.fill(15)(admission.permit).sequence.use { held =>
+      _ <- List.fill(16)(admission.permit).sequence.use { held =>
         for {
           _ <- IO(assert(held.forall(identity)))
           _ <- Resource.make(http(Request[IO](Method.GET, Uri.unsafeFromString("/ready"))).start)(_.cancel).use { requestFiber =>
@@ -857,7 +870,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
               _ <- (requestFiber.cancel *> cancelled.complete(()).void).background.use { _ =>
                 for {
                   _ <- cancelled.get.timeout(2.seconds)
-                  recovered <- http(health)
+                  recovered <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
                   _ <- IO(assertEquals(recovered.status, Status.Ok))
                 } yield ()
               }

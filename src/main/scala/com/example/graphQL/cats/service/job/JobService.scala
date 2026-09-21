@@ -54,7 +54,7 @@ final class JobService[F[_]](
   ): F[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](authorization.canManageJobs(user), (), UseCaseError.domain(DomainError.Forbidden))
+      _ <- EitherT.cond[F](authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
       job <- EitherT.fromEither[F](validateNewJob(user.id, input, now, jobId))
       created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id))
     } yield created).value
@@ -85,8 +85,8 @@ final class JobService[F[_]](
   def viewJob(actor: ActorContext, jobId: JobId): F[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.domain(DomainError.Forbidden))
+      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
     } yield job).value
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
@@ -102,7 +102,7 @@ final class JobService[F[_]](
         user.role match {
           case UserRole.Admin => EitherT(jobs.findAll(page).map(_.widenUseCase))
           case UserRole.Recruiter => EitherT(jobs.findByRecruiter(user.id, page).map(_.widenUseCase))
-          case UserRole.Candidate => EitherT.leftT[F, List[Job]](UseCaseError.domain(DomainError.Forbidden))
+          case UserRole.Candidate => EitherT.leftT[F, List[Job]](UseCaseError.Domain(DomainError.Forbidden))
         }
       }
     } yield manageableJobs).value

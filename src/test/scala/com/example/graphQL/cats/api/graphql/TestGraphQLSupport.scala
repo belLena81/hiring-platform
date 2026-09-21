@@ -6,7 +6,7 @@ import com.example.graphQL.cats.api.http.{ClientAddressResolver, FixedWindowRate
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.service.{ActorContext, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, JobUseCases, LoginInput, SignUpInput}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
@@ -67,9 +67,11 @@ object TestGraphQLSupport {
       probe: IO[ProbeResult],
       actor: Option[ActorContext] = None,
       hiring: HiringGraphQLServices = emptyServices,
-      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready)
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
+      diagnostics: Diagnostics = Diagnostics.noop,
+      requestId: Option[String] = None
   ): Resource[IO, RequestContext] =
-    RequestContextFactory.resource.flatMap(_.resource(probe, actor, hiring, hiringReady))
+    RequestContextFactory.resource.flatMap(_.resource(probe, actor, hiring, hiringReady, diagnostics = diagnostics, requestId = requestId))
 
   def dependencies(
       hiring: HiringGraphQLServices = emptyServices,

@@ -8,10 +8,10 @@ import com.example.graphQL.cats.repository.protocol.{
   ClaimedOperationalEvent, ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository,
   OperationalEventOutboxRepository, SearchSessionRepository
 }
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.mongodb.MongoWriteException
-import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, Updates}
-import com.mongodb.reactivestreams.client.{ClientSession, MongoCollection, MongoDatabase}
+import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Updates}
+import com.mongodb.reactivestreams.client.{MongoClient, MongoDatabase}
 import org.bson.Document
 import org.bson.types.Binary
 import java.time.Instant
@@ -21,17 +21,29 @@ import java.util.UUID
 final class MongoSearchSessionRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction
-) extends SearchSessionRepository[IO] with MongoOperationalEventInsertion {
+) extends SearchSessionRepository[IO] with MongoOperationalEventInsertion with MongoConflictWriteMapping {
   private val sessions = database.getCollection("search_sessions")
   private val outbox = database.getCollection("event_outbox")
 
   override def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]] =
     transactionRunner.run { active =>
-      insertOne(active, sessions, MongoHiringCodecs.searchSession(session)).flatMap {
-        case Some(_) => insertOperationalEvents(outbox, active, List(event), session.occurredAt)
+      val document = MongoHiringCodecs.searchSession(session)
+      val filter = Filters.and(
+        Filters.eq("_id", session.id.toString),
+        Filters.eq("actorId", session.actorId.value.toString)
+      )
+      val update = new Document("$setOnInsert", document)
+      val options = new UpdateOptions().upsert(true)
+      val result = active.fold(
+        PublisherBridge.first(sessions.updateOne(filter, update, options))
+      )(clientSession => PublisherBridge.first(sessions.updateOne(clientSession, filter, update, options)))
+      result.flatMap {
+        case Some(value) if Option(value.getUpsertedId).nonEmpty =>
+          insertOperationalEvents(outbox, active, List(event), session.occurredAt)
+        case Some(_) => IO.pure(Right(()))
         case None => IO.pure(Left(RepositoryError.Unavailable))
       }
-    }.handleError(_ => Left(RepositoryError.Unavailable))
+    }.handleError(mapWrite)
 
   override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
     PublisherBridge.first(sessions.find(Filters.eq("_id", id.toString)))
@@ -48,13 +60,6 @@ final class MongoSearchSessionRepository(
         }.handleError(_ => Left(RepositoryError.Unavailable))
       case _ => IO.pure(Left(RepositoryError.Unavailable))
     }
-
-  private def insertOne(
-      session: Option[ClientSession],
-      target: MongoCollection[Document],
-      document: Document
-  ) =
-    session.fold(PublisherBridge.first(target.insertOne(document)))(active => PublisherBridge.first(target.insertOne(active, document)))
 
   private def sameEvent(document: Document, event: OperationalEventEnvelope): Boolean =
     MongoHiringCodecs.readOperationalEvent(document).toOption.exists(existing =>
@@ -276,6 +281,6 @@ object MongoSearchSessionRepository {
   def standalone(database: MongoDatabase): MongoSearchSessionRepository =
     new MongoSearchSessionRepository(database)
 
-  def transactional(database: MongoDatabase, client: com.mongodb.reactivestreams.client.MongoClient): MongoSearchSessionRepository =
+  def transactional(database: MongoDatabase, client: MongoClient): MongoSearchSessionRepository =
     new MongoSearchSessionRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict))
 }

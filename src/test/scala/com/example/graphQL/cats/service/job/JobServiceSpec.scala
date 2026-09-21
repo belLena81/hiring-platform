@@ -35,7 +35,7 @@ class JobServiceSpec extends CatsEffectSuite {
     } yield {
       assertEquals(created.map(_.recruiterId), Right(recruiterId))
       assertEquals(created.map(_.title), Right("New role"))
-      assertEquals(rejected, Left(UseCaseError.domain(DomainError.Forbidden)))
+      assertEquals(rejected, Left(UseCaseError.Domain(DomainError.Forbidden)))
     }
   }
 
@@ -52,7 +52,7 @@ class JobServiceSpec extends CatsEffectSuite {
       )
       stored <- jobs.get
     } yield {
-      assertEquals(result, Left(UseCaseError.domain(DomainError.InvalidInitialJobStatus(JobStatus.Closed))))
+      assertEquals(result, Left(UseCaseError.Domain(DomainError.InvalidInitialJobStatus(JobStatus.Closed))))
       assertEquals(stored, Map.empty)
     }
   }
@@ -82,7 +82,7 @@ class JobServiceSpec extends CatsEffectSuite {
       updated <- service.updateJob(ActorContext(recruiterId, UserRole.Recruiter), jobId, updatedInput, later)
     } yield {
       assertEquals(created.map(_.id), Right(jobId))
-      assertEquals(rejected, Left(UseCaseError.domain(DomainError.Forbidden)))
+      assertEquals(rejected, Left(UseCaseError.Domain(DomainError.Forbidden)))
       assertEquals(updated.map(_.id), Right(jobId))
     }
   }
@@ -139,7 +139,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
       service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.closeJob(ActorContext(recruiterId, UserRole.Admin), jobId, later)
-    } yield assertEquals(result, Left(UseCaseError.domain(DomainError.Forbidden)))
+    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
 
   test("stored admin without singleton marker is rejected") {
@@ -151,7 +151,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
       service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.closeJob(ActorContext(adminId, UserRole.Admin), jobId, later)
-    } yield assertEquals(result, Left(UseCaseError.authentication(AuthenticationError.SingletonAdminViolation)))
+    } yield assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
   }
 
   test("myJobs resolves stored actor before listing recruiter jobs") {
@@ -172,7 +172,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
       service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(recruiterId, UserRole.Candidate), page)
-    } yield assertEquals(result, Left(UseCaseError.domain(DomainError.Forbidden)))
+    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
 
   test("myJobs lists all manageable jobs for singleton admin") {
@@ -213,6 +213,6 @@ class JobServiceSpec extends CatsEffectSuite {
       )
       service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId)
-    } yield assertEquals(result, Left(UseCaseError.domain(DomainError.Forbidden)))
+    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
 }

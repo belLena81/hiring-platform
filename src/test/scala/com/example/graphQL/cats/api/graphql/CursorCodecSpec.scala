@@ -85,6 +85,21 @@ final class CursorCodecSpec extends FunSuite {
     assert(codec.jobCursorCodec.decode(legacy).isLeft)
   }
 
+  test("unsupported cursor versions report the received version") {
+    val versionOne = Json.obj(
+      "v" -> Json.fromInt(1),
+      "kind" -> Json.fromString("job"),
+      "createdAt" -> Json.fromString(instant.toString),
+      "occurredAt" -> Json.Null,
+      "id" -> Json.fromString(id.toString)
+    )
+
+    codec.jobCursorCodec.decode(encode(versionOne)) match {
+      case Left(CursorCodec.CursorError.Malformed(message)) => assert(message.contains("Unsupported cursor version: 1"))
+      case other => fail(s"Expected unsupported-version failure, received $other")
+    }
+  }
+
   test("old custom signed cursor envelopes do not decode") {
     val payload = Base64.getUrlEncoder.withoutPadding().encodeToString(Json.obj(
       "v" -> Json.fromInt(2),

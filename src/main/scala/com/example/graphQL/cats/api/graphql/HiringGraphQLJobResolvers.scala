@@ -29,10 +29,10 @@ private[graphql] object HiringGraphQLJobResolvers {
         (pageRequest, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
         searchId                 <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         values                   <- liftUseCase(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
-        _                        <- saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
+        _                        <- EitherT.liftF(saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
                                       _.id.value.toString,
                                       _ => 0d
-                                    )
+                                    ))
       } yield jobConnection(values, requested, cursorCodec).copy(searchId = Some(searchId.toString))
     }, graphQLErrorConnection[Job])
 
@@ -52,20 +52,17 @@ private[graphql] object HiringGraphQLJobResolvers {
 
   def createJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
-      jobInput(context.arg(createJobInputArgument), JobStatus.Open).fold(error => IO.pure(jobErrorPayload(error)), input =>
-        timestamped { (now, jobId) =>
-          hiring.jobService.createJob(actor, input, now, JobId(jobId))
-        }.map(jobPayload)
-      )
+      val input = jobInput(context.arg(createJobInputArgument), JobStatus.Open)
+      timestamped { (now, jobId) =>
+        hiring.jobService.createJob(actor, input, now, JobId(jobId))
+      }.map(jobPayload)
     }
 
   def updateJob(context: Context[RequestContext, Unit]): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
       val input = context.arg(updateJobInputArgument)
-      updateInput(input.patch).fold(
-        error => IO.pure(jobErrorPayload(error)),
-        patch => IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, input.id, patch, now).map(jobPayload))
-      )
+      val patch = updateInput(input.patch)
+      IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, input.id, patch, now).map(jobPayload))
     }
 
   def changeJob(
@@ -77,24 +74,24 @@ private[graphql] object HiringGraphQLJobResolvers {
       IO.realTimeInstant.flatMap(now => method(hiring.jobService)(actor, jobId, now).map(jobPayload))
     }
 
-  private def jobInput(input: JobGraphQLInput, status: JobStatus): Either[UseCaseError, CreateJobInput] =
-    Right(CreateJobInput(
+  private def jobInput(input: JobGraphQLInput, status: JobStatus): CreateJobInput =
+    CreateJobInput(
       input.title,
       input.description,
       input.requirements,
       input.skills.toSet,
       Location(input.country, input.city.getOrElse(""), input.remote),
       status
-    ))
+    )
 
-  private def updateInput(input: JobGraphQLInput): Either[UseCaseError, UpdateJobInput] =
-    Right(UpdateJobInput(
+  private def updateInput(input: JobGraphQLInput): UpdateJobInput =
+    UpdateJobInput(
       input.title,
       input.description,
       input.requirements,
       input.skills.toSet,
       Location(input.country, input.city.getOrElse(""), input.remote)
-    ))
+    )
 
   private def jobConnection(values: List[Job], requested: Int, cursorCodec: CursorCodec[JobCursor]): Connection[Job] =
     connection(values, requested)(job => cursorCodec.encode(JobCursor(job.createdAt, job.id)))

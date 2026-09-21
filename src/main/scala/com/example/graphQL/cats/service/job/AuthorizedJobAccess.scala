@@ -21,8 +21,8 @@ private[service] final class AuthorizedJobAccess[F[_]: Monad](
   )(operation: Job => F[Either[UseCaseError, A]]): F[Either[UseCaseError, A]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canManage(user, job), (), UseCaseError.domain(DomainError.Forbidden))
+      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- EitherT.cond[F](authorization.canManage(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
       result <- EitherT(operation(job))
     } yield result).value
 }

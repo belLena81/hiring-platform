@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{IO, Resource}
 import cats.effect.std.Dispatcher
-import com.example.graphQL.cats.service.{ActorContext, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, ProbeResult}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
@@ -31,7 +31,9 @@ final class RequestContext private (
     val actor: Option[ActorContext],
     val hiring: HiringGraphQLServices,
     tracer: Tracer[IO],
-    spanContext: Option[SpanContext]
+    spanContext: Option[SpanContext],
+    diagnostics: Diagnostics,
+    requestId: Option[String]
 ) {
   def readiness: IO[ProbeResult] = probe
 
@@ -39,6 +41,10 @@ final class RequestContext private (
 
   private[graphql] def unsafeToFuture[A](action: IO[A]) =
     dispatcher.unsafeToFuture(spanContext.fold(action)(tracer.childScope(_)(action)))
+
+  private[graphql] def reportExecutionFailure(error: Throwable): Unit =
+    try dispatcher.unsafeRunAndForget(Diagnostics.emit(diagnostics, LogEvent.RuntimeFailed, requestId, LogFields.failure(error)))
+    catch case _: Throwable => ()
 
   def users(ids: List[UserId]): IO[List[User]] =
     read(hiring.readModel.users(ids.distinct))
@@ -63,10 +69,12 @@ final class RequestContextFactory private (dispatcher: Dispatcher[IO]) {
       actor: Option[ActorContext],
       hiring: HiringGraphQLServices,
       ensureHiringReady: IO[ProbeResult],
-      tracer: Tracer[IO] = Tracer.noop[IO]
+      tracer: Tracer[IO] = Tracer.noop[IO],
+      diagnostics: Diagnostics = Diagnostics.noop,
+      requestId: Option[String] = None
   ): Resource[IO, RequestContext] =
     Resource.eval(tracer.currentSpanContext).flatMap { spanContext =>
-      RequestContext.withDispatcher(dispatcher, probe, actor, hiring, ensureHiringReady, tracer, spanContext)
+      RequestContext.withDispatcher(dispatcher, probe, actor, hiring, ensureHiringReady, tracer, spanContext, diagnostics, requestId)
     }
 }
 
@@ -85,11 +93,13 @@ object RequestContext {
       hiring: HiringGraphQLServices,
       ensureHiringReady: IO[ProbeResult],
       tracer: Tracer[IO],
-      spanContext: Option[SpanContext]
+      spanContext: Option[SpanContext],
+      diagnostics: Diagnostics,
+      requestId: Option[String]
   ): Resource[IO, RequestContext] =
     for {
       memoized <- Resource.eval(probe.memoize)
       memoizedHiringReady <- Resource.eval(ensureHiringReady.memoize)
-      context <- Resource.eval(IO(new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, hiring, tracer, spanContext)))
+      context <- Resource.eval(IO(new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, hiring, tracer, spanContext, diagnostics, requestId)))
     } yield context
 }

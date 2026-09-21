@@ -9,13 +9,13 @@ import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, Use
 
 final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
   def resolve(actor: ActorContext, allowDeleted: Boolean = false): F[Either[UseCaseError, User]] =
-    users.find(actor.userId).map(_.leftMap(UseCaseError.repository).flatMap {
-      case None => UseCaseError.authentication(AuthenticationError.Unauthorized).asLeft[User]
+    users.find(actor.userId).map(_.leftMap(UseCaseError.Repository.apply).flatMap {
+      case None => UseCaseError.Authentication(AuthenticationError.Unauthorized).asLeft[User]
       case Some(user) if user.accountStatus != AccountStatus.Active && !allowDeleted =>
-        UseCaseError.authentication(AuthenticationError.Unauthorized).asLeft[User]
-      case Some(user) if user.role != actor.role => UseCaseError.domain(DomainError.Forbidden).asLeft[User]
+        UseCaseError.Authentication(AuthenticationError.Unauthorized).asLeft[User]
+      case Some(user) if user.role != actor.role => UseCaseError.Domain(DomainError.Forbidden).asLeft[User]
       case Some(user) if user.role == UserRole.Admin && !user.adminSingleton =>
-        UseCaseError.authentication(AuthenticationError.SingletonAdminViolation).asLeft[User]
+        UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation).asLeft[User]
       case Some(user) => user.asRight[UseCaseError]
     })
 

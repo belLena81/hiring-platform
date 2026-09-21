@@ -2,8 +2,8 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
-import com.example.graphQL.cats.service.{ActorContext, HealthService, ProbeResult}
-import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, ProbeResult, UseCaseError}
 import io.circe.Json
 import org.typelevel.otel4s.trace.Tracer
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
@@ -27,9 +27,10 @@ object HiringGraphQLSchema {
       hiring: HiringGraphQLServices,
       ensureHiringReady: IO[ProbeResult],
       contextFactory: RequestContextFactory,
-      tracer: Tracer[IO] = Tracer.noop[IO]
+      tracer: Tracer[IO] = Tracer.noop[IO],
+      diagnostics: Diagnostics = Diagnostics.noop
   ): IO[Either[Failure, Json]] =
-    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, tracer).use { context =>
+    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, tracer, diagnostics, Some(requestId)).use { context =>
       executeInContext(request, context)
     }
 
@@ -46,7 +47,9 @@ object HiringGraphQLSchema {
           case (_, error: QueryComplexityExceeded) => throw error
           case (_, RequestContext.ReadFailure(UseCaseError.Repository(RepositoryError.Unavailable))) =>
             HandledException("Repository unavailable")
-          case (_, _) => HandledException("Execution failed")
+          case (_, error) =>
+            context.reportExecutionFailure(error)
+            HandledException("Execution failed")
         },
         queryReducers = HiringGraphQLSchemaAssembly.queryReducers,
         deferredResolver = HiringGraphQLSchemaAssembly.deferredResolver,
