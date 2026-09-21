@@ -63,7 +63,7 @@ object MongoDatabaseProbe {
           val fields = metadata ++ failure ++ Map(LogField.DurationMs -> elapsed.toMillis.toString,
             LogField.Outcome -> "NOT_READY")
           (if (result == ProbeResult.Ready) IO.unit
-          else Diagnostics.emit(diagnostics, LogEvent.MongoProbeFailed, requestId, fields)).as(result)
+          else diagnostics.emit(LogEvent.MongoProbeFailed, requestId, fields = fields)).as(result)
         }
   }
 }

@@ -40,7 +40,7 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
             assertEquals(body.hcursor.get[String]("status"), Right("NOT_READY"))
             assert(id.nonEmpty)
             assert(captured.filterNot { case (event, _, _) => event match {
-              case LogEvent.SpanParameters | LogEvent.SpanStarted | LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
+              case LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
               case _ => false
             }}.forall(_._2 == id))
             assertEquals(serviceRecords.size, 1)
@@ -55,7 +55,6 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
             assert(adapterRecords.size <= 1)
             assert(adapterRecords.forall(_._3.get(LogField.Reason)
               .exists(Set("PROBE_TIMEOUT", "DATABASE_TIMEOUT", "DATABASE_NETWORK").contains)))
-            assert(captured.filter(_._1 == LogEvent.RequestCompleted).map(_._3.get(LogField.Status)) == Vector(Some("503")))
             assert(elapsed < 4.seconds, clues(elapsed))
           }
         }

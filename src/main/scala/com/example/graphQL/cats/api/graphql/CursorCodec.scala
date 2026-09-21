@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.syntax.all.*
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
@@ -12,7 +13,6 @@ import java.util.{Base64, UUID}
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import pdi.jwt.{JwtAlgorithm, JwtCirce}
-import scala.util.Try
 
 private[cats] trait CursorCodec[A] {
   def encode(value: A): String
@@ -121,13 +121,13 @@ private[cats] object CursorCodec {
   private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
 
   private given Decoder[Instant] = Decoder.decodeString.emap { raw =>
-    Try(Instant.parse(raw)).toEither.left.map(_ => "Invalid cursor timestamp")
+    Either.catchNonFatal(Instant.parse(raw)).left.map(_ => "Invalid cursor timestamp")
   }
 
   private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
 
   private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
-    Try(UUID.fromString(raw)).toEither.left.map(_ => "Invalid cursor id")
+    Either.catchNonFatal(UUID.fromString(raw)).left.map(_ => "Invalid cursor id")
   }
 
   private given Encoder[Cursor] = deriveEncoder[Cursor]

@@ -2,16 +2,16 @@
 
 Application diagnostics are single-line JSON records in `_logs/hiring-platform.log` at the project root. The packaged [logback.xml](../src/main/resources/logback.xml) is the only severity filter: it defaults to `INFO`, writes synchronously, rolls at 20 MiB, and retains ten previous `.log` files. To investigate an incident with `DEBUG` or `TRACE`, change the packaged logger level, rebuild, and redeploy. There is no application `LOG_LEVEL` setting and no live reload.
 
-The application uses log4cats `StructuredLogger` for structured fields and otel4s for tracing. HTTP requests retain their generated `requestId`; trace and span identifiers are owned by OpenTelemetry and are exported through the configured OTLP exporter when tracing is enabled. Span start/success/failure/cancellation is recorded by the tracer, not by synthetic application log events.
+The application uses log4cats `StructuredLogger` for structured fields and otel4s for tracing. The active OpenTelemetry trace ID is the request correlation ID and is returned as the `X-Request-ID` compatibility alias. HTTP server spans, W3C propagation, active-request metrics and duration metrics are owned by the http4s otel4s middleware. Application diagnostics retain bounded rejection, GraphQL, readiness and child-operation records without synthetic HTTP completion/cancellation events.
 
 ```bash
 rg '"requestId":"YOUR-RESPONSE-REQUEST-ID"' _logs/hiring-platform.log
-rg 'http.request|voyage.embeddings' _logs/hiring-platform.log
+rg 'traceId|voyage.embeddings' _logs/hiring-platform.log
 ```
 
 ## Tracing
 
-Tracing is initialized through the OpenTelemetry Java SDK's standard environment configuration, including `OTEL_SDK_DISABLED`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_TRACES_EXPORTER`. Disable the SDK with `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none`; the application does not duplicate those controls. Cats Effect fiber-context propagation is enabled before initializing otel4s, so no additional JVM property is required. Incoming W3C `traceparent` headers are joined, and child spans propagate through the http4s request boundary. Mongo/HTTP readiness does not depend on a collector being available.
+Tracing is initialized through the OpenTelemetry Java SDK's standard environment configuration, including `OTEL_SDK_DISABLED`, `OTEL_SERVICE_NAME`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_TRACES_EXPORTER`. Disable the SDK with `OTEL_SDK_DISABLED=true` or `OTEL_TRACES_EXPORTER=none`; the application does not duplicate those controls. Cats Effect fiber-context propagation is enabled before initializing otel4s, so no additional JVM property is required. Incoming W3C `traceparent` headers are joined by `ServerMiddleware`, and response propagation is owned by the same middleware. Child spans and application diagnostics share the server trace ID. Mongo/HTTP readiness does not depend on a collector being available.
 
 ## Disclosure policy
 

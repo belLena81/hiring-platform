@@ -9,7 +9,6 @@ import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant
-import java.util.UUID
 import scala.concurrent.duration.*
 
 enum EmbeddingWork {
@@ -103,12 +102,12 @@ final class EmbeddingPipeline(
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
     claim.key.kind match {
       case EmbeddingWorkKind.Job =>
-        scala.util.Try(JobId(UUID.fromString(claim.key.entityId))).toEither.fold(
+        com.example.graphQL.cats.shared.Parsing.parseUuid(claim.key.entityId).map(JobId(_)).fold(
           _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
           processJob
         )
       case EmbeddingWorkKind.CandidateProfile =>
-        scala.util.Try(UserId(UUID.fromString(claim.key.entityId))).toEither.fold(
+        com.example.graphQL.cats.shared.Parsing.parseUuid(claim.key.entityId).map(UserId(_)).fold(
           _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
           processCandidate
         )

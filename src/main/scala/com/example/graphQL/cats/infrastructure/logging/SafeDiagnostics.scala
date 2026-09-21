@@ -26,7 +26,7 @@ object SafeDiagnostics {
       }
       diagnostics
     }.flatTap { diagnostics =>
-      if (maskSensitive) IO.unit else Diagnostics.emit(diagnostics, LogEvent.LocalUnmasked)
+      if (maskSensitive) IO.unit else diagnostics.emit(LogEvent.LocalUnmasked)
     }
 
   def apply(maskSensitive: Boolean = true): Diagnostics = {
@@ -125,7 +125,7 @@ object SafeDiagnostics {
       isEnabled(event.level).flatMap { enabled =>
       if (!enabled) IO.unit
       else IO.realTimeInstant.flatMap { timestamp =>
-        val safeId = requestId.filter(isUuid)
+        val safeId = requestId.filter(isCorrelationId)
         val details = fields.toList.sortBy(_._1.ordinal).take(12).map { case (field, value) =>
           val rendered =
             if (field.sensitive && maskSensitive) "[REDACTED]"
@@ -153,6 +153,7 @@ object SafeDiagnostics {
     }.handleError(_ => ())
   }
 
-  private def isUuid(value: String): Boolean =
-    value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+  private def isCorrelationId(value: String): Boolean =
+    value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}") ||
+      value.matches("[0-9a-fA-F]{32}")
 }

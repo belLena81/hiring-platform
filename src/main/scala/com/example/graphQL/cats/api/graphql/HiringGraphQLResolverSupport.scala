@@ -9,6 +9,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, SearchError, UseCaseError}
+import com.example.graphQL.cats.shared.Parsing.parseUuid
 import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.JobSearchFilter
@@ -19,7 +20,6 @@ import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import scala.concurrent.duration.*
-import scala.util.Try
 
 private[graphql] object HiringGraphQLResolverSupport {
   def liftUseCase[A](value: IO[Either[UseCaseError, A]]): GraphQLStep[A] =
@@ -30,7 +30,7 @@ private[graphql] object HiringGraphQLResolverSupport {
 
   def searchIdValue(value: Option[String]): IO[Either[GraphQLError, UUID]] =
     value match {
-      case Some(raw) => IO.pure(Try(UUID.fromString(raw)).toEither.leftMap(_ => GraphQLError("INVALID_ID", "Invalid UUID")))
+      case Some(raw) => IO.pure(parseUuid(raw).left.map(_ => GraphQLError("INVALID_ID", "Invalid UUID")))
       case None => IO.randomUUID.map(Right(_))
     }
 
@@ -113,14 +113,14 @@ private[graphql] object HiringGraphQLResolverSupport {
       first: Int,
       after: Option[String],
       decode: String => Either[CursorCodec.CursorError, JobCursor]
-  ): IO[Either[GraphQLError, (JobPageRequest, Int)]] =
+  ): Either[GraphQLError, (JobPageRequest, Int)] =
     cursorPage(first, after, decode)((cursor, size) => JobPageRequest(None, cursor, size))
 
   def pageEvent(
       first: Int,
       after: Option[String],
       cursorCodec: CursorCodec[ApplicationEventCursor]
-  ): IO[Either[GraphQLError, (ApplicationEventPageRequest, Int)]] =
+  ): Either[GraphQLError, (ApplicationEventPageRequest, Int)] =
     cursorPage(first, after, cursorCodec.decode)((cursor, size) => ApplicationEventPageRequest(cursor, size))
 
   def applicationPage(
@@ -128,7 +128,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       after: Option[String],
       status: Option[ApplicationStatus],
       cursorCodec: CursorCodec[ApplicationCursor]
-  ): IO[Either[GraphQLError, (ApplicationPageRequest, Int)]] =
+  ): Either[GraphQLError, (ApplicationPageRequest, Int)] =
     cursorPage(first, after, cursorCodec.decode)((cursor, size) => ApplicationPageRequest(status, cursor, size))
 
   def userPage(
@@ -137,7 +137,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       status: AccountStatus,
       role: Option[UserRole],
       cursorCodec: CursorCodec[UserCursor]
-  ): IO[Either[GraphQLError, (UserPageRequest, Int)]] =
+  ): Either[GraphQLError, (UserPageRequest, Int)] =
     cursorPage(first, after, cursorCodec.decode)((cursor, size) => UserPageRequest(status, role, cursor, size))
 
   def connection[A](values: List[A], requested: Int)(cursor: A => String): Connection[A] = {
@@ -202,18 +202,18 @@ private[graphql] object HiringGraphQLResolverSupport {
       first: Int,
       after: Option[String],
       decode: String => Either[CursorCodec.CursorError, A]
-  )(build: (Option[A], PageSize) => B): IO[Either[GraphQLError, (B, Int)]] =
-    pageSize(first).map(_.flatMap { size =>
+  )(build: (Option[A], PageSize) => B): Either[GraphQLError, (B, Int)] =
+    pageSize(first).flatMap { size =>
       after.traverse(decode)
         .leftMap {
           case CursorCodec.CursorError.WrongKind(_) => GraphQLError("WRONG_CURSOR_KIND", "Cursor belongs to a different connection")
           case CursorCodec.CursorError.Malformed(_) => GraphQLError("INVALID_CURSOR", "Invalid cursor")
         }
         .map(cursor => build(cursor, PageSize.next(size)) -> size.value)
-    })
+    }
 
-  def pageSize(first: Int): IO[Either[GraphQLError, PageSize]] =
-    IO.pure(PageSize.fromInt(first).toEither.leftMap(errors => toGraphQLError(UseCaseError.ValidationFailed(errors))))
+  def pageSize(first: Int): Either[GraphQLError, PageSize] =
+    PageSize.fromInt(first).toEither.leftMap(errors => toGraphQLError(UseCaseError.ValidationFailed(errors)))
 
   private def validationErrorMessage(error: DomainValidationError): String =
     error match {

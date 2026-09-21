@@ -7,7 +7,6 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import sangria.schema.Context
 import java.util.UUID
-import scala.util.Try
 
 private[graphql] object HiringGraphQLInteractionResolvers {
   def recordJobView(context: Context[RequestContext, Unit]): IO[InteractionPayload] =
@@ -16,10 +15,12 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       parseUuid(input.eventId).flatMap(eventId => input.searchId.traverse(parseUuid).map(eventId -> _)) match {
         case Left(error) => IO.pure(InteractionPayload(false, List(error)))
         case Right((eventId, searchId)) =>
-          IO.realTimeInstant.flatMap(now =>
-            hiring.interactionService.recordJobView(actor, eventId, input.jobId, searchId, now)
-              .map(_.fold(error => InteractionPayload(false, List(toGraphQLError(error))), _ => InteractionPayload(true, Nil)))
-          )
+          hiring.interactionService.fold(IO.pure(InteractionPayload(true, Nil))) { interaction =>
+            IO.realTimeInstant.flatMap(now =>
+              interaction.recordJobView(actor, eventId, input.jobId, searchId, now)
+                .map(_.fold(error => InteractionPayload(false, List(toGraphQLError(error))), _ => InteractionPayload(true, Nil)))
+            )
+          }
       }
     }
 
@@ -29,13 +30,15 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       (parseUuid(input.eventId), parseUuid(input.searchId)).mapN(_ -> _) match {
         case Left(error) => IO.pure(InteractionPayload(false, List(error)))
         case Right((eventId, searchId)) =>
-          IO.realTimeInstant.flatMap(now =>
-            hiring.interactionService.recordSearchResultClick(actor, eventId, searchId, input.resultId, now)
-              .map(_.fold(error => InteractionPayload(false, List(toGraphQLError(error))), _ => InteractionPayload(true, Nil)))
-          )
+          hiring.interactionService.fold(IO.pure(InteractionPayload(true, Nil))) { interaction =>
+            IO.realTimeInstant.flatMap(now =>
+              interaction.recordSearchResultClick(actor, eventId, searchId, input.resultId, now)
+                .map(_.fold(error => InteractionPayload(false, List(toGraphQLError(error))), _ => InteractionPayload(true, Nil)))
+            )
+          }
       }
     }
 
   private def parseUuid(value: String): Either[GraphQLError, UUID] =
-    Try(UUID.fromString(value)).toEither.left.map(_ => GraphQLError("INVALID_ID", "Invalid UUID"))
+    parseUuid(value).left.map(_ => GraphQLError("INVALID_ID", "Invalid UUID"))
 }

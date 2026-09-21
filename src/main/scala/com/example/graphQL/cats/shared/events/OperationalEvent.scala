@@ -9,7 +9,7 @@ import io.circe.parser.parse
 import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
-import scala.util.Try
+import com.example.graphQL.cats.shared.Parsing.parseUuid
 
 enum OperationalEventType {
   case JOB_CREATED, JOB_UPDATED, JOB_CLOSED, JOB_VIEWED, SEARCH_PERFORMED, SEARCH_RESULT_CLICKED,
@@ -45,13 +45,13 @@ object OperationalEventJson {
   private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
 
   private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
-    Try(UUID.fromString(raw)).toEither.left.map(_ => "invalid UUID")
+    parseUuid(raw).left.map(_ => "invalid UUID")
   }
 
   private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
 
   private given Decoder[Instant] = Decoder.decodeString.emap { raw =>
-    Try(Instant.parse(raw)).toEither.left.map(_ => "invalid timestamp")
+    Either.catchNonFatal(Instant.parse(raw)).left.map(_ => "invalid timestamp")
   }
 
   private given Encoder[OperationalEventType] = Encoder.encodeString.contramap(_.toString)
@@ -69,7 +69,7 @@ object OperationalEventJson {
   private given Encoder[UserId] = Encoder.encodeString.contramap(_.value.toString)
 
   private given Decoder[UserId] = Decoder.decodeString.emap { raw =>
-    Try(UUID.fromString(raw)).toEither.left.map(_ => "invalid actorId").map(UserId(_))
+    parseUuid(raw).left.map(_ => "invalid actorId").map(UserId(_))
   }
 
   private given Encoder[OperationalEventEnvelope] = deriveEncoder

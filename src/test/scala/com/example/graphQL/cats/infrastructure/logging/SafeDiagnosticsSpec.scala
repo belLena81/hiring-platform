@@ -15,7 +15,7 @@ import scala.jdk.CollectionConverters.*
 class SafeDiagnosticsSpec extends CatsEffectSuite {
   test("LOG-01 disabled levels do not evaluate structured field thunks") {
     val evaluated = new AtomicBoolean(false)
-    SafeDiagnostics().event(LogEvent.SpanStarted, fields = {
+    SafeDiagnostics().event(LogEvent.SpanSucceeded, fields = {
       evaluated.set(true)
       Map(LogField.SpanName -> "startup")
     }).as(assert(!evaluated.get()))

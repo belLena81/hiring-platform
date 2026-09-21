@@ -18,13 +18,9 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case RuntimeFailed extends LogEvent("RUNTIME_FAILED", "RUNTIME", "Unhandled runtime failure", LogLevel.Error)
   case Started extends LogEvent("STARTED", "RUNTIME", "Application listening for requests", LogLevel.Info)
   case Shutdown extends LogEvent("SHUTDOWN", "RUNTIME", "Application resources released", LogLevel.Info)
-  case RequestCompleted extends LogEvent("REQUEST_COMPLETED", "HTTP", "Application response created", LogLevel.Info)
-  case RequestCancelled extends LogEvent("REQUEST_CANCELLED", "HTTP", "Request cancelled; cleanup finished", LogLevel.Info)
   case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", LogLevel.Info)
   case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", LogLevel.Warn)
   case LocalUnmasked extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
-  case SpanParameters extends LogEvent("SPAN_PARAMETERS", "TRACE", "Execution span parameters captured", LogLevel.Debug)
-  case SpanStarted extends LogEvent("SPAN_STARTED", "TRACE", "Execution span started", LogLevel.Trace)
   case SpanSucceeded extends LogEvent("SPAN_SUCCEEDED", "TRACE", "Execution span succeeded", LogLevel.Trace)
   case SpanFailed extends LogEvent("SPAN_FAILED", "TRACE", "Execution span failed", LogLevel.Trace)
   case SpanCancelled extends LogEvent("SPAN_CANCELLED", "TRACE", "Execution span cancelled", LogLevel.Trace)
@@ -65,13 +61,7 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
 }
 
 object LogFields {
-  val reasons: Set[String] = Set(
-    "INVALID_REQUEST", "INVALID_QUERY", "UNSUPPORTED_MEDIA", "NOT_ACCEPTABLE", "PAYLOAD_TOO_LARGE",
-    "OVERLOADED", "DEADLINE_EXCEEDED", "INTERNAL_ERROR", "METHOD_NOT_ALLOWED", "NOT_FOUND",
-    "AUTHENTICATION_FAILED", "RATE_LIMITED", "DATABASE_UNAVAILABLE", "DATABASE_TIMEOUT", "DATABASE_NETWORK",
-    "DATABASE_ERROR", "EMPTY_RESULT", "CANCELLED", "PROBE_TIMEOUT", "CONFIG_INVALID", "BIND_FAILED",
-    "STARTUP_FAILED", "RUNTIME_FAILED", "OPERATION_COMPLETED"
-  )
+  val reasons: Set[String] = Rejection.values.map(_.reason).toSet
 
   private val errorTypes = Set(
     "java.net.BindException", "java.net.ConnectException", "java.net.SocketTimeoutException",
@@ -82,7 +72,7 @@ object LogFields {
   )
   private val Root = "com.example.graphQL.cats."
 
-  def failure(error: Throwable): Map[LogField, String] = scala.util.Try {
+  def failure(error: Throwable): Map[LogField, String] = {
     val errorType = error.getClass.getName
     val location = error.getStackTrace.iterator.take(32)
       .find(frame => frame.getClassName.startsWith(Root))
@@ -90,7 +80,7 @@ object LogFields {
       .fold("unavailable")(frame => s"${frame.getFileName}:${frame.getLineNumber}")
     Map(LogField.ErrorType -> (if (errorTypes.contains(errorType)) errorType else "OtherException"),
       LogField.ErrorLocation -> location)
-  }.getOrElse(Map(LogField.ErrorType -> "OtherException", LogField.ErrorLocation -> "unavailable"))
+  }
 
   def validPublic(field: LogField, value: String): Boolean = field match {
     case LogField.Method => Set("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER").contains(value)
@@ -100,14 +90,7 @@ object LogFields {
     case LogField.HttpPort => value.toIntOption.exists(port => port >= 1 && port <= 65535)
     case LogField.Reason => reasons.contains(value)
     case LogField.Outcome => Set("COMPLETED", "REJECTED", "CANCELLED", "FIELD_ERROR", "READY", "NOT_READY").contains(value)
-    case LogField.ConfigKey => Set(
-      "CONFIG_FILE", "HTTP_HOST", "HTTP_PORT", "HTTP_ADMISSION_PERMITS", "MONGODB_URI", "MONGODB_DATABASE",
-      "LOG_MASK_SENSITIVE", "AUTH_JWT_HS256_SECRET", "AUTH_JWT_ISSUER",
-      "AUTH_JWT_AUDIENCE", "VECTOR_SEARCH_ENABLED", "VOYAGE_API_KEY", "VOYAGE_ENDPOINT",
-      "VOYAGE_MODEL", "VOYAGE_DIMENSION", "EMBEDDING_VERSION", "EMBEDDING_QUEUE_SIZE",
-      "EMBEDDING_PARALLELISM", "EMBEDDING_TIMEOUT_MS", "JOB_VECTOR_INDEX",
-      "CANDIDATE_VECTOR_INDEX", "VECTOR_NUM_CANDIDATES"
-    ).contains(value)
+    case LogField.ConfigKey => com.example.graphQL.cats.config.ConfigError.publicKeys.contains(value)
     case LogField.ErrorType => errorTypes.contains(value) || value == "OtherException"
     case LogField.ErrorLocation => value == "unavailable" || value.matches("[A-Za-z]+\\.scala:[1-9][0-9]{0,5}")
     case LogField.Environment => Set("local", "production").contains(value)
@@ -132,12 +115,13 @@ object Diagnostics {
     def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO.unit
   }
 
-  def emit(diagnostics: Diagnostics, event: LogEvent, requestId: Option[String] = None,
-      fields: Map[LogField, String] = Map.empty): IO[Unit] =
-    IO.defer(diagnostics.event(event, requestId, fields)).handleError(_ => ())
+  extension (diagnostics: Diagnostics)
+    def emit(event: LogEvent, requestId: Option[String] = None,
+        fields: => Map[LogField, String] = Map.empty): IO[Unit] =
+      IO.defer(diagnostics.event(event, requestId, fields)).handleError(_ => ())
 
   /** Emits a complete lifecycle for an effect without changing its cancellation semantics. */
-  def spanWith[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty,
+  def spanWith[A](diagnostics: Diagnostics, name: String, fields: => Map[LogField, String] = Map.empty,
       requestId: Option[String] = None)(
       action: IO[A]
   )(using tracer: Tracer[IO]): IO[A] =
@@ -149,18 +133,17 @@ object Diagnostics {
           LogField.SpanId -> context.spanIdHex
         )
       }).flatMap { base =>
-        emit(diagnostics, LogEvent.SpanParameters, requestId, base) *>
-          emit(diagnostics, LogEvent.SpanStarted, requestId, base) *>
-          IO.monotonic.flatMap { started =>
-            def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
-              emit(diagnostics, event, requestId, base + (LogField.DurationMs -> (now - started).toMillis.toString))
-            }
-            action.guaranteeCase {
-              case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
-              case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
-              case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)
-            }
+        IO.monotonic.flatMap { started =>
+          def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
+            diagnostics.emit(event, requestId,
+              fields = base + (LogField.DurationMs -> (now - started).toMillis.toString))
           }
+          action.guaranteeCase {
+            case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
+            case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
+            case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)
+          }
+        }
       }
     }
 

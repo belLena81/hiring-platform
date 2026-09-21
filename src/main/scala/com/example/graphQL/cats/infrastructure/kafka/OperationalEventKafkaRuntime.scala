@@ -227,7 +227,7 @@ object OperationalEventKafkaRuntime {
       retryingOnErrors(stream.compile.drain)(
         policy = RetryPolicies.fullJitter[IO](baseDelay),
         errorHandler = (error, _) =>
-          Diagnostics.emit(diagnostics, LogEvent.RuntimeFailed, fields = LogFields.failure(error)).as(HandlerDecision.Continue)
+          diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)).as(HandlerDecision.Continue)
       )
     )
 

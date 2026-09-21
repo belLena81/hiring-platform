@@ -1,0 +1,28 @@
+package com.example.graphQL.cats.service
+
+enum Rejection(val reason: String) {
+  case InvalidRequest extends Rejection("INVALID_REQUEST")
+  case InvalidQuery extends Rejection("INVALID_QUERY")
+  case UnsupportedMedia extends Rejection("UNSUPPORTED_MEDIA")
+  case NotAcceptable extends Rejection("NOT_ACCEPTABLE")
+  case PayloadTooLarge extends Rejection("PAYLOAD_TOO_LARGE")
+  case Overloaded extends Rejection("OVERLOADED")
+  case DeadlineExceeded extends Rejection("DEADLINE_EXCEEDED")
+  case InternalError extends Rejection("INTERNAL_ERROR")
+  case MethodNotAllowed extends Rejection("METHOD_NOT_ALLOWED")
+  case NotFound extends Rejection("NOT_FOUND")
+  case AuthenticationFailed extends Rejection("AUTHENTICATION_FAILED")
+  case RateLimited extends Rejection("RATE_LIMITED")
+  case DatabaseUnavailable extends Rejection("DATABASE_UNAVAILABLE")
+  case DatabaseTimeout extends Rejection("DATABASE_TIMEOUT")
+  case DatabaseNetwork extends Rejection("DATABASE_NETWORK")
+  case DatabaseError extends Rejection("DATABASE_ERROR")
+  case EmptyResult extends Rejection("EMPTY_RESULT")
+  case Cancelled extends Rejection("CANCELLED")
+  case ProbeTimeout extends Rejection("PROBE_TIMEOUT")
+  case ConfigInvalid extends Rejection("CONFIG_INVALID")
+  case BindFailed extends Rejection("BIND_FAILED")
+  case StartupFailed extends Rejection("STARTUP_FAILED")
+  case RuntimeFailed extends Rejection("RUNTIME_FAILED")
+  case OperationCompleted extends Rejection("OPERATION_COMPLETED")
+}

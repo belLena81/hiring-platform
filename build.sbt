@@ -8,6 +8,7 @@ lazy val fs2KafkaVersion       = "3.9.1"
 lazy val kafkaClientsVersion   = "4.3.1"
 lazy val http4sVersion         = "0.23.37"
 lazy val otel4sVersion         = "1.1.0"
+lazy val http4sOtelMiddlewareVersion = "0.19.0"
 lazy val opentelemetryVersion  = "1.66.0"
 lazy val jwtScalaVersion       = "11.0.4"
 lazy val argon2Version         = "2.12"
@@ -57,6 +58,8 @@ lazy val root = (project in file("."))
       "org.http4s"          %% "http4s-ember-client"    % http4sVersion,
       "org.http4s"          %% "http4s-ember-server"    % http4sVersion,
       "org.http4s"          %% "http4s-circe"           % http4sVersion,
+      "org.http4s"          %% "http4s-otel4s-middleware-trace-server" % http4sOtelMiddlewareVersion,
+      "org.http4s"          %% "http4s-otel4s-middleware-metrics" % http4sOtelMiddlewareVersion,
       "org.typelevel"       %% "otel4s-oteljava"        % otel4sVersion,
       "org.typelevel"       %% "otel4s-oteljava-context-storage" % otel4sVersion,
       "io.opentelemetry"    % "opentelemetry-exporter-otlp" % opentelemetryVersion % Runtime,

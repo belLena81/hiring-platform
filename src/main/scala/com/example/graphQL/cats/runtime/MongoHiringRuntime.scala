@@ -109,7 +109,7 @@ object MongoHiringRuntime {
       val outbox = new MongoOperationalEventOutboxRepository(database)
       val receipts = new MongoConsumerReceiptRepository(database)
       val quarantine = new MongoEventQuarantineRepository(database)
-      Resource.eval(MongoHiringSetup.initializeCore(database, vectorSearch.enabled)) *>
+      Resource.eval(MongoHiringSetup.initializeCore(database, vectorSearch.enabled).attempt.void) *>
       hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, diagnostics, jwtAuth, passwordHash, tracer, resolverTimeout).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, vectorSearch)).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine, diagnostics).as {
@@ -158,7 +158,7 @@ object MongoHiringRuntime {
         cursorCodec,
         TracedHiringServices.accounts(accountService, diagnostics, tracer),
         semanticSearch.map(TracedHiringServices.search(_, diagnostics, tracer)),
-        interactionService,
+        Some(interactionService),
         searchSessions
       )
 

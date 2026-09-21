@@ -17,7 +17,7 @@ When masking is disabled, only an explicit approved field set is revealed: UUID 
 ## Source facts and implementation boundary
 
 - `SafeDiagnostics` remains the compatibility sanitizer for legacy public log fields; application log emission is delegated to log4cats.
-- `HiringApiRoutes` joins an incoming W3C `traceparent` or creates an OpenTelemetry root; the response request ID remains separate correlation data. otel4s owns span IDs and lifecycle finalization. Mongo publisher bridge, http4s concurrency middleware, setup, and embedding pipeline remain concurrency boundaries.
+- http4s otel4s `ServerMiddleware` joins an incoming W3C `traceparent` or creates the server span, owns span lifecycle and response propagation, and exposes the active trace ID as the response correlation alias. OTel-backed http4s metrics own active-request and duration measurement. Mongo publisher bridge, http4s concurrency middleware, setup, and embedding pipeline remain concurrency boundaries.
 - The domain remains pure and does not receive a tracing dependency. Instrumentation belongs in transport, service/repository decorators, and infrastructure adapters.
 
 ## Acceptance and evidence
@@ -25,7 +25,7 @@ When masking is disabled, only an explicit approved field set is revealed: UUID 
 | ID | Given / When / Then | Implementation and test paths | Verification | Actual outcome |
 |---|---|---|---|---|
 | ETR-01 | Given packaged Logback defaults to INFO, when DEBUG/TRACE calls exist, then they are suppressed by XML rather than application configuration and matching SLF4J levels are used when enabled. | Pending implementation | Focused logging tests | Not run |
-| ETR-02 | Given an HTTP GraphQL request, when it crosses resolver, service, repository, and Mongo boundaries, then spans share an OpenTelemetry trace ID with parent relationships. | `HiringApiRoutes`, `HiringGraphQLSchema`, `RequestContext`, and `TracedHiringServices`; `TracePropagationSpec` | Focused HTTP-to-job-service parent test | Partial: account and Mongo boundary coverage remain pending |
+| ETR-02 | Given an HTTP GraphQL request, when it crosses resolver, service, repository, and Mongo boundaries, then spans share the middleware-owned OpenTelemetry trace ID with parent relationships. | `ServerMiddleware`, `HiringApiRoutes`, `HiringGraphQLSchema`, `RequestContext`, and `TracedHiringServices`; `TracePropagationSpec` | Focused HTTP-to-job-service parent test | Partial: account and Mongo boundary coverage remain pending |
 | ETR-03 | Given concurrent resolvers, cancellation, HTTP concurrency middleware, setup, or embedding work, when trace is enabled, then lifecycle outcomes are observable without changing ownership or cleanup. | Pending implementation | Focused concurrency/cancellation tests | Not run |
 | ETR-04 | Given masking is enabled or disabled, when approved and forbidden values are submitted, then only approved values may be revealed and forbidden data never appears. | Pending implementation | Adversarial renderer/config tests | Not run |
 | ETR-05 | Given an unmasked production configuration, when the application destination is not a restrictive rolling file, then startup fails safely; valid rolling configuration retains ten 20 MiB files. | Pending implementation | Process/config/logging tests | Not run |

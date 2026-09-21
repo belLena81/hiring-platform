@@ -1,23 +1,27 @@
 package com.example.graphQL.cats.api.auth
 
 import cats.effect.{Clock as EffectClock, IO}
+import cats.data.Kleisli
 import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
+import com.example.graphQL.cats.shared.Parsing.parseUuid
 import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import org.http4s.Request
 import org.http4s.{AuthScheme, Credentials}
 import org.http4s.headers.Authorization
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtOptions}
-import scala.util.Try
 
 enum AuthFailure {
   case MalformedCredentials, InvalidToken, UnknownActor, Unavailable
 }
 
 final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
+  def authenticate: Kleisli[IO, Request[IO], Either[AuthFailure, Option[ActorContext]]] =
+    Kleisli(authenticateDetailed)
+
   def authenticateDetailed(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
     bearerToken(request) match {
       case Right(None) => IO.pure(Right(None))
@@ -68,5 +72,5 @@ object JwtActorAuthenticator {
       .toOption
       .filter(_.isValid(issuer, audience))
       .flatMap(_.subject)
-      .flatMap(subject => Try(java.util.UUID.fromString(subject)).toOption.map(UserId(_)))
+      .flatMap(subject => parseUuid(subject).toOption.map(UserId(_)))
 }

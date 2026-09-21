@@ -9,7 +9,6 @@ import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFie
 import com.example.graphQL.cats.config.{AppConfig, ConfigError}
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
-import org.typelevel.log4cats.slf4j.Slf4jLogger
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
 import scala.util.control.NoStackTrace
 
@@ -20,8 +19,9 @@ object Main extends IOApp {
       extends RuntimeException with NoStackTrace
 
   override protected def reportFailure(error: Throwable): IO[Unit] =
-    val logger = Slf4jLogger.getLoggerFromName[IO]("hiring.foundation")
-    logger.error(Map("errorType" -> error.getClass.getName))("Unhandled runtime failure")
+    SafeDiagnostics.configure().flatMap { diagnostics =>
+      diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+    }
 
   private def program: Resource[IO, Unit] = for {
     telemetry <- TelemetryRuntime.resource
@@ -35,7 +35,7 @@ object Main extends IOApp {
     contextFactory <- RequestContextFactory.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
     authenticate = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
-      .authenticateDetailed
+      .authenticate
     routeBuilder = new HiringApiRoutes(
       new com.example.graphQL.cats.service.HealthService(runtime.probe, diagnostics),
       diagnostics,
@@ -49,26 +49,28 @@ object Main extends IOApp {
       ),
       telemetry.tracer
     )
-    routes <- Resource.eval(routeBuilder.httpApp(HiringApiRoutes.HttpConfig(config.admissionPermits, config.requestTimeout)))
+    routeConfig = HiringApiRoutes.HttpConfig(config.admissionPermits, config.requestTimeout)
+    routeSet <- Resource.eval(routeBuilder.httpRoutes(routeConfig))
+    routes <- telemetry.instrument(routeSet)
     _ <- HiringPlatformServer.resource(config.host, config.port, routes, telemetry.logger)
-    _ <- Resource.make(Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
+    _ <- Resource.make(diagnostics.emit(LogEvent.Started, fields = Map(
       LogField.HttpHost -> config.host.toString,
       LogField.HttpPort -> config.port.toString
-    )))(_ => Diagnostics.emit(diagnostics, LogEvent.Shutdown))
+    )))(_ => diagnostics.emit(LogEvent.Shutdown))
   } yield ()
 
-  private def handleStartupFailure(maskSensitive: Boolean)(error: Throwable): IO[ExitCode] =
-    SafeDiagnostics.configure(maskSensitive).flatMap { diagnostics =>
-      val event = error match {
-        case ConfigInvalid(errors) => Diagnostics.emit(diagnostics, LogEvent.ConfigInvalid,
-          fields = Map(LogField.ConfigKey -> errors.head.key))
-        case _ => Diagnostics.emit(diagnostics, LogEvent.StartupFailed, fields = LogFields.failure(error))
+  private def handleStartupFailure(error: Throwable): IO[ExitCode] =
+    AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
+      SafeDiagnostics.configure(maskSensitive).flatMap { diagnostics =>
+        val event = error match {
+          case ConfigInvalid(errors) => diagnostics.emit(LogEvent.ConfigInvalid,
+            fields = Map(LogField.ConfigKey -> errors.head.key))
+          case _ => diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error))
+        }
+        event.as(ExitCode.Error)
       }
-      event.as(ExitCode.Error)
     }
 
   def run(args: List[String]): IO[ExitCode] =
-    AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
-      program.useForever.as(ExitCode.Success).handleErrorWith(handleStartupFailure(maskSensitive))
-    }
+    program.useForever.as(ExitCode.Success).handleErrorWith(handleStartupFailure)
 }

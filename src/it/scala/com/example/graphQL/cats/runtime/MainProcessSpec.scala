@@ -251,7 +251,8 @@ class MainProcessSpec extends CatsEffectSuite {
           assert(Set(Right("enabled"), Right("disabled"), Right("disabled-local")).contains(event.hcursor.get[String]("masking")))
         }
         val started = events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
-        assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right(host))
+        val expectedHost = com.comcast.ip4s.IpAddress.fromString(host).map(_.toString).getOrElse(host)
+        assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right(expectedHost))
         val failure = events.find(_.hcursor.get[String]("category") == Right("RUNTIME_FAILED")).getOrElse(fail("Missing failure"))
         assertEquals(failure.hcursor.downField("details").get[String]("errorType"), Right("java.lang.RuntimeException"))
       }

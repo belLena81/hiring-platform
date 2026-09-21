@@ -17,7 +17,6 @@ import _root_.pureconfig.*
 import _root_.pureconfig.error.{ConfigReaderFailures, ConvertFailure, KeyNotFound}
 import java.nio.charset.StandardCharsets
 import scala.jdk.CollectionConverters.*
-import scala.util.Try
 import scala.concurrent.duration.*
 
 enum ConfigError(val key: String) {
@@ -70,6 +69,23 @@ enum ConfigError(val key: String) {
   case InvalidKafkaQuarantineTtl extends ConfigError("KAFKA_QUARANTINE_TTL_DAYS")
 }
 
+object ConfigError {
+  val publicKeys: Set[String] = List[ConfigError](
+    InvalidConfigFile(""), InvalidHost, InvalidPort, InvalidAdmissionPermits, InvalidRequestTimeout,
+    InvalidResolverTimeout, InvalidMongoUri, InvalidMongoDatabase, InvalidMaskSensitive, InvalidJwtSecret,
+    InvalidJwtIssuer, InvalidJwtAudience, InvalidPasswordHashIterations, InvalidPasswordHashMemory,
+    InvalidPasswordHashParallelism, InvalidAuthRateLimitWindow, InvalidAuthRateLimitAttempts,
+    InvalidAuthRateLimitBuckets, InvalidTrustedProxyCidrs, InvalidVectorSearchEnabled, InvalidVoyageApiKey,
+    InvalidVoyageEndpoint, InvalidVoyageModel, InvalidVoyageDimension, InvalidEmbeddingVersion,
+    InvalidEmbeddingQueueSize, InvalidEmbeddingParallelism, InvalidEmbeddingTimeout, InvalidEmbeddingRetryAttempts,
+    InvalidEmbeddingRetryDelay, InvalidJobVectorIndex, InvalidCandidateVectorIndex, InvalidJobLexicalIndex,
+    InvalidSearchIndexReadyTimeout, InvalidSearchIndexPollInterval, InvalidVectorNumCandidates, InvalidKafkaEnabled,
+    InvalidKafkaBootstrapServers, InvalidKafkaTopic, InvalidKafkaConsumerGroup, InvalidKafkaBatchSize,
+    InvalidKafkaLeaseSeconds, InvalidKafkaRetryDelaySeconds, InvalidKafkaMaxAttempts, InvalidKafkaPollInterval,
+    InvalidKafkaReceiptTtl, InvalidKafkaQuarantineTtl
+  ).map(_.key).toSet
+}
+
 final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
     voyageModel: String, voyageDimension: Int, embeddingVersion: Int, queueSize: Int, parallelism: Int,
     timeoutMillis: Int, retryAttempts: Int, retryDelayMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
@@ -113,9 +129,8 @@ object AppConfig {
 
   def fromConfig(raw: String, env: Map[String, String]): Either[NonEmptyList[ConfigError], AppConfig] =
     for {
-      parsed <- Try(ConfigFactory.parseString(raw, parseOptions)).toEither.left.map(parseError)
-      resolved <- Try(parsed.withFallback(ConfigFactory.parseMap(env.asJava)).resolve(ConfigResolveOptions.noSystem())).toEither
-        .left.map(parseError)
+      parsed <- Either.catchNonFatal(ConfigFactory.parseString(raw, parseOptions)).left.map(parseError)
+      resolved <- Either.catchNonFatal(parsed.withFallback(ConfigFactory.parseMap(env.asJava)).resolve(ConfigResolveOptions.noSystem())).left.map(parseError)
       config <- ConfigSource.fromConfig(resolved).load[RawAppConfig].left.map(readError).flatMap(read)
     } yield config
 
@@ -197,7 +212,7 @@ object AppConfig {
   private def validPort(value: Port): ValidatedNel[ConfigError, Ip4sPort] =
     Ip4sPort.fromInt(value).toValidNel(ConfigError.InvalidPort)
   private def validMongoUri(value: String): ValidatedNel[ConfigError, String] =
-    Try(new ConnectionString(value)).toEither.leftMap(_ => ConfigError.InvalidMongoUri).toValidatedNel.map(_ => value)
+    Either.catchNonFatal(new ConnectionString(value)).leftMap(_ => ConfigError.InvalidMongoUri).toValidatedNel.map(_ => value)
   private def validMongoDatabase(value: String): ValidatedNel[ConfigError, String] =
     Either.cond(value.nonEmpty && value.getBytes(StandardCharsets.UTF_8).length < 64 &&
       !value.exists(c => c.isWhitespace || c.isControl || "/\\.\"$*<>:|?".contains(c)), value,

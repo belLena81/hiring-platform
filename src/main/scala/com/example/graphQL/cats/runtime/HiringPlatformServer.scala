@@ -20,7 +20,7 @@ object HiringPlatformServer {
       .withHost(host)
       .withPort(port)
       .withHttpApp(app)
-      .withLogger(logger)
+      .withLogger(NoOpLogger[IO])
       .withShutdownTimeout(10.seconds)
       .withIdleTimeout(10.seconds)
       .withRequestHeaderReceiveTimeout(5.seconds)

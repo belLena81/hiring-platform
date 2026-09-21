@@ -26,7 +26,7 @@ private[graphql] object HiringGraphQLJobResolvers {
         context.arg(createdAfterArgument)
       )
       for {
-        (pageRequest, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
+        (pageRequest, requested) <- EitherT.fromEither[IO](page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
         searchId                 <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         values                   <- liftUseCase(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
         _                        <- EitherT.liftF(saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
@@ -45,7 +45,7 @@ private[graphql] object HiringGraphQLJobResolvers {
     complete(authenticatedStep(context) { case (actor, hiring) =>
       val cursorCodec = context.ctx.hiring.cursorCodec.jobCursorCodec
       for {
-        (pageRequest, requested) <- EitherT(page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
+        (pageRequest, requested) <- EitherT.fromEither[IO](page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
         values                   <- liftUseCase(hiring.jobService.myJobs(actor, pageRequest.copy(status = context.arg(jobStatusArgument))))
       } yield jobConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Job])

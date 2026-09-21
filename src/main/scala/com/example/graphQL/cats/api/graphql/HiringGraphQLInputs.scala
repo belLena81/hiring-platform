@@ -3,13 +3,13 @@ package com.example.graphQL.cats.api.graphql
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
+import cats.syntax.all.*
 import sangria.marshalling.{CoercedScalaResultMarshaller, FromInput}
 import sangria.schema.*
 import sangria.validation.ValueCoercionViolation
 
 import java.time.Instant
 import java.util.{Locale, UUID}
-import scala.util.Try
 
 private[graphql] object HiringGraphQLInputs {
   private final case class IdCoercionViolation(typeName: String)
@@ -175,13 +175,13 @@ private[graphql] object HiringGraphQLInputs {
   lazy val instantType: ScalarType[Instant] = ScalarType[Instant](
     "Instant",
     coerceUserInput = {
-      case value: String => Try(Instant.parse(value)).toEither.left.map(_ => InstantCoercionViolation())
+      case value: String => Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation())
       case _ => Left(InstantCoercionViolation())
     },
     coerceOutput = (value, _) => value.toString,
     coerceInput = {
       case sangria.ast.StringValue(value, _, _, _, _) =>
-        Try(Instant.parse(value)).toEither.left.map(_ => InstantCoercionViolation())
+        Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation())
       case _ => Left(InstantCoercionViolation())
     }
   )
@@ -193,13 +193,13 @@ private[graphql] object HiringGraphQLInputs {
     ScalarType[A](
       name,
       coerceUserInput = {
-        case value: String => Try(UUID.fromString(value)).toEither.left.map(_ => IdCoercionViolation(name)).map(wrap)
+        case value: String => Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap)
         case _ => Left(IdCoercionViolation(name))
       },
       coerceOutput = (value, _) => unwrap(value).toString,
       coerceInput = {
         case sangria.ast.StringValue(value, _, _, _, _) =>
-          Try(UUID.fromString(value)).toEither.left.map(_ => IdCoercionViolation(name)).map(wrap)
+          Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap)
         case _ => Left(IdCoercionViolation(name))
       }
     )

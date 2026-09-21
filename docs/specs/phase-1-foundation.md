@@ -49,7 +49,7 @@ Fixed local safety budgets: 16 admitted GraphQL requests, fail-fast excess rejec
 
 Mongo pool maximum ten and total readiness deadline two seconds. Parse connection URI first, then override pool/driver connect-selection-read limits so URI options cannot relax budgets. An outer two-second timeout covers the complete probe. Request scope owns cancellable resolver IO/subscriptions, rejects late submissions after closing, cancels registration-racing subscriptions, and joins IO. Do not use FutureDao.
 
-Structured logs contain UTC time, severity, safe event category, generated request ID (also returned in X-Request-ID), stable markers, concise messages and controlled details. Categories include CONFIG_INVALID, MONGO_UNAVAILABLE, MONGO_AUTH_FAILED, REQUEST_REJECTED, STARTUP_FAILED, SHUTDOWN. Configure logging before client acquisition; suppress raw framework/driver emitters for all supported application levels. Exclude raw bodies/query text, raw variable values, full URIs, credentials and exception messages.
+Structured logs contain UTC time, severity, safe event category, active trace ID correlation (also returned as X-Request-ID), stable markers, concise messages and controlled details. Categories include CONFIG_INVALID, MONGO_UNAVAILABLE, MONGO_AUTH_FAILED, REQUEST_REJECTED, STARTUP_FAILED, SHUTDOWN. Configure logging before client acquisition; suppress raw framework/driver emitters for all supported application levels. Exclude raw bodies/query text, raw variable values, full URIs, credentials and exception messages.
 
 ## Local infrastructure and compatibility
 

@@ -147,9 +147,9 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               assertEquals(response.status, Status.Ok)
               assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
               val domainEvents = correlated.map(_._1).filterNot(event =>
-                Set(LogEvent.SpanParameters, LogEvent.SpanStarted, LogEvent.SpanSucceeded).contains(event))
+                Set(LogEvent.SpanSucceeded).contains(event))
               assertEquals(domainEvents, Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed,
-                LogEvent.GraphQLCompleted, LogEvent.RequestCompleted))
+                LogEvent.GraphQLCompleted))
               assert(id.nonEmpty)
               assert(correlated.forall(_._2 == id))
               assert(correlated.filter(_._1 == LogEvent.MongoProbeFailed).forall(_._3.get(LogField.ErrorType)

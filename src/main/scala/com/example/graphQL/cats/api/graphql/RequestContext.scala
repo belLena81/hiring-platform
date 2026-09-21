@@ -18,7 +18,7 @@ final case class HiringGraphQLServices(
     cursorCodec: CursorCodec.CursorCodecs,
     accountService: AccountUseCases[IO],
     semanticSearchService: Option[SearchUseCases[IO]] = None,
-    interactionService: InteractionUseCases[IO] = InteractionUseCases.noop[IO],
+    interactionService: Option[InteractionUseCases[IO]] = Some(InteractionUseCases.noop[IO]),
     searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO]
 )
 
@@ -43,7 +43,7 @@ final class RequestContext private (
     dispatcher.unsafeToFuture(spanContext.fold(action)(tracer.childScope(_)(action)))
 
   private[graphql] def reportExecutionFailure(error: Throwable): Unit =
-    try dispatcher.unsafeRunAndForget(Diagnostics.emit(diagnostics, LogEvent.RuntimeFailed, requestId, LogFields.failure(error)))
+    try dispatcher.unsafeRunAndForget(diagnostics.emit(LogEvent.RuntimeFailed, requestId, fields = LogFields.failure(error)))
     catch case _: Throwable => ()
 
   def users(ids: List[UserId]): IO[List[User]] =
@@ -100,6 +100,6 @@ object RequestContext {
     for {
       memoized <- Resource.eval(probe.memoize)
       memoizedHiringReady <- Resource.eval(ensureHiringReady.memoize)
-      context <- Resource.eval(IO(new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, hiring, tracer, spanContext, diagnostics, requestId)))
+      context = new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, hiring, tracer, spanContext, diagnostics, requestId)
     } yield context
 }

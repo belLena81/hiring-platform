@@ -10,9 +10,14 @@ import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.job.JobService
 import io.circe.Json
 import munit.CatsEffectSuite
-import org.http4s.{Method, Request, Status}
+import org.http4s.{Method, Request, Status, Uri}
 import org.http4s.circe.*
+import org.http4s.otel4s.middleware.trace.PerRequestFilter
+import org.http4s.otel4s.middleware.trace.redact.{PathRedactor, QueryRedactor}
+import org.http4s.otel4s.middleware.trace.server.ServerMiddleware
 import org.http4s.syntax.literals.*
+import org.typelevel.otel4s.trace.TracerProvider
+import org.typelevel.ci.CIString
 import org.typelevel.otel4s.oteljava.OtelJava
 import scala.concurrent.duration.*
 
@@ -20,9 +25,21 @@ final class TracePropagationSpec extends CatsEffectSuite {
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
   test("a served jobs resolver span is a child of its http request span") {
-    OtelJava.autoConfigured[IO]().flatMap { otel =>
-      Resource.eval(otel.tracerProvider.get("hiring-platform-test"))
-    }.use { tracer =>
+    OtelJava.autoConfigured[IO]().use { otel =>
+      (for {
+        tracer <- Resource.eval(otel.tracerProvider.get("hiring-platform-test"))
+        middleware <- Resource.eval {
+          given TracerProvider[IO] = otel.tracerProvider
+          val redactor = new PathRedactor with QueryRedactor {
+            def redactPath(path: Uri.Path): Uri.Path = path
+            def redactQuery(query: org.http4s.Query): org.http4s.Query = org.http4s.Query.empty
+          }
+          val provider = org.http4s.otel4s.middleware.trace.server.ServerSpanDataProvider.openTelemetry(redactor)
+          ServerMiddleware.builder[IO](provider)
+            .withPerRequestReversePropagationFilter(PerRequestFilter.alwaysEnabled)
+            .build
+        }
+      } yield (tracer, middleware)).use { case (tracer, middleware) =>
       for {
         records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
         usersRef <- Ref.of[IO, Map[UserId, User]](Map(
@@ -52,22 +69,27 @@ final class TracePropagationSpec extends CatsEffectSuite {
           for {
             http <- new HiringApiRoutes(new HealthService(probe, diagnostics), diagnostics, dependencies, tracer)
               .httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
-            captured <- http(Request[IO](Method.POST, uri"/graphql").withEntity(Json.obj(
+            response <- middleware.wrapHttpApp(http)(Request[IO](Method.POST, uri"/graphql").withEntity(Json.obj(
               "query" -> Json.fromString("{ jobs(first: 1) { edges { node { id } } } }")
-            ))).flatMap(response => IO(assertEquals(response.status, Status.Ok)) *> records.get)
-          } yield captured
+            )))
+            captured <- records.get
+          } yield (response, captured)
         }
       } yield {
-        val httpSpan = span(captured, "http.request")
+        val response = captured._1
+        val records = captured._2
         val resolverSpan = span(captured, "service.job.searchOpen")
 
-        assertEquals(resolverSpan(LogField.TraceId), httpSpan(LogField.TraceId))
-        assertNotEquals(resolverSpan(LogField.SpanId), httpSpan(LogField.SpanId))
-        assert(httpSpan(LogField.TraceId).matches("[0-9a-f]{32}"))
-        assert(httpSpan(LogField.SpanId).matches("[0-9a-f]{16}"))
+        assertEquals(response.status, Status.Ok)
+        val correlation = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+        assert(correlation.exists(_.matches("[0-9a-f]{32}")))
+        assertEquals(Some(resolverSpan(LogField.TraceId)), correlation)
+        assert(response.headers.get(CIString("traceparent")).isDefined)
+        assert(!records.exists(_._3.get(LogField.SpanName).contains("http.request")))
         assert(!resolverSpan.keys.exists(_.key == "sequence"))
       }
     }
+  }
   }
 
   private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics = new Diagnostics {
@@ -75,8 +97,8 @@ final class TracePropagationSpec extends CatsEffectSuite {
       records.update(_ :+ ((event, requestId, fields)))
   }
 
-  private def span(records: Vector[DiagnosticRecord], name: String): Map[LogField, String] =
-    records.collectFirst {
-      case (LogEvent.SpanStarted, _, fields) if fields.get(LogField.SpanName).contains(name) => fields
+  private def span(records: (org.http4s.Response[IO], Vector[DiagnosticRecord]), name: String): Map[LogField, String] =
+    records._2.collectFirst {
+      case (LogEvent.SpanSucceeded, _, fields) if fields.get(LogField.SpanName).contains(name) => fields
     }.getOrElse(fail(s"missing $name span"))
 }

@@ -18,6 +18,7 @@ import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.*
 import org.http4s.circe.*
+import org.http4s.headers.{`Cache-Control`, `Retry-After`, `WWW-Authenticate`}
 import org.typelevel.ci.CIString
 import pdi.jwt.JwtCirce
 
@@ -97,7 +98,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
   private def spanEvent(event: LogEvent): Boolean = event match {
-    case LogEvent.SpanParameters | LogEvent.SpanStarted | LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
+    case LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
     case _ => false
   }
 
@@ -295,13 +296,38 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(limitedLogin.status, Status.TooManyRequests)
       assertEquals(limitedSignup.status, Status.TooManyRequests)
       assertEquals(firstSignup.status, Status.Ok)
-      assert(limitedLogin.headers.get(CIString("Retry-After")).flatMap(_.head.value.toLongOption)
-        .exists(value => value >= 1 && value <= 60))
+      assert(limitedLogin.headers.get[`Retry-After`].exists(_.retry.exists(value => value >= 1 && value <= 60)))
       assertEquals(limitedLogin.contentType.map(_.mediaType), Some(MediaType.application.json))
       assertEquals(limitedBody, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Too many authentication attempts")))))
       assert(captured.exists { case (event, _, fields) =>
         event == LogEvent.RequestRejected && fields.get(LogField.Reason).contains("RATE_LIMITED")
       })
+    }
+  }
+
+  test("authentication failure returns a typed bearer challenge") {
+    for {
+      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
+      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+        authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.InvalidToken)))
+          .flatMap(defaultApp)
+      response <- http(health)
+    } yield {
+      assertEquals(response.status, Status.Unauthorized)
+      assertEquals(response.headers.get[`WWW-Authenticate`].map(_.values.head),
+        Some(Challenge("Bearer", "hiring")))
+    }
+  }
+
+  test("responses include the typed shared security headers") {
+    for {
+      http <- app(IO.pure(ProbeResult.Ready))
+      response <- http(health)
+    } yield {
+      assertEquals(response.headers.get[`Cache-Control`].map(_.values.toList), Some(List(CacheDirective.`no-store`)))
+      assertEquals(response.headers.get(CIString("X-Content-Type-Options")).map(_.head.value), Some("nosniff"))
+      assertEquals(response.headers.get(CIString("Content-Security-Policy")).map(_.head.value),
+        Some("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"))
     }
   }
 
@@ -629,8 +655,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           def record(): Unit = {
             val _ = attempts.updateAndGet(_ :+ (((event, id, fields), finalized.get())))
           }
-          if (event != LogEvent.RequestCancelled) IO.unit
-          else if (synchronous) {
+          if (synchronous) {
             record()
             throw new IllegalStateException("synthetic-cancellation-secret")
           } else IO.delay(record()) *> IO.raiseError(new IllegalStateException("synthetic-cancellation-secret"))
@@ -658,11 +683,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
                 } yield {
                   assert(outcome.isCanceled)
                   assertEquals(recovered.status, Status.Ok)
-                  assertEquals(after.size, 1)
-                  assert(after.forall { case ((event, id, fields), cleaned) =>
-                    cleaned && event == LogEvent.RequestCancelled && id.nonEmpty &&
-                      !fields.contains(LogField.Status) && fields.get(LogField.Outcome).contains("CANCELLED")
-                  })
+                  assertEquals(after, Vector.empty)
                 }).guarantee(finish.complete(()).void)
               }
             }
@@ -670,7 +691,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("response creation logs one normalized completion with rejection reason, status and timing") {
+  test("HTTP rejection diagnostics remain correlated without synthetic completion events") {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       http <- app(IO.pure(ProbeResult.Ready), capture(records))
@@ -680,17 +701,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       captured <- records.get
     } yield {
       val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
-      val completions = captured.filter(_._1 == LogEvent.RequestCompleted)
       assertEquals(response.status, Status.NotFound)
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Not found")))))
-      assertEquals(completions.size, 1)
       assert(captured.filterNot(record => spanEvent(record._1)).forall(_._2 == id))
       assert(captured.exists(record => record._1 == LogEvent.RequestRejected &&
         record._3.get(LogField.Reason).contains("NOT_FOUND")))
-      assert(completions.forall { case (_, _, fields) =>
-        fields.get(LogField.Route).contains("_unmatched") && fields.get(LogField.Method).contains("OTHER") &&
-          fields.get(LogField.Status).contains("404") && fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0)
-      })
+      assert(!captured.exists(record => record._1.toString == "REQUEST_COMPLETED" || record._1.toString == "REQUEST_CANCELLED"))
       assert(captured.forall(_._3.forall { case (field, value) => LogFields.validPublic(field, value) }))
       assert(!captured.toString.contains("synthetic"))
     }
@@ -705,8 +721,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
       assertEquals(response.status, Status.Ok)
-      assertEquals(captured.map(_._1), Vector(LogEvent.SpanParameters, LogEvent.SpanStarted,
-        LogEvent.MongoUnavailable, LogEvent.GraphQLCompleted, LogEvent.RequestCompleted, LogEvent.SpanSucceeded))
+      assertEquals(captured.map(_._1), Vector(LogEvent.MongoUnavailable, LogEvent.GraphQLCompleted))
       assert(captured.filterNot(record => spanEvent(record._1)).forall(_._2 == id))
       assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall { case (_, _, fields) =>
         fields.get(LogField.OperationName).contains("LocalCheck") && fields.get(LogField.Outcome).contains("COMPLETED")
@@ -714,7 +729,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("a valid inbound request ID is echoed but cannot select the trace ID") {
+  test("an inbound request ID is ignored and each response receives its own correlation ID") {
     val inboundId = "00000000-0000-0000-0000-000000000123"
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
@@ -723,52 +738,43 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       second <- http(health.putHeaders(Header.Raw(CIString("X-Request-ID"), inboundId)))
       captured <- records.get
     } yield {
-      assertEquals(first.headers.get(CIString("X-Request-ID")).map(_.head.value), Some(inboundId))
-      assertEquals(second.headers.get(CIString("X-Request-ID")).map(_.head.value), Some(inboundId))
-      val traceIds = captured.collect {
-        case (LogEvent.SpanStarted, _, fields) if fields.get(LogField.SpanName).contains("http.request") => fields.get(LogField.TraceId)
-      }.flatten
-      assertEquals(traceIds, Vector.empty)
+      val firstId = first.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      val secondId = second.headers.get(CIString("X-Request-ID")).map(_.head.value)
+      assert(firstId.exists(_.matches("[0-9a-fA-F-]{36}")))
+      assert(secondId.exists(_.matches("[0-9a-fA-F-]{36}")))
+      assertNotEquals(firstId, Some(inboundId))
+      assertNotEquals(secondId, Some(inboundId))
+      assertNotEquals(firstId, secondId)
+      assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted, LogEvent.GraphQLCompleted))
     }
   }
 
-  test("HTTP cancellation is recorded after blocked cleanup without a completion or invented status") {
+  test("HTTP cancellation does not emit duplicate application lifecycle diagnostics") {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       entered <- Deferred[IO, Unit]
       finalizing <- Deferred[IO, Unit]
       finish <- Deferred[IO, Unit]
-      finalized <- Ref.of[IO, Boolean](false)
       sink = new Diagnostics {
         def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
-          (if (event == LogEvent.RequestCancelled) finalized.get.flatMap(done => IO(assert(done))) else IO.unit) *>
-            records.update(_ :+ ((event, id, fields)))
+          records.update(_ :+ ((event, id, fields)))
       }
       http <- app(IO.pure(ProbeResult.Ready), sink)
       slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
-        .onFinalize(finalizing.complete(()) *> finish.get *> finalized.set(true)))
+        .onFinalize(finalizing.complete(()) *> finish.get))
       _ <- Resource.make(http(slow).start)(fiber => finish.complete(()).void *> fiber.cancel).use { fiber =>
         entered.get.timeout(2.seconds) *> fiber.cancel.background.use { joined =>
           (for {
             _ <- finalizing.get.timeout(2.seconds)
             during <- records.get
-            _ <- IO(assertEquals(during.map(_._1), Vector(LogEvent.SpanParameters, LogEvent.SpanStarted)))
+            _ <- IO(assertEquals(during, Vector.empty))
             _ <- finish.complete(())
             _ <- joined.flatMap(_.embedNever)
             outcome <- fiber.join
             after <- records.get
           } yield {
             assert(outcome.isCanceled)
-            assertEquals(after.map(_._1), Vector(LogEvent.SpanParameters, LogEvent.SpanStarted,
-              LogEvent.RequestCancelled, LogEvent.SpanCancelled))
-            assert(after.filter(_._1 == LogEvent.RequestCancelled).forall { case (_, id, fields) =>
-              id.nonEmpty && !fields.contains(LogField.Status) && fields.get(LogField.Outcome).contains("CANCELLED") &&
-                fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0)
-            })
-            assert(after.filter(_._1 == LogEvent.SpanCancelled).forall { case (_, id, fields) =>
-              id.nonEmpty && fields.get(LogField.SpanName).contains("http.request") &&
-                fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0)
-            })
+            assertEquals(after, Vector.empty)
           }).guarantee(finish.complete(()).void)
         }
       }
@@ -1046,10 +1052,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
       assertEquals(response.status, Status.BadRequest)
       assert(requestId.exists(value => scala.util.Try(java.util.UUID.fromString(value)).isSuccess))
-      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(
-        LogEvent.RequestRejected -> requestId,
-        LogEvent.RequestCompleted -> requestId
-      ))
+      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(LogEvent.RequestRejected -> requestId))
       assert(!body.contains(secret))
       assert(!response.headers.toString.contains(secret))
       assert(!captured.toString.contains(secret))
@@ -1071,10 +1074,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(response.status, Status.InternalServerError)
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Request failed")))))
       val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
-      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(
-        LogEvent.RequestRejected -> requestId,
-        LogEvent.RequestCompleted -> requestId
-      ))
+      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(LogEvent.RequestRejected -> requestId))
       assert(!body.noSpaces.contains(secret))
       assert(!response.headers.toString.contains(secret))
       assert(!captured.toString.contains(secret))
@@ -1104,8 +1104,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
       assertEquals(captured.filterNot(record => spanEvent(record._1)), List(
         LogEvent.MongoUnavailable -> requestId,
-        LogEvent.GraphQLCompleted -> requestId,
-        LogEvent.RequestCompleted -> requestId
+        LogEvent.GraphQLCompleted -> requestId
       ))
       assert(!body.noSpaces.contains(secret))
       assert(!response.headers.toString.contains(secret))
@@ -1130,11 +1129,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(successful.status, Status.Ok)
       val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
       val deadline = captured.filter(record => !spanEvent(record._1) && record._2 == id)
-      assertEquals(deadline.map(_._1), Vector(LogEvent.RequestRejected, LogEvent.RequestCompleted))
+      assertEquals(deadline.map(_._1), Vector(LogEvent.RequestRejected))
       assert(deadline.filter(_._1 == LogEvent.RequestRejected).forall(_._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED")))
-      assert(deadline.filter(_._1 == LogEvent.RequestCompleted).forall { case (_, _, fields) =>
-        fields.get(LogField.Status).contains("504") && fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 5000)
-      })
     }
   }
 
