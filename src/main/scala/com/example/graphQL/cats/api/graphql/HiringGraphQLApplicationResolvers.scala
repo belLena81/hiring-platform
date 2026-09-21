@@ -15,7 +15,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
     complete(authenticatedStep(context) { case (actor, hiring) =>
       val cursorCodec = context.ctx.hiring.cursorCodec.applicationCursorCodec
       for {
-        (pageRequest, requested) <- EitherT(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
+        (pageRequest, requested) <- EitherT.fromEither[IO](applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
         values                   <- liftUseCase(hiring.applicationService.myApplications(actor, pageRequest))
       } yield applicationConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Application])
@@ -25,7 +25,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       val cursorCodec = context.ctx.hiring.cursorCodec.applicationCursorCodec
       val jobId = context.arg(jobIdArgument)
       for {
-        (pageRequest, requested) <- EitherT(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
+        (pageRequest, requested) <- EitherT.fromEither[IO](applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
         values                   <- liftUseCase(hiring.applicationService.jobApplications(actor, jobId, pageRequest))
       } yield applicationConnection(values, requested, cursorCodec)
     }, graphQLErrorConnection[Application])
@@ -35,7 +35,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       val cursorCodec = context.ctx.hiring.cursorCodec.eventCursorCodec
       val applicationId = context.arg(applicationIdArgument)
       for {
-        (pageRequest, requested) <- EitherT(pageEvent(context.arg(firstArgument), context.arg(afterArgument), cursorCodec))
+        (pageRequest, requested) <- EitherT.fromEither[IO](pageEvent(context.arg(firstArgument), context.arg(afterArgument), cursorCodec))
         _                        <- liftUseCase(hiring.readModel.canViewApplication(actor, applicationId))
         values                   <- liftUseCase(hiring.readModel.applicationHistory(applicationId, pageRequest))
       } yield eventConnection(values, requested, cursorCodec)

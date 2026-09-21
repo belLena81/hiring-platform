@@ -19,7 +19,7 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
   test("encodes the Voyage request and decodes a successful response") {
     val app: HttpApp[IO] = Kleisli { (request: Request[IO]) =>
       for {
-        body <- request.as[Json](using jsonOf[IO, Json])
+        body <- request.as[Json]
         _ = assertEquals(request.method, Method.POST)
         _ = assert(request.headers.get(CIString("Authorization")).nonEmpty)
         _ = assertEquals(body.hcursor.get[String]("input"), Right("Scala"))

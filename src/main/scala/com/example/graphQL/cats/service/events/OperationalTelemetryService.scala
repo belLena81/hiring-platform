@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.events
 
-import cats.Monad
 import cats.data.EitherT
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
@@ -14,11 +14,11 @@ import com.example.graphQL.cats.service.protocol.InteractionUseCases
 import java.time.Instant
 import java.util.UUID
 
-final class OperationalTelemetryService[F[_]: Monad](
-    users: UserRepository[F],
-    jobs: JobRepository[F],
-    searchSessions: SearchSessionRepository[F]
-) extends InteractionUseCases[F] {
+final class OperationalTelemetryService(
+    users: UserRepository[IO],
+    jobs: JobRepository[IO],
+    searchSessions: SearchSessionRepository[IO]
+) extends InteractionUseCases {
   private val authorization = ActorAuthorization(users)
 
   override def recordJobView(
@@ -27,14 +27,14 @@ final class OperationalTelemetryService[F[_]: Monad](
       jobId: JobId,
       searchId: Option[UUID],
       now: Instant
-  ): F[Either[UseCaseError, Unit]] =
+  ): IO[Either[UseCaseError, Unit]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
       job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
+      _ <- EitherT.cond[IO](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
       rank <- EitherT(searchId match {
         case Some(id) => verifiedSearchResult(actor, id, jobId.value.toString).map(_.map(Some(_)))
-        case None => Monad[F].pure(Right(None))
+        case None => IO.pure(Right(None))
       })
       event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
       _ <- EitherT(searchSessions.recordInteraction(event).map(_.widenUseCase.void))
@@ -46,7 +46,7 @@ final class OperationalTelemetryService[F[_]: Monad](
       searchId: UUID,
       resultId: String,
       now: Instant
-  ): F[Either[UseCaseError, Unit]] =
+  ): IO[Either[UseCaseError, Unit]] =
     (for {
       rank <- EitherT(verifiedSearchResult(actor, searchId, resultId))
       event = OperationalEvents.searchResultClicked(eventId, searchId, resultId, actor.userId, rank, now)
@@ -57,7 +57,7 @@ final class OperationalTelemetryService[F[_]: Monad](
       actor: ActorContext,
       searchId: UUID,
       resultId: String
-  ): F[Either[UseCaseError, Int]] =
+  ): IO[Either[UseCaseError, Int]] =
     searchSessions.find(searchId).map(_.widenUseCase.flatMap {
       case None => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[Int]
       case Some(session) if session.actorId != actor.userId => UseCaseError.Domain(DomainError.Forbidden).asLeft[Int]
@@ -69,10 +69,10 @@ final class OperationalTelemetryService[F[_]: Monad](
 }
 
 object OperationalTelemetryService {
-  def apply[F[_]: Monad](
-      users: UserRepository[F],
-      jobs: JobRepository[F],
-      searchSessions: SearchSessionRepository[F]
-  ): OperationalTelemetryService[F] =
+  def apply(
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      searchSessions: SearchSessionRepository[IO]
+  ): OperationalTelemetryService =
     new OperationalTelemetryService(users, jobs, searchSessions)
 }

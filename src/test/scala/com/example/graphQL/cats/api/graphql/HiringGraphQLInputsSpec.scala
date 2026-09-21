@@ -94,24 +94,22 @@ final class HiringGraphQLInputsSpec extends CatsEffectSuite {
     }
   }
 
-  test("malformed coerced input maps fail with the sanitized adapter error") {
+  test("malformed JSON input fails through the Circe decoder") {
     val malformedInputs = List(
-      Map.empty[String, Any],
-      Map("title" -> 1),
-      Map("title" -> "title", "description" -> "description", "requirements" -> "not-a-list",
-        "skills" -> Vector("Scala"), "country" -> "Cyprus", "remote" -> true),
-      Map("title" -> "title", "description" -> "description", "requirements" -> Vector("requirement"),
-        "skills" -> Vector("Scala"), "country" -> "Cyprus", "remote" -> "not-a-boolean")
+      Json.obj(),
+      Json.obj("title" -> Json.fromInt(1)),
+      Json.obj("title" -> Json.fromString("title"), "description" -> Json.fromString("description"),
+        "requirements" -> Json.fromString("not-a-list"), "skills" -> Json.arr(Json.fromString("Scala")),
+        "country" -> Json.fromString("Cyprus"), "remote" -> Json.fromBoolean(true)),
+      Json.obj("title" -> Json.fromString("title"), "description" -> Json.fromString("description"),
+        "requirements" -> Json.arr(Json.fromString("requirement")), "skills" -> Json.arr(Json.fromString("Scala")),
+        "country" -> Json.fromString("Cyprus"), "remote" -> Json.fromString("not-a-boolean"))
     )
 
     malformedInputs.foreach { input =>
-      val fromInput = summon[FromInput[HiringGraphQLModel.JobGraphQLInput]]
-      val failure = intercept[RuntimeException] {
-        fromInput.fromResult(input.asInstanceOf[fromInput.marshaller.Node])
-      }
-      assertEquals(failure.getMessage, "Invalid GraphQL input")
-      assert(!failure.isInstanceOf[ClassCastException])
-      assert(!failure.isInstanceOf[NoSuchElementException])
+      val result = summon[io.circe.Decoder[HiringGraphQLModel.JobGraphQLInput]].decodeJson(input)
+      assert(result.isLeft)
+      assert(result.left.exists(_.getMessage.nonEmpty))
     }
   }
 

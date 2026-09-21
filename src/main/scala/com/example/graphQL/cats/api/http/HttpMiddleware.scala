@@ -7,8 +7,7 @@ import com.example.graphQL.cats.service.Diagnostics.*
 import org.http4s.*
 import org.http4s.headers.`Cache-Control`
 import org.http4s.server.middleware.{EntityLimiter, ErrorHandling, MaxActiveRequests, RequestId, Timeout}
-import org.http4s.syntax.all.*
-import org.typelevel.ci.CIStringSyntax
+import org.typelevel.ci.{CIString, CIStringSyntax}
 import org.typelevel.otel4s.trace.Tracer
 
 object HttpMiddleware {
@@ -40,14 +39,15 @@ object HttpMiddleware {
 
   def apply(config: HiringApiRoutes.HttpConfig, routes: HttpApp[IO], diagnostics: Diagnostics, tracer: Tracer[IO],
       onError: (Request[IO], Throwable) => IO[Response[IO]],
-      onEntityTooLarge: Request[IO] => IO[Response[IO]]): IO[HttpApp[IO]] = {
+      onEntityTooLarge: Request[IO] => IO[Response[IO]],
+      applyAdmissionControl: Boolean = true): IO[HttpApp[IO]] = {
     val timeoutResponse = IO.pure(Response[IO](Status.GatewayTimeout))
     MaxActiveRequests.forHttpApp[IO](config.admissionPermits,
       Response[IO](Status.ServiceUnavailable)).map { limitActive =>
       val limited = EntityLimiter.httpApp[IO](routes, MaxRequestBytes)
       val timed = Timeout.httpApp[IO](config.requestTimeout, timeoutResponse)(limited)
-      val active = limitActive(timed)
-      val handled = Kleisli { request =>
+      val active = if (applyAdmissionControl) limitActive(timed) else timed
+      val handled: HttpApp[IO] = Kleisli { (request: Request[IO]) =>
         ErrorHandling.Custom.recoverWith(active) {
           case _: EntityLimiter.EntityTooLarge => onEntityTooLarge(request)
           case failure => onError(request, failure)

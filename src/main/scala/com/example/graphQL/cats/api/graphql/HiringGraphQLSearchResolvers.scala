@@ -17,7 +17,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       val filter = jobFilter(context.arg(jobFilterArgument))
       for {
         size     <- EitherT.fromEither[IO](pageSize(context.arg(firstArgument)))
-        searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
+        searchId <- EitherT.liftF(context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure))
         results  <- liftUseCase(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
         _        <- EitherT.liftF(saveSearchSession(
                       hiring,
@@ -35,7 +35,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
     complete(EitherT(authenticatedSearch(context).map(_.leftMap(toGraphQLError))).flatMap { case (actor, hiring, service) =>
       for {
         size     <- EitherT.fromEither[IO](pageSize(context.arg(firstArgument)))
-        searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
+        searchId <- EitherT.liftF(context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure))
         results  <- liftUseCase(service.recommendedJobs(actor, size, searchId))
         _        <- EitherT.liftF(saveSearchSession(
                       hiring,
@@ -54,7 +54,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       val jobId = context.arg(jobIdArgument)
       for {
         size     <- EitherT.fromEither[IO](pageSize(context.arg(firstArgument)))
-        searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
+        searchId <- EitherT.liftF(context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure))
         results  <- liftUseCase(service.candidateMatches(actor, jobId, size, searchId))
         _        <- EitherT.liftF(saveSearchSession(
                       hiring,

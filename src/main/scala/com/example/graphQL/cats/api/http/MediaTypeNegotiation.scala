@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.http
 
-import org.http4s.{MediaRange, MediaType}
+import org.http4s.{MediaRange, MediaType, QValue}
 import org.http4s.headers.Accept
 import org.http4s.MediaType.application
 
@@ -15,7 +15,7 @@ object MediaTypeNegotiation {
         header.values.toList.zipWithIndex
           .filter { case (entry, _) => entry.mediaRange.satisfiedBy(mediaType) }
           .maxByOption { case (entry, headerIndex) => (specificity(entry.mediaRange), -headerIndex) }
-          .collect { case (entry, _) if entry.qValue > org.http4s.headers.QValue.Zero =>
+          .collect { case (entry, _) if entry.qValue > QValue.Zero =>
             (mediaType, entry.qValue, declarationIndex)
           }
       }.maxByOption { case (_, quality, declarationIndex) => (quality, -declarationIndex) }.map(_._1)

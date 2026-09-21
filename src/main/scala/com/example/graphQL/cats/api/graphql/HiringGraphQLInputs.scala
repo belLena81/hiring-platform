@@ -1,13 +1,14 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.syntax.either.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import io.circe.Decoder
 import io.circe.generic.semiauto.deriveDecoder
 import sangria.marshalling.circe.*
 import sangria.schema.*
-import sangria.validation.ValueCoercionViolation
+import sangria.validation.{ValueCoercionViolation, Violation}
 
 import java.time.Instant
 import java.util.{Locale, UUID}
@@ -16,11 +17,18 @@ import scala.util.Try
 private[graphql] object HiringGraphQLInputs {
   private final case class IdCoercionViolation(typeName: String)
       extends ValueCoercionViolation(s"Invalid $typeName value")
+  private final case class NotAString(typeName: String)
+      extends ValueCoercionViolation(s"Invalid $typeName value; expected a string")
   private final case class InstantCoercionViolation()
       extends ValueCoercionViolation("Invalid Instant value; expected ISO-8601")
+  private given Decoder[UUID] = Decoder.decodeUUID
   private given Decoder[JobId] = Decoder.decodeUUID.map(JobId.apply)
   private given Decoder[ApplicationId] = Decoder.decodeUUID.map(ApplicationId.apply)
-  private given Decoder[UserRole] = Decoder.decodeString.emapTry(value => Try(UserRole.valueOf(value)))
+  private given Decoder[UserRole] = Decoder.decodeString.emap { value =>
+    UserRole.values
+      .find(_.toString.equalsIgnoreCase(value))
+      .toRight(s"Unknown user role: $value")
+  }
   private given Decoder[Instant] = Decoder.decodeString.emapTry(value => Try(Instant.parse(value)))
 
   given Decoder[JobFilterGraphQLInput] = deriveDecoder
@@ -44,50 +52,37 @@ private[graphql] object HiringGraphQLInputs {
     EnumType("ReadinessStatus", values = List(
       EnumValue("READY", value = "READY"), EnumValue("NOT_READY", value = "NOT_READY")))
   lazy val jobStatus: EnumType[JobStatus] =
-    EnumType("JobStatus", values = JobStatus.values.toList.map(status => EnumValue(status.toString, value = status)))
+    EnumType("JobStatus", values = JobStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
   lazy val applicationStatus: EnumType[ApplicationStatus] =
-    EnumType("ApplicationStatus", values = ApplicationStatus.values.toList.map(status => EnumValue(status.toString, value = status)))
+    EnumType("ApplicationStatus", values = ApplicationStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
   lazy val userRole: EnumType[UserRole] =
-    EnumType("UserRole", values = UserRole.values.toList.map(role => EnumValue(role.toString, value = role)))
+    EnumType("UserRole", values = UserRole.values.toList.map(role => EnumValue(role.toString.toUpperCase(Locale.ROOT), value = role)))
   lazy val userStatus: EnumType[AccountStatus] =
     EnumType("UserStatus", values = AccountStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
   lazy val searchMode: EnumType[SearchMode] =
-    EnumType("SearchMode", values = SearchMode.values.toList.map(mode => EnumValue(mode.toString, value = mode)))
+    EnumType("SearchMode", values = SearchMode.values.toList.map(mode => EnumValue(mode.toString.toUpperCase(Locale.ROOT), value = mode)))
 
-  lazy val instantType: ScalarType[Instant] = ScalarType[Instant](
-    "Instant",
-    coerceUserInput = {
-      case value: String => Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation())
-      case _ => Left(InstantCoercionViolation())
-    },
-    coerceOutput = (value, _) => value.toString,
-    coerceInput = {
-      case sangria.ast.StringValue(value, _, _, _, _) =>
-        Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation())
-      case _ => Left(InstantCoercionViolation())
-    }
-  )
+  private def stringScalar[A](name: String, parse: String => Either[Violation, A], render: A => String): ScalarType[A] =
+    ScalarType[A](name,
+      coerceOutput = (value, _) => render(value),
+      coerceUserInput = { case value: String => parse(value); case _ => Left(NotAString(name)) },
+      coerceInput = { case sangria.ast.StringValue(value, _, _, _, _) => parse(value); case _ => Left(NotAString(name)) })
+
+  private def uuidScalar[A](name: String, wrap: UUID => A, unwrap: A => UUID): ScalarType[A] =
+    stringScalar(name,
+      value => Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap),
+      value => unwrap(value).toString)
+
+  lazy val instantType: ScalarType[Instant] =
+    stringScalar("Instant", value => Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation()), _.toString)
 
   def instantField[A](name: String, resolve: A => Instant): Field[RequestContext, A] =
     Field(name, instantType, resolve = context => resolve(context.value))
 
-  private def idScalar[A](name: String, wrap: UUID => A, unwrap: A => UUID): ScalarType[A] =
-    ScalarType[A](
-      name,
-      coerceUserInput = {
-        case value: String => Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap)
-        case _ => Left(IdCoercionViolation(name))
-      },
-      coerceOutput = (value, _) => unwrap(value).toString,
-      coerceInput = {
-        case sangria.ast.StringValue(value, _, _, _, _) =>
-          Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap)
-        case _ => Left(IdCoercionViolation(name))
-      }
-    )
-
-  lazy val jobIdType: ScalarType[JobId] = idScalar("JobID", JobId.apply, _.value)
-  lazy val applicationIdType: ScalarType[ApplicationId] = idScalar("ApplicationID", ApplicationId.apply, _.value)
+  lazy val uuidType: ScalarType[UUID] = uuidScalar[UUID]("UUID", value => value, value => value)
+  lazy val userIdType: ScalarType[UserId] = uuidScalar("UserID", UserId.apply, _.value)
+  lazy val jobIdType: ScalarType[JobId] = uuidScalar("JobID", JobId.apply, _.value)
+  lazy val applicationIdType: ScalarType[ApplicationId] = uuidScalar("ApplicationID", ApplicationId.apply, _.value)
 
   lazy val idArgument: Argument[JobId] = Argument("id", jobIdType)
   lazy val jobIdArgument: Argument[JobId] = Argument("jobId", jobIdType)
@@ -98,7 +93,7 @@ private[graphql] object HiringGraphQLInputs {
   lazy val cityArgument: Argument[Option[String]] = Argument("city", OptionInputType(StringType))
   lazy val skillsArgument: Argument[Option[Seq[String]]] = Argument("skills", OptionInputType(ListInputType(StringType)))
   lazy val createdAfterArgument: Argument[Option[Instant]] = Argument("createdAfter", OptionInputType(instantType))
-  lazy val searchIdArgument: Argument[Option[String]] = Argument("searchId", OptionInputType(StringType))
+  lazy val searchIdArgument: Argument[Option[UUID]] = Argument("searchId", OptionInputType(uuidType))
   lazy val jobStatusArgument: Argument[Option[JobStatus]] = Argument("status", OptionInputType(jobStatus))
   lazy val applicationStatusArgument: Argument[Option[ApplicationStatus]] = Argument("status", OptionInputType(applicationStatus))
   lazy val userRoleArgument: Argument[Option[UserRole]] = Argument("role", OptionInputType(userRole))
@@ -158,10 +153,10 @@ private[graphql] object HiringGraphQLInputs {
   lazy val updateProfileInputArgument: Argument[UpdateProfileGraphQLInput] = Argument("input", updateProfileInputType)
   lazy val recordJobViewInputType: InputObjectType[RecordJobViewGraphQLInput] =
     InputObjectType[RecordJobViewGraphQLInput]("RecordJobViewInput", List(
-      InputField("eventId", StringType), InputField("jobId", jobIdType), InputField("searchId", OptionInputType(StringType))))
+      InputField("eventId", uuidType), InputField("jobId", jobIdType), InputField("searchId", OptionInputType(uuidType))))
   lazy val recordSearchResultClickInputType: InputObjectType[RecordSearchResultClickGraphQLInput] =
     InputObjectType[RecordSearchResultClickGraphQLInput]("RecordSearchResultClickInput", List(
-      InputField("eventId", StringType), InputField("searchId", StringType), InputField("resultId", StringType)))
+      InputField("eventId", uuidType), InputField("searchId", uuidType), InputField("resultId", uuidType)))
   lazy val recordJobViewInputArgument: Argument[RecordJobViewGraphQLInput] = Argument("input", recordJobViewInputType)
   lazy val recordSearchResultClickInputArgument: Argument[RecordSearchResultClickGraphQLInput] =
     Argument("input", recordSearchResultClickInputType)

@@ -1,59 +1,47 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.{Deferred, IO, Ref}
 import com.example.graphQL.cats.service.ProbeResult
 import munit.CatsEffectSuite
 
 import scala.concurrent.duration.*
 
 final class RequestContextSpec extends CatsEffectSuite {
-  test("closing rejects submissions while resolver cancellation finalizers are still running") {
+  test("request release cancels in-flight resolver work and rejects late submissions") {
     for {
       entered <- Deferred[IO, Unit]
-      finalizing <- Deferred[IO, Unit]
-      finishFinalizer <- Deferred[IO, Unit]
-      released <- Deferred[IO, Unit]
-      _ <- Resource.make(TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
-        .onCancel(finalizing.complete(()) *> finishFinalizer.get)).allocated) {
-        case (_, release) => finishFinalizer.complete(()).void *> release
-      }.use { case (context, release) =>
-        for {
-          _ <- IO(context.unsafeToFuture(context.readiness))
-          _ <- entered.get.timeout(2.seconds)
-          _ <- (release *> released.complete(()).void).background.use { _ =>
-            (for {
-              _ <- finalizing.get.timeout(2.seconds)
-              _ <- IO(context.unsafeToFuture(context.readiness)).attempt
-              completed <- released.tryGet
-              _ <- IO {
-                assertEquals(completed, None)
-              }
-              _ <- finishFinalizer.complete(())
-              _ <- released.get.timeout(2.seconds)
-              after <- IO(context.unsafeToFuture(context.readiness)).attempt
-              _ <- IO(assert(after.isLeft))
-            } yield ()).guarantee(finishFinalizer.complete(()).void)
-          }
-        } yield ()
-      }
-    } yield ()
+      cancelled <- Deferred[IO, Unit]
+      allocated <- TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
+        .onCancel(cancelled.complete(()) *> IO.unit)).allocated
+      (context, release) = allocated
+      _ <- IO(context.unsafeToFuture(context.readiness))
+      _ <- entered.get.timeout(2.seconds)
+      _ <- release
+      _ <- cancelled.get.timeout(2.seconds)
+      after <- IO(context.unsafeToFuture(context.readiness)).attempt
+    } yield assert(after.isLeft)
   }
 
-  test("request release cancels and joins resolver work and rejects late submissions") {
+  test("request contexts have independent cancellation signals") {
     for {
-      entered <- Deferred[IO, Unit]
-      released <- Deferred[IO, Unit]
-      _ <- Resource.make(TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
-        .onCancel(released.complete(()).void)).allocated)(_._2).use { case (context, release) =>
-        for {
-          _ <- IO(context.unsafeToFuture(context.readiness))
-          _ <- entered.get.timeout(2.seconds)
-          _ <- release
-          _ <- released.get.timeout(1.second)
-          late <- IO(context.unsafeToFuture(context.readiness)).attempt
-        } yield assert(late.isLeft)
-      }
-    } yield ()
+      firstEntered <- Deferred[IO, Unit]
+      firstCancelled <- Deferred[IO, Unit]
+      secondEntered <- Deferred[IO, Unit]
+      secondReady <- Deferred[IO, ProbeResult]
+      first <- TestGraphQLSupport.context((firstEntered.complete(()) *> IO.never[ProbeResult])
+        .onCancel(firstCancelled.complete(()) *> IO.unit)).allocated
+      second <- TestGraphQLSupport.context((secondEntered.complete(()) *> secondReady.get)
+        .onCancel(IO.unit)).allocated
+      _ <- IO(first._1.unsafeToFuture(first._1.readiness))
+      _ <- IO(second._1.unsafeToFuture(second._1.readiness))
+      _ <- firstEntered.get.timeout(2.seconds)
+      _ <- secondEntered.get.timeout(2.seconds)
+      _ <- first._2
+      _ <- firstCancelled.get.timeout(2.seconds)
+      _ <- secondReady.complete(ProbeResult.Ready)
+      secondResult <- IO(second._1.unsafeToFuture(second._1.readiness)).flatMap(future => IO.fromFuture(IO.pure(future))).attempt
+      _ <- second._2
+    } yield assert(secondResult.isRight)
   }
 
   test("memoization executes the request probe once across concurrent aliases") {

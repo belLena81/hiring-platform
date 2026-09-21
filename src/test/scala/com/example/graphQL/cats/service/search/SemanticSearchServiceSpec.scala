@@ -172,8 +172,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       jobs: JobRepository[IO],
       embeddings: EmbeddingService[IO],
       search: SemanticSearchRepository[IO]
-  ): SemanticSearchService[IO] =
-    SemanticSearchService[IO](users, jobs, embeddings, search, embeddingModel = configuredModel, embeddingVersion = 1)
+  ): SemanticSearchService =
+    SemanticSearchService(users, jobs, embeddings, search, embeddingModel = configuredModel, embeddingVersion = 1)
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =

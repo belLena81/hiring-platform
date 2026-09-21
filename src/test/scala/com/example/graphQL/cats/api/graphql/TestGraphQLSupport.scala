@@ -22,7 +22,7 @@ object TestGraphQLSupport {
   val cursorCodec: CursorCodec.CursorCodecs =
     CursorCodec.fromSecret("test-cursor-secret-01234567890123456789")
 
-  val accountService: AccountUseCases[IO] = new AccountUseCases[IO] {
+  val accountService: AccountUseCases = new AccountUseCases {
     def signUp(input: SignUpInput, now: Instant, userId: UserId) = unsupported
     def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId) = unsupported
     def login(input: LoginInput, now: Instant) = unsupported
@@ -33,7 +33,7 @@ object TestGraphQLSupport {
   }
 
   val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
-    new HiringReadModel[IO] {
+    new HiringReadModel {
       def user(id: UserId) = unsupported
       def users(ids: List[UserId]) = unsupported
       def canViewUserEmail(actor: ActorContext, userId: UserId) = unsupported
@@ -44,7 +44,7 @@ object TestGraphQLSupport {
       def canViewApplication(actor: ActorContext, applicationId: ApplicationId) = unsupported
       def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest) = unsupported
     },
-    new JobUseCases[IO] {
+    new JobUseCases {
       def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId) = unsupported
       def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant) = unsupported
       def publishJob(actor: ActorContext, jobId: JobId, now: Instant) = unsupported
@@ -53,7 +53,7 @@ object TestGraphQLSupport {
       def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest) = unsupported
       def myJobs(actor: ActorContext, page: JobPageRequest) = unsupported
     },
-    new ApplicationUseCases[IO] {
+    new ApplicationUseCases {
       def submitApplication(actor: ActorContext, jobId: JobId, applicationId: ApplicationId, eventId: ApplicationEventId, now: Instant) = unsupported
       def myApplications(actor: ActorContext, page: ApplicationPageRequest) = unsupported
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
@@ -71,7 +71,8 @@ object TestGraphQLSupport {
       diagnostics: Diagnostics = Diagnostics.noop,
       requestId: Option[String] = None
   ): Resource[IO, RequestContext] =
-    RequestContextFactory.resource.flatMap(_.resource(probe, actor, hiring, hiringReady, diagnostics = diagnostics, requestId = requestId))
+    RequestContextFactory.resource.flatMap(_.resource(RequestContextParameters(probe, actor, hiring, hiringReady,
+      diagnostics = diagnostics, requestId = requestId)))
 
   def dependencies(
       hiring: HiringGraphQLServices = emptyServices,

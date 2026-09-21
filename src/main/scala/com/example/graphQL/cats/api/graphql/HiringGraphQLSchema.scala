@@ -1,11 +1,10 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, ProbeResult, UseCaseError}
+import com.example.graphQL.cats.service.UseCaseError
 import io.circe.Json
-import org.typelevel.otel4s.trace.Tracer
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
 import sangria.marshalling.circe.*
 import sangria.renderer.SchemaRenderer
@@ -21,18 +20,9 @@ object HiringGraphQLSchema {
 
   def execute(
       request: GraphQLRequest,
-      service: HealthService,
-      requestId: String,
-      actor: Option[ActorContext],
-      hiring: HiringGraphQLServices,
-      ensureHiringReady: IO[ProbeResult],
-      contextFactory: RequestContextFactory,
-      tracer: Tracer[IO] = Tracer.noop[IO],
-      diagnostics: Diagnostics = Diagnostics.noop
+      context: Resource[IO, RequestContext]
   ): IO[Either[Failure, Json]] =
-    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, tracer, diagnostics, Some(requestId)).use { context =>
-      executeInContext(request, context)
-    }
+    context.use(executeInContext(request, _))
 
   private[api] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
     IO.executionContext.flatMap { implicit executionContext =>
@@ -47,6 +37,8 @@ object HiringGraphQLSchema {
           case (_, error: QueryComplexityExceeded) => throw error
           case (_, RequestContext.ReadFailure(UseCaseError.Repository(RepositoryError.Unavailable))) =>
             HandledException("Repository unavailable")
+          case (_, RequestContext.RequestClosed) =>
+            HandledException("Execution failed")
           case (_, error) =>
             context.reportExecutionFailure(error)
             HandledException("Execution failed")

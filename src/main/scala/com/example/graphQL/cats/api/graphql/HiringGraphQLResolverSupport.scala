@@ -9,7 +9,6 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, SearchError, UseCaseError}
-import com.example.graphQL.cats.shared.Parsing.parseUuid
 import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.JobSearchFilter
@@ -27,12 +26,6 @@ private[graphql] object HiringGraphQLResolverSupport {
 
   def timestamped[A](f: (Instant, UUID) => IO[A]): IO[A] =
     (IO.realTimeInstant, IO.randomUUID).mapN(f).flatten
-
-  def searchIdValue(value: Option[String]): IO[Either[GraphQLError, UUID]] =
-    value match {
-      case Some(raw) => IO.pure(parseUuid(raw).left.map(_ => GraphQLError("INVALID_ID", "Invalid UUID")))
-      case None => IO.randomUUID.map(Right(_))
-    }
 
   def searchEventId(searchId: UUID): UUID =
     UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))
@@ -104,7 +97,7 @@ private[graphql] object HiringGraphQLResolverSupport {
 
   def authenticatedSearch(
       context: Context[RequestContext, Unit]
-  ): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases[IO])]] =
+  ): IO[Either[UseCaseError, (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases)]] =
     authenticated(context).map(_.flatMap { case (actor, hiring) =>
       hiring.semanticSearchService.map(service => (actor, hiring, service)).toRight(UseCaseError.Search(SearchError.VectorSearchUnavailable))
     })

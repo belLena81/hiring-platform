@@ -55,9 +55,9 @@ final class TracePropagationSpec extends CatsEffectSuite {
         applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
         diagnostics = capture(records)
         services = HiringGraphQLServices(
-          TracedHiringServices.readModel(HiringReadService[IO](users, jobs, applications), diagnostics, tracer),
-          TracedHiringServices.jobs(JobService[IO](users, jobs), diagnostics, tracer),
-          TracedHiringServices.applications(ApplicationService[IO](users, jobs, applications), diagnostics, tracer),
+          HiringReadService(users, jobs, applications),
+          JobService(users, jobs),
+          ApplicationService(users, jobs, applications),
           TestGraphQLSupport.cursorCodec,
           TestGraphQLSupport.accountService
         )
@@ -78,7 +78,7 @@ final class TracePropagationSpec extends CatsEffectSuite {
       } yield {
         val response = captured._1
         val records = captured._2
-        val resolverSpan = span(captured, "service.job.searchOpen")
+        val resolverSpan = span(captured, "graphql.field.jobs")
 
         assertEquals(response.status, Status.Ok)
         val traceparent = response.headers.get(CIString("traceparent")).map(_.head.value)

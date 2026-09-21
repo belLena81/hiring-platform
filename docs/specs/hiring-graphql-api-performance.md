@@ -16,7 +16,7 @@ Status: completed for planned development scope - GraphQL contract, HS256 bearer
 - Verified implementation: Foundation serves `health` and `readiness`, while hiring schema operations can execute through served HTTP when a valid HS256 bearer JWT maps to a stored user. Domain-service source contains `ActorContext`, `JobService`, `ApplicationService`, typed `UseCaseError`, MongoDB repositories, transactions, bounded application pagination, and named list indexes.
 - Target requirements: `docs/development-milestones.md` Hiring GraphQL API requires queries, mutations, inputs, typed payloads/errors, RBAC, cursor pagination, nested resolvers, request-scoped batching, UC01 structured job search, GraphQL exposure for domain service use cases, documented access patterns, and `explain("executionStats")` evidence.
 - Auth decision: served HTTP derives `ActorContext` from an HS256 bearer JWT only when `AUTH_JWT_HS256_SECRET` is configured. The token must contain valid `sub`, `iss`, `aud`, and `exp` claims; optional `nbf` is honored. The trusted role is loaded from `UserRepository.find(sub)`, so client-controlled role claims cannot elevate privileges. Login/token issuance and external identity-provider integration remain out of scope.
-- API evolution decision: evolve the single GraphQL schema additively. Keep `health` and `readiness` unchanged, update SDL snapshots and executable fixtures with representative hiring operations, and do not introduce versioned endpoints.
+- API evolution decision: evolve the single GraphQL schema additively for feature fields and operations. The scalar/enum consistency follow-up is an explicitly coordinated breaking cutover; `health` and `readiness` remain unchanged, SDL snapshots and executable fixtures stay canonical, and no versioned endpoint is introduced.
 - Cursor decision: API cursors are opaque base64url-encoded JSON with a required `kind` discriminator. Jobs encode `{ "kind": "job", "createdAt": "<ISO-8601 UTC instant>", "id": "<UUID>" }`; applications encode `{ "kind": "application", "createdAt": "<ISO-8601 UTC instant>", "id": "<UUID>" }`; application history encodes `{ "kind": "applicationEvent", "occurredAt": "<ISO-8601 UTC instant>", "id": "<UUID>" }`. Invalid, malformed, cross-type, or unauthorized cursors return typed sanitized errors and must not bypass ownership checks.
 - Performance decision: Hiring GraphQL API records local measured query-plan evidence for representative bounded fixture data. UC SLOs remain targets unless a benchmark records dataset size, concurrency, environment, percentiles, errors, and resource usage.
 
@@ -94,6 +94,12 @@ For each accepted performance-sensitive operation, record `executionTimeMillis`,
   - Documentation owner: `docs/api.md`, `docs/mongodb-design.md`, `docs/development-milestones.md`, and this spec when contracts/evidence change.
 - Serialization: schema/context changes land before resolvers; repository port changes land before Mongo adapter changes; explain evidence lands after query/index implementation. Avoid overlapping edits to the same files across agents.
 - Current blockers: no planned-scope blocker remains. Real performance SLO claims require a workload benchmark not included here. Production identity-provider integration and token issuance remain separately scoped, but served HTTP hiring workflows can execute with configured HS256 bearer JWTs.
+
+## Scalar and enum contract follow-up
+
+- The GraphQL boundary now uses shared string/UUID scalar coercion for `Instant`, `UUID`, `UserID`, `JobID`, and `ApplicationID`; malformed UUID input is rejected by Sangria validation before resolver execution.
+- `User.id` is `UserID!`; search and interaction UUID inputs use `UUID`; GraphQL enum labels are SCREAMING_CASE while domain and event values remain unchanged.
+- This is an intentional breaking client cutover. No MongoDB or event-payload migration is required because the change is confined to GraphQL input/output representation.
 
 ## Checkpoint and review
 

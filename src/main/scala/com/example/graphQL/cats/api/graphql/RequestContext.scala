@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{IO, Resource}
+import cats.effect.{Deferred, IO, Resource}
 import cats.effect.std.Dispatcher
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -13,20 +13,31 @@ import org.typelevel.otel4s.trace.{SpanContext, Tracer}
 import scala.util.control.NoStackTrace
 
 final case class HiringGraphQLServices(
-    readModel: HiringReadModel[IO],
-    jobService: JobUseCases[IO],
-    applicationService: ApplicationUseCases[IO],
+    readModel: HiringReadModel,
+    jobService: JobUseCases,
+    applicationService: ApplicationUseCases,
     cursorCodec: CursorCodec.CursorCodecs,
-    accountService: AccountUseCases[IO],
-    semanticSearchService: Option[SearchUseCases[IO]] = None,
-    interactionService: Option[InteractionUseCases[IO]] = None,
+    accountService: AccountUseCases,
+    semanticSearchService: Option[SearchUseCases] = None,
+    interactionService: Option[InteractionUseCases] = None,
     searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO]
 )
 
 final case class EmailVisibility(userId: UserId)
 
+final case class RequestContextParameters(
+    probe: IO[ProbeResult],
+    actor: Option[ActorContext],
+    hiring: HiringGraphQLServices,
+    ensureHiringReady: IO[ProbeResult],
+    tracer: Tracer[IO] = Tracer.noop[IO],
+    diagnostics: Diagnostics = Diagnostics.noop,
+    requestId: Option[String] = None
+)
+
 final class RequestContext private (
     dispatcher: Dispatcher[IO],
+    closed: Deferred[IO, Unit],
     probe: IO[ProbeResult],
     hiringReady: IO[ProbeResult],
     val actor: Option[ActorContext],
@@ -41,7 +52,17 @@ final class RequestContext private (
   def hiringAvailable: IO[ProbeResult] = hiringReady
 
   private[graphql] def unsafeToFuture[A](action: IO[A]) =
-    dispatcher.unsafeToFuture(spanContext.fold(action)(tracer.childScope(_)(action)))
+    dispatcher.unsafeToFuture(requestScoped(action))
+
+  private[graphql] def unsafeFieldToFuture[A](name: String, action: IO[A]) =
+    dispatcher.unsafeToFuture(requestScoped(
+      Diagnostics.spanWith(diagnostics, s"graphql.field.$name", requestId = requestId)(action)(using tracer)))
+
+  private def requestScoped[A](action: IO[A]): IO[A] =
+    IO.race(closed.get, spanContext.fold(action)(tracer.childScope(_)(action))).flatMap {
+      case Left(_) => IO.raiseError(RequestContext.RequestClosed)
+      case Right(value) => IO.pure(value)
+    }
 
   private[graphql] def reportExecutionFailure(error: Throwable): Unit =
     try dispatcher.unsafeRunAndForget(diagnostics.emit(LogEvent.RuntimeFailed, requestId, fields = LogFields.failure(error)))
@@ -65,17 +86,9 @@ final class RequestContext private (
 }
 
 final class RequestContextFactory private (dispatcher: Dispatcher[IO]) {
-  def resource(
-      probe: IO[ProbeResult],
-      actor: Option[ActorContext],
-      hiring: HiringGraphQLServices,
-      ensureHiringReady: IO[ProbeResult],
-      tracer: Tracer[IO] = Tracer.noop[IO],
-      diagnostics: Diagnostics = Diagnostics.noop,
-      requestId: Option[String] = None
-  ): Resource[IO, RequestContext] =
-    Resource.eval(tracer.currentSpanContext).flatMap { spanContext =>
-      RequestContext.withDispatcher(dispatcher, probe, actor, hiring, ensureHiringReady, tracer, spanContext, diagnostics, requestId)
+  def resource(parameters: RequestContextParameters): Resource[IO, RequestContext] =
+    Resource.eval(parameters.tracer.currentSpanContext).flatMap { spanContext =>
+      RequestContext.withDispatcher(dispatcher, parameters, spanContext)
     }
 }
 
@@ -86,21 +99,19 @@ object RequestContextFactory {
 
 object RequestContext {
   final case class ReadFailure(error: UseCaseError) extends RuntimeException with NoStackTrace
+  case object RequestClosed extends RuntimeException with NoStackTrace
 
   private[graphql] def withDispatcher(
       dispatcher: Dispatcher[IO],
-      probe: IO[ProbeResult],
-      actor: Option[ActorContext],
-      hiring: HiringGraphQLServices,
-      ensureHiringReady: IO[ProbeResult],
-      tracer: Tracer[IO],
-      spanContext: Option[SpanContext],
-      diagnostics: Diagnostics,
-      requestId: Option[String]
+      parameters: RequestContextParameters,
+      spanContext: Option[SpanContext]
   ): Resource[IO, RequestContext] =
     for {
-      memoized <- Resource.eval(probe.memoize)
-      memoizedHiringReady <- Resource.eval(ensureHiringReady.memoize)
-      context = new RequestContext(dispatcher, memoized, memoizedHiringReady, actor, hiring, tracer, spanContext, diagnostics, requestId)
+      closed <- Resource.eval(Deferred[IO, Unit])
+      memoized <- Resource.eval(parameters.probe.memoize)
+      memoizedHiringReady <- Resource.eval(parameters.ensureHiringReady.memoize)
+      context = new RequestContext(dispatcher, closed, memoized, memoizedHiringReady, parameters.actor, parameters.hiring,
+        parameters.tracer, spanContext, parameters.diagnostics, parameters.requestId)
+      _ <- Resource.onFinalize(closed.complete(()).void)
     } yield context
 }

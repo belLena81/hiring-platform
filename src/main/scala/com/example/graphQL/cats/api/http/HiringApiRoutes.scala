@@ -35,18 +35,21 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
   }
 
   def httpRoutes(config: HiringApiRoutes.HttpConfig): IO[HttpRoutes[IO]] = {
-    val graphQL = new GraphQLHttpRoutes(service, diagnostics, dependencies, tracer).routes
-    val mounted = (healthRoutes <+> graphQL).orNotFound
-    HttpMiddleware(
-      config,
-      mounted,
-      diagnostics,
-      tracer,
-      (request, failure) => new GraphQLHttpRoutes(service, diagnostics, dependencies, tracer)
-        .rejection(HttpRejection.Internal, request, LogFields.failure(failure)),
-      request => new GraphQLHttpRoutes(service, diagnostics, dependencies, tracer)
-        .rejection(HttpRejection.PayloadTooLarge, request)
-    ).map(app => Kleisli(request => OptionT.liftF(app(request))))
+    val graphQL = new GraphQLHttpRoutes(service, diagnostics, dependencies, tracer)
+    val onError = (request: Request[IO], failure: Throwable) =>
+      graphQL.rejection(HttpRejection.Internal, request, LogFields.failure(failure))
+    val onEntityTooLarge = (request: Request[IO]) =>
+      graphQL.rejection(HttpRejection.PayloadTooLarge, request)
+
+    for {
+      protectedRoutes <- HttpMiddleware(config, graphQL.routes.orNotFound, diagnostics, tracer, onError, onEntityTooLarge)
+      probeRoutes <- HttpMiddleware(config, healthRoutes.orNotFound, diagnostics, tracer, onError, onEntityTooLarge,
+        applyAdmissionControl = false)
+    } yield Kleisli { request =>
+      val app = if (request.uri.path.renderString == "/health" || request.uri.path.renderString == "/ready") probeRoutes
+      else protectedRoutes
+      OptionT.liftF(app(request))
+    }
   }
 
   def httpApp(config: HiringApiRoutes.HttpConfig): IO[HttpApp[IO]] =

@@ -81,7 +81,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       sessions = new InMemorySearchSessions(sessionsRef, eventsRef)
-    } yield sessions -> OperationalTelemetryService[IO](users, jobs, sessions)
+    } yield sessions -> OperationalTelemetryService(users, jobs, sessions)
 
   private val session: SearchSession =
     SearchSession(

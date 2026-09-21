@@ -27,7 +27,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       )
       for {
         (pageRequest, requested) <- EitherT.fromEither[IO](page(context.arg(firstArgument), context.arg(afterArgument), cursorCodec.decode))
-        searchId                 <- EitherT(searchIdValue(context.arg(searchIdArgument)))
+        searchId                 <- EitherT.liftF(context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure))
         values                   <- liftUseCase(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
         _                        <- EitherT.liftF(saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
                                       _.id.value.toString,
@@ -67,7 +67,7 @@ private[graphql] object HiringGraphQLJobResolvers {
 
   def changeJob(
       context: Context[RequestContext, Unit],
-      method: JobUseCases[IO] => (com.example.graphQL.cats.service.ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
+      method: JobUseCases => (com.example.graphQL.cats.service.ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
   ): IO[JobPayload] =
     authenticatedPayload(JobPayload(None, _))(context) { case (actor, hiring) =>
       val jobId = context.arg(jobActionInputArgument).jobId

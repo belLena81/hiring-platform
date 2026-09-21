@@ -1,8 +1,7 @@
 package com.example.graphQL.cats.service.application
 
-import cats.Monad
 import cats.data.EitherT
-import cats.syntax.all.*
+import cats.effect.IO
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
@@ -20,11 +19,11 @@ import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
-final class ApplicationService[F[_]: Monad](
-    users: UserRepository[F],
-    jobs: JobRepository[F],
-    applications: ApplicationRepository[F]
-) extends ApplicationUseCases[F] {
+final class ApplicationService(
+    users: UserRepository[IO],
+    jobs: JobRepository[IO],
+    applications: ApplicationRepository[IO]
+) extends ApplicationUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
@@ -34,12 +33,12 @@ final class ApplicationService[F[_]: Monad](
       applicationId: ApplicationId,
       eventId: ApplicationEventId,
       now: Instant
-  ): F[Either[UseCaseError, Application]] =
+  ): IO[Either[UseCaseError, Application]] =
     (for {
       candidate <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
+      _ <- EitherT.cond[IO](candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
       job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      application <- EitherT.fromEither[F](ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase)
+      application <- EitherT.fromEither[IO](ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase)
       initialEvent = ApplicationEvent(eventId, application.id, None, application.status, candidate.id, now, None, None)
       event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
       _ <- EitherT(applications.createForOpenJobWithEvents(job, application, initialEvent, List(event)).map(_.widenUseCase))
@@ -48,10 +47,10 @@ final class ApplicationService[F[_]: Monad](
   def myApplications(
       actor: ActorContext,
       page: ApplicationPageRequest
-  ): F[Either[UseCaseError, List[Application]]] =
+  ): IO[Either[UseCaseError, List[Application]]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
+      _ <- EitherT.cond[IO](user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
       applications <- EitherT(this.applications.findByCandidate(user.id, page).map(_.widenUseCase))
     } yield applications).value
 
@@ -59,7 +58,7 @@ final class ApplicationService[F[_]: Monad](
       actor: ActorContext,
       jobId: JobId,
       page: ApplicationPageRequest
-  ): F[Either[UseCaseError, List[Application]]] =
+  ): IO[Either[UseCaseError, List[Application]]] =
     authorizedJobs.manage(actor, jobId) { job =>
       applications.findByJob(job.id, page).map(_.widenUseCase)
     }
@@ -72,17 +71,17 @@ final class ApplicationService[F[_]: Monad](
       reason: Option[String],
       eventId: ApplicationEventId,
       now: Instant
-  ): F[Either[UseCaseError, Application]] =
+  ): IO[Either[UseCaseError, Application]] =
     (for {
       actorUser <- EitherT(authorization.resolve(actor))
       application <- EitherT(applications.find(applicationId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
       job <- EitherT(jobs.find(application.jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canManage(actorUser, job), (), UseCaseError.Domain(DomainError.Forbidden))
-      change <- EitherT.fromEither[F](
+      _ <- EitherT.cond[IO](authorization.canManage(actorUser, job), (), UseCaseError.Domain(DomainError.Forbidden))
+      change <- EitherT.fromEither[IO](
         ApplicationLifecycle.changeStatus(application, target, actorUser.id, now, feedback, reason).widenUseCase
       )
       persistedApplication = change.application.copy(version = application.version + 1L)
-      event <- EitherT.fromEither[F](
+      event <- EitherT.fromEither[IO](
         ApplicationEvent
           .validate(eventId, application.id, Some(change.previousStatus), change.newStatus, actorUser.id, now, change.feedback, change.reason)
           .toEither
@@ -104,10 +103,10 @@ final class ApplicationService[F[_]: Monad](
 }
 
 object ApplicationService {
-  def apply[F[_]: Monad](
-      users: UserRepository[F],
-      jobs: JobRepository[F],
-      applications: ApplicationRepository[F]
-  ): ApplicationService[F] =
+  def apply(
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      applications: ApplicationRepository[IO]
+  ): ApplicationService =
     new ApplicationService(users, jobs, applications)
 }

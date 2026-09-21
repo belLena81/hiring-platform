@@ -21,7 +21,7 @@ class JobServiceSpec extends CatsEffectSuite {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](Map.empty)
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       _ <- users.set(Map(candidateId -> candidate, recruiterId -> recruiter))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       input = CreateJobInput(
         " New role ",
         " Build services ",
@@ -43,7 +43,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.createJob(
         ActorContext(recruiterId, UserRole.Recruiter),
         CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Closed),
@@ -68,7 +68,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter, candidateId -> candidate))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       input = CreateJobInput(
         "New role",
         "Build services",
@@ -95,7 +95,7 @@ class JobServiceSpec extends CatsEffectSuite {
       publisher = new EmbeddingWorkPublisher[IO] {
         override def wake: IO[Unit] = wakes.update(_ + 1)
       }
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs), publisher)
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs), publisher)
       result <- service.createJob(
         ActorContext(recruiterId, UserRole.Recruiter),
         CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Open),
@@ -115,7 +115,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
       jobRepository = InMemoryJobs(jobs, Some(outbox))
-      service = JobService[IO](InMemoryUsers(users), jobRepository)
+      service = JobService(InMemoryUsers(users), jobRepository)
       result <- service.createJob(
         ActorContext(recruiterId, UserRole.Recruiter),
         CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Open),
@@ -137,7 +137,7 @@ class JobServiceSpec extends CatsEffectSuite {
         Map(recruiterId -> recruiter)
       )
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.closeJob(ActorContext(recruiterId, UserRole.Admin), jobId, later)
     } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
@@ -149,7 +149,7 @@ class JobServiceSpec extends CatsEffectSuite {
         Map(adminId -> unseededAdmin)
       )
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.closeJob(ActorContext(adminId, UserRole.Admin), jobId, later)
     } yield assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
   }
@@ -161,7 +161,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(recruiterId, UserRole.Recruiter), page)
     } yield assertEquals(result.map(_.map(_.id)), Right(List(jobId)))
   }
@@ -170,7 +170,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(recruiterId, UserRole.Candidate), page)
     } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
@@ -182,7 +182,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(adminId -> admin))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(adminId, UserRole.Admin), page)
     } yield assertEquals(result.map(_.map(_.id).toSet), Right(Set(jobId, otherJobId)))
   }
@@ -193,7 +193,7 @@ class JobServiceSpec extends CatsEffectSuite {
         Map(recruiterId -> recruiter)
       )
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.closeJob(ActorContext(recruiterId, UserRole.Recruiter), jobId, later)
       stored <- jobs.get.map(_.get(jobId))
     } yield {
@@ -211,7 +211,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](
         Map(jobId -> openJob.copy(status = JobStatus.Closed))
       )
-      service = JobService[IO](InMemoryUsers(users), InMemoryJobs(jobs))
+      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId)
     } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }

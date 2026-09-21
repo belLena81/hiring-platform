@@ -45,7 +45,7 @@ private[graphql] object HiringGraphQLTypes {
         case GraphQLUserProfile.Recruiter(profile) => profile
       }
   lazy val userType: ObjectType[RequestContext, User] = ObjectType("User", fields[RequestContext, User](
-    Field("id", IDType, resolve = _.value.id.value.toString),
+    Field("id", userIdType, resolve = _.value.id),
     Field("email", OptionType(StringType), resolve = context =>
       emailVisibilityFetcher.deferOpt(context.value.id)
         .map(_.flatMap(_ => context.value.email))(using ExecutionContext.parasitic)),

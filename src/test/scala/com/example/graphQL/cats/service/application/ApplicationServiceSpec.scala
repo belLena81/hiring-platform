@@ -165,7 +165,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
   private def withServices(
       jobs: Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job],
       applications: Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]
-  ): IO[(InMemoryJobs, InMemoryApplications, ApplicationService[IO])] =
+  ): IO[(InMemoryJobs, InMemoryApplications, ApplicationService)] =
     for {
       usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
         Map(candidateId -> candidate, recruiterId -> recruiter, adminId -> admin)
@@ -178,5 +178,5 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       nextOperationalEventError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       jobRepository = InMemoryJobs(jobsRef)
       applicationRepository = InMemoryApplications(applicationsRef, eventsRef, nextCreateError, Some(operationalEvents), Some(nextOperationalEventError))
-    } yield (jobRepository, applicationRepository, ApplicationService[IO](InMemoryUsers(usersRef), jobRepository, applicationRepository))
+    } yield (jobRepository, applicationRepository, ApplicationService(InMemoryUsers(usersRef), jobRepository, applicationRepository))
 }

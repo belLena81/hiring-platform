@@ -25,7 +25,6 @@ class AppConfigSpec extends FunSuite {
       |  port = 8080
       |  admission-permits = 16
       |  request-timeout-ms = 5000
-      |  resolver-timeout-ms = 4000
       |  trusted-proxy-cidrs = []
       |}
       |mongo {
@@ -142,7 +141,6 @@ class AppConfigSpec extends FunSuite {
         |  port = 65535
         |  admission-permits = 64
         |  request-timeout-ms = 5000
-        |  resolver-timeout-ms = 4000
         |  trusted-proxy-cidrs = []
         |}
         |mongo {
@@ -211,9 +209,9 @@ class AppConfigSpec extends FunSuite {
     assertEquals(AppConfig.fromConfig(config, Map(
       "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
-    )), Right(AppConfig(Host.fromString("::1").get, Ip4sPort.fromInt(65535).get, 64, 5.seconds, 4.seconds, TrustedProxyConfig(Nil),
+    )), Right(AppConfig(Host.fromString("::1").get, Ip4sPort.fromInt(65535).get, 64, 5.seconds, TrustedProxyConfig(Nil),
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
-      "hiring_test-2", maskSensitive = true,
+      "hiring_test-2", true,
       JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
       defaultPasswordHash,
       AuthRateLimitConfig(30, 10, 500),
@@ -246,7 +244,6 @@ class AppConfigSpec extends FunSuite {
         |  port = 8080
         |  admission-permits = 16
         |  request-timeout-ms = 5000
-        |  resolver-timeout-ms = 4000
         |  trusted-proxy-cidrs = []
         |}
         |mongo {
@@ -311,7 +308,6 @@ class AppConfigSpec extends FunSuite {
         |  admission-permits = 16
         |  admission-permits = ${?HTTP_ADMISSION_PERMITS}
         |  request-timeout-ms = 5000
-        |  resolver-timeout-ms = 4000
         |  trusted-proxy-cidrs = []
         |}
         |mongo {
@@ -464,8 +460,8 @@ class AppConfigSpec extends FunSuite {
       assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
-      Right(AppConfig(Host.fromString("127.0.0.1").get, Ip4sPort.fromInt(8080).get, 16, 5.seconds, 4.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
-        maskSensitive = false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false), defaultKafka)))
+      Right(AppConfig(Host.fromString("127.0.0.1").get, Ip4sPort.fromInt(8080).get, 16, 5.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
+        false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false), defaultKafka)))
   }
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
@@ -532,15 +528,10 @@ class AppConfigSpec extends FunSuite {
     }
   }
 
-  test("resolver timeout is positive, bounded, and strictly below the request deadline") {
-    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(config => (config.requestTimeout, config.resolverTimeout)),
-      Right((5.seconds, 4.seconds)))
+  test("request timeout is bounded") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.requestTimeout), Right(5.seconds))
     assertContainsError(AppConfig.fromConfig(defaultConfig + "http.request-timeout-ms = 99\n", Map.empty),
       ConfigError.InvalidRequestTimeout)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "http.resolver-timeout-ms = 0\n", Map.empty),
-      ConfigError.InvalidResolverTimeout)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "http.resolver-timeout-ms = 5000\n", Map.empty),
-      ConfigError.InvalidResolverTimeout)
   }
 
   test("trusted proxy CIDRs are explicit, typed, and never global") {

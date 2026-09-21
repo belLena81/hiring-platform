@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.search
 
-import cats.Monad
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
@@ -14,14 +14,14 @@ import com.example.graphQL.cats.shared.pagination.PageSize
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
 import java.util.UUID
 
-final class SemanticSearchService[F[_]: Monad](
-    users: UserRepository[F],
-    jobs: JobRepository[F],
-    embeddings: EmbeddingService[F],
-    search: SemanticSearchRepository[F],
+final class SemanticSearchService(
+    users: UserRepository[IO],
+    jobs: JobRepository[IO],
+    embeddings: EmbeddingService[IO],
+    search: SemanticSearchRepository[IO],
     embeddingModel: String,
     embeddingVersion: Int
-) extends SearchUseCases[F] {
+) extends SearchUseCases {
   private val authorization = ActorAuthorization(users)
 
   def semanticJobSearch(
@@ -30,13 +30,13 @@ final class SemanticSearchService[F[_]: Monad](
       filter: JobSearchFilter,
       first: PageSize,
       searchId: UUID
-  ): F[Either[UseCaseError, List[RankedJob]]] =
+  ): IO[Either[UseCaseError, List[RankedJob]]] =
     resolveCandidate(actor).flatMap {
-      case Left(error) => error.asLeft[List[RankedJob]].pure[F]
+      case Left(error) => IO.pure(error.asLeft[List[RankedJob]])
       case Right(_) if text.length > SearchableText.QueryMaxChars =>
-        UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars)).asLeft[List[RankedJob]].pure[F]
+        IO.pure(UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars)).asLeft[List[RankedJob]])
       case Right(_) => embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Query)).flatMap {
-        case Left(_) => UseCaseError.Search(SearchError.ProviderUnavailable).asLeft[List[RankedJob]].pure[F]
+        case Left(_) => IO.pure(UseCaseError.Search(SearchError.ProviderUnavailable).asLeft[List[RankedJob]])
         case Right(vector) =>
           search.searchJobs(VectorSearchQuery(
             vector.values,
@@ -55,9 +55,9 @@ final class SemanticSearchService[F[_]: Monad](
       actor: ActorContext,
       first: PageSize,
       searchId: UUID
-  ): F[Either[UseCaseError, List[RankedJob]]] =
+  ): IO[Either[UseCaseError, List[RankedJob]]] =
     resolveCandidate(actor).flatMap {
-      case Left(error) => error.asLeft[List[RankedJob]].pure[F]
+      case Left(error) => IO.pure(error.asLeft[List[RankedJob]])
       case Right(user) =>
         (user.candidateProfile, user.embedding) match {
           case (Some(profile), Some(embedding)) if embedding.meta.model == embeddingModel &&
@@ -74,8 +74,8 @@ final class SemanticSearchService[F[_]: Monad](
               searchId
             )
             search.recommendedJobs(query).map(_.leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable)))
-          case (Some(_), Some(_)) => UseCaseError.Search(SearchError.StaleEmbedding("candidate")).asLeft[List[RankedJob]].pure[F]
-          case _ => UseCaseError.Search(SearchError.MissingEmbedding("candidate")).asLeft[List[RankedJob]].pure[F]
+          case (Some(_), Some(_)) => IO.pure(UseCaseError.Search(SearchError.StaleEmbedding("candidate")).asLeft[List[RankedJob]])
+          case _ => IO.pure(UseCaseError.Search(SearchError.MissingEmbedding("candidate")).asLeft[List[RankedJob]])
         }
     }
 
@@ -84,19 +84,19 @@ final class SemanticSearchService[F[_]: Monad](
       jobId: JobId,
       first: PageSize,
       searchId: UUID
-  ): F[Either[UseCaseError, List[RankedCandidate]]] =
+  ): IO[Either[UseCaseError, List[RankedCandidate]]] =
     authorization.resolve(actor).flatMap {
-      case Left(error) => error.asLeft[List[RankedCandidate]].pure[F]
+      case Left(error) => IO.pure(error.asLeft[List[RankedCandidate]])
       case Right(user) if user.role == UserRole.Candidate =>
-        UseCaseError.Domain(DomainError.RecruiterRequired).asLeft[List[RankedCandidate]].pure[F]
+        IO.pure(UseCaseError.Domain(DomainError.RecruiterRequired).asLeft[List[RankedCandidate]])
       case Right(user) =>
         jobs.find(jobId).flatMap {
-      case Left(error) => UseCaseError.Repository(error).asLeft[List[RankedCandidate]].pure[F]
-      case Right(None) => UseCaseError.Domain(DomainError.NotFound("job")).asLeft[List[RankedCandidate]].pure[F]
+      case Left(error) => IO.pure(UseCaseError.Repository(error).asLeft[List[RankedCandidate]])
+      case Right(None) => IO.pure(UseCaseError.Domain(DomainError.NotFound("job")).asLeft[List[RankedCandidate]])
       case Right(Some(job)) if user.role == UserRole.Recruiter && job.recruiterId != user.id =>
-        UseCaseError.Domain(DomainError.Forbidden).asLeft[List[RankedCandidate]].pure[F]
+        IO.pure(UseCaseError.Domain(DomainError.Forbidden).asLeft[List[RankedCandidate]])
       case Right(Some(job)) if job.status != JobStatus.Open =>
-        UseCaseError.Domain(DomainError.JobMustBeOpen).asLeft[List[RankedCandidate]].pure[F]
+        IO.pure(UseCaseError.Domain(DomainError.JobMustBeOpen).asLeft[List[RankedCandidate]])
       case Right(Some(job)) =>
         job.embedding match {
           case Some(embedding) if embedding.meta.model == embeddingModel &&
@@ -113,13 +113,13 @@ final class SemanticSearchService[F[_]: Monad](
               searchId
             )
             search.candidateMatches(query).map(_.leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable)))
-          case Some(_) => UseCaseError.Search(SearchError.StaleEmbedding("job")).asLeft[List[RankedCandidate]].pure[F]
-          case None => UseCaseError.Search(SearchError.MissingEmbedding("job")).asLeft[List[RankedCandidate]].pure[F]
+          case Some(_) => IO.pure(UseCaseError.Search(SearchError.StaleEmbedding("job")).asLeft[List[RankedCandidate]])
+          case None => IO.pure(UseCaseError.Search(SearchError.MissingEmbedding("job")).asLeft[List[RankedCandidate]])
         }
         }
     }
 
-  private def resolveCandidate(actor: ActorContext): F[Either[UseCaseError, User]] =
+  private def resolveCandidate(actor: ActorContext): IO[Either[UseCaseError, User]] =
     authorization.resolve(actor).map(_.flatMap { user =>
       if (user.role == UserRole.Candidate) user.asRight[UseCaseError]
       else UseCaseError.Domain(DomainError.CandidateRequired).asLeft[User]
@@ -127,13 +127,13 @@ final class SemanticSearchService[F[_]: Monad](
 }
 
 object SemanticSearchService {
-  def apply[F[_]: Monad](
-      users: UserRepository[F],
-      jobs: JobRepository[F],
-      embeddings: EmbeddingService[F],
-      search: SemanticSearchRepository[F],
+  def apply(
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      embeddings: EmbeddingService[IO],
+      search: SemanticSearchRepository[IO],
       embeddingModel: String,
       embeddingVersion: Int
-  ): SemanticSearchService[F] =
+  ): SemanticSearchService =
     new SemanticSearchService(users, jobs, embeddings, search, embeddingModel, embeddingVersion)
 }

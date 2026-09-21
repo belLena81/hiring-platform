@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import io.circe.Json
@@ -47,9 +48,28 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     for {
       parsed <- parseRequest("{ job(id: \"not-a-uuid\") { id } }")
       result <- TestGraphQLSupport.dependencies().use(dependencies =>
-        HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001",
-          None, dependencies.hiring, dependencies.ensureHiringReady, dependencies.contextFactory))
+        HiringGraphQLSchema.execute(parsed, dependencies.contextFactory.resource(RequestContextParameters(
+          service.readiness(Some("00000000-0000-0000-0000-000000000001")), None, dependencies.hiring,
+          dependencies.ensureHiringReady, requestId = Some("00000000-0000-0000-0000-000000000001")))))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+  }
+
+  test("malformed UUID interaction inputs fail standard GraphQL validation") {
+    val operations = List(
+      "mutation { recordJobView(input: { eventId: \"invalid\", jobId: \"00000000-0000-0000-0000-000000000001\" }) { recorded } }",
+      "mutation { recordJobView(input: { eventId: \"00000000-0000-0000-0000-000000000001\", jobId: \"00000000-0000-0000-0000-000000000001\", searchId: \"invalid\" }) { recorded } }",
+      "mutation { recordSearchResultClick(input: { eventId: \"invalid\", searchId: \"invalid\", resultId: \"invalid\" }) { recorded } }"
+    )
+
+    operations.traverse(parseRequest).flatMap { requests =>
+      TestGraphQLSupport.dependencies().use { dependencies =>
+          requests.traverse { request =>
+          HiringGraphQLSchema.execute(request, dependencies.contextFactory.resource(RequestContextParameters(
+            service.readiness(Some("00000000-0000-0000-0000-000000000001")), None, dependencies.hiring,
+            dependencies.ensureHiringReady, requestId = Some("00000000-0000-0000-0000-000000000001"))))
+        }
+      }
+    }.map(results => assert(results.forall(_ == Left(HiringGraphQLSchema.Failure.InvalidQuery))))
   }
 
   List("health.graphql", "readiness.graphql", "introspection.graphql").foreach { name =>
@@ -58,8 +78,9 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
         query <- fixture(name)
         parsed <- parseRequest(query)
         result <- TestGraphQLSupport.dependencies().use(dependencies =>
-          HiringGraphQLSchema.execute(parsed, service, "00000000-0000-0000-0000-000000000001",
-            None, dependencies.hiring, dependencies.ensureHiringReady, dependencies.contextFactory))
+          HiringGraphQLSchema.execute(parsed, dependencies.contextFactory.resource(RequestContextParameters(
+            service.readiness(Some("00000000-0000-0000-0000-000000000001")), None, dependencies.hiring,
+            dependencies.ensureHiringReady, requestId = Some("00000000-0000-0000-0000-000000000001")))))
       } yield {
         val json = result.fold(failure => fail(failure.toString), identity)
         assert(json.hcursor.downField("data").succeeded)

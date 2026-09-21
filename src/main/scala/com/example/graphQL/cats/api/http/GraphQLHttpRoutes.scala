@@ -2,8 +2,9 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
+import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, RequestContextParameters}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.Rejection as LogRejection
@@ -13,7 +14,6 @@ import org.http4s.circe.*
 import org.http4s.dsl.Http4sDsl
 import org.http4s.headers.{Accept, Allow, `Content-Type`, `Retry-After`, `WWW-Authenticate`}
 import org.http4s.server.AuthMiddleware
-import org.http4s.syntax.all.*
 import org.typelevel.otel4s.trace.Tracer
 
 private[http] enum HttpRejection(val status: Status, val message: String, val reason: LogRejection) {
@@ -72,13 +72,16 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
                   .map(Left(_))
             }
 
-          def execute: IO[Response[IO]] =
-            HiringGraphQLSchema.execute(parsed, service, requestId, actor, dependencies.hiring,
-              dependencies.ensureHiringReady, dependencies.contextFactory, tracer, diagnostics).flatMap {
+          def execute: IO[Response[IO]] = {
+            val context = dependencies.contextFactory.resource(RequestContextParameters(
+              service.readiness(Some(requestId)), actor, dependencies.hiring, dependencies.ensureHiringReady,
+              tracer, diagnostics, Some(requestId)))
+            HiringGraphQLSchema.execute(parsed, context).flatMap {
               case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
               case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
               case Left(HiringGraphQLSchema.Failure.Internal) => rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
             }
+          }
 
           accountOperation(parsed) match {
             case AccountOperation.Single(operation) =>
@@ -157,8 +160,8 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
 
   private val authenticationFailures: AuthedRoutes[AuthFailure, IO] = AuthedRoutes.of {
     case request as failure =>
-      correlationId(request.req).flatMap { requestId =>
-        MediaTypeNegotiation.selectResponseMediaType(request.req.headers.get[Accept]) match {
+      correlationId(request).flatMap { requestId =>
+        MediaTypeNegotiation.selectResponseMediaType(request.headers.get[Accept]) match {
           case None => rejected(HttpRejection.NotAcceptable, requestId)
           case Some(mediaType) =>
             val rejection = failure match {
@@ -183,9 +186,10 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
           }
         }
     }
-    val middleware = AuthMiddleware(dependencies.authenticate, authenticationFailures)(graphqlRoutes)
+    val middleware: AuthMiddleware[IO, Option[ActorContext]] =
+      AuthMiddleware(dependencies.authenticate, authenticationFailures)
     Kleisli { request =>
-      if (request.method == Method.POST && request.uri.path.renderString == "/graphql") middleware(request)
+      if (request.method == Method.POST && request.uri.path.renderString == "/graphql") middleware(graphqlRoutes)(request)
       else OptionT.none[IO, Response[IO]]
     }
   }

@@ -25,7 +25,6 @@ enum ConfigError(val key: String) {
   case InvalidPort extends ConfigError("HTTP_PORT")
   case InvalidAdmissionPermits extends ConfigError("HTTP_ADMISSION_PERMITS")
   case InvalidRequestTimeout extends ConfigError("HTTP_REQUEST_TIMEOUT_MS")
-  case InvalidResolverTimeout extends ConfigError("HTTP_RESOLVER_TIMEOUT_MS")
   case InvalidMongoUri extends ConfigError("MONGODB_URI")
   case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
@@ -72,7 +71,7 @@ enum ConfigError(val key: String) {
 object ConfigError {
   val publicKeys: Set[String] = List[ConfigError](
     InvalidConfigFile(""), InvalidHost, InvalidPort, InvalidAdmissionPermits, InvalidRequestTimeout,
-    InvalidResolverTimeout, InvalidMongoUri, InvalidMongoDatabase, InvalidMaskSensitive, InvalidJwtSecret,
+    InvalidMongoUri, InvalidMongoDatabase, InvalidMaskSensitive, InvalidJwtSecret,
     InvalidJwtIssuer, InvalidJwtAudience, InvalidPasswordHashIterations, InvalidPasswordHashMemory,
     InvalidPasswordHashParallelism, InvalidAuthRateLimitWindow, InvalidAuthRateLimitAttempts,
     InvalidAuthRateLimitBuckets, InvalidTrustedProxyCidrs, InvalidVectorSearchEnabled, InvalidVoyageApiKey,
@@ -113,7 +112,7 @@ type TimeoutMs = Int :| Interval.Closed[100, 60000]
 type HttpsUrl = String :| StartWith["https://"]
 
 final case class AppConfig(host: Host, port: Ip4sPort, admissionPermits: Int, requestTimeout: FiniteDuration,
-    resolverTimeout: FiniteDuration, trustedProxy: TrustedProxyConfig,
+    trustedProxy: TrustedProxyConfig,
     mongoUri: String, mongoDatabase: String,
     maskSensitive: Boolean, jwtAuth: JwtAuthConfig, passwordHash: PasswordHashConfig, authRateLimit: AuthRateLimitConfig,
     vectorSearch: VectorSearchConfig, kafka: KafkaConfig) {
@@ -150,11 +149,11 @@ object AppConfig {
 
     val transport =
       (validHost(http.host), validPort(http.port), http.admissionPermits.validNel[ConfigError],
-        validRequestTimeout(http.requestTimeoutMs), validResolverTimeout(http.resolverTimeoutMs, http.requestTimeoutMs),
+        validRequestTimeout(http.requestTimeoutMs),
         validTrustedProxyCidrs(http.trustedProxyCidrs),
         validMongoUri(mongo.uri), validMongoDatabase(mongo.database)).mapN {
-        (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database) =>
-          (host, port, permits, requestTimeout.millis, resolverTimeout.millis, trustedProxy, uri, database)
+        (host, port, permits, requestTimeout, trustedProxy, uri, database) =>
+          (host, port, permits, requestTimeout.millis, trustedProxy, uri, database)
       }
 
     val authConfig =
@@ -193,12 +192,12 @@ object AppConfig {
 
     (transport, authConfig, kafkaConfig, vectorConfig).mapN {
       case (
-            (host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database),
+            (host, port, permits, requestTimeout, trustedProxy, uri, database),
             (jwtConfig, passwordHashConfig, rateLimitConfig),
             kafkaConfig,
             vectorSearchConfig
           ) =>
-        AppConfig(host, port, permits, requestTimeout, resolverTimeout, trustedProxy, uri, database, raw.logging.maskSensitive,
+        AppConfig(host, port, permits, requestTimeout, trustedProxy, uri, database, raw.logging.maskSensitive,
           jwtConfig, passwordHashConfig, rateLimitConfig, vectorSearchConfig, kafkaConfig)
     }
   }
@@ -235,8 +234,6 @@ object AppConfig {
     bounded(1, 16, ConfigError.InvalidPasswordHashParallelism)(value)
   private def validRequestTimeout(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(100, 60000, ConfigError.InvalidRequestTimeout)(value)
-  private def validResolverTimeout(value: Int, requestTimeout: Int): ValidatedNel[ConfigError, Int] =
-    Either.cond(value >= 100 && value < requestTimeout, value, ConfigError.InvalidResolverTimeout).toValidatedNel
   private def validTrustedProxyCidrs(values: List[String]): ValidatedNel[ConfigError, TrustedProxyConfig] =
     values.traverse { value =>
       Cidr.fromString(value).filter(_.prefixBits > 0)
@@ -294,7 +291,6 @@ object AppConfig {
     case "http.port" => Some(ConfigError.InvalidPort)
     case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
     case "http.request-timeout-ms" => Some(ConfigError.InvalidRequestTimeout)
-    case "http.resolver-timeout-ms" => Some(ConfigError.InvalidResolverTimeout)
     case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
     case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
     case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
@@ -343,7 +339,7 @@ object AppConfig {
   private final case class RawAppConfig(http: RawHttpConfig, mongo: RawMongoConfig, logging: RawLoggingConfig,
       auth: RawAuthConfig, kafka: RawKafkaConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
   private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits,
-      requestTimeoutMs: Int, resolverTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
+      requestTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
   private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig, passwordHash: Option[RawPasswordHashConfig],

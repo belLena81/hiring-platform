@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.job
 
-import cats.MonadError
 import cats.data.EitherT
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
@@ -38,11 +38,11 @@ final case class UpdateJobInput(
     location: Location
 )
 
-final class JobService[F[_]](
-    users: UserRepository[F],
-    jobs: JobRepository[F],
-    embeddingWork: EmbeddingWorkPublisher[F]
-)(using MonadError[F, Throwable]) extends JobUseCases[F] {
+final class JobService(
+    users: UserRepository[IO],
+    jobs: JobRepository[IO],
+    embeddingWork: EmbeddingWorkPublisher[IO]
+) extends JobUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
@@ -51,11 +51,11 @@ final class JobService[F[_]](
       input: CreateJobInput,
       now: Instant,
       jobId: JobId
-  ): F[Either[UseCaseError, Job]] =
+  ): IO[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[F](authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
-      job <- EitherT.fromEither[F](validateNewJob(user.id, input, now, jobId))
+      _ <- EitherT.cond[IO](authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
+      job <- EitherT.fromEither[IO](validateNewJob(user.id, input, now, jobId))
       created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id))
     } yield created).value
 
@@ -64,45 +64,45 @@ final class JobService[F[_]](
       jobId: JobId,
       input: UpdateJobInput,
       now: Instant
-  ): F[Either[UseCaseError, Job]] =
+  ): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
       (for {
-        update <- EitherT.fromEither[F](validateUpdatedJob(job, input, now))
+        update <- EitherT.fromEither[IO](validateUpdatedJob(job, input, now))
         updated <- EitherT(persistUpdatedJob(Right[UseCaseError, Job](JobLifecycle.update(job, update)), actor.userId))
       } yield updated).value
     }
 
-  def publishJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
+  def publishJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
       persistJob(JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED)
     }
 
-  def closeJob(actor: ActorContext, jobId: JobId, now: Instant): F[Either[UseCaseError, Job]] =
+  def closeJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
       persistJob(JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED)
     }
 
-  def viewJob(actor: ActorContext, jobId: JobId): F[Either[UseCaseError, Job]] =
+  def viewJob(actor: ActorContext, jobId: JobId): IO[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
       job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[F](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
+      _ <- EitherT.cond[IO](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
     } yield job).value
 
-  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
+  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): IO[Either[UseCaseError, List[Job]]] =
     (for {
       _ <- EitherT(authorization.resolve(actor))
       openJobs <- EitherT(jobs.findOpen(filter, page).map(_.widenUseCase))
     } yield openJobs).value
 
-  def myJobs(actor: ActorContext, page: JobPageRequest): F[Either[UseCaseError, List[Job]]] =
+  def myJobs(actor: ActorContext, page: JobPageRequest): IO[Either[UseCaseError, List[Job]]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
       manageableJobs <- {
         user.role match {
           case UserRole.Admin => EitherT(jobs.findAll(page).map(_.widenUseCase))
           case UserRole.Recruiter => EitherT(jobs.findByRecruiter(user.id, page).map(_.widenUseCase))
-          case UserRole.Candidate => EitherT.leftT[F, List[Job]](UseCaseError.Domain(DomainError.Forbidden))
+          case UserRole.Candidate => EitherT.leftT[IO, List[Job]](UseCaseError.Domain(DomainError.Forbidden))
         }
       }
     } yield manageableJobs).value
@@ -158,9 +158,9 @@ final class JobService[F[_]](
         )
       )
 
-  private def persistCreatedJob(result: Either[UseCaseError, Job], actorId: UserId): F[Either[UseCaseError, Job]] =
+  private def persistCreatedJob(result: Either[UseCaseError, Job], actorId: UserId): IO[Either[UseCaseError, Job]] =
     result.fold(
-      _.asLeft[Job].pure[F],
+      error => IO.pure(error.asLeft[Job]),
       job => {
         val event = OperationalEvents.jobEvent(
           OperationalEventType.JOB_CREATED,
@@ -173,12 +173,12 @@ final class JobService[F[_]](
       }
     )
 
-  private def persistUpdatedJob(result: Either[UseCaseError, Job], actorId: UserId): F[Either[UseCaseError, Job]] =
+  private def persistUpdatedJob(result: Either[UseCaseError, Job], actorId: UserId): IO[Either[UseCaseError, Job]] =
     persistJob(result, actorId, OperationalEventType.JOB_UPDATED)
 
-  private def persistJob(result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType): F[Either[UseCaseError, Job]] =
+  private def persistJob(result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType): IO[Either[UseCaseError, Job]] =
     result.fold(
-      _.asLeft[Job].pure[F],
+      error => IO.pure(error.asLeft[Job]),
       job => {
         val persisted = job.copy(version = job.version + 1L)
         val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, persisted.version), persisted, actorId, job.updatedAt)
@@ -186,21 +186,21 @@ final class JobService[F[_]](
       }
     )
 
-  private def notifyAfterCommit(result: F[Either[UseCaseError, Job]]): F[Either[UseCaseError, Job]] =
-    result.flatTap(_.fold(_ => MonadError[F, Throwable].unit, _ => embeddingWork.wake.handleError(_ => ())))
+  private def notifyAfterCommit(result: IO[Either[UseCaseError, Job]]): IO[Either[UseCaseError, Job]] =
+    result.flatTap(_.fold(_ => IO.unit, _ => embeddingWork.wake.handleError(_ => ())))
 
   private def eventId(job: Job, eventType: OperationalEventType, version: Long): UUID =
     UUID.nameUUIDFromBytes(s"job:${job.id.value}:$eventType:$version".getBytes(StandardCharsets.UTF_8))
 }
 
 object JobService {
-  def apply[F[_]](users: UserRepository[F], jobs: JobRepository[F])(using MonadError[F, Throwable]): JobService[F] =
-    new JobService(users, jobs, EmbeddingWorkPublisher.noop[F])
+  def apply(users: UserRepository[IO], jobs: JobRepository[IO]): JobService =
+    new JobService(users, jobs, EmbeddingWorkPublisher.noop[IO])
 
-  def apply[F[_]](
-      users: UserRepository[F],
-      jobs: JobRepository[F],
-      embeddingWork: EmbeddingWorkPublisher[F]
-  )(using MonadError[F, Throwable]): JobService[F] =
+  def apply(
+      users: UserRepository[IO],
+      jobs: JobRepository[IO],
+      embeddingWork: EmbeddingWorkPublisher[IO]
+  ): JobService =
     new JobService(users, jobs, embeddingWork)
 }

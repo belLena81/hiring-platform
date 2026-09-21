@@ -71,7 +71,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val requested = context.arg(firstArgument)
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
-      EitherT(userPage(requested, context.arg(afterArgument), status, role, cursorCodec)).flatMap {
+      EitherT.fromEither[IO](userPage(requested, context.arg(afterArgument), status, role, cursorCodec)).flatMap {
         case (request, pageSize) =>
           liftUseCase(hiring.accountService.listUsers(actor, request))
             .map(values => userConnection(values, pageSize, cursorCodec))

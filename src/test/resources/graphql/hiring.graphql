@@ -53,12 +53,12 @@ type ApplicationPayload {
 }
 
 enum ApplicationStatus {
-  Created
-  Accepted
-  Declined
-  Interview
-  Hired
-  Rejected
+  CREATED
+  ACCEPTED
+  DECLINED
+  INTERVIEW
+  HIRED
+  REJECTED
 }
 
 type AuthPayload {
@@ -168,9 +168,9 @@ type JobPayload {
 }
 
 enum JobStatus {
-  Draft
-  Open
-  Closed
+  DRAFT
+  OPEN
+  CLOSED
 }
 
 type Location {
@@ -219,10 +219,10 @@ type Query {
   readiness: Readiness!
   me: UserPayload!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
-  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: String): JobConnection!
-  semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: String): RankedJobResults!
-  recommendedJobs(first: Int!, searchId: String): RankedJobResults!
-  candidateMatches(jobId: JobID!, first: Int!, searchId: String): RankedCandidateResults!
+  jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
+  semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!
+  recommendedJobs(first: Int!, searchId: UUID): RankedJobResults!
+  candidateMatches(jobId: JobID!, first: Int!, searchId: UUID): RankedCandidateResults!
   job(id: JobID!): JobPayload!
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
@@ -268,15 +268,15 @@ enum ReadinessStatus {
 }
 
 input RecordJobViewInput {
-  eventId: String!
+  eventId: UUID!
   jobId: JobID!
-  searchId: String
+  searchId: UUID
 }
 
 input RecordSearchResultClickInput {
-  eventId: String!
-  searchId: String!
-  resultId: String!
+  eventId: UUID!
+  searchId: UUID!
+  resultId: UUID!
 }
 
 type RecruiterProfile {
@@ -310,6 +310,8 @@ input SubmitApplicationInput {
   jobId: JobID!
 }
 
+scalar UUID
+
 input UpdateJobInput {
   id: JobID!
   patch: JobInput!
@@ -324,7 +326,7 @@ input UpdateMyProfileInput {
 }
 
 type User {
-  id: ID!
+  id: UserID!
   email: String
   name: String!
   role: UserRole!
@@ -345,6 +347,8 @@ type UserEdge {
   cursor: String!
 }
 
+scalar UserID
+
 type UserPayload {
   user: User
   errors: [PayloadError!]!
@@ -353,9 +357,9 @@ type UserPayload {
 union UserProfile = CandidateProfile | RecruiterProfile
 
 enum UserRole {
-  Candidate
-  Recruiter
-  Admin
+  CANDIDATE
+  RECRUITER
+  ADMIN
 }
 
 enum UserStatus {

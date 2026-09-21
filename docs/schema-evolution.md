@@ -47,7 +47,7 @@ Prefer one evolving GraphQL schema over automatically introducing `/v1` and `/v2
 
 ### Hiring GraphQL typed IDs and signed cursor cutover
 
-The current Hiring GraphQL contract intentionally uses typed scalar IDs for jobs and applications in both inputs and outputs: `Job.id` is `JobID!` and `Application.id` is `ApplicationID!`. Clients that treated these output fields as plain `ID` should refresh generated types from the served SDL before this change is released.
+The current Hiring GraphQL contract intentionally uses typed scalar IDs for users, jobs, and applications in both inputs and outputs: `User.id` is `UserID!`, `Job.id` is `JobID!`, and `Application.id` is `ApplicationID!`. UUID-shaped search and interaction inputs use the named `UUID` scalar. GraphQL enum labels use SCREAMING_CASE. This is a coordinated breaking cutover: clients that used plain `ID`/`String` declarations or mixed-case enum literals must refresh generated types and operations from the served SDL before this change is released.
 
 The `job(id:)` and `me` query fields now return `JobPayload!` and `UserPayload!` rather than nullable `Job` and `User`. Consumers must read the nested `job` or `user` field and handle payload `errors`; this preserves `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, and `SERVICE_NOT_READY` outcomes that were previously indistinguishable from absent data.
 

@@ -10,7 +10,7 @@ private[graphql] object HiringGraphQLDsl {
       fieldType: OutputType[Res],
       arguments: List[Argument[?]] = Nil
   )(resolve: Context[RequestContext, Val] => IO[Res]): Field[RequestContext, Val] =
-    Field(name, fieldType, arguments = arguments, resolve = context => context.ctx.unsafeToFuture(resolve(context)))
+    Field(name, fieldType, arguments = arguments, resolve = context => context.ctx.unsafeFieldToFuture(name, resolve(context)))
 
   def ioFetcher[Res, Id](fetch: (RequestContext, Seq[Id]) => IO[Seq[Res]])(using HasId[Res, Id])
       : Fetcher[RequestContext, Res, Res, Id] =

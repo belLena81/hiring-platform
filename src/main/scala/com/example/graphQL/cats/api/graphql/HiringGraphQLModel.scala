@@ -6,6 +6,7 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 
 import java.time.Instant
+import java.util.UUID
 
 private[graphql] object HiringGraphQLModel {
   final case class GraphQLError(code: String, message: String)
@@ -68,6 +69,6 @@ private[graphql] object HiringGraphQLModel {
       organizationName: Option[String],
       jobTitle: Option[String]
   )
-  final case class RecordJobViewGraphQLInput(eventId: String, jobId: JobId, searchId: Option[String])
-  final case class RecordSearchResultClickGraphQLInput(eventId: String, searchId: String, resultId: String)
+  final case class RecordJobViewGraphQLInput(eventId: UUID, jobId: JobId, searchId: Option[UUID])
+  final case class RecordSearchResultClickGraphQLInput(eventId: UUID, searchId: UUID, resultId: UUID)
 }

@@ -20,7 +20,7 @@ final class UserAccountService(
     hasher: PasswordHasher[IO],
     tokenIssuer: AccessTokenIssuer[IO],
     embeddingWork: EmbeddingWorkPublisher[IO] = EmbeddingWorkPublisher.noop[IO]
-) extends AccountUseCases[IO] {
+) extends AccountUseCases {
   private val authorization = ActorAuthorization(users)
 
   override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
