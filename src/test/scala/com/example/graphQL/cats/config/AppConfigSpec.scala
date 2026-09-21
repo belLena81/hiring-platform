@@ -222,6 +222,11 @@ class AppConfigSpec extends FunSuite {
     assertContainsError(AppConfig.fromConfig(config, Map.empty), ConfigError.InvalidVectorNumCandidates)
   }
 
+  test("Mongo startup reset is disabled by default and opt-in") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.resetOnStart), Right(false))
+    assertEquals(AppConfig.fromConfig(defaultConfig + "mongo.reset-on-start = true\n", Map.empty).map(_.resetOnStart), Right(true))
+  }
+
   test("VHS-AC08 packaged application config is grouped, sanitized and fails safely without required local values") {
     val raw = resource("application.conf")
     assertInvalidConfig(AppConfig.fromConfig(raw, Map.empty))

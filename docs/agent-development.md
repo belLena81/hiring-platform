@@ -8,7 +8,8 @@ The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and
 
 Application configuration follows the library defaults: `ConfigSource.default` delegates source loading and precedence to Typesafe Config. Use `application.conf` for packaged defaults and the standard `config.file` or `config.resource` selectors for local/test overrides; do not add project-owned filename constants or custom source-merging layers unless a new requirement establishes a different source boundary.
 
-Startup resets hiring-owned MongoDB data to the active document shape. No prior contract or local data is retained.
+Startup preserves hiring-owned MongoDB data by default. Set `mongo.reset-on-start = true` or
+`MONGODB_RESET_ON_START=true` only for an explicitly authorized local reset.
 
 ## Entry point and roles
 

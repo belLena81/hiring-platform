@@ -34,7 +34,7 @@ object Main extends IOApp {
     )))
     diagnostics <- Resource.eval(SafeDiagnostics.configure(mask && config.maskSensitive))
     runtime <- MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
-      config.jwtAuth, config.passwordHash, config.kafka)
+      config.jwtAuth, config.passwordHash, config.kafka, config.resetOnStart)
     contextFactory <- RequestContextFactory.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
     authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])

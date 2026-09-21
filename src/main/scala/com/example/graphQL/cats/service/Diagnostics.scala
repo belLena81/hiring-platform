@@ -20,6 +20,7 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case Shutdown extends LogEvent("SHUTDOWN", "RUNTIME", "Application resources released", LogLevel.Info)
   case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", LogLevel.Info)
   case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", LogLevel.Warn)
+  case MongoSetupFailed extends LogEvent("MONGO_SETUP_FAILED", "MONGO", "MongoDB setup failed", LogLevel.Error)
   case LocalUnmasked extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
   case SpanSucceeded extends LogEvent("SPAN_SUCCEEDED", "TRACE", "Execution span succeeded", LogLevel.Trace)
   case SpanFailed extends LogEvent("SPAN_FAILED", "TRACE", "Execution span failed", LogLevel.Trace)

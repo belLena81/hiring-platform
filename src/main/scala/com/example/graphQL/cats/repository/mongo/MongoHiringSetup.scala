@@ -15,7 +15,7 @@ final case class AtlasSearchIndexConfig(
     dimension: Int, readyTimeoutMillis: Int, pollIntervalMillis: Int
 )
 
-/** Creates the sole pre-MVP Mongo shape. Every invocation deliberately removes prior hiring data. */
+/** Creates the pre-MVP Mongo shape and only removes prior hiring data when explicitly requested. */
 object MongoHiringSetup {
   private val CollectionLimit = 128
   private val ownedCollections = Set(
@@ -51,16 +51,11 @@ object MongoHiringSetup {
   val EventQuarantineOffsetIndex = "event_quarantine_offset"
   val EventQuarantineExpiryIndex = "event_quarantine_expiry"
 
-  def initialize(database: MongoDatabase): IO[Unit] = initialize(database, None, false)
-  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] = initialize(database, atlas, atlas.nonEmpty)
-  /** The full setup call is the only destructive reset. */
-  def initializeTransactionalSupport(database: MongoDatabase, vectorSearchEnabled: Boolean): IO[Unit] =
-    IO.pure((database, vectorSearchEnabled)).void
-  def initializeCore(database: MongoDatabase, vectorSearchEnabled: Boolean): IO[Unit] =
-    IO.pure((database, vectorSearchEnabled)).void
-  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig], vectorSearchEnabled: Boolean): IO[Unit] =
-    IO.pure(vectorSearchEnabled).void *>
-    resetOwnedCollections(database) *> createAccountRegistry(database) *> createUserValidator(database) *> createIndexes(database) *>
+  def initialize(database: MongoDatabase): IO[Unit] = initialize(database, None, resetOnStart = false)
+  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] = initialize(database, atlas, resetOnStart = false)
+  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig], resetOnStart: Boolean): IO[Unit] =
+    Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
+      createAccountRegistry(database) *> createUserValidator(database) *> createIndexes(database) *>
       atlas.traverse_(provisionAtlasIndexes(database, _))
 
   private def resetOwnedCollections(database: MongoDatabase): IO[Unit] =
@@ -113,7 +108,7 @@ object MongoHiringSetup {
     val schema = new Document("$jsonSchema", new Document("bsonType", "object").append("required", List("role", "accountStatus").asJava)
       .append("oneOf", List(active("Candidate", "profile"), active("Recruiter", "profile"), admin,
         new Document("properties", new Document("accountStatus", new Document("enum", List("Deleted").asJava)))).asJava))
-    PublisherBridge.first(database.createCollection("users")).void.handleErrorWith {
+    PublisherBridge.first(database.createCollection("users")).void.recoverWith {
       case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
     } *> PublisherBridge.first(database.runCommand(new Document("collMod", "users").append("validator", schema)
       .append("validationLevel", "strict").append("validationAction", "error"))).void

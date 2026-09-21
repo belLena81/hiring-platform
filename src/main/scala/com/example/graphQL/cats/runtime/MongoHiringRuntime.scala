@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogField, ProbeResult}
+import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
@@ -39,12 +39,17 @@ private[runtime] final class SetupLifecycle private (
 }
 
 private[runtime] object SetupLifecycle {
-  def resource(setup: IO[Unit]): Resource[IO, SetupLifecycle] =
+  def resource(setup: IO[Unit], diagnostics: Diagnostics): Resource[IO, SetupLifecycle] =
     Resource.eval(Deferred[IO, Either[Throwable, Unit]]).flatMap { completion =>
       Resource.make(
-        setup.attempt.flatMap(completion.complete).start
+        setup.attempt.flatTap(_.fold(
+          error => diagnostics.emit(LogEvent.MongoSetupFailed, fields = LogFields.failure(error)),
+          _ => IO.unit
+        )).flatMap(completion.complete).start
       )(_.cancel).as(new SetupLifecycle(completion))
     }
+
+  def resource(setup: IO[Unit]): Resource[IO, SetupLifecycle] = resource(setup, Diagnostics.noop)
 }
 
 object MongoHiringRuntime {
@@ -81,10 +86,11 @@ object MongoHiringRuntime {
       vectorSearch: VectorSearchConfig,
       jwtAuth: JwtAuthConfig,
       passwordHash: PasswordHashConfig,
-      kafka: KafkaConfig
+      kafka: KafkaConfig,
+      resetOnStart: Boolean
   ): Resource[IO, MongoHiringRuntime] =
     resource(uri, databaseName, diagnostics, vectorSearch, voyageEmbeddingService, jwtAuth,
-      passwordHash, kafka)
+      passwordHash, kafka, resetOnStart)
 
   def resource(
       uri: String,
@@ -94,7 +100,8 @@ object MongoHiringRuntime {
       embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService[IO]],
       jwtAuth: JwtAuthConfig,
       passwordHash: PasswordHashConfig,
-      kafka: KafkaConfig
+      kafka: KafkaConfig,
+      resetOnStart: Boolean = false
   ): Resource[IO, MongoHiringRuntime] =
     MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
@@ -106,9 +113,8 @@ object MongoHiringRuntime {
       val outbox = new MongoOperationalEventOutboxRepository(database)
       val receipts = new MongoConsumerReceiptRepository(database)
       val quarantine = new MongoEventQuarantineRepository(database)
-      Resource.eval(MongoHiringSetup.initializeCore(database, vectorSearch.enabled).attempt.void) *>
       hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, jwtAuth, passwordHash).flatMap { services =>
-        SetupLifecycle.resource(setupEffect(database, vectorSearch)).flatMap { setup =>
+        SetupLifecycle.resource(setupEffect(database, vectorSearch, resetOnStart), diagnostics).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine, diagnostics).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
           MongoHiringRuntime(
@@ -248,7 +254,8 @@ object MongoHiringRuntime {
 
   private def setupEffect(
       database: com.mongodb.reactivestreams.client.MongoDatabase,
-      vectorSearch: VectorSearchConfig
+      vectorSearch: VectorSearchConfig,
+      resetOnStart: Boolean
   ): IO[Unit] =
     MongoHiringSetup.initialize(database, Option.when(vectorSearch.enabled)(AtlasSearchIndexConfig(
       vectorSearch.jobVectorIndex,
@@ -257,7 +264,7 @@ object MongoHiringRuntime {
       vectorSearch.voyageDimension,
       vectorSearch.indexReadyTimeoutMillis,
       vectorSearch.indexPollIntervalMillis
-    )), vectorSearch.enabled)
+    )), resetOnStart)
 
   private val defaultPasswordHash = PasswordHashConfig(iterations = 2, memoryKilobytes = 19456, parallelism = 1)
 

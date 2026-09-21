@@ -113,7 +113,7 @@ final case class AppConfig(host: Host, port: Ip4sPort, admissionPermits: Int, re
     trustedProxy: TrustedProxyConfig,
     mongoUri: String, mongoDatabase: String,
     maskSensitive: Boolean, jwtAuth: JwtAuthConfig, passwordHash: PasswordHashConfig, authRateLimit: AuthRateLimitConfig,
-    vectorSearch: VectorSearchConfig, kafka: KafkaConfig) {
+    vectorSearch: VectorSearchConfig, kafka: KafkaConfig, resetOnStart: Boolean = false) {
   override def toString: String = "AppConfig([REDACTED])"
 }
 
@@ -196,7 +196,7 @@ object AppConfig {
             vectorSearchConfig
           ) =>
         AppConfig(host, port, permits, requestTimeout, trustedProxy, uri, database, raw.logging.maskSensitive,
-          jwtConfig, passwordHashConfig, rateLimitConfig, vectorSearchConfig, kafkaConfig)
+          jwtConfig, passwordHashConfig, rateLimitConfig, vectorSearchConfig, kafkaConfig, raw.mongo.resetOnStart.getOrElse(false))
     }
   }
 
@@ -337,7 +337,7 @@ object AppConfig {
       auth: RawAuthConfig, kafka: RawKafkaConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
   private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits,
       requestTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
-  private final case class RawMongoConfig(uri: String, database: String) derives ConfigReader
+  private final case class RawMongoConfig(uri: String, database: String, resetOnStart: Option[Boolean]) derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig, passwordHash: Option[RawPasswordHashConfig],
       rateLimit: RawAuthRateLimitConfig) derives ConfigReader

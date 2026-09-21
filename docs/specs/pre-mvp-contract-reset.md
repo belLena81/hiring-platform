@@ -3,7 +3,7 @@
 ## Identity and scope
 
 - Status: in review
-- User outcome: one current, unversioned hiring contract before MVP, with no compatibility code or retained local state.
+- User outcome: one current, unversioned hiring contract before MVP, with no compatibility code; local state is retained unless an explicit reset is enabled.
 - Authorized scope: GraphQL, cursors, Mongo documents/setup, events/Kafka, embedding metadata, documentation, fixtures, and tests.
 - Non-goals: Git-history rewriting, dependency/toolchain protocol changes, production deployment.
 

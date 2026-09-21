@@ -2,7 +2,7 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Ref}
 import scala.concurrent.duration.*
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
+import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
 import munit.CatsEffectSuite
 
 class MongoHiringRuntimeSpec extends CatsEffectSuite {
@@ -58,5 +58,17 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
         entered.get *> lifecycle.ready.timeout(100.millis)
       }
     } yield assertEquals(ready, false)
+  }
+
+  test("setup failure is emitted to diagnostics") {
+    for {
+      events <- Ref.of[IO, List[LogEvent]](Nil)
+      diagnostics = new Diagnostics {
+        override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          events.update(event :: _)
+      }
+      _ <- SetupLifecycle.resource(IO.raiseError[Unit](new RuntimeException("synthetic setup failure")), diagnostics).use(_.await)
+      recorded <- events.get
+    } yield assertEquals(recorded, List(LogEvent.MongoSetupFailed))
   }
 }
