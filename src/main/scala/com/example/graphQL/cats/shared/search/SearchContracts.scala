@@ -18,7 +18,6 @@ final case class VectorSearchQuery(
     first: PageSize,
     mode: SearchMode,
     model: String,
-    version: Int,
     searchId: UUID
 )
 

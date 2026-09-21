@@ -1,10 +1,10 @@
 # Architecture
 
-This document describes the target architecture. See [README](README.md) for the current scaffold and [development plan](INITIAL_DEVELOPMENT_PLAN.md) for delivery sequencing.
+This document describes the active architecture. See [README](README.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for its contract and verification evidence.
 
-The Foundation runtime uses one sbt project with constructor-injected application, API, and infrastructure packages. It serves health/readiness with a resource-managed MongoDB client. Retired SQL/user-query scaffolds and their dependencies have been removed; hiring domain implementation remains Phase 2. See [Foundation contracts and evidence](docs/specs/phase-1-foundation.md).
+The runtime uses one sbt project with constructor-injected application, API, and infrastructure packages. It serves the hiring API through a resource-managed MongoDB client.
 
-Supporting design: [MongoDB modeling and indexes](docs/mongodb-design.md), [big data architecture](docs/big-data-architecture.md), and [use cases](docs/use-cases.md).
+Supporting design: [use cases](docs/use-cases.md).
 
 ## 1. Goals
 

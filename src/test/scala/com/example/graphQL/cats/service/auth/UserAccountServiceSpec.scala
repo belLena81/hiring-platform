@@ -217,7 +217,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(ids.flatMap(values.get)))
-    override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private final class TestAccounts(

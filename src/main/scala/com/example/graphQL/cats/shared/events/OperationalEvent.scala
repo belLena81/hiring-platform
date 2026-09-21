@@ -23,12 +23,9 @@ enum OperationalAggregateType {
 final case class OperationalEventEnvelope(
     eventId: UUID,
     eventType: OperationalEventType,
-    schemaVersion: Int,
     occurredAt: Instant,
     aggregateType: OperationalAggregateType,
     aggregateId: String,
-    aggregateVersion: Long,
-    sequence: Long,
     actorId: UserId,
     payload: Json
 ) {
@@ -37,11 +34,13 @@ final case class OperationalEventEnvelope(
 }
 
 object OperationalEventEnvelope {
-  val SchemaVersion: Int = 1
-  val Topic: String = "hiring.operational-events.v1"
+  val Topic: String = "hiring.operational-events"
 }
 
 object OperationalEventJson {
+  private val EnvelopeFields = Set(
+    "eventId", "eventType", "occurredAt", "aggregateType", "aggregateId", "actorId", "payload"
+  )
   private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
 
   private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
@@ -86,8 +85,8 @@ object OperationalEventJson {
 
   def decode(json: Json): Either[String, OperationalEventEnvelope] =
     for {
-      schemaVersion <- json.hcursor.get[Int]("schemaVersion").leftMap(_ => "MalformedEnvelope")
-      _ <- Either.cond(schemaVersion == OperationalEventEnvelope.SchemaVersion, (), "UnsupportedVersion")
+      fields <- json.asObject.toRight("MalformedEnvelope")
+      _ <- Either.cond(fields.keys.toSet == EnvelopeFields, (), "MalformedEnvelope")
       value <- summon[Decoder[OperationalEventEnvelope]].decodeJson(json).leftMap(_ => "MalformedEnvelope")
     } yield value
 }
@@ -105,7 +104,6 @@ final case class SearchSession(
     query: Option[String],
     filter: Json,
     model: Option[String],
-    modelVersion: Option[Int],
     results: List[SearchSessionResult],
     occurredAt: Instant,
     expiresAt: Instant
@@ -134,12 +132,9 @@ object OperationalEvents {
     OperationalEventEnvelope(
       eventId,
       eventType,
-      OperationalEventEnvelope.SchemaVersion,
       occurredAt,
       OperationalAggregateType.Job,
       job.id.value.toString,
-      job.version,
-      job.version,
       actorId,
       Json.obj("job" -> jobSnapshot(job))
     )
@@ -148,12 +143,9 @@ object OperationalEvents {
     OperationalEventEnvelope(
       eventId,
       OperationalEventType.APPLICATION_CREATED,
-      OperationalEventEnvelope.SchemaVersion,
       occurredAt,
       OperationalAggregateType.Application,
       application.id.value.toString,
-      application.version,
-      application.version,
       actorId,
       Json.obj(
         "applicationId" -> Json.fromString(application.id.value.toString),
@@ -167,12 +159,9 @@ object OperationalEvents {
     OperationalEventEnvelope(
       eventId,
       OperationalEventType.APPLICATION_STATUS_CHANGED,
-      OperationalEventEnvelope.SchemaVersion,
       event.occurredAt,
       OperationalAggregateType.Application,
       application.id.value.toString,
-      application.version,
-      application.version,
       event.actorId,
       Json.obj(
         "applicationId" -> Json.fromString(application.id.value.toString),
@@ -188,7 +177,6 @@ object OperationalEvents {
   def candidateHired(eventId: UUID, application: Application, event: ApplicationEvent): OperationalEventEnvelope =
     statusChanged(eventId, application, event).copy(
       eventType = OperationalEventType.CANDIDATE_HIRED,
-      sequence = application.version + 1L,
       payload = Json.obj(
         "applicationId" -> Json.fromString(application.id.value.toString),
         "candidateId" -> Json.fromString(application.candidateId.value.toString),
@@ -201,12 +189,9 @@ object OperationalEvents {
     OperationalEventEnvelope(
       eventId,
       OperationalEventType.SEARCH_PERFORMED,
-      OperationalEventEnvelope.SchemaVersion,
       session.occurredAt,
       OperationalAggregateType.Search,
       session.id.toString,
-      1L,
-      1L,
       session.actorId,
       Json.obj(
         "searchId" -> Json.fromString(session.id.toString),
@@ -214,7 +199,6 @@ object OperationalEvents {
         "query" -> session.query.fold(Json.Null)(Json.fromString),
         "filter" -> session.filter,
         "model" -> session.model.fold(Json.Null)(Json.fromString),
-        "modelVersion" -> session.modelVersion.fold(Json.Null)(Json.fromInt),
         "results" -> Json.arr(session.results.map(result =>
           Json.obj(
             "resultId" -> Json.fromString(result.resultId),
@@ -244,12 +228,9 @@ object OperationalEvents {
     OperationalEventEnvelope(
       eventId,
       eventType,
-      OperationalEventEnvelope.SchemaVersion,
       occurredAt,
       OperationalAggregateType.Search,
       aggregateId,
-      1L,
-      1L,
       actorId,
       Json.obj(
         "searchId" -> searchId.fold(Json.Null)(id => Json.fromString(id.toString)),

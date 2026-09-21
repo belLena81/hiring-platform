@@ -13,12 +13,9 @@ class OperationalEventJsonSpec extends FunSuite {
   private val envelope = OperationalEventEnvelope(
     eventId,
     OperationalEventType.APPLICATION_STATUS_CHANGED,
-    OperationalEventEnvelope.SchemaVersion,
     Instant.parse("2026-09-19T10:15:30Z"),
     OperationalAggregateType.Application,
     "application-1",
-    7L,
-    7L,
     actorId,
     Json.obj(
       "applicationId" -> Json.fromString("application-1"),
@@ -27,18 +24,15 @@ class OperationalEventJsonSpec extends FunSuite {
     )
   )
 
-  test("derived codec preserves the envelope wire shape and round-trips") {
+  test("derived codec preserves the unversioned envelope wire shape and round-trips") {
     assertEquals(
       OperationalEventJson.json(envelope),
       Json.obj(
         "eventId" -> Json.fromString(eventId.toString),
         "eventType" -> Json.fromString("APPLICATION_STATUS_CHANGED"),
-        "schemaVersion" -> Json.fromInt(1),
         "occurredAt" -> Json.fromString("2026-09-19T10:15:30Z"),
         "aggregateType" -> Json.fromString("Application"),
         "aggregateId" -> Json.fromString("application-1"),
-        "aggregateVersion" -> Json.fromLong(7L),
-        "sequence" -> Json.fromLong(7L),
         "actorId" -> Json.fromString(actorId.value.toString),
         "payload" -> envelope.payload
       )
@@ -46,17 +40,14 @@ class OperationalEventJsonSpec extends FunSuite {
     assertEquals(OperationalEventJson.decode(OperationalEventJson.bytes(envelope)), Right(envelope))
   }
 
-  test("v1 envelope fixture decodes unchanged") {
+  test("unversioned envelope fixture decodes") {
     val fixture =
       """{
         |  "eventId": "00000000-0000-0000-0000-000000000201",
         |  "eventType": "APPLICATION_STATUS_CHANGED",
-        |  "schemaVersion": 1,
         |  "occurredAt": "2026-09-19T10:15:30Z",
         |  "aggregateType": "Application",
         |  "aggregateId": "application-1",
-        |  "aggregateVersion": 7,
-        |  "sequence": 7,
         |  "actorId": "00000000-0000-0000-0000-000000000202",
         |  "payload": {
         |    "applicationId": "application-1",
@@ -70,12 +61,9 @@ class OperationalEventJsonSpec extends FunSuite {
       Right(OperationalEventEnvelope(
         eventId,
         OperationalEventType.APPLICATION_STATUS_CHANGED,
-        OperationalEventEnvelope.SchemaVersion,
         Instant.parse("2026-09-19T10:15:30Z"),
         OperationalAggregateType.Application,
         "application-1",
-        7L,
-        7L,
         actorId,
         Json.obj(
           "applicationId" -> Json.fromString("application-1"),
@@ -86,8 +74,8 @@ class OperationalEventJsonSpec extends FunSuite {
     )
   }
 
-  test("unknown schema versions are rejected without reinterpretation") {
-    val unsupported =
+  test("versioned envelope fixtures are rejected") {
+    val versioned =
       """{
         |  "eventId": "00000000-0000-0000-0000-000000000201",
         |  "eventType": "APPLICATION_STATUS_CHANGED",
@@ -95,13 +83,11 @@ class OperationalEventJsonSpec extends FunSuite {
         |  "occurredAt": "2026-09-19T10:15:30Z",
         |  "aggregateType": "Application",
         |  "aggregateId": "application-1",
-        |  "aggregateVersion": 7,
-        |  "sequence": 7,
         |  "actorId": "00000000-0000-0000-0000-000000000202",
         |  "payload": {}
         |}""".stripMargin
 
-    assertEquals(OperationalEventJson.decode(unsupported.getBytes(java.nio.charset.StandardCharsets.UTF_8)), Left("UnsupportedVersion"))
+    assertEquals(OperationalEventJson.decode(versioned.getBytes(java.nio.charset.StandardCharsets.UTF_8)), Left("MalformedEnvelope"))
   }
 
   test("malformed derived fields are normalized to the envelope error") {
@@ -117,11 +103,11 @@ class OperationalEventJsonSpec extends FunSuite {
     malformed.foreach(value => assertEquals(OperationalEventJson.decode(value), Left("MalformedEnvelope")))
   }
 
-  test("unsupported schema wins before malformed envelope fields") {
-    val unsupported = OperationalEventJson.json(envelope).mapObject { fields =>
-      fields.add("schemaVersion", Json.fromInt(99)).add("eventId", Json.fromString("invalid"))
+  test("missing current fields are rejected even when a legacy version field is present") {
+    val malformed = OperationalEventJson.json(envelope).mapObject { fields =>
+      fields.add("schemaVersion", Json.fromInt(99)).remove("eventId")
     }
 
-    assertEquals(OperationalEventJson.decode(unsupported), Left("UnsupportedVersion"))
+    assertEquals(OperationalEventJson.decode(malformed), Left("MalformedEnvelope"))
   }
 }

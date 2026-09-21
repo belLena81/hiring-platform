@@ -97,7 +97,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     val unavailableUsers = new UserRepository[IO] {
       override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Left(RepositoryError.Unavailable))
       override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
-      override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
     }
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
@@ -143,7 +143,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   private def userRepository(values: Map[UserId, User]): UserRepository[IO] = new UserRepository[IO] {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(ids.flatMap(values.get)))
-    override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       IO.pure(Right(()))
   }
 }

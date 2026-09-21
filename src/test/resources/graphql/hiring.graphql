@@ -239,7 +239,6 @@ type RankedCandidate {
   score: Float!
   searchMode: SearchMode!
   model: String!
-  version: Int!
   searchId: ID!
 }
 
@@ -252,7 +251,6 @@ type RankedJob {
   score: Float!
   searchMode: SearchMode!
   model: String!
-  version: Int!
   searchId: ID!
 }
 

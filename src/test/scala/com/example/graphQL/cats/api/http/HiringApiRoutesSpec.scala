@@ -18,7 +18,7 @@ import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.*
 import org.http4s.circe.*
-import org.http4s.headers.{`Cache-Control`, `Retry-After`, `WWW-Authenticate`}
+import org.http4s.headers.{`Cache-Control`, `WWW-Authenticate`}
 import org.typelevel.ci.CIString
 import pdi.jwt.JwtCirce
 
@@ -269,7 +269,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("login and signup requests are rate limited by remote address and operation") {
+  test("login and signup fields return GraphQL rate-limit errors by remote address and operation") {
     val login =
       """mutation {
         |  login(input: { name: "Candidate", password: "password-password" }) {
@@ -294,18 +294,19 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       firstSignup <- http(request(signup))
       limitedSignup <- http(request(signup))
       limitedBody <- limitedLogin.as[Json]
+      limitedSignupBody <- limitedSignup.as[Json]
       captured <- records.get
     } yield {
       assertEquals(firstLogin.status, Status.Ok)
-      assertEquals(limitedLogin.status, Status.TooManyRequests)
-      assertEquals(limitedSignup.status, Status.TooManyRequests)
+      assertEquals(limitedLogin.status, Status.Ok)
+      assertEquals(limitedSignup.status, Status.Ok)
       assertEquals(firstSignup.status, Status.Ok)
-      assert(limitedLogin.headers.get[`Retry-After`].exists(_.retry.exists(value => value >= 1 && value <= 60)))
-      assertEquals(limitedLogin.contentType.map(_.mediaType), Some(MediaType.application.json))
-      assertEquals(limitedBody, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Too many authentication attempts")))))
-      assert(captured.exists { case (event, _, fields) =>
-        event == LogEvent.RequestRejected && fields.get(LogField.Reason).contains("RATE_LIMITED")
-      })
+      assertEquals(limitedLogin.contentType.map(_.mediaType), Some(MediaType.unsafeParse("application/graphql-response+json")))
+      assert(limitedLogin.headers.get(CIString("Retry-After")).isEmpty)
+      assertEquals(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assert(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[Long]("retryAfter").exists(_ >= 1))
+      assertEquals(limitedSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assert(captured.exists(record => record._1 == LogEvent.GraphQLCompleted))
     }
   }
 
@@ -335,7 +336,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
-  test("account admission rejects multiple selected sensitive root fields before authentication or execution") {
+  test("rate limiting applies to independently executed sensitive mutation fields") {
     val repeatedAliases =
       """mutation {
         |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
@@ -346,39 +347,21 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |}""".stripMargin
-    val cyclicFragments =
-      """mutation {
-        |  ...First
-        |}
-        |fragment First on Mutation {
-        |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
-        |  ...Second
-        |}
-        |fragment Second on Mutation {
-        |  second: signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
-        |  ...First
-        |}""".stripMargin
-
     for {
-      authenticationCalls <- Ref.of[IO, Int](0)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authenticate = _ => authenticationCalls.updateAndGet(_ + 1).as(Right(None))).flatMap(defaultApp)
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       aliasResponse <- http(request(repeatedAliases))
       mixedResponse <- http(request(mixedOperations))
-      cyclicResponse <- http(request(cyclicFragments))
-      aliasBody <- aliasResponse.as[Json]
-      calls <- authenticationCalls.get
+      mixedBody <- mixedResponse.as[Json]
     } yield {
-      assertEquals(aliasResponse.status, Status.BadRequest)
-      assertEquals(mixedResponse.status, Status.BadRequest)
-      assertEquals(cyclicResponse.status, Status.BadRequest)
-      assertEquals(aliasBody, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Invalid GraphQL query")))))
-      assertEquals(calls, 3)
+      assertEquals(aliasResponse.status, Status.Ok)
+      assertEquals(mixedResponse.status, Status.Ok)
+      assertEquals(mixedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
     }
   }
 
-  test("account admission only inspects the selected operation") {
+  test("selected operation execution rate limits only the selected sensitive fields") {
     val document =
       """mutation UnselectedSensitive {
         |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
@@ -407,11 +390,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       harmlessSecond <- http(request(document, "Harmless"))
       sensitiveFirst <- http(request(document, "SelectedSingle"))
       sensitiveSecond <- http(request(document, "SelectedSingle"))
+      sensitiveSecondBody <- sensitiveSecond.as[Json]
     } yield {
       assertEquals(harmlessFirst.status, Status.Ok)
       assertEquals(harmlessSecond.status, Status.Ok)
       assertEquals(sensitiveFirst.status, Status.Ok)
-      assertEquals(sensitiveSecond.status, Status.TooManyRequests)
+      assertEquals(sensitiveSecond.status, Status.Ok)
+      assertEquals(sensitiveSecondBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
     }
   }
 
@@ -453,42 +438,19 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       limitedInlineSignup <- http(request(inlineSignup))
       firstBootstrap <- http(request(aliasedBootstrap))
       limitedBootstrap <- http(request(aliasedBootstrap))
+      limitedNamedLoginBody <- limitedNamedLogin.as[Json]
+      limitedInlineSignupBody <- limitedInlineSignup.as[Json]
+      limitedBootstrapBody <- limitedBootstrap.as[Json]
     } yield {
       assertEquals(firstNamedLogin.status, Status.Ok)
-      assertEquals(limitedNamedLogin.status, Status.TooManyRequests)
+      assertEquals(limitedNamedLogin.status, Status.Ok)
       assertEquals(firstInlineSignup.status, Status.Ok)
-      assertEquals(limitedInlineSignup.status, Status.TooManyRequests)
+      assertEquals(limitedInlineSignup.status, Status.Ok)
       assertEquals(firstBootstrap.status, Status.Ok)
-      assertEquals(limitedBootstrap.status, Status.TooManyRequests)
-    }
-  }
-
-  test("account admission rejects duplicate fragment expansion without exponential traversal") {
-    val fragmentCount = 32
-    val fragments = (0 until fragmentCount).map {
-      case 0 =>
-        """fragment Fragment0 on Mutation {
-          |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
-          |}""".stripMargin
-      case index =>
-        s"""fragment Fragment$index on Mutation {
-           |  ...Fragment${index - 1}
-           |  ...Fragment${index - 1}
-           |}""".stripMargin
-    }
-    val fragmentBomb = s"""mutation { ...Fragment${fragmentCount - 1} }
-                            |${fragments.mkString("\n")}""".stripMargin
-
-    for {
-      probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
-      first <- http(request(fragmentBomb))
-      second <- http(request(fragmentBomb))
-    } yield {
-      assert(fragmentBomb.length < 64 * 1024)
-      assertEquals(first.status, Status.BadRequest)
-      assertEquals(second.status, Status.BadRequest)
+      assertEquals(limitedBootstrap.status, Status.Ok)
+      assertEquals(limitedNamedLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(limitedInlineSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(limitedBootstrapBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
     }
   }
 
@@ -550,13 +512,17 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       firstClientSignup <- http(proxiedRequest(signup, "10.0.0.5", "for=203.0.113.10"))
       limitedClientSignup <- http(proxiedRequest(signup, "10.0.0.5", "for=203.0.113.10"))
       secondClientSignup <- http(proxiedRequest(signup, "10.0.0.5", "for=203.0.113.11"))
+      limitedClientLoginBody <- limitedClientLogin.as[Json]
+      limitedClientSignupBody <- limitedClientSignup.as[Json]
     } yield {
       assertEquals(firstClientLogin.status, Status.Ok)
-      assertEquals(limitedClientLogin.status, Status.TooManyRequests)
+      assertEquals(limitedClientLogin.status, Status.Ok)
       assertEquals(secondClientLogin.status, Status.Ok)
       assertEquals(firstClientSignup.status, Status.Ok)
-      assertEquals(limitedClientSignup.status, Status.TooManyRequests)
+      assertEquals(limitedClientSignup.status, Status.Ok)
       assertEquals(secondClientSignup.status, Status.Ok)
+      assertEquals(limitedClientLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(limitedClientSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
     }
   }
 
@@ -572,9 +538,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
       first <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.10"))
       limited <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.11"))
+      limitedBody <- limited.as[Json]
     } yield {
       assertEquals(first.status, Status.Ok)
-      assertEquals(limited.status, Status.TooManyRequests)
+      assertEquals(limited.status, Status.Ok)
+      assertEquals(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
     }
   }
 
@@ -593,10 +561,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       first <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))
       limited <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))
       second <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.11"))
+      limitedBody <- limited.as[Json]
     } yield {
       assertEquals(first.status, Status.Ok)
-      assertEquals(limited.status, Status.TooManyRequests)
+      assertEquals(limited.status, Status.Ok)
       assertEquals(second.status, Status.Ok)
+      assertEquals(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
     }
   }
 

@@ -31,7 +31,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         jobs,
         embeddings,
         model = "voyage-4-lite",
-        version = 1,
         queueSize = 8,
         parallelism = 1,
         retryAttempts = 3,
@@ -52,14 +51,13 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("VHS-AC06 embedding pipeline regenerates jobs when model or version changes") {
+  test("embedding pipeline regenerates jobs when the model changes") {
     val currentHash = SourceHash.sha256(SearchableText.job(openJob))
     val staleModel = EntityEmbedding(
       List(0.1f, 0.2f),
-      EmbeddingMeta("voyage-previous", 1, currentHash, now)
+      EmbeddingMeta("voyage-previous", currentHash, now)
     )
-    val staleVersion = staleModel.copy(meta = staleModel.meta.copy(model = "voyage-4-lite", version = 0))
-    List(staleModel, staleVersion).traverse_ { existing =>
+    List(staleModel).traverse_ { existing =>
       for {
         usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
         jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(existing))))
@@ -72,7 +70,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           jobs,
           embeddings,
           model = "voyage-4-lite",
-          version = 1,
           queueSize = 8,
           parallelism = 1,
           retryAttempts = 3,
@@ -84,7 +81,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             updated <- successfulFind(jobs, jobId)
           } yield {
             assertEquals(updated.flatMap(_.embedding).map(_.meta.model), Some("voyage-4-lite"))
-            assertEquals(updated.flatMap(_.embedding).map(_.meta.version), Some(1))
             assertEquals(updated.flatMap(_.embedding).map(_.meta.sourceHash), Some(currentHash))
           }
         }
@@ -105,7 +101,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         jobs,
         embeddings,
         model = "voyage-4-lite",
-        version = 1,
         queueSize = 8,
         parallelism = 1,
         retryAttempts = 2,
@@ -140,7 +135,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         jobs,
         embeddings,
         model = "voyage-4-lite",
-        version = 1,
         queueSize = 8,
         parallelism = 1,
         retryAttempts = 3,
@@ -150,13 +144,12 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- started.get
           updated <- jobs.update(openJob.copy(title = "Staff Scala Developer"), now)
-          _ = assert(updated.exists(_.version == 1L))
+          _ = assert(updated.isRight)
           _ <- release.complete(()).void
           staleResult <- writeResult.get
           finalJob <- successfulFind(jobs, jobId)
         } yield {
           assertEquals(staleResult, Left(RepositoryError.Conflict))
-          assertEquals(finalJob.map(_.version), Some(1L))
           assertEquals(finalJob.flatMap(_.embedding), None)
         }
       }
@@ -180,7 +173,6 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         jobs,
         embeddings,
         model = "voyage-4-lite",
-        version = 1,
         queueSize = 1,
         parallelism = 1,
         retryAttempts = 3,
@@ -243,7 +235,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           }
       }
       _ <- EmbeddingPipeline.resource(work, InMemoryUsers(usersRef), InMemoryJobs(jobsRef), embeddings,
-        "voyage-4-lite", 1, 8, 1, retryAttempts = 1, retryDelay = 10.millis, leaseDuration = 1.second).use { publisher =>
+        "voyage-4-lite", 8, 1, retryAttempts = 1, retryDelay = 10.millis, leaseDuration = 1.second).use { publisher =>
           publisher.offer(EmbeddingWork.JobChanged(jobId)) *> publisher.offer(EmbeddingWork.JobChanged(otherJobId)) *>
             eventually(jobsRef.get.map(_.get(otherJobId).flatMap(_.embedding).nonEmpty))(identity).void
         }
@@ -265,7 +257,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       _ <- work.enqueue(malformedJob, now)
       _ <- work.enqueue(malformedCandidate, now)
       _ <- EmbeddingPipeline.resource(work, InMemoryUsers(usersRef), InMemoryJobs(jobsRef), CountingEmbeddingService.uncounted,
-        "voyage-4-lite", 1, 8, 1, retryAttempts = 1, retryDelay = 10.millis, leaseDuration = 1.second).use { publisher =>
+        "voyage-4-lite", 8, 1, retryAttempts = 1, retryDelay = 10.millis, leaseDuration = 1.second).use { publisher =>
           publisher.wake *> eventually(work.snapshot)(snapshot =>
             List(malformedJob, malformedCandidate).forall(key =>
               snapshot.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.InvalidWorkKey))
@@ -280,14 +272,13 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       jobs: JobRepository[IO],
       embeddings: EmbeddingService[IO],
       model: String,
-      version: Int,
       queueSize: Int,
       parallelism: Int,
       retryAttempts: Int,
       retryDelay: FiniteDuration
   ) =
     Resource.eval(InMemoryEmbeddingWorkRepository.create).flatMap(work =>
-      EmbeddingPipeline.resource(work, users, jobs, embeddings, model, version, queueSize, parallelism, retryAttempts, retryDelay, 1.second))
+      EmbeddingPipeline.resource(work, users, jobs, embeddings, model, queueSize, parallelism, retryAttempts, retryDelay, 1.second))
 
   private def waitFor(done: IO[Boolean], remaining: Int = 20): IO[Unit] =
     done.flatMap {
@@ -370,10 +361,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
 
     override def updateEmbedding(
         id: Identifiers.JobId,
-        observedVersion: Long,
         embedding: EntityEmbedding
     ): IO[Either[RepositoryError, Unit]] =
-      delegate.updateEmbedding(id, observedVersion, embedding).flatTap(result => writeResult.complete(result).void)
+      delegate.updateEmbedding(id, embedding).flatTap(result => writeResult.complete(result).void)
   }
 
   private final case class StoredWork(

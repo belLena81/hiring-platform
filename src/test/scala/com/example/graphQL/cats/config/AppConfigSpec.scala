@@ -73,7 +73,6 @@ class AppConfigSpec extends FunSuite {
       |    dimension = 1024
       |  }
       |  embedding {
-      |    version = 1
       |    queue-size = 128
       |    parallelism = 4
       |    timeout-ms = 5000
@@ -98,7 +97,6 @@ class AppConfigSpec extends FunSuite {
       voyageEndpoint = "https://api.voyageai.com/v1/embeddings",
       voyageModel = "voyage-4-lite",
       voyageDimension = 1024,
-      embeddingVersion = 1,
       queueSize = 128,
       parallelism = 4,
       timeoutMillis = 5000,
@@ -189,7 +187,6 @@ class AppConfigSpec extends FunSuite {
         |    dimension = 1024
         |  }
         |  embedding {
-        |    version = 1
         |    queue-size = 128
         |    parallelism = 4
         |    timeout-ms = 5000
@@ -360,7 +357,6 @@ class AppConfigSpec extends FunSuite {
         |    dimension = 1024
         |  }
         |  embedding {
-        |    version = 1
         |    queue-size = 128
         |    parallelism = 4
         |    timeout-ms = 5000

@@ -262,10 +262,10 @@ final class MongoUserRepository(
   override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
 
-  override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge.first(collection.updateOne(
-      Filters.and(Filters.eq("_id", id.value.toString), Filters.eq("version", observedVersion)),
+      Filters.eq("_id", id.value.toString),
       Updates.combine(
         Updates.set("embedding", encoded.get("embedding")),
         Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
@@ -276,6 +276,7 @@ final class MongoUserRepository(
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
   }
+
 
   override def initialized: IO[Either[RepositoryError, Boolean]] =
     PublisherBridge.first(registry.find(Filters.eq("_id", "user-account-registry")))
@@ -366,7 +367,6 @@ final class MongoUserRepository(
       Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString)),
       Updates.combine(
         Updates.set("profile", MongoHiringCodecs.profile(profile)),
-        Updates.inc("version", 1L),
         Updates.set("updatedAt", Date.from(now))
       )
     )).flatMap {
@@ -390,7 +390,6 @@ final class MongoUserRepository(
         )
         val update = Updates.combine(
           Updates.set("profile", MongoHiringCodecs.profile(profile)),
-          Updates.inc("version", 1L),
           Updates.set("updatedAt", Date.from(now))
         )
         updateOne(session, collection, filter, update).flatMap {
@@ -427,7 +426,6 @@ final class MongoUserRepository(
         Updates.set("deletedAt", Date.from(now)),
         Updates.set("name", tombstone),
         Updates.set("nameCanonical", AccountName.canonical(tombstone)),
-        Updates.inc("version", 1L),
         Updates.unset("passwordHash"), Updates.unset("profile"), Updates.unset("recruiterProfile"), Updates.unset("email"), Updates.unset("emailCanonical")
       )
       val userWrite = session.fold(PublisherBridge.first(collection.updateOne(userFilter, userUpdate)))(active => PublisherBridge.first(collection.updateOne(active, userFilter, userUpdate)))
@@ -456,14 +454,11 @@ final class MongoUserRepository(
                 case Left(error) => IO.pure(Left(error))
                 case Right(Nil) => IO.pure(Right(()))
                 case Right(openJobs) =>
-                  val closedJobs = openJobs.map(job =>
-                    job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now, version = job.version + 1L)
-                  )
+                  val closedJobs = openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
                   openJobs.zip(closedJobs).traverse_ { case (job, closed) =>
                     val filter = Filters.and(
                       Filters.eq("_id", job.id.value.toString),
-                      Filters.eq("status", JobStatus.Open.toString),
-                      Filters.eq("version", job.version)
+                      Filters.eq("status", JobStatus.Open.toString)
                     )
                     session.fold(
                       PublisherBridge.first(jobs.replaceOne(filter, MongoHiringCodecs.job(closed)))
@@ -478,7 +473,7 @@ final class MongoUserRepository(
                       val closeEvents = closedJobs.map { closed =>
                         OperationalEvents.jobEvent(
                           OperationalEventType.JOB_CLOSED,
-                          java.util.UUID.nameUUIDFromBytes(s"job:${closed.id.value}:JOB_CLOSED:${closed.version}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                          java.util.UUID.nameUUIDFromBytes(s"job:${closed.id.value}:JOB_CLOSED:${closed.updatedAt.toEpochMilli}".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
                           closed,
                           userId,
                           now
@@ -591,9 +586,9 @@ final class MongoJobRepository(
     }
 
   private def updateDirect(job: Job): IO[Either[RepositoryError, Job]] = {
-    val persisted = job.copy(version = job.version + 1L)
+    val persisted = job
     PublisherBridge.first(collection.replaceOne(
-      Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("version", job.version)),
+      Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
       MongoHiringCodecs.job(persisted)
     )).map {
       case Some(result) if result.getMatchedCount == 1L => Right(persisted)
@@ -608,11 +603,11 @@ final class MongoJobRepository(
   override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
     if (events.isEmpty) update(job, now)
     else {
-      val persisted = job.copy(version = job.version + 1L)
+      val persisted = job
       transactionRunner.run { session =>
         replaceOne(
           session,
-          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("version", job.version)),
+          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
           MongoHiringCodecs.job(persisted)
         ).flatMap {
           case Some(result) if result.getMatchedCount == 1L =>
@@ -628,14 +623,14 @@ final class MongoJobRepository(
       }.map(_.as(persisted)).handleError(mapWrite)
     }
 
-  /** Optimistic job replacement and the coalesced reindex request commit together. */
+  /** Job replacement and the coalesced reindex request commit together. */
   def updateWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
-    val persisted = job.copy(version = job.version + 1L)
+    val persisted = job
     embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Job])) { work =>
       transactionRunner.run { session =>
         replaceOne(
           session,
-          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("version", job.version)),
+          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
           MongoHiringCodecs.job(persisted)
         ).flatMap {
           case Some(result) if result.getMatchedCount == 1L =>
@@ -647,10 +642,10 @@ final class MongoJobRepository(
     }
   }
 
-  override def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge.first(collection.updateOne(
-      Filters.and(Filters.eq("_id", id.value.toString), Filters.eq("version", observedVersion)),
+      Filters.eq("_id", id.value.toString),
       Updates.combine(
         Updates.set("embedding", encoded.get("embedding")),
         Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
@@ -661,6 +656,7 @@ final class MongoJobRepository(
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
   }
+
 
   private def findMany(filter: Bson, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)
@@ -720,8 +716,7 @@ final class MongoSemanticSearchRepository(
     val filter = Filters.and(
       Filters.eq("role", UserRole.Candidate.toString),
       Filters.exists("profile"),
-      Filters.eq("embeddingMeta.model", query.model),
-      Filters.eq("embeddingMeta.version", query.version)
+      Filters.eq("embeddingMeta.model", query.model)
     )
     val pipeline = List(vectorSearchStage(candidateVectorIndex, query.vector, filter, query.first.value), scoreStage).asJava
     PublisherBridge.collectWithin(users.aggregate(pipeline), query.first.value).map { documents =>
@@ -776,7 +771,6 @@ final class MongoSemanticSearchRepository(
     MongoKeysetPaging.filter(List(
       Some(Filters.eq("status", JobStatus.Open.toString)),
       Some(Filters.eq("embeddingMeta.model", query.model)),
-      Some(Filters.eq("embeddingMeta.version", query.version)),
       filter.city.map(city => Filters.eq("location.city", city)),
       skillsFilter(filter.skills),
       filter.createdAfter.map(createdAfter => Filters.gte("createdAt", java.util.Date.from(createdAfter)))
@@ -805,23 +799,25 @@ private[mongo] object MongoSemanticSearchResult {
     documents.traverse(rankedCandidate(_, query)).leftMap(_ => RepositoryError.Unavailable)
 
   def rankedJob(document: Document, query: VectorSearchQuery): Either[NonEmptyList[MongoHiringCodecs.StoredDocumentError], Option[RankedJob]] =
-    MongoHiringCodecs.readJob(document).toEither.map { job =>
+    val stored = new Document(document)
+    stored.remove("score")
+    MongoHiringCodecs.readJob(stored).toEither.map { job =>
       for {
       embedding <- job.embedding
       if embedding.meta.model == query.model
-      if embedding.meta.version == query.version
       if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job))
       score <- Option(document.get("score")).collect { case value: Number => value }
     } yield RankedJob(job, score.doubleValue, query.mode, embedding.meta, query.searchId)
     }
 
   def rankedCandidate(document: Document, query: VectorSearchQuery): Either[NonEmptyList[MongoHiringCodecs.StoredDocumentError], Option[RankedCandidate]] =
-    MongoHiringCodecs.readUser(document).toEither.map { candidate =>
+    val stored = new Document(document)
+    stored.remove("score")
+    MongoHiringCodecs.readUser(stored).toEither.map { candidate =>
       for {
       profile <- candidate.candidateProfile
       embedding <- candidate.embedding
       if embedding.meta.model == query.model
-      if embedding.meta.version == query.version
       if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
       score <- Option(document.get("score")).collect { case value: Number => value }
     } yield RankedCandidate(candidate, score.doubleValue, query.mode, embedding.meta, query.searchId)
@@ -954,13 +950,12 @@ final class MongoApplicationRepository private (
     transactionRunner.run { session =>
       val guardFilter = Filters.and(
         Filters.eq("_id", observedJob.id.value.toString),
-        Filters.eq("status", JobStatus.Open.toString),
-        Filters.eq("version", observedJob.version)
+        Filters.eq("status", JobStatus.Open.toString)
       )
       val guard = session.fold(
-        PublisherBridge.first(jobs.updateOne(guardFilter, Updates.inc("version", 1L)))
+        PublisherBridge.first(jobs.updateOne(guardFilter, Updates.set("updatedAt", Date.from(application.createdAt))))
       ) { active =>
-        PublisherBridge.first(jobs.updateOne(active, guardFilter, Updates.inc("version", 1L)))
+        PublisherBridge.first(jobs.updateOne(active, guardFilter, Updates.set("updatedAt", Date.from(application.createdAt))))
       }
       guard.flatMap {
         case Some(result) if result.getMatchedCount == 1L =>

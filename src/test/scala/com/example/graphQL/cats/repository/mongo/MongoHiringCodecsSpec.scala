@@ -50,18 +50,14 @@ class MongoHiringCodecsSpec extends FunSuite {
     assert(!document.containsKey("recruiterProfile"))
   }
 
-  test("user codec rejects legacy documents whose role and profile do not satisfy the current invariant") {
-    val legacyDocument = new Document("_id", candidateId.value.toString)
-      .append("schemaVersion", 1)
-      .append("email", "candidate@example.com")
-      .append("emailCanonical", "candidate@example.com")
-      .append("name", "Candidate")
-      .append("role", UserRole.Candidate.toString)
-      .append("createdAt", Date.from(now))
+  test("user codec rejects removed schema fields") {
+    val document = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
+      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)).append("schemaVersion", Int.box(1))
 
-    val result = MongoHiringCodecs.readUser(legacyDocument)
-
-    assertEquals(result.toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
+    assertEquals(
+      MongoHiringCodecs.readUser(document).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("schemaVersion")))
+    )
   }
 
   test("job codec preserves closedAt round-trip for closed jobs") {
@@ -87,7 +83,7 @@ class MongoHiringCodecsSpec extends FunSuite {
   }
 
   test("job codec preserves embedding metadata when present") {
-    val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", 1, "source-hash", later))
+    val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", "source-hash", later))
     val job = Job(
       jobId,
       recruiterId,
@@ -110,23 +106,16 @@ class MongoHiringCodecsSpec extends FunSuite {
     assertEquals(result.map(_.embedding).toEither, Right(Some(embedding)))
   }
 
-  test("job codec reads legacy documents without closedAt as absent close timestamp") {
-    val legacyDocument = new Document("_id", jobId.value.toString)
-      .append("schemaVersion", 1)
-      .append("version", java.lang.Long.valueOf(0L))
-      .append("recruiterId", recruiterId.value.toString)
-      .append("title", "Senior Scala Developer")
-      .append("description", "Build services")
-      .append("requirements", List("Scala").asJava)
-      .append("skills", List("Cats Effect").asJava)
-      .append("location", new Document("country", "Cyprus").append("city", "Nicosia").append("remote", true))
-      .append("status", JobStatus.Closed.toString)
-      .append("createdAt", Date.from(now))
-      .append("updatedAt", Date.from(later))
+  test("job codec rejects removed revision fields") {
+    val document = MongoHiringCodecs.job(Job(
+      jobId, recruiterId, "Senior Scala Developer", "Build services", List("Scala"), Set("Cats Effect"),
+      Location("Cyprus", "Nicosia", remote = true), JobStatus.Open, now, later
+    )).append("version", Long.box(1L))
 
-    val result = MongoHiringCodecs.readJob(legacyDocument)
-
-    assertEquals(result.map(_.closedAt).toEither, Right(None))
+    assertEquals(
+      MongoHiringCodecs.readJob(document).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("version")))
+    )
   }
 
   test("malformed stored documents decode to non-sensitive typed errors") {

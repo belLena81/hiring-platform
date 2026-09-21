@@ -43,7 +43,6 @@ enum ConfigError(val key: String) {
   case InvalidVoyageEndpoint extends ConfigError("VOYAGE_ENDPOINT")
   case InvalidVoyageModel extends ConfigError("VOYAGE_MODEL")
   case InvalidVoyageDimension extends ConfigError("VOYAGE_DIMENSION")
-  case InvalidEmbeddingVersion extends ConfigError("EMBEDDING_VERSION")
   case InvalidEmbeddingQueueSize extends ConfigError("EMBEDDING_QUEUE_SIZE")
   case InvalidEmbeddingParallelism extends ConfigError("EMBEDDING_PARALLELISM")
   case InvalidEmbeddingTimeout extends ConfigError("EMBEDDING_TIMEOUT_MS")
@@ -75,7 +74,7 @@ object ConfigError {
     InvalidJwtIssuer, InvalidJwtAudience, InvalidPasswordHashIterations, InvalidPasswordHashMemory,
     InvalidPasswordHashParallelism, InvalidAuthRateLimitWindow, InvalidAuthRateLimitAttempts,
     InvalidAuthRateLimitBuckets, InvalidTrustedProxyCidrs, InvalidVectorSearchEnabled, InvalidVoyageApiKey,
-    InvalidVoyageEndpoint, InvalidVoyageModel, InvalidVoyageDimension, InvalidEmbeddingVersion,
+    InvalidVoyageEndpoint, InvalidVoyageModel, InvalidVoyageDimension,
     InvalidEmbeddingQueueSize, InvalidEmbeddingParallelism, InvalidEmbeddingTimeout, InvalidEmbeddingRetryAttempts,
     InvalidEmbeddingRetryDelay, InvalidJobVectorIndex, InvalidCandidateVectorIndex, InvalidJobLexicalIndex,
     InvalidSearchIndexReadyTimeout, InvalidSearchIndexPollInterval, InvalidVectorNumCandidates, InvalidKafkaEnabled,
@@ -86,7 +85,7 @@ object ConfigError {
 }
 
 final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
-    voyageModel: String, voyageDimension: Int, embeddingVersion: Int, queueSize: Int, parallelism: Int,
+    voyageModel: String, voyageDimension: Int, queueSize: Int, parallelism: Int,
     timeoutMillis: Int, retryAttempts: Int, retryDelayMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
     indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
 
@@ -105,7 +104,6 @@ type AdmissionPermits = Int :| Interval.Closed[1, 1024]
 type NonBlank128 = String :| (Not[Blank] & MaxLength[128])
 type NonBlankStr = String :| Not[Blank]
 type VoyageDim = Int :| StrictEqual[1024]
-type Positive = Int :| Greater[0]
 type QueueSize = Int :| Interval.Closed[1, 10000]
 type Parallelism = Int :| Interval.Closed[1, 64]
 type TimeoutMs = Int :| Interval.Closed[100, 60000]
@@ -186,7 +184,7 @@ object AppConfig {
         validEmbeddingRetryDelay(embedding.retryDelayMs)).mapN {
         (apiKey, readyTimeout, searchIndexPollInterval, numCandidates, retryAttempts, retryDelay) =>
           VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
-            embedding.version, embedding.queueSize, embedding.parallelism, embedding.timeoutMs, retryAttempts, retryDelay,
+            embedding.queueSize, embedding.parallelism, embedding.timeoutMs, retryAttempts, retryDelay,
             indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, searchIndexPollInterval, numCandidates)
       }
 
@@ -309,7 +307,6 @@ object AppConfig {
     case "vector-search.voyage.endpoint" => Some(ConfigError.InvalidVoyageEndpoint)
     case "vector-search.voyage.model" => Some(ConfigError.InvalidVoyageModel)
     case "vector-search.voyage.dimension" => Some(ConfigError.InvalidVoyageDimension)
-    case "vector-search.embedding.version" => Some(ConfigError.InvalidEmbeddingVersion)
     case "vector-search.embedding.queue-size" => Some(ConfigError.InvalidEmbeddingQueueSize)
     case "vector-search.embedding.parallelism" => Some(ConfigError.InvalidEmbeddingParallelism)
     case "vector-search.embedding.timeout-ms" => Some(ConfigError.InvalidEmbeddingTimeout)
@@ -357,7 +354,7 @@ object AppConfig {
       indexes: RawVectorIndexesConfig, numCandidates: Int) derives ConfigReader
   private final case class RawVoyageConfig(apiKey: Option[String], endpoint: HttpsUrl, model: NonBlankStr,
       dimension: VoyageDim) derives ConfigReader
-  private final case class RawEmbeddingConfig(version: Positive, queueSize: QueueSize, parallelism: Parallelism,
+  private final case class RawEmbeddingConfig(queueSize: QueueSize, parallelism: Parallelism,
       timeoutMs: TimeoutMs, retryAttempts: Int, retryDelayMs: Int) derives ConfigReader
   private final case class RawVectorIndexesConfig(jobs: NonBlankStr, candidates: NonBlankStr, lexical: NonBlankStr,
       readyTimeoutMs: Int, pollIntervalMs: Int) derives ConfigReader

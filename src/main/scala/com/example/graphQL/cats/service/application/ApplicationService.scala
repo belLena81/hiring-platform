@@ -80,7 +80,7 @@ final class ApplicationService(
       change <- EitherT.fromEither[IO](
         ApplicationLifecycle.changeStatus(application, target, actorUser.id, now, feedback, reason).widenUseCase
       )
-      persistedApplication = change.application.copy(version = application.version + 1L)
+      persistedApplication = change.application
       event <- EitherT.fromEither[IO](
         ApplicationEvent
           .validate(eventId, application.id, Some(change.previousStatus), change.newStatus, actorUser.id, now, change.feedback, change.reason)

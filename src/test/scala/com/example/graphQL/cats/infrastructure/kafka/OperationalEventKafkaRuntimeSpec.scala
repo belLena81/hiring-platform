@@ -29,17 +29,16 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   private def event(
       eventType: OperationalEventType,
       aggregateId: String = "job-1",
-      sequence: Long = 0L,
-      schemaVersion: Int = OperationalEventEnvelope.SchemaVersion
+      occurredAt: Instant = now
   ): OperationalEventEnvelope =
     OperationalEventEnvelope(
-      UUID.randomUUID(), eventType, schemaVersion, now, OperationalAggregateType.Job,
-      aggregateId, sequence, sequence, actor, Json.obj("value" -> Json.fromString("fixture"))
+      UUID.randomUUID(), eventType, occurredAt, OperationalAggregateType.Job,
+      aggregateId, actor, Json.obj("value" -> Json.fromString("fixture"))
     )
 
-  private def claim(partitionKey: String, sequence: Long): ClaimedOperationalEvent = {
-    val value = event(OperationalEventType.JOB_UPDATED, aggregateId = partitionKey, sequence = sequence)
-    ClaimedOperationalEvent(value, OperationalEventJson.bytes(value), partitionKey, s"lease-$partitionKey-$sequence", 1)
+  private def claim(partitionKey: String, eventId: UUID): ClaimedOperationalEvent = {
+    val value = event(OperationalEventType.JOB_UPDATED, aggregateId = partitionKey).copy(eventId = eventId)
+    ClaimedOperationalEvent(value, OperationalEventJson.bytes(value), partitionKey, s"lease-$partitionKey-$eventId", 1)
   }
 
   private final case class Fakes(
@@ -56,10 +55,6 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       val receipts = new ConsumerReceiptRepository[IO] {
         override def exists(group: String, id: UUID): IO[Either[RepositoryError, Boolean]] =
           receiptState.get.map(values => Right(values.contains(group -> id)))
-        override def latestSequence(group: String, aggregateType: String, aggregateId: String): IO[Either[RepositoryError, Option[Long]]] =
-          receiptState.get.map(_.values.filter(value =>
-            value.aggregateType.toString == aggregateType && value.aggregateId == aggregateId
-          ).map(_.sequence).toList.sorted.lastOption).map(Right(_))
         override def record(group: String, value: OperationalEventEnvelope, createdAt: Instant, expiresAt: Instant): IO[Either[RepositoryError, Boolean]] =
           receiptState.modify { values =>
             val key = group -> value.eventId
@@ -74,71 +69,53 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       Fakes(receipts, quarantines, quarantineState)
     }
 
-  test("malformed, unsupported, and invalid ordering records quarantine without commit") {
+  test("malformed records quarantine without commit") {
     fakes.flatMap { values =>
-      val unsupported = OperationalEventJson.json(event(OperationalEventType.JOB_UPDATED, schemaVersion = 99)).noSpaces.getBytes
-      val invalid = OperationalEventJson.bytes(event(OperationalEventType.JOB_UPDATED, sequence = -1L))
       for {
-        unsupportedCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 1L, unsupported)
-        malformedCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 2L, "not-json".getBytes)
-        invalidCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 3L, invalid)
+        malformedCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 1L, "not-json".getBytes)
         records <- values.quarantined.get
       } yield {
-        assertEquals((unsupportedCommit, malformedCommit, invalidCommit), (false, false, false))
-        assertEquals(records.map(_.category), Vector(
-          OperationalEventFailureCategory.UnsupportedVersion,
-          OperationalEventFailureCategory.MalformedEnvelope,
-          OperationalEventFailureCategory.InvalidOrdering
-        ))
+        assert(!malformedCommit)
+        assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.MalformedEnvelope))
       }
     }
   }
 
-  test("duplicate delivery acknowledges once and a gap is quarantined") {
+  test("duplicate delivery acknowledges once and accepts events without revision gaps") {
     fakes.flatMap { values =>
-      val first = event(OperationalEventType.JOB_CREATED, sequence = 0L)
-      val gap = event(OperationalEventType.JOB_UPDATED, sequence = 2L)
+      val first = event(OperationalEventType.JOB_CREATED)
+      val independent = event(OperationalEventType.JOB_UPDATED)
       for {
         firstCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 4L, OperationalEventJson.bytes(first))
         duplicateCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 5L, OperationalEventJson.bytes(first))
-        gapCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 6L, OperationalEventJson.bytes(gap))
+        independentCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 6L, OperationalEventJson.bytes(independent))
         records <- values.quarantined.get
       } yield {
         assert(firstCommit)
         assert(duplicateCommit)
-        assert(!gapCommit)
-        assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.InvalidOrdering))
-      }
-    }
-  }
-
-  test("candidate hired cannot be the first observed application fact") {
-    fakes.flatMap { values =>
-      val hired = event(OperationalEventType.CANDIDATE_HIRED, aggregateId = "application-1", sequence = 9L).copy(aggregateType = OperationalAggregateType.Application)
-      OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 7L, OperationalEventJson.bytes(hired)).flatMap { committed =>
-        values.quarantined.get.map { records =>
-          assert(!committed)
-          assertEquals(records.headOption.map(_.category), Some(OperationalEventFailureCategory.InvalidOrdering))
-        }
+        assert(independentCommit)
+        assertEquals(records, Vector.empty)
       }
     }
   }
 
   test("publisher preserves ordering within each partition key") {
     for {
-      seen <- Ref.of[IO, Vector[Long]](Vector.empty)
-      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", 0), claim("job-1", 1))) { value =>
-        seen.update(_ :+ value.event.sequence)
+      first = UUID.fromString("00000000-0000-0000-0000-000000000101")
+      second = UUID.fromString("00000000-0000-0000-0000-000000000102")
+      seen <- Ref.of[IO, Vector[UUID]](Vector.empty)
+      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", first), claim("job-1", second))) { value =>
+        seen.update(_ :+ value.event.eventId)
       }
       result <- seen.get
-    } yield assertEquals(result, Vector(0L, 1L))
+    } yield assertEquals(result, Vector(first, second))
   }
 
   test("publisher overlaps independent partition keys") {
     for {
       arrivals <- Ref.of[IO, Int](0)
       barrier <- Deferred[IO, Unit]
-      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", 0), claim("job-2", 0))) { value =>
+      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", UUID.randomUUID()), claim("job-2", UUID.randomUUID()))) { value =>
         arrivals.modify(count => (count + 1, count + 1)).flatMap { count =>
           if (count == 2) barrier.complete(()).void else barrier.get
         } *> IO(assert(value.event.aggregateId == "job-1" || value.event.aggregateId == "job-2"))

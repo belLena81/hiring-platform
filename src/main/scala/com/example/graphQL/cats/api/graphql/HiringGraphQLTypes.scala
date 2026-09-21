@@ -116,7 +116,6 @@ private[graphql] object HiringGraphQLTypes {
     Field("score", FloatType, resolve = _.value.score),
     Field("searchMode", searchMode, resolve = _.value.searchMode),
     Field("model", StringType, resolve = _.value.model),
-    Field("version", IntType, resolve = _.value.version),
     Field("searchId", IDType, resolve = _.value.searchId)))
   lazy val rankedCandidateType: ObjectType[RequestContext, RankedCandidatePayload] =
     ObjectType("RankedCandidate", fields[RequestContext, RankedCandidatePayload](
@@ -124,7 +123,6 @@ private[graphql] object HiringGraphQLTypes {
       Field("score", FloatType, resolve = _.value.score),
       Field("searchMode", searchMode, resolve = _.value.searchMode),
       Field("model", StringType, resolve = _.value.model),
-      Field("version", IntType, resolve = _.value.version),
       Field("searchId", IDType, resolve = _.value.searchId)))
   lazy val rankedJobResultsType: ObjectType[RequestContext, RankedJobResults] =
     ObjectType("RankedJobResults", fields[RequestContext, RankedJobResults](

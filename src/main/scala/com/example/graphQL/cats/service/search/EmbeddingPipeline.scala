@@ -56,7 +56,6 @@ final class EmbeddingPipeline(
     jobs: JobRepository[IO],
     embeddings: EmbeddingService[IO],
     model: String,
-    version: Int,
     parallelism: Int,
     retryAttempts: Int,
     retryDelay: FiniteDuration,
@@ -120,7 +119,7 @@ final class EmbeddingPipeline(
         val hash = SourceHash.sha256(text)
         if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
         else embedDocument(text).flatMap {
-          case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(id, job.version, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(id, embedding).map(writeOutcome)
           case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
           case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
         }
@@ -136,7 +135,7 @@ final class EmbeddingPipeline(
           val hash = SourceHash.sha256(text)
           if (user.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
           else embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(id, user.version, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(id, embedding).map(writeOutcome)
             case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
             case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
           }
@@ -147,7 +146,7 @@ final class EmbeddingPipeline(
     }
 
   private def isCurrent(embedding: EntityEmbedding, hash: String): Boolean =
-    embedding.meta.sourceHash == hash && embedding.meta.model == model && embedding.meta.version == version
+    embedding.meta.sourceHash == hash && embedding.meta.model == model
 
   private def writeOutcome(result: Either[RepositoryError, Unit]): ProcessingOutcome = result match {
     case Right(_) | Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
@@ -159,7 +158,7 @@ final class EmbeddingPipeline(
     else embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Document)).flatMap {
       case Left(_) => IO.pure(EmbeddingOutcome.Retry)
       case Right(vector) => now.map { instant =>
-        EmbeddingOutcome.Embedded(EntityEmbedding(vector.values, EmbeddingMeta(model, version, SourceHash.sha256(text), instant)))
+        EmbeddingOutcome.Embedded(EntityEmbedding(vector.values, EmbeddingMeta(model, SourceHash.sha256(text), instant)))
       }
     }
 }
@@ -171,7 +170,6 @@ object EmbeddingPipeline {
       jobs: JobRepository[IO],
       embeddings: EmbeddingService[IO],
       model: String,
-      version: Int,
       queueSize: Int,
       parallelism: Int,
       retryAttempts: Int,
@@ -182,7 +180,7 @@ object EmbeddingPipeline {
       for {
         workerId <- Resource.eval(IO.randomUUID.map(_.toString))
         publisher = new DurableEmbeddingWorkPublisher(work, wakeups, IO.realTimeInstant)
-        pipeline = new EmbeddingPipeline(wakeups, work, users, jobs, embeddings, model, version, parallelism,
+        pipeline = new EmbeddingPipeline(wakeups, work, users, jobs, embeddings, model, parallelism,
           retryAttempts, retryDelay, leaseDuration, IO.realTimeInstant, workerId)
         _ <- Resource.make(pipeline.stream.compile.drain.start)(_.cancel)
       } yield publisher

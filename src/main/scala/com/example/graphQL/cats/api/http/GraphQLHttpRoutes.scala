@@ -12,7 +12,7 @@ import io.circe.Json
 import org.http4s.*
 import org.http4s.circe.*
 import org.http4s.dsl.Http4sDsl
-import org.http4s.headers.{Accept, Allow, `Content-Type`, `Retry-After`, `WWW-Authenticate`}
+import org.http4s.headers.{Accept, Allow, `Content-Type`, `WWW-Authenticate`}
 import org.http4s.server.AuthMiddleware
 import org.typelevel.otel4s.trace.Tracer
 
@@ -24,7 +24,6 @@ private[http] enum HttpRejection(val status: Status, val message: String, val re
     s"Expected ${MediaTypeNegotiation.supportedMessage}", LogRejection.NotAcceptable)
   case AuthenticationFailed extends HttpRejection(Status.Unauthorized, "Authentication failed", LogRejection.AuthenticationFailed)
   case Unavailable extends HttpRejection(Status.ServiceUnavailable, "Service unavailable", LogRejection.InternalError)
-  case RateLimited extends HttpRejection(Status.TooManyRequests, "Too many authentication attempts", LogRejection.RateLimited)
   case PayloadTooLarge extends HttpRejection(Status.PayloadTooLarge, "Request body too large", LogRejection.PayloadTooLarge)
   case Overloaded extends HttpRejection(Status.ServiceUnavailable, "Server busy", LogRejection.Overloaded)
   case DeadlineExceeded extends HttpRejection(Status.GatewayTimeout, "Request deadline exceeded", LogRejection.DeadlineExceeded)
@@ -63,19 +62,11 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
       request.attemptAs[GraphQLRequest](using jsonOf[IO, GraphQLRequest]).foldF(
         _ => rejected(HttpRejection.InvalidRequest, requestId, mediaType = mediaType),
         parsed => {
-          def limited(operation: AuthRateLimiter.Operation): IO[Either[Response[IO], Unit]] =
-            dependencies.rateLimiter.permit(AuthRateLimiter.Key(dependencies.clientAddressResolver.resolve(request), operation)).flatMap {
-              case Right(()) => IO.pure(Right(()))
-              case Left(rateLimited) =>
-                rejected(HttpRejection.RateLimited, requestId)
-                  .map(_.putHeaders(`Retry-After`.unsafeFromLong(rateLimited.retryAfterSeconds)))
-                  .map(Left(_))
-            }
-
           def execute: IO[Response[IO]] = {
             val context = dependencies.contextFactory.resource(RequestContextParameters(
               service.readiness(Some(requestId)), actor, dependencies.hiring, dependencies.ensureHiringReady,
-              tracer, diagnostics, Some(requestId)))
+              tracer, diagnostics, Some(requestId), dependencies.clientAddressResolver.resolve(request),
+              key => dependencies.rateLimiter.permit(key)))
             HiringGraphQLSchema.execute(parsed, context).flatMap {
               case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
               case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
@@ -83,69 +74,15 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
             }
           }
 
-          accountOperation(parsed) match {
-            case AccountOperation.Single(operation) =>
-              limited(operation).flatMap {
-                case Left(response) => IO.pure(response)
-                case Right(()) => execute
-              }
-            case AccountOperation.Multiple => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
-            case AccountOperation.None => execute
-          }
+          execute
         }
       )
     }
   }
 
-  private enum AccountOperation {
-    case None
-    case Single(operation: AuthRateLimiter.Operation)
-    case Multiple
-  }
-
-  private object AccountOperation {
-    val byFieldName: Map[String, AuthRateLimiter.Operation] = Map(
-      "signUp" -> AuthRateLimiter.Operation.SignUp,
-      "login" -> AuthRateLimiter.Operation.Login,
-      "bootstrapAdmin" -> AuthRateLimiter.Operation.BootstrapAdmin
-    )
-  }
-
-  private def accountOperation(request: GraphQLRequest): AccountOperation = {
-    val operations = request.document.definitions.collect { case operation: sangria.ast.OperationDefinition => operation }
-    val selected = request.operationName match {
-      case Some(name) => operations.find(_.name.contains(name))
-      case None => Option.when(operations.size == 1)(operations.head)
-    }
-
-    def sensitiveFields(selections: Vector[sangria.ast.Selection], expanding: Set[String]): Vector[AuthRateLimiter.Operation] =
-      selections.foldLeft(Vector.empty[AuthRateLimiter.Operation]) { (found, selection) =>
-        if (found.size >= 2) found
-        else {
-          val next = selection match {
-            case field: sangria.ast.Field => AccountOperation.byFieldName.get(field.name).toVector
-            case inline: sangria.ast.InlineFragment => sensitiveFields(inline.selections, expanding)
-            case spread: sangria.ast.FragmentSpread if !expanding(spread.name) =>
-              request.document.fragments.get(spread.name).toVector.flatMap(fragment =>
-                sensitiveFields(fragment.selections, expanding + spread.name))
-            case _ => Vector.empty
-          }
-          (found ++ next).take(2)
-        }
-      }
-
-    selected.map(operation => sensitiveFields(operation.selections, Set.empty)) match {
-      case Some(Vector(operation)) => AccountOperation.Single(operation)
-      case Some(fields) if fields.size >= 2 => AccountOperation.Multiple
-      case _ => AccountOperation.None
-    }
-  }
-
   private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
       mediaType: MediaType = MediaTypeNegotiation.graphqlResponse): IO[Response[IO]] = {
-    val operationName = parsed.operationName.orElse(parsed.document.definitions.collectFirst {
-      case operation: sangria.ast.OperationDefinition => operation.name
-    }.flatten)
+    val operationName = parsed.document.operation(parsed.operationName).flatMap(_.name)
     val fields = Map(LogField.Outcome ->
       (if (result.hcursor.downField("errors").succeeded) "FIELD_ERROR" else "COMPLETED")) ++
       operationName.map(LogField.OperationName -> _)

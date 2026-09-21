@@ -77,7 +77,7 @@ class ApplicationServiceSpec extends CatsEffectSuite {
   }
 
   test("hireApplication emits status-change before candidate-hired with distinct event IDs") {
-    val interviewApplication = createdApplication.copy(status = ApplicationStatus.Interview, version = 7L)
+    val interviewApplication = createdApplication.copy(status = ApplicationStatus.Interview)
     withServices(Map(jobId -> openJob), Map(applicationId -> interviewApplication)).flatMap { case (_, applications, service) =>
       for {
         result <- service.changeStatus(
@@ -91,9 +91,9 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         )
         outbox <- applications.allOperationalEvents
       } yield {
-        assertEquals(result.map(_.version), Right(8L))
+        assertEquals(result.map(_.status), Right(ApplicationStatus.Hired))
         assertEquals(outbox.map(_.eventType), Vector(OperationalEventType.APPLICATION_STATUS_CHANGED, OperationalEventType.CANDIDATE_HIRED))
-        assertEquals(outbox.map(_.sequence), Vector(8L, 9L))
+        assertEquals(outbox.map(_.eventType), Vector(OperationalEventType.APPLICATION_STATUS_CHANGED, OperationalEventType.CANDIDATE_HIRED))
         assert(outbox.map(_.eventId).distinct.size == 2)
       }
     }

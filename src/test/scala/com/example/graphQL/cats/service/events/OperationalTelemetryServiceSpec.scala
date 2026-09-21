@@ -91,7 +91,6 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       None,
       Json.obj(),
       None,
-      None,
       List(
         SearchSessionResult("other-result", 1, 0d),
         SearchSessionResult(jobId.value.toString, 2, 0d)
@@ -129,8 +128,6 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         left.eventType == right.eventType &&
         left.aggregateType == right.aggregateType &&
         left.aggregateId == right.aggregateId &&
-        left.aggregateVersion == right.aggregateVersion &&
-        left.sequence == right.sequence &&
         left.actorId == right.actorId &&
         left.payload == right.payload
   }

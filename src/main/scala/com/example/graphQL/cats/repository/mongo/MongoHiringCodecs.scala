@@ -14,7 +14,7 @@ import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/** BSON decoding is total because persisted values are untrusted input, including values from older binaries. */
+/** BSON decoding is total because persisted values are untrusted input. */
 private[mongo] object MongoHiringCodecs {
   enum StoredDocumentError {
     case MissingField(field: String)
@@ -28,9 +28,9 @@ private[mongo] object MongoHiringCodecs {
 
   def user(value: User): Document = {
     val document = new Document("_id", value.id.value.toString)
-      .append("schemaVersion", 3).append("name", value.name).append("nameCanonical", AccountName.canonical(value.name))
+      .append("name", value.name).append("nameCanonical", AccountName.canonical(value.name))
       .append("role", value.role.toString).append("accountStatus", value.accountStatus.toString)
-      .append("version", java.lang.Long.valueOf(value.version)).append("createdAt", Date.from(value.createdAt))
+      .append("createdAt", Date.from(value.createdAt))
     value.email.foreach(email => document.append("email", email).append("emailCanonical", AccountName.canonical(email)))
     if (value.role == UserRole.Admin && value.adminSingleton) {
       document.append("adminSingletonKey", "singleton-admin")
@@ -42,6 +42,7 @@ private[mongo] object MongoHiringCodecs {
   }
 
   def readUser(document: Document): ValidatedNel[StoredDocumentError, User] =
+    noUnexpectedFields(document, UserFields).andThen { _ =>
     (
       uuid(document, "_id").toValidatedNel.map(UserId.apply),
       optionalString(document, "email").toValidatedNel,
@@ -49,15 +50,15 @@ private[mongo] object MongoHiringCodecs {
       enumValue(document, "role", UserRole.values).toValidatedNel,
       readUserProfile(document),
       instant(document, "createdAt").toValidatedNel,
-      optionalEnum(document, "accountStatus", AccountStatus.values).toValidatedNel.map(_.getOrElse(AccountStatus.Active)),
+      enumValue(document, "accountStatus", AccountStatus.values).toValidatedNel,
       optionalInstant(document, "deletedAt").toValidatedNel,
-      optionalLong(document, "version").toValidatedNel.map(_.getOrElse(0L)),
       optionalString(document, "adminSingletonKey").toValidatedNel.map(_.contains("singleton-admin")),
       readEmbedding(document)
-    ).mapN { (id, email, name, role, profile, createdAt, accountStatus, deletedAt, version, adminSingleton, embedding) =>
-      User(id, email, name, role, profile, createdAt, adminSingleton, embedding, accountStatus, deletedAt, version)
+    ).mapN { (id, email, name, role, profile, createdAt, accountStatus, deletedAt, adminSingleton, embedding) =>
+      User(id, email, name, role, profile, createdAt, adminSingleton, embedding, accountStatus, deletedAt)
     }.andThen { user =>
       Either.cond(user.roleProfileIsValid, user, InconsistentDocument).toValidatedNel
+    }
     }
 
   def readCredentials(document: Document): ValidatedNel[StoredDocumentError, Option[AccountCredentials]] =
@@ -65,8 +66,8 @@ private[mongo] object MongoHiringCodecs {
 
   def job(job: Job): Document =
     appendOptionalEmbedding(
-      appendOptionalDate(new Document("_id", job.id.value.toString).append("schemaVersion", 1)
-        .append("version", java.lang.Long.valueOf(job.version)).append("recruiterId", job.recruiterId.value.toString)
+      appendOptionalDate(new Document("_id", job.id.value.toString)
+        .append("recruiterId", job.recruiterId.value.toString)
         .append("title", job.title).append("description", job.description).append("requirements", job.requirements.asJava)
         .append("skills", job.skills.toList.sorted.asJava).append("location", location(job.location)).append("status", job.status.toString)
         .append("createdAt", Date.from(job.createdAt)).append("updatedAt", Date.from(job.updatedAt)), "closedAt", job.closedAt),
@@ -74,6 +75,7 @@ private[mongo] object MongoHiringCodecs {
     )
 
   def readJob(document: Document): ValidatedNel[StoredDocumentError, Job] =
+    noUnexpectedFields(document, JobFields).andThen { _ =>
     (
       uuid(document, "_id").toValidatedNel.map(JobId.apply),
       uuid(document, "recruiterId").toValidatedNel.map(UserId.apply),
@@ -86,30 +88,30 @@ private[mongo] object MongoHiringCodecs {
       instant(document, "createdAt").toValidatedNel,
       instant(document, "updatedAt").toValidatedNel,
       optionalInstant(document, "closedAt").toValidatedNel,
-      optionalLong(document, "version").toValidatedNel.map(_.getOrElse(0L)),
       readEmbedding(document)
     ).mapN(Job.apply)
+    }
 
   def application(application: Application): Document =
-    new Document("_id", application.id.value.toString).append("schemaVersion", 1).append("candidateId", application.candidateId.value.toString)
+    new Document("_id", application.id.value.toString).append("candidateId", application.candidateId.value.toString)
       .append("jobId", application.jobId.value.toString).append("status", application.status.toString)
       .append("createdAt", Date.from(application.createdAt)).append("updatedAt", Date.from(application.updatedAt))
-      .append("version", java.lang.Long.valueOf(application.version))
 
   def readApplication(document: Document): ValidatedNel[StoredDocumentError, Application] =
+    noUnexpectedFields(document, ApplicationFields).andThen { _ =>
     (
       uuid(document, "_id").toValidatedNel.map(ApplicationId.apply),
       uuid(document, "candidateId").toValidatedNel.map(UserId.apply),
       uuid(document, "jobId").toValidatedNel.map(JobId.apply),
       enumValue(document, "status", ApplicationStatus.values).toValidatedNel,
       instant(document, "createdAt").toValidatedNel,
-      instant(document, "updatedAt").toValidatedNel,
-      optionalLong(document, "version").toValidatedNel.map(_.getOrElse(0L))
+      instant(document, "updatedAt").toValidatedNel
     ).mapN(Application.apply)
+    }
 
   def event(event: ApplicationEvent): Document =
     appendOptionalString(appendOptionalString(appendOptionalString(new Document("_id", event.id.value.toString)
-      .append("schemaVersion", 1).append("applicationId", event.applicationId.value.toString).append("newStatus", event.newStatus.toString)
+      .append("applicationId", event.applicationId.value.toString).append("newStatus", event.newStatus.toString)
       .append("actorId", event.actorId.value.toString).append("occurredAt", Date.from(event.occurredAt)), "previousStatus", event.previousStatus.map(_.toString)), "feedback", event.feedback), "reason", event.reason)
 
   def readEvent(document: Document): ValidatedNel[StoredDocumentError, ApplicationEvent] =
@@ -126,14 +128,11 @@ private[mongo] object MongoHiringCodecs {
 
   def operationalEvent(value: OperationalEventEnvelope): Document =
     new Document("_id", value.eventId.toString)
-      .append("schemaVersion", value.schemaVersion)
       .append("topic", OperationalEventEnvelope.Topic)
       .append("eventType", value.eventType.toString)
       .append("occurredAt", Date.from(value.occurredAt))
       .append("aggregateType", value.aggregateType.toString)
       .append("aggregateId", value.aggregateId)
-      .append("aggregateVersion", java.lang.Long.valueOf(value.aggregateVersion))
-      .append("sequence", java.lang.Long.valueOf(value.sequence))
       .append("actorId", value.actorId.value.toString)
       .append("payload", value.payload.noSpaces)
       .append("envelopeBytes", OperationalEventJson.bytes(value))
@@ -143,14 +142,9 @@ private[mongo] object MongoHiringCodecs {
     (
       uuid(document, "_id").toValidatedNel,
       enumValue(document, "eventType", OperationalEventType.values).toValidatedNel,
-      requiredInt(document, "schemaVersion").toValidatedNel.andThen { schemaVersion =>
-        Either.cond(schemaVersion == OperationalEventEnvelope.SchemaVersion, schemaVersion, InvalidField("schemaVersion")).toValidatedNel
-      },
       instant(document, "occurredAt").toValidatedNel,
       enumValue(document, "aggregateType", OperationalAggregateType.values).toValidatedNel,
       requiredString(document, "aggregateId").toValidatedNel,
-      requiredLong(document, "aggregateVersion").toValidatedNel,
-      requiredLong(document, "sequence").toValidatedNel,
       uuid(document, "actorId").toValidatedNel.map(UserId.apply),
       requiredString(document, "payload").toValidatedNel.andThen(value => json("payload")(value).toValidatedNel)
     ).mapN(OperationalEventEnvelope.apply)
@@ -172,7 +166,6 @@ private[mongo] object MongoHiringCodecs {
       .append("query", value.query.orNull)
       .append("filter", value.filter.noSpaces)
       .append("model", value.model.orNull)
-      .append("modelVersion", value.modelVersion.map(Int.box).orNull)
       .append("results", value.results.map(result =>
         new Document("resultId", result.resultId)
           .append("rank", java.lang.Integer.valueOf(result.rank))
@@ -189,7 +182,6 @@ private[mongo] object MongoHiringCodecs {
       optionalString(document, "query").toValidatedNel,
       requiredString(document, "filter").toValidatedNel.andThen(value => json("filter")(value).toValidatedNel),
       optionalString(document, "model").toValidatedNel,
-      optionalInt(document, "modelVersion").toValidatedNel,
       resultList(document, "results"),
       instant(document, "occurredAt").toValidatedNel,
       instant(document, "expiresAt").toValidatedNel
@@ -197,19 +189,20 @@ private[mongo] object MongoHiringCodecs {
 
   private def location(location: Location): Document = new Document("country", location.country).append("city", location.city).append("remote", location.remote)
 
+  private val UserFields = Set("_id", "email", "emailCanonical", "name", "nameCanonical", "role", "profile",
+    "createdAt", "updatedAt", "accountStatus", "deletedAt", "adminSingletonKey", "passwordHash", "embedding", "embeddingMeta")
+  private val JobFields = Set("_id", "recruiterId", "title", "description", "requirements", "skills", "location",
+    "status", "createdAt", "updatedAt", "closedAt", "embedding", "embeddingMeta")
+  private val ApplicationFields = Set("_id", "candidateId", "jobId", "status", "createdAt", "updatedAt")
+
+  private def noUnexpectedFields(document: Document, fields: Set[String]): ValidatedNel[StoredDocumentError, Unit] =
+    document.keySet.asScala.find(!fields.contains(_)).fold(().validNel)(field => InvalidField(field).invalidNel)
+
   private def readLocation(document: Document): ValidatedNel[StoredDocumentError, Location] =
     (requiredString(document, "country").toValidatedNel, requiredString(document, "city").toValidatedNel, requiredBoolean(document, "remote").toValidatedNel).mapN(Location(_, _, _))
 
-  private def readUserProfile(document: Document): ValidatedNel[StoredDocumentError, Option[UserProfile]] = {
-    val current = optionalDocument(document, "profile").toValidatedNel.andThen(_.traverse(readProfile))
-    val legacyRecruiter = optionalDocument(document, "recruiterProfile").toValidatedNel.andThen(_.traverse(readRecruiterProfile))
-    (current, legacyRecruiter).mapN {
-      case (Some(profileValue), None) => Right(Some(profileValue))
-      case (None, Some(profileValue)) => Right(Some(UserProfile.Recruiter(profileValue)))
-      case (None, None) => Right(None)
-      case (Some(_), Some(_)) => Left(InconsistentDocument)
-    }.andThen(_.toValidatedNel)
-  }
+  private def readUserProfile(document: Document): ValidatedNel[StoredDocumentError, Option[UserProfile]] =
+    optionalDocument(document, "profile").toValidatedNel.andThen(_.traverse(readProfile))
 
   private[mongo] def profile(profile: UserProfile): Document = profile match {
     case UserProfile.Candidate(value) => appendOptionalString(appendOptionalString(new Document("kind", "Candidate").append("skills", value.skills.toList.sorted.asJava), "experienceSummary", value.experienceSummary), "resumeRef", value.resumeRef)
@@ -235,14 +228,14 @@ private[mongo] object MongoHiringCodecs {
     new Document("embedding", embedding.values.map(float => java.lang.Double.valueOf(float.toDouble)).asJava).append("embeddingMeta", embeddingMeta(embedding.meta))
 
   private def embeddingMeta(meta: EmbeddingMeta): Document =
-    new Document("model", meta.model).append("version", java.lang.Integer.valueOf(meta.version)).append("sourceHash", meta.sourceHash).append("updatedAt", Date.from(meta.updatedAt))
+    new Document("model", meta.model).append("sourceHash", meta.sourceHash).append("updatedAt", Date.from(meta.updatedAt))
 
   private def readEmbedding(document: Document): ValidatedNel[StoredDocumentError, Option[EntityEmbedding]] =
     (optionalNumberList(document, "embedding"), optionalDocument(document, "embeddingMeta").toValidatedNel).mapN((values, meta) => (values, meta)).andThen {
       case (None, None) => None.validNel
       case (Some(values), Some(meta)) =>
-        (requiredString(meta, "model").toValidatedNel, requiredInt(meta, "version").toValidatedNel, requiredString(meta, "sourceHash").toValidatedNel, instant(meta, "updatedAt").toValidatedNel).mapN {
-          (model, version, sourceHash, updatedAt) => Some(EntityEmbedding(values.map(_.floatValue), EmbeddingMeta(model, version, sourceHash, updatedAt)))
+        (requiredString(meta, "model").toValidatedNel, requiredString(meta, "sourceHash").toValidatedNel, instant(meta, "updatedAt").toValidatedNel).mapN {
+          (model, sourceHash, updatedAt) => Some(EntityEmbedding(values.map(_.floatValue), EmbeddingMeta(model, sourceHash, updatedAt)))
         }
       case _ => InconsistentDocument.invalidNel
     }
@@ -268,17 +261,8 @@ private[mongo] object MongoHiringCodecs {
   private def requiredBoolean(document: Document, field: String): Either[StoredDocumentError, Boolean] = Option(document.get(field)) match {
     case Some(value: java.lang.Boolean) => Right(value.booleanValue); case None => Left(MissingField(field)); case _ => Left(InvalidField(field))
   }
-  private def optionalLong(document: Document, field: String): Either[StoredDocumentError, Option[Long]] = Option(document.get(field)) match {
-    case None => Right(None); case Some(value: Number) => Right(Some(value.longValue)); case Some(_) => Left(InvalidField(field))
-  }
   private def requiredInt(document: Document, field: String): Either[StoredDocumentError, Int] = Option(document.get(field)) match {
     case Some(value: Number) => Right(value.intValue); case None => Left(MissingField(field)); case _ => Left(InvalidField(field))
-  }
-  private def optionalInt(document: Document, field: String): Either[StoredDocumentError, Option[Int]] = Option(document.get(field)) match {
-    case None => Right(None); case Some(value: Number) => Right(Some(value.intValue)); case Some(_) => Left(InvalidField(field))
-  }
-  private def requiredLong(document: Document, field: String): Either[StoredDocumentError, Long] = Option(document.get(field)) match {
-    case Some(value: Number) => Right(value.longValue); case None => Left(MissingField(field)); case _ => Left(InvalidField(field))
   }
   private def nestedDocument(document: Document, field: String): Either[StoredDocumentError, Document] = optionalDocument(document, field).flatMap(_.toRight(MissingField(field)))
   private def optionalDocument(document: Document, field: String): Either[StoredDocumentError, Option[Document]] = Option(document.get(field)) match {

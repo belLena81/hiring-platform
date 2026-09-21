@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
+import com.example.graphQL.cats.api.http.AuthRateLimiter.Operation
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
@@ -13,39 +14,44 @@ private[graphql] object HiringGraphQLAccountResolvers {
   def accountMe(context: Context[RequestContext, Unit]): IO[User] =
     authenticatedMutation(context) { case (actor, hiring) => liftUseCase(hiring.accountService.me(actor)) }
 
-  def signUp(context: Context[RequestContext, Unit]): IO[Any] = {
-    val input = context.arg(signUpInputArgument)
-    publicMutation(context) { hiring =>
-      signUpProfile(input).fold(
-        error => mutationResult(IO.pure(Left(error): Either[UseCaseError, (User, AccountToken)]))(authSuccess),
-        profile => timestamped { (now, id) =>
-          hiring.accountService.signUp(
-            SignUpInput(input.name, input.role, input.password, profile),
+  def signUp(context: Context[RequestContext, Unit]): IO[Any] =
+    rateLimited(context, Operation.SignUp).flatMap { _ =>
+      val input = context.arg(signUpInputArgument)
+      publicMutation(context) { hiring =>
+        signUpProfile(input).fold(
+          error => mutationResult(IO.pure(Left(error): Either[UseCaseError, (User, AccountToken)]))(authSuccess),
+          profile => timestamped { (now, id) =>
+            hiring.accountService.signUp(
+              SignUpInput(input.name, input.role, input.password, profile),
+              now,
+              Identifiers.UserId(id)
+            )
+          }.flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+        )
+      }
+    }
+
+  def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[Any] =
+    rateLimited(context, Operation.BootstrapAdmin).flatMap { _ =>
+      val input = context.arg(bootstrapAdminInputArgument)
+      publicMutation(context) { hiring =>
+        timestamped { (now, id) =>
+          hiring.accountService.bootstrapAdmin(
+            BootstrapAdminInput(input.name, input.password),
             now,
             Identifiers.UserId(id)
           )
         }.flatMap(result => mutationResult(IO.pure(result))(authSuccess))
-      )
-    }
-  }
-
-  def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[Any] =
-    val input = context.arg(bootstrapAdminInputArgument)
-    publicMutation(context) { hiring =>
-      timestamped { (now, id) =>
-        hiring.accountService.bootstrapAdmin(
-          BootstrapAdminInput(input.name, input.password),
-          now,
-          Identifiers.UserId(id)
-        )
-      }.flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+      }
     }
 
   def login(context: Context[RequestContext, Unit]): IO[Any] =
-    val input = context.arg(loginInputArgument)
-    publicMutation(context) { hiring =>
-      IO.realTimeInstant.flatMap(now => hiring.accountService.login(LoginInput(input.name, input.password), now))
-        .flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+    rateLimited(context, Operation.Login).flatMap { _ =>
+      val input = context.arg(loginInputArgument)
+      publicMutation(context) { hiring =>
+        IO.realTimeInstant.flatMap(now => hiring.accountService.login(LoginInput(input.name, input.password), now))
+          .flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+      }
     }
 
   def updateMyProfile(context: Context[RequestContext, Unit]): IO[Any] =

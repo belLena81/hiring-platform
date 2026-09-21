@@ -65,11 +65,8 @@ final class MongoSearchSessionRepository(
     MongoHiringCodecs.readOperationalEvent(document).toOption.exists(existing =>
       existing.eventId == event.eventId &&
         existing.eventType == event.eventType &&
-        existing.schemaVersion == event.schemaVersion &&
         existing.aggregateType == event.aggregateType &&
         existing.aggregateId == event.aggregateId &&
-        existing.aggregateVersion == event.aggregateVersion &&
-        existing.sequence == event.sequence &&
         existing.actorId == event.actorId &&
         existing.payload == event.payload
     )
@@ -176,7 +173,7 @@ final class MongoOperationalEventOutboxRepository(database: MongoDatabase)
         Updates.set("updatedAt", Date.from(now))
       ),
       new FindOneAndUpdateOptions()
-        .sort(Sorts.ascending("availableAt", "aggregateType", "aggregateId", "sequence", "_id"))
+        .sort(Sorts.ascending("availableAt", "occurredAt", "_id"))
         .returnDocument(ReturnDocument.AFTER)
     )).map(_.traverse(readClaimed).leftMap(_ => RepositoryError.Unavailable))
       .handleError(_ => Left(RepositoryError.Unavailable))
@@ -232,26 +229,12 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase) extends Cons
       .map(value => Right(value.nonEmpty))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def latestSequence(consumerGroup: String, aggregateType: String, aggregateId: String): IO[Either[RepositoryError, Option[Long]]] =
-    PublisherBridge.first(receipts.find(Filters.and(
-      Filters.eq("consumerGroup", consumerGroup),
-      Filters.eq("aggregateType", aggregateType),
-      Filters.eq("aggregateId", aggregateId)
-    )).sort(Sorts.descending("sequence")).limit(1)).map {
-      case Some(document) => Right(Option(document.get("sequence")).collect {
-        case value: java.lang.Long => value.longValue
-        case value: java.lang.Integer => value.longValue
-      })
-      case None => Right(None)
-    }.handleError(_ => Left(RepositoryError.Unavailable))
-
   override def record(consumerGroup: String, event: OperationalEventEnvelope, now: Instant, expiresAt: Instant): IO[Either[RepositoryError, Boolean]] =
     PublisherBridge.first(receipts.insertOne(new Document("_id", s"$consumerGroup:${event.eventId.toString}")
       .append("consumerGroup", consumerGroup)
       .append("eventId", event.eventId.toString)
       .append("aggregateType", event.aggregateType.toString)
       .append("aggregateId", event.aggregateId)
-      .append("sequence", java.lang.Long.valueOf(event.sequence))
       .append("createdAt", Date.from(now))
       .append("expiresAt", Date.from(expiresAt)))).as(Right(true)).handleError {
       case write: MongoWriteException if write.getError.getCode == 11000 => Right(false)

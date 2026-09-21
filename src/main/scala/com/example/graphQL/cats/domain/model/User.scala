@@ -81,8 +81,7 @@ final case class User(
   adminSingleton: Boolean = false,
   embedding: Option[EntityEmbedding] = None,
   accountStatus: AccountStatus = AccountStatus.Active,
-  deletedAt: Option[Instant] = None,
-  version: Long = 0L
+  deletedAt: Option[Instant] = None
 ) {
   def candidateProfile: Option[CandidateProfile] =
     profile.collect { case UserProfile.Candidate(value) => value }

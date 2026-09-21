@@ -8,7 +8,7 @@ import munit.FunSuite
 import java.util.UUID
 
 final class HybridRankFusionSpec extends FunSuite {
-  private val meta = EmbeddingMeta("voyage-4-lite", 1, "source", ServiceFixtures.now)
+  private val meta = EmbeddingMeta("voyage-4-lite", "source", ServiceFixtures.now)
 
   test("documents present in both retrieval branches receive the combined reciprocal-rank score") {
     val shared = ServiceFixtures.openJob

@@ -19,8 +19,7 @@ final class SemanticSearchService(
     jobs: JobRepository[IO],
     embeddings: EmbeddingService[IO],
     search: SemanticSearchRepository[IO],
-    embeddingModel: String,
-    embeddingVersion: Int
+    embeddingModel: String
 ) extends SearchUseCases {
   private val authorization = ActorAuthorization(users)
 
@@ -45,7 +44,6 @@ final class SemanticSearchService(
             first,
             SearchMode.HYBRID,
             embeddingModel,
-            embeddingVersion,
             searchId
           )).map(_.leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable)))
       }
@@ -61,7 +59,6 @@ final class SemanticSearchService(
       case Right(user) =>
         (user.candidateProfile, user.embedding) match {
           case (Some(profile), Some(embedding)) if embedding.meta.model == embeddingModel &&
-              embedding.meta.version == embeddingVersion &&
               embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile)) =>
             val query = VectorSearchQuery(
               embedding.values,
@@ -70,7 +67,6 @@ final class SemanticSearchService(
               first,
               SearchMode.VECTOR,
               embedding.meta.model,
-              embedding.meta.version,
               searchId
             )
             search.recommendedJobs(query).map(_.leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable)))
@@ -100,7 +96,6 @@ final class SemanticSearchService(
       case Right(Some(job)) =>
         job.embedding match {
           case Some(embedding) if embedding.meta.model == embeddingModel &&
-              embedding.meta.version == embeddingVersion &&
               embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             val query = VectorSearchQuery(
               embedding.values,
@@ -109,7 +104,6 @@ final class SemanticSearchService(
               first,
               SearchMode.VECTOR,
               embedding.meta.model,
-              embedding.meta.version,
               searchId
             )
             search.candidateMatches(query).map(_.leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable)))
@@ -132,8 +126,7 @@ object SemanticSearchService {
       jobs: JobRepository[IO],
       embeddings: EmbeddingService[IO],
       search: SemanticSearchRepository[IO],
-      embeddingModel: String,
-      embeddingVersion: Int
+      embeddingModel: String
   ): SemanticSearchService =
-    new SemanticSearchService(users, jobs, embeddings, search, embeddingModel, embeddingVersion)
+    new SemanticSearchService(users, jobs, embeddings, search, embeddingModel)
 }

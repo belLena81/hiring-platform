@@ -22,12 +22,11 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     pageSize,
     SearchMode.VECTOR,
     "voyage-4-lite",
-    1,
     searchId
   )
 
   test("fresh job vector hit is returned with score and metadata") {
-    val job = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite", 1)))
+    val job = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite")))
     val ranked = MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(job)), query)
 
     assertEquals(ranked.map(_.map(_.job.id)), Right(Some(job.id)))
@@ -36,8 +35,8 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
   }
 
   test("stale job vector hit is omitted") {
-    val stale = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite", 1)
-      .copy(meta = jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite", 1).meta.copy(sourceHash = "stale"))))
+    val stale = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite")
+      .copy(meta = jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite").meta.copy(sourceHash = "stale"))))
 
     assertEquals(MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(stale)), query), Right(None))
   }
@@ -45,9 +44,9 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
   test("fresh candidate vector hit is returned and stale candidate hit is omitted") {
     val profile = CandidateProfile(Set("Scala"), Some("Backend engineer"), Some("resume-ref"))
     val fresh = ServiceFixtures.candidate.copy(profile = Some(UserProfile.Candidate(profile)),
-      embedding = Some(candidateEmbedding(profile, "voyage-4-lite", 1)))
-    val stale = fresh.copy(embedding = Some(candidateEmbedding(profile, "voyage-4-lite", 1)
-      .copy(meta = candidateEmbedding(profile, "voyage-4-lite", 1).meta.copy(sourceHash = "stale"))))
+      embedding = Some(candidateEmbedding(profile, "voyage-4-lite")))
+    val stale = fresh.copy(embedding = Some(candidateEmbedding(profile, "voyage-4-lite")
+      .copy(meta = candidateEmbedding(profile, "voyage-4-lite").meta.copy(sourceHash = "stale"))))
 
     assert(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(fresh)), query).exists(_.exists {
       case RankedCandidate(candidate, 0.91d, SearchMode.VECTOR, meta, `searchId`) =>
@@ -59,14 +58,13 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
   private def jobEmbedding(
       job: com.example.graphQL.cats.domain.model.Job,
-      model: String,
-      version: Int
+      model: String
   ): EntityEmbedding =
-    EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta(model, version, SourceHash.sha256(SearchableText.job(job)), ServiceFixtures.now))
+    EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta(model, SourceHash.sha256(SearchableText.job(job)), ServiceFixtures.now))
 
-  private def candidateEmbedding(profile: CandidateProfile, model: String, version: Int): EntityEmbedding =
+  private def candidateEmbedding(profile: CandidateProfile, model: String): EntityEmbedding =
     EntityEmbedding(List(0.1f, 0.2f),
-      EmbeddingMeta(model, version, SourceHash.sha256(SearchableText.candidate(profile)), ServiceFixtures.now))
+      EmbeddingMeta(model, SourceHash.sha256(SearchableText.candidate(profile)), ServiceFixtures.now))
 
   private def scored(document: Document): Document =
     document.append("score", java.lang.Double.valueOf(0.91d))

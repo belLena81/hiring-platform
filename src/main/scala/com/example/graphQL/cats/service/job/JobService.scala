@@ -142,8 +142,7 @@ final class JobService(
         job.status,
         job.createdAt,
         now,
-        job.closedAt,
-        job.version
+        job.closedAt
       )
       .toEither
       .widenUseCase
@@ -164,7 +163,7 @@ final class JobService(
       job => {
         val event = OperationalEvents.jobEvent(
           OperationalEventType.JOB_CREATED,
-          eventId(job, OperationalEventType.JOB_CREATED, job.version),
+          eventId(job, OperationalEventType.JOB_CREATED, job.createdAt),
           job,
           actorId,
           job.createdAt
@@ -180,8 +179,7 @@ final class JobService(
     result.fold(
       error => IO.pure(error.asLeft[Job]),
       job => {
-        val persisted = job.copy(version = job.version + 1L)
-        val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, persisted.version), persisted, actorId, job.updatedAt)
+        val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
         notifyAfterCommit(jobs.updateWithEvents(job, job.updatedAt, List(event)).map(_.widenUseCase))
       }
     )
@@ -189,8 +187,8 @@ final class JobService(
   private def notifyAfterCommit(result: IO[Either[UseCaseError, Job]]): IO[Either[UseCaseError, Job]] =
     result.flatTap(_.fold(_ => IO.unit, _ => embeddingWork.wake.handleError(_ => ())))
 
-  private def eventId(job: Job, eventType: OperationalEventType, version: Long): UUID =
-    UUID.nameUUIDFromBytes(s"job:${job.id.value}:$eventType:$version".getBytes(StandardCharsets.UTF_8))
+  private def eventId(job: Job, eventType: OperationalEventType, occurredAt: Instant): UUID =
+    UUID.nameUUIDFromBytes(s"job:${job.id.value}:$eventType:$occurredAt".getBytes(StandardCharsets.UTF_8))
 }
 
 object JobService {

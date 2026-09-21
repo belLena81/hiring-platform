@@ -9,6 +9,8 @@ import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Can
 import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
+import com.example.graphQL.cats.shared.crypto.SourceHash
+import com.example.graphQL.cats.domain.model.SearchableText
 import java.time.Instant
 import java.util.UUID
 
@@ -60,14 +62,14 @@ private[cats] object ServiceFixtures {
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
       findAll(ids).map(Right(_))
 
-    override def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       ref.modify { users =>
         users.get(id) match {
-          case Some(user) if user.version == observedVersion => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
           case None => (users, Left(RepositoryError.Conflict))
-          case Some(_) => (users, Left(RepositoryError.Conflict))
         }
       }
+
   }
 
   final class InMemoryJobs(
@@ -115,7 +117,7 @@ private[cats] object ServiceFixtures {
       }
 
     override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
-      val persisted = job.copy(version = job.version + 1L)
+      val persisted = job
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
 
@@ -128,15 +130,15 @@ private[cats] object ServiceFixtures {
     def allOperationalEvents: IO[Vector[OperationalEventEnvelope]] =
       operationalEvents.fold(IO.pure(Vector.empty[OperationalEventEnvelope]))(_.get)
 
-    override def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
       ref.modify { jobs =>
         jobs.get(id) match {
-          case Some(job) if job.version == observedVersion =>
+          case Some(job) if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
-          case None => (jobs, Left(RepositoryError.Conflict))
-          case Some(_) => (jobs, Left(RepositoryError.Conflict))
+          case _ => (jobs, Left(RepositoryError.Conflict))
         }
       }
+
 
     private def matches(page: JobPageRequest)(job: Job): Boolean =
       page.status.forall(_ == job.status)

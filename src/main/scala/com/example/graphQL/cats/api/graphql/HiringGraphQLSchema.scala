@@ -38,6 +38,11 @@ object HiringGraphQLSchema {
             HandledException(failure.message, Map("code" -> marshaller.scalarNode(failure.code, "String", Set.empty)))
           case (marshaller, RequestContext.FieldFailure(code, message)) =>
             HandledException(message, Map("code" -> marshaller.scalarNode(code, "String", Set.empty)))
+          case (marshaller, RequestContext.RateLimited(retryAfterSeconds)) =>
+            HandledException("Too many authentication attempts", Map(
+              "code" -> marshaller.scalarNode("RATE_LIMITED", "String", Set.empty),
+              "retryAfter" -> marshaller.scalarNode(retryAfterSeconds, "Int", Set.empty)
+            ))
           case (_, RequestContext.RequestClosed) =>
             HandledException("Execution failed")
           case (_, error) =>

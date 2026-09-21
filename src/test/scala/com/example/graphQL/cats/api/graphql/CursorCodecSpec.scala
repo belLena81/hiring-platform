@@ -15,7 +15,7 @@ final class CursorCodecSpec extends FunSuite {
   private val instant = Instant.parse("2026-09-17T08:00:00Z")
   private val id = UUID.fromString("10000000-0000-0000-0000-000000000001")
 
-  test("all cursor types round-trip through the compact v3 format") {
+  test("all cursor types round-trip through the compact signed format") {
     assertEquals(CursorCodec.decode[JobCursor](CursorCodec.encode(JobCursor(instant, JobId(id)))), Right(JobCursor(instant, JobId(id))))
     assertEquals(CursorCodec.decode[ApplicationCursor](CursorCodec.encode(ApplicationCursor(instant, ApplicationId(id)))), Right(ApplicationCursor(instant, ApplicationId(id))))
     assertEquals(CursorCodec.decode[ApplicationEventCursor](CursorCodec.encode(ApplicationEventCursor(instant, ApplicationEventId(id)))), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
@@ -27,8 +27,8 @@ final class CursorCodecSpec extends FunSuite {
     val decoded = new String(Base64.getUrlDecoder.decode(encoded), StandardCharsets.UTF_8)
 
     assert(!encoded.contains('.'))
-    assertEquals(decoded.split("\\|", -1).toList.take(4), List("v3", "j", instant.toString, id.toString))
-    assertEquals(decoded.split("\\|", -1).length, 5)
+    assertEquals(decoded.split("\\|", -1).toList.take(3), List("j", instant.toString, id.toString))
+    assertEquals(decoded.split("\\|", -1).length, 4)
   }
 
   test("cursor kinds remain isolated") {
@@ -41,33 +41,33 @@ final class CursorCodecSpec extends FunSuite {
     assertEquals(CursorCodec.decode[JobCursor](event), Left(CursorCodec.CursorError.WrongKind("e")))
   }
 
-  test("malformed, legacy, and JWT-shaped cursors do not decode") {
+  test("malformed, versioned, and JWT-shaped cursors do not decode") {
     assert(CursorCodec.decode[JobCursor]("not-base64").isLeft)
     assert(CursorCodec.decode[JobCursor]("eyJhbGciOiJIUzI1NiJ9.eyJ2IjoyfQ.signature").isLeft)
 
-    val legacy = Base64.getUrlEncoder.withoutPadding().encodeToString("v2|j|$instant|$id".getBytes(StandardCharsets.UTF_8))
-    assert(CursorCodec.decode[JobCursor](legacy).isLeft)
+    val versioned = Base64.getUrlEncoder.withoutPadding().encodeToString(s"v3|j|$instant|$id|AAAAAAAAAAAAAAAAAAAAAA".getBytes(StandardCharsets.UTF_8))
+    assert(CursorCodec.decode[JobCursor](versioned).isLeft)
   }
 
   test("payload and MAC tampering do not decode") {
     val encoded = CursorCodec.encode(JobCursor(instant, JobId(id)))
     val decoded = new String(Base64.getUrlDecoder.decode(encoded), StandardCharsets.UTF_8)
     val fields = decoded.split("\\|", -1)
-    val changedPayload = fields.updated(3, UUID.randomUUID().toString).mkString("|")
-    val changedMac = fields.updated(4, fields(4).updated(0, if fields(4).head == 'A' then 'B' else 'A')).mkString("|")
+    val changedPayload = fields.updated(2, UUID.randomUUID().toString).mkString("|")
+    val changedMac = fields.updated(3, fields(3).updated(0, if fields(3).head == 'A' then 'B' else 'A')).mkString("|")
 
     assert(CursorCodec.decode[JobCursor](encodeText(changedPayload)).isLeft)
     assert(CursorCodec.decode[JobCursor](encodeText(changedMac)).isLeft)
   }
 
-  test("invalid field values and versions are rejected") {
-    val invalidTimestamp = encodeText(s"v3|j|not-an-instant|$id|AAAAAAAAAAAAAAAAAAAAAA")
-    val invalidId = encodeText(s"v3|j|$instant|not-a-uuid|AAAAAAAAAAAAAAAAAAAAAA")
-    val unsupportedVersion = encodeText(s"v2|j|$instant|$id|AAAAAAAAAAAAAAAAAAAAAA")
+  test("invalid field values and versioned payloads are rejected") {
+    val invalidTimestamp = encodeText(s"j|not-an-instant|$id|AAAAAAAAAAAAAAAAAAAAAA")
+    val invalidId = encodeText(s"j|$instant|not-a-uuid|AAAAAAAAAAAAAAAAAAAAAA")
+    val versioned = encodeText(s"v2|j|$instant|$id|AAAAAAAAAAAAAAAAAAAAAA")
 
     assert(CursorCodec.decode[JobCursor](invalidTimestamp).isLeft)
     assert(CursorCodec.decode[JobCursor](invalidId).isLeft)
-    assert(CursorCodec.decode[JobCursor](unsupportedVersion).isLeft)
+    assert(CursorCodec.decode[JobCursor](versioned).isLeft)
   }
 
   private def encodeText(value: String): String =

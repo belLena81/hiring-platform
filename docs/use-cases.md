@@ -201,7 +201,7 @@ query SemanticJobSearch(
 - Only jobs visible to the candidate can be returned.
 - Closed jobs must not appear.
 - Structured authorization/filtering is independent of semantic similarity.
-- Search version/model must be identifiable for evaluation.
+- Search model must be identifiable for evaluation.
 
 ### Data Flow
 
@@ -231,7 +231,6 @@ searchId
 query
 searchMode
 embeddingModel
-embeddingVersion
 resultIds
 resultRanks
 scores
@@ -900,7 +899,6 @@ Consumers
 ```text
 eventId
 eventType
-schemaVersion
 occurredAt
 aggregateId
 payload

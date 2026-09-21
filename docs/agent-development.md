@@ -2,15 +2,13 @@
 
 ## Current decisions and implementation
 
-[README](../README.md) describes the target Scala 3, Cats Effect, FS2, Sangria, http4s, and MongoDB platform. [Architecture](../ARCHITECTURE.md) covers core design; [MongoDB design](mongodb-design.md) and [big data architecture](big-data-architecture.md) provide supporting detail.
+[README](../README.md) describes the Scala 3, Cats Effect, FS2, Sangria, http4s, and MongoDB platform. [Architecture](../ARCHITECTURE.md), [use cases](use-cases.md), and the [current reset specification](specs/pre-mvp-contract-reset.md) describe the active system and its evidence.
 
-[Use cases](use-cases.md) define UC01–UC13 and initial SLO targets. [Development plan](../INITIAL_DEVELOPMENT_PLAN.md) supplies the overall plan; [development milestones](development-milestones.md) defines phase acceptance criteria. Unspecified details remain implementation decisions; do not invent prior agreement.
-
-The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and MUnit. Foundation starts a health-only HTTP/GraphQL application with a resource-managed MongoDB client. Unused SQL adapters, user-query scaffolds and their dependencies have been removed. Unit tests are Docker-independent; the explicit `IntegrationTest` configuration contains live HTTP and disposable MongoDB checks. Flyway and formatting are not configured. Consult the [Foundation spec](specs/phase-1-foundation.md) for actual acceptance/review evidence; connectivity does not implement hiring persistence or data migration. Inspect the live build before each task.
+The current build uses Scala 3.9 LTS, Java 17+, Cats Effect, Sangria/http4s, and MUnit. Unit tests are Docker-independent; the explicit `IntegrationTest` configuration contains live HTTP and disposable MongoDB checks. Inspect the live build before each task.
 
 Application configuration follows the library defaults: `ConfigSource.default` delegates source loading and precedence to Typesafe Config. Use `application.conf` for packaged defaults and the standard `config.file` or `config.resource` selectors for local/test overrides; do not add project-owned filename constants or custom source-merging layers unless a new requirement establishes a different source boundary.
 
-The updated root rules replace the old ZIO/Caliban/PostgreSQL target preferences with the documented target. Historical Scala 3 build migration evidence remains in `docs/specs/build-alignment.md`; the Foundation spec records the later source/dependency cleanup. No stored SQL data was migrated or deleted.
+Startup resets hiring-owned MongoDB data to the active document shape. No prior contract or local data is retained.
 
 ## Entry point and roles
 

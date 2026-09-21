@@ -17,7 +17,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
         results  <- liftUseCase(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
         _        <- saveSearchSession(hiring, actor.userId, "semanticJobSearch", searchId, filterJson(filter),
-                      results.headOption.map(_.meta.model), results.headOption.map(_.meta.version))(results)(
+                      results.headOption.map(_.meta.model))(results)(
                       _.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
     }
@@ -29,7 +29,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
         results  <- liftUseCase(service.recommendedJobs(actor, size, searchId))
         _        <- saveSearchSession(hiring, actor.userId, "recommendedJobs", searchId, Json.obj(),
-                      results.headOption.map(_.meta.model), results.headOption.map(_.meta.version))(results)(
+                      results.headOption.map(_.meta.model))(results)(
                       _.job.id.value.toString, _.score)
       } yield rankedJobResults(results)
     }
@@ -43,14 +43,14 @@ private[graphql] object HiringGraphQLSearchResolvers {
         results  <- liftUseCase(service.candidateMatches(actor, jobId, size, searchId))
         _        <- saveSearchSession(hiring, actor.userId, "candidateMatches", searchId,
                       Json.obj("jobId" -> Json.fromString(jobId.value.toString)),
-                      results.headOption.map(_.meta.model), results.headOption.map(_.meta.version))(results)(
+                      results.headOption.map(_.meta.model))(results)(
                       _.candidate.id.value.toString, _.score)
       } yield rankedCandidateResults(results)
     }
 
   private def rankedJobResults(values: List[RankedJob]): RankedJobResults =
     RankedJobResults(values.map(value => RankedJobPayload(
-      value.job, value.score, value.mode, value.meta.model, value.meta.version, value.searchId.toString)))
+      value.job, value.score, value.mode, value.meta.model, value.searchId.toString)))
 
   private def rankedCandidateResults(values: List[RankedCandidate]): RankedCandidateResults =
     RankedCandidateResults(values.map(value => RankedCandidatePayload(
@@ -58,5 +58,5 @@ private[graphql] object HiringGraphQLSearchResolvers {
         value.candidate.id.value.toString,
         value.candidate.name,
         value.candidate.candidateProfile.map(profile => CandidateMatchProfile(profile.skills, profile.experienceSummary))
-      ), value.score, value.mode, value.meta.model, value.meta.version, value.searchId.toString)))
+      ), value.score, value.mode, value.meta.model, value.searchId.toString)))
 }

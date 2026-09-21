@@ -2,6 +2,8 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{Deferred, IO, Resource}
 import cats.effect.std.Dispatcher
+import com.comcast.ip4s.IpAddress
+import com.example.graphQL.cats.api.http.AuthRateLimiter
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
@@ -32,7 +34,9 @@ final case class RequestContextParameters(
     ensureHiringReady: IO[ProbeResult],
     tracer: Tracer[IO] = Tracer.noop[IO],
     diagnostics: Diagnostics = Diagnostics.noop,
-    requestId: Option[String] = None
+    requestId: Option[String] = None,
+    clientAddress: Option[IpAddress] = None,
+    rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
 )
 
 final class RequestContext private (
@@ -45,11 +49,19 @@ final class RequestContext private (
     tracer: Tracer[IO],
     spanContext: Option[SpanContext],
     diagnostics: Diagnostics,
-    requestId: Option[String]
+    requestId: Option[String],
+    clientAddress: Option[IpAddress],
+    rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]]
 ) {
   def readiness: IO[ProbeResult] = probe
 
   def hiringAvailable: IO[ProbeResult] = hiringReady
+
+  private[graphql] def rateLimited(operation: AuthRateLimiter.Operation): IO[Unit] =
+    rateLimit(AuthRateLimiter.Key(clientAddress, operation)).flatMap {
+      case Right(()) => IO.unit
+      case Left(rejection) => IO.raiseError(RequestContext.RateLimited(rejection.retryAfterSeconds))
+    }
 
   private[graphql] def unsafeToFuture[A](action: IO[A]) =
     dispatcher.unsafeToFuture(requestScoped(action))
@@ -100,6 +112,7 @@ object RequestContextFactory {
 object RequestContext {
   final case class ReadFailure(error: UseCaseError) extends RuntimeException with NoStackTrace
   final case class FieldFailure(code: String, message: String) extends RuntimeException with NoStackTrace
+  final case class RateLimited(retryAfterSeconds: Long) extends RuntimeException with NoStackTrace
   case object RequestClosed extends RuntimeException with NoStackTrace
 
   private[graphql] def withDispatcher(
@@ -112,7 +125,7 @@ object RequestContext {
       memoized <- Resource.eval(parameters.probe.memoize)
       memoizedHiringReady <- Resource.eval(parameters.ensureHiringReady.memoize)
       context = new RequestContext(dispatcher, closed, memoized, memoizedHiringReady, parameters.actor, parameters.hiring,
-        parameters.tracer, spanContext, parameters.diagnostics, parameters.requestId)
+        parameters.tracer, spanContext, parameters.diagnostics, parameters.requestId, parameters.clientAddress, parameters.rateLimit)
       _ <- Resource.onFinalize(closed.complete(()).void)
     } yield context
 }

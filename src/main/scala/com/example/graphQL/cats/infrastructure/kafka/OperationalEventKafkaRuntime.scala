@@ -10,7 +10,7 @@ import com.example.graphQL.cats.repository.protocol.{
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventJson}
+import com.example.graphQL.cats.shared.events.OperationalEventJson
 import fs2.Stream
 import fs2.kafka.*
 import org.apache.kafka.clients.consumer.ConsumerConfig
@@ -142,54 +142,22 @@ object OperationalEventKafkaRuntime {
   ): IO[Boolean] =
     IO.realTimeInstant.flatMap { now =>
       OperationalEventJson.decode(bytes) match {
-        case Left("UnsupportedVersion") =>
-          quarantineRecord(config, quarantine, topic, partition, offset, OperationalEventFailureCategory.UnsupportedVersion,
-            "unsupported schema version", bytes, now).as(false)
         case Left(_) =>
           quarantineRecord(config, quarantine, topic, partition, offset, OperationalEventFailureCategory.MalformedEnvelope,
             "malformed event envelope", bytes, now).as(false)
-        case Right(event) if invalidOrdering(event) =>
-          quarantineRecord(config, quarantine, topic, partition, offset, OperationalEventFailureCategory.InvalidOrdering,
-            "invalid aggregate ordering metadata", bytes, now).as(false)
         case Right(event) =>
           receipts.exists(config.consumerGroup, event.eventId).flatMap {
             case Right(true) => IO.pure(true)
             case Right(false) =>
-              validateReceiptOrder(config, receipts, event).flatMap {
-                case Left(OperationalEventFailureCategory.InvalidOrdering) =>
-                  quarantineRecord(config, quarantine, topic, partition, offset, OperationalEventFailureCategory.InvalidOrdering,
-                    "invalid aggregate ordering metadata", bytes, now).as(false)
-                case Left(_) => IO.pure(false)
-                case Right(()) =>
-                  receipts.record(config.consumerGroup, event, now, now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)).map {
-                    case Right(_) => true
-                    case Left(RepositoryError.Conflict) => true
-                    case Left(_) => false
-                  }
+              receipts.record(config.consumerGroup, event, now, now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)).map {
+                case Right(_) => true
+                case Left(RepositoryError.Conflict) => true
+                case Left(_) => false
               }
             case Left(_) => IO.pure(false)
           }
       }
     }
-
-  private[kafka] def validateReceiptOrder(
-      config: KafkaConfig,
-      receipts: ConsumerReceiptRepository[IO],
-      event: OperationalEventEnvelope
-  ): IO[Either[OperationalEventFailureCategory, Unit]] =
-    event.aggregateType match {
-      case OperationalAggregateType.Search => IO.pure(Right(()))
-      case OperationalAggregateType.Application | OperationalAggregateType.Job =>
-        receipts.latestSequence(config.consumerGroup, event.aggregateType.toString, event.aggregateId).map {
-          case Right(None) if firstObservedEventAllowed(event) => Right(())
-          case Right(Some(previous)) if event.sequence == previous + 1L => Right(())
-          case Right(_) => Left(OperationalEventFailureCategory.InvalidOrdering)
-          case Left(_) => Left(OperationalEventFailureCategory.ConsumerFailure)
-        }
-    }
-
-  private def firstObservedEventAllowed(event: OperationalEventEnvelope): Boolean =
-    event.sequence >= 0L && event.eventType != com.example.graphQL.cats.shared.events.OperationalEventType.CANDIDATE_HIRED
 
   private def quarantineRecord(
       config: KafkaConfig,
@@ -212,12 +180,6 @@ object OperationalEventKafkaRuntime {
       now,
       now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
     )).void
-
-  private def invalidOrdering(event: OperationalEventEnvelope): Boolean =
-    event.aggregateType match {
-      case OperationalAggregateType.Application | OperationalAggregateType.Job => event.aggregateVersion < 0L || event.sequence < 0L
-      case OperationalAggregateType.Search => event.sequence < 1L
-    }
 
   private[kafka] def resilientStream(
       diagnostics: Diagnostics,

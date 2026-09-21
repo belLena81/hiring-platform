@@ -3,6 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.syntax.all.*
+import com.example.graphQL.cats.api.http.AuthRateLimiter
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
 import com.example.graphQL.cats.domain.model.*
@@ -62,8 +63,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       kind: String,
       searchId: UUID,
       filter: Json,
-      model: Option[String] = None,
-      version: Option[Int] = None
+      model: Option[String] = None
   )(results: List[A])(idOf: A => String, scoreOf: A => Double): IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
       val session = SearchSession(
@@ -73,7 +73,6 @@ private[graphql] object HiringGraphQLResolverSupport {
         None,
         filter,
         model,
-        version,
         results.zipWithIndex.map { case (result, index) =>
           SearchSessionResult(idOf(result), index + 1, scoreOf(result))
         },
@@ -94,6 +93,9 @@ private[graphql] object HiringGraphQLResolverSupport {
       case ProbeResult.Ready => action(context.ctx.hiring)
       case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(AvailabilityError.ServiceNotReady)))
     }
+
+  def rateLimited(context: Context[RequestContext, Unit], operation: AuthRateLimiter.Operation): IO[Unit] =
+    context.ctx.rateLimited(operation)
 
   def authenticatedSearch(
       context: Context[RequestContext, Unit]

@@ -8,7 +8,7 @@ A practical playground for functional Scala, GraphQL API design, MongoDB data mo
 
 Start with `$product-manager` to coordinate specialist work and independent reviews. See [agent workflow and usage](docs/agent-development.md) and [project rules](AGENTS.md). Local skills cover Product Manager, Software Architect, Scala Developer, Data Engineer, Big Data Engineer, QA Engineer, Security Engineer, and Code Reviewer.
 
-The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, fs2-kafka, Logback, and MUnit/Testcontainers core. Foundation supplies a health-only HTTP/GraphQL runtime with a resource-managed MongoDB client. Unused Doobie/PostgreSQL dependencies and the old user-query/demo scaffold have been removed. Hiring models, persistence, and authorization belong to Phase 2.
+The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, fs2-kafka, Logback, and MUnit/Testcontainers core. It serves the current hiring API with a resource-managed MongoDB client.
 
 ## Local build
 
@@ -19,17 +19,17 @@ docker compose up -d mongodb
 sbt run
 ```
 
-Phase 5 event publication can also use the local Kafka broker:
+Event publication can also use the local Kafka broker:
 
 ```bash
 docker compose up -d mongodb kafka
 ```
 
-Kafka publishes to `hiring.operational-events.v1` with seven-day broker retention. MongoDB readiness and HTTP startup do not depend on Kafka availability; operational mutations write a transactional Mongo outbox first and the background publisher retries broker delivery.
+Kafka publishes to `hiring.operational-events` with seven-day broker retention. MongoDB readiness and HTTP startup do not depend on Kafka availability; operational mutations write a transactional Mongo outbox first and the background publisher retries broker delivery.
 
 `GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
 
-See the [Foundation runbook](docs/foundation.md) for configuration, shutdown, limits, and integration commands, and the [Foundation specification](docs/specs/phase-1-foundation.md) for current verification and review evidence.
+See the [API reference](docs/api.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for the active contract and verification evidence.
 
 See [diagnostic logging](docs/logging.md) for searchable markers, request tracing, masked defaults, and explicitly gated local payload capture.
 
@@ -41,13 +41,11 @@ Use Java 17+ and sbt 1.11.1. Set `JAVA_HOME` to your installed JDK when the defa
 bash scripts/check-local.sh
 ```
 
-The command validates local skills and runs the Docker-independent MUnit suite. Run `sbt 'IntegrationTest / test'` separately for real HTTP lifecycle and disposable MongoDB tests; Docker is required for the database tests. These commands are local checks, not deployment or performance certification. Historical dependency choices are recorded in the [build alignment spec](docs/specs/build-alignment.md).
+The command validates local skills and runs the Docker-independent MUnit suite. Run `sbt 'IntegrationTest / test'` separately for real HTTP lifecycle and disposable MongoDB tests; Docker is required for the database tests. These commands are local checks, not deployment or performance certification.
 
 ## Documentation
 
-- [Architecture](ARCHITECTURE.md) and [development plan](INITIAL_DEVELOPMENT_PLAN.md)
-- [Use cases](docs/use-cases.md) and [development milestones](docs/development-milestones.md)
-- [MongoDB design](docs/mongodb-design.md) and [big data architecture](docs/big-data-architecture.md)
+- [Architecture](ARCHITECTURE.md) and [use cases](docs/use-cases.md)
 - [Agent workflow](docs/agent-development.md) and [project rules](AGENTS.md)
 - [Spec-driven development](docs/spec-driven-development.md), [spec template](docs/templates/feature-spec.md), and [worked draft](docs/examples/submit-application-spec.md)
 - [Pure FP and local quality checks](docs/engineering-quality.md) and [data/API/schema evolution](docs/schema-evolution.md)

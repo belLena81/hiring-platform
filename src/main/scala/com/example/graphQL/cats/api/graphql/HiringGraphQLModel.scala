@@ -25,8 +25,8 @@ private[graphql] object HiringGraphQLModel {
     case Recruiter(value: RecruiterProfile)
   }
 
-  final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
-  final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
+  final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, searchId: String)
+  final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, searchId: String)
   final case class RankedJobResults(results: List[RankedJobPayload])
   final case class RankedCandidateResults(results: List[RankedCandidatePayload])
 

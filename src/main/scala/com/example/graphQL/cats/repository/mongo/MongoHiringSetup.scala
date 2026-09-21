@@ -2,49 +2,27 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.AccountName
-import com.example.graphQL.cats.repository.protocol.{EmbeddingWorkKey, EmbeddingWorkKind}
-import com.example.graphQL.cats.shared.crypto.SourceHash
+import com.mongodb.client.model.{Filters, IndexOptions, Indexes, SearchIndexModel, SearchIndexType, UpdateOptions, Updates}
 import com.mongodb.MongoCommandException
-import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, IndexOptions, Indexes, ReturnDocument, SearchIndexModel, SearchIndexType, Sorts, UpdateOptions, Updates}
-import com.mongodb.reactivestreams.client.MongoDatabase
+import com.mongodb.reactivestreams.client.{MongoCollection, MongoDatabase}
 import org.bson.Document
 import org.bson.conversions.Bson
-import java.util.Date
-import java.util.UUID
 import java.util.concurrent.TimeUnit
-import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 final case class AtlasSearchIndexConfig(
-    jobVectorIndex: String,
-    candidateVectorIndex: String,
-    jobLexicalIndex: String,
-    dimension: Int,
-    readyTimeoutMillis: Int,
-    pollIntervalMillis: Int
+    jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
+    dimension: Int, readyTimeoutMillis: Int, pollIntervalMillis: Int
 )
 
+/** Creates the sole pre-MVP Mongo shape. Every invocation deliberately removes prior hiring data. */
 object MongoHiringSetup {
-  private val UserMigrationBatchSize = 100
-  private val IndexMetadataLimit = 128
-  private val MigrationLease = 5.minutes
-  val HiringMigrationLedger = "hiring_migration_ledger"
-  val HiringUserSetupMigrationId = "hiring-user-setup-v2"
-  val EmbeddingWorkMigrationId = "hiring-embedding-work-v1"
-  val JobEmbeddingBackfillMigrationId = "job-embedding-work-backfill-v1"
-  val CandidateEmbeddingBackfillMigrationId = "candidate-embedding-work-backfill-v1"
-  val OperationalEventsMigrationId = "hiring-operational-events-v1"
-  private val HiringUserSetupDescriptor = "canonical-name-account-status-profile-email-indexes-validator-atlas-v2"
-  private val HiringUserSetupChecksum = sha256(HiringUserSetupDescriptor)
-  private val EmbeddingWorkDescriptor = "durable-embedding-work-claim-index-v1"
-  private val EmbeddingWorkChecksum = sha256(EmbeddingWorkDescriptor)
-  private val JobEmbeddingBackfillDescriptor = "enqueue-current-jobs-for-durable-embedding-v1"
-  private val JobEmbeddingBackfillChecksum = sha256(JobEmbeddingBackfillDescriptor)
-  private val CandidateEmbeddingBackfillDescriptor = "enqueue-current-candidate-profiles-for-durable-embedding-v1"
-  private val CandidateEmbeddingBackfillChecksum = sha256(CandidateEmbeddingBackfillDescriptor)
-  private val OperationalEventsDescriptor = "transactional-outbox-search-session-receipt-quarantine-v1"
-  private val OperationalEventsChecksum = sha256(OperationalEventsDescriptor)
+  private val CollectionLimit = 128
+  private val ownedCollections = Set(
+    "users", "jobs", "applications", "application_events", "account_registry", "embedding_work",
+    "event_outbox", "search_sessions", "consumer_receipts", "event_quarantine", "hiring_migration_ledger"
+  )
+
   val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
   val UsersEmailIndex = "users_emailCanonical_unique"
   val UsersNameIndex = "users_nameCanonical_unique"
@@ -65,805 +43,100 @@ object MongoHiringSetup {
   val JobsEmbeddingMetaIndex = "jobs_embedding_meta_filters"
   val UsersEmbeddingMetaIndex = "users_embedding_meta_filters"
   val EventOutboxClaimIndex = "event_outbox_claim"
-  val EventOutboxAggregateSequenceIndex = "event_outbox_aggregate_sequence"
   val EventOutboxPublishedRetentionIndex = "event_outbox_published_retention"
   val SearchSessionsActorIndex = "search_sessions_actor_created"
   val SearchSessionsExpiryIndex = "search_sessions_expiry"
   val ConsumerReceiptsIdIndex = "consumer_receipts_group_event"
-  val ConsumerReceiptsAggregateSequenceIndex = "consumer_receipts_aggregate_sequence"
   val ConsumerReceiptsExpiryIndex = "consumer_receipts_expiry"
   val EventQuarantineOffsetIndex = "event_quarantine_offset"
   val EventQuarantineExpiryIndex = "event_quarantine_expiry"
-  val HiringDomainMongoMigrationId = "phase-2-domain-mongodb-v1"
-  val HiringGraphQLSearchIndexMigrationId = "hiring-graphql-search-indexes-v1"
-  val HiringAdminJobListingIndexMigrationId = "hiring-admin-job-listing-indexes-v1"
-  val HiringVectorSearchMigrationId = "hiring-vector-search-v1"
-  val HiringAtlasSearchIndexMigrationId = "hiring-atlas-search-indexes-v1"
-  val UserNameCanonicalMigrationId = "user-name-canonical-v1"
-  val UserAccountMigrationId = "user-account-management-v1"
-  val UserAccountStatusMigrationId = "user-account-status-v1"
-  val UserProfileOneOfMigrationId = "user-profile-one-of-v1"
-  val UserEmailSparseIndexMigrationId = "user-email-canonical-sparse-v1"
 
-  def initialize(database: MongoDatabase): IO[Unit] =
-    initialize(database, None, vectorSearchEnabled = false)
-
-  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    initialize(database, atlas, vectorSearchEnabled = atlas.nonEmpty)
-
+  def initialize(database: MongoDatabase): IO[Unit] = initialize(database, None, false)
+  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] = initialize(database, atlas, atlas.nonEmpty)
+  /** The full setup call is the only destructive reset. */
   def initializeTransactionalSupport(database: MongoDatabase, vectorSearchEnabled: Boolean): IO[Unit] =
-    runOperationalEventsMigration(database) *>
-      (if (vectorSearchEnabled) runEmbeddingWorkMigration(database) else IO.unit)
-
+    IO.pure((database, vectorSearchEnabled)).void
   def initializeCore(database: MongoDatabase, vectorSearchEnabled: Boolean): IO[Unit] =
-    runOperationalEventsMigration(database) *>
-      runHiringUserSetupMigration(database, None) *>
-      (if (vectorSearchEnabled) runEmbeddingWorkMigration(database) else IO.unit)
+    IO.pure((database, vectorSearchEnabled)).void
+  def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig], vectorSearchEnabled: Boolean): IO[Unit] =
+    IO.pure(vectorSearchEnabled).void *>
+    resetOwnedCollections(database) *> createAccountRegistry(database) *> createUserValidator(database) *> createIndexes(database) *>
+      atlas.traverse_(provisionAtlasIndexes(database, _))
 
-  /** Vector work migrations are opt-in so a disabled vector runtime never creates a reindex backlog. */
-  def initialize(
-      database: MongoDatabase,
-      atlas: Option[AtlasSearchIndexConfig],
-      vectorSearchEnabled: Boolean
-  ): IO[Unit] =
-    runOperationalEventsMigration(database) *>
-      runHiringUserSetupMigration(database, atlas) *>
-      runEmbeddingWorkMigration(database) *>
-      (if (vectorSearchEnabled) runEmbeddingBackfills(database).sequence_ else IO.unit)
-
-  private def runOperationalEventsMigration(database: MongoDatabase): IO[Unit] = {
-    val ledger = database.getCollection(HiringMigrationLedger)
-    IO(UUID.randomUUID().toString).flatMap { owner =>
-      for {
-        now <- IO.realTimeInstant
-        _ <- ensureLedgerRecord(ledger, OperationalEventsMigrationId, OperationalEventsDescriptor, OperationalEventsChecksum, now)
-        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", OperationalEventsMigrationId)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("operational events migration ledger record was not created")))
-        _ <- validateLedgerRecord(record, OperationalEventsMigrationId, OperationalEventsDescriptor, OperationalEventsChecksum)
-        claimed <- claimMigration(ledger, OperationalEventsMigrationId, OperationalEventsChecksum, owner, now)
-        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", OperationalEventsMigrationId)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("operational events migration ledger record disappeared"))))(IO.pure)
-        _ <- claimed match {
-          case None if current.getString("status") == "Applied" => verifyOperationalEventIndexes(database)
-          case None => IO.raiseError(new IllegalStateException(
-            s"hiring migration '$OperationalEventsMigrationId' is already applying; wait for its lease to expire before recovery"
-          ))
-          case Some(_) =>
-            ensureOperationalEventIndexes(database) *> verifyOperationalEventIndexes(database) *>
-              markMigrationApplied(ledger, OperationalEventsMigrationId, OperationalEventsChecksum, owner)
-        }
-      } yield ()
-    }
-  }
-
-  private def ordinaryIndexes(database: MongoDatabase): List[IO[Unit]] = List(
-      createIndex(database.getCollection("users"),
-        Indexes.ascending("nameCanonical"), new IndexOptions().name(UsersNameIndex).unique(true)),
-      createIndex(database.getCollection("users"),
-        Indexes.compoundIndex(Indexes.ascending("accountStatus"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(UsersStatusCreatedIndex)),
-      createIndex(database.getCollection("users"),
-        Indexes.compoundIndex(Indexes.ascending("role", "accountStatus"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(UsersRoleStatusCreatedIndex)),
-      createIndex(database.getCollection("users"),
-        Indexes.ascending("adminSingletonKey"),
-        new IndexOptions().name(UsersAdminSingletonIndex).unique(true)
-          .partialFilterExpression(Filters.eq("role", "Admin"))),
-      createIndex(database.getCollection("applications"),
-        Indexes.ascending("candidateId", "jobId"), new IndexOptions().name(ApplicationsCandidateJobIndex).unique(true)),
-      createIndex(database.getCollection("jobs"),
-        Indexes.compoundIndex(Indexes.ascending("recruiterId", "status"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(JobsRecruiterStatusCreatedIndex)),
-      createIndex(database.getCollection("jobs"),
-        Indexes.compoundIndex(Indexes.ascending("recruiterId"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(JobsRecruiterCreatedIndex)),
-      createIndex(database.getCollection("applications"),
-        Indexes.compoundIndex(Indexes.ascending("candidateId", "status"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(ApplicationsCandidateStatusCreatedIndex)),
-      createIndex(database.getCollection("applications"),
-        Indexes.compoundIndex(Indexes.ascending("candidateId"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(ApplicationsCandidateCreatedIndex)),
-      createIndex(database.getCollection("applications"),
-        Indexes.compoundIndex(Indexes.ascending("jobId", "status"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(ApplicationsJobStatusCreatedIndex)),
-      createIndex(database.getCollection("applications"),
-        Indexes.compoundIndex(Indexes.ascending("jobId"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(ApplicationsJobCreatedIndex)),
-      createIndex(database.getCollection("application_events"),
-        Indexes.compoundIndex(Indexes.ascending("applicationId"), Indexes.descending("occurredAt", "_id")),
-        new IndexOptions().name(ApplicationEventsApplicationCreatedIndex)),
-      createIndex(database.getCollection("jobs"),
-        Indexes.descending("createdAt", "_id"),
-        new IndexOptions().name(JobsCreatedIndex)),
-      createIndex(database.getCollection("jobs"),
-        Indexes.compoundIndex(Indexes.ascending("status"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(JobsOpenCreatedIndex)),
-      createIndex(database.getCollection("jobs"),
-        Indexes.compoundIndex(Indexes.ascending("status", "location.city"), Indexes.descending("createdAt", "_id")),
-        new IndexOptions().name(JobsOpenCityCreatedIndex)),
-      createIndex(database.getCollection("jobs"),
-        Indexes.ascending("embeddingMeta.model", "embeddingMeta.version", "status", "location.city", "recruiterId"),
-        new IndexOptions().name(JobsEmbeddingMetaIndex)),
-      createIndex(database.getCollection("users"),
-        Indexes.ascending("embeddingMeta.model", "embeddingMeta.version", "role"),
-        new IndexOptions().name(UsersEmbeddingMetaIndex))
-    )
-
-  private def runHiringUserSetupMigration(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] = {
-    val ledger = database.getCollection(HiringMigrationLedger)
-    IO(UUID.randomUUID().toString).flatMap { owner =>
-      for {
-        now <- IO.realTimeInstant
-        _ <- ensureLedgerRecord(ledger, HiringUserSetupMigrationId, HiringUserSetupDescriptor, HiringUserSetupChecksum, now)
-        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", HiringUserSetupMigrationId)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("hiring migration ledger record was not created")))
-        _ <- validateLedgerRecord(record, HiringUserSetupMigrationId, HiringUserSetupDescriptor, HiringUserSetupChecksum)
-        claimed <- claimMigration(ledger, HiringUserSetupMigrationId, HiringUserSetupChecksum, owner, now)
-        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", HiringUserSetupMigrationId)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("hiring migration ledger record disappeared"))))(IO.pure)
-        _ <- claimed match {
-          case None if current.getString("status") == "Applied" =>
-            verifyAppliedHiringUserSetup(database, atlas)
-          case None => IO.raiseError(new IllegalStateException(
-            s"hiring migration '$HiringUserSetupMigrationId' is already applying; wait for its lease to expire before recovery"
-          ))
-          case Some(_) =>
-            ensureUsersCollection(database) *>
-              migrateUsers(database.getCollection("users"), ledger, owner) *>
-              replaceEmailIndex(database) *>
-              (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
-              ensureUserProfileValidator(database) *>
-              atlas.fold(IO.unit)(provisionAtlasIndexes(database, _)) *>
-              verifyHiringUserSetup(database) *>
-              markMigrationApplied(ledger, HiringUserSetupMigrationId, HiringUserSetupChecksum, owner)
-        }
-      } yield ()
-    }
-  }
-
-  private def verifyAppliedHiringUserSetup(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    ensureUsersCollection(database) *>
-      replaceEmailIndex(database) *>
-      (ordinaryIndexes(database) :+ ensureAccountRegistry(database)).sequence_ *>
-      ensureUserProfileValidator(database) *>
-      verifyHiringUserSetup(database) *>
-      atlas.fold(IO.unit)(provisionAtlasIndexes(database, _))
-
-  private def runEmbeddingWorkMigration(database: MongoDatabase): IO[Unit] = {
-    val ledger = database.getCollection(HiringMigrationLedger)
-    IO(UUID.randomUUID().toString).flatMap { owner =>
-      for {
-        now <- IO.realTimeInstant
-        _ <- ensureLedgerRecord(ledger, EmbeddingWorkMigrationId, EmbeddingWorkDescriptor, EmbeddingWorkChecksum, now)
-        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", EmbeddingWorkMigrationId)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("embedding work migration ledger record was not created")))
-        _ <- validateLedgerRecord(record, EmbeddingWorkMigrationId, EmbeddingWorkDescriptor, EmbeddingWorkChecksum)
-        claimed <- claimMigration(ledger, EmbeddingWorkMigrationId, EmbeddingWorkChecksum, owner, now)
-        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", EmbeddingWorkMigrationId)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("embedding work migration ledger record disappeared"))))(IO.pure)
-        _ <- claimed match {
-          case None if current.getString("status") == "Applied" => verifyEmbeddingWorkIndexes(database)
-          case None => IO.raiseError(new IllegalStateException(
-            s"hiring migration '$EmbeddingWorkMigrationId' is already applying; wait for its lease to expire before recovery"
-          ))
-          case Some(_) =>
-            ensureEmbeddingWorkIndexes(database) *> verifyEmbeddingWorkIndexes(database) *>
-              markMigrationApplied(ledger, EmbeddingWorkMigrationId, EmbeddingWorkChecksum, owner)
-        }
-      } yield ()
-    }
-  }
-
-  private def runEmbeddingBackfills(database: MongoDatabase): List[IO[Unit]] =
-    List(
-      runEmbeddingBackfillMigration(
-        database,
-        JobEmbeddingBackfillMigrationId,
-        JobEmbeddingBackfillDescriptor,
-        JobEmbeddingBackfillChecksum,
-        database.getCollection("jobs"),
-        new Document(),
-        EmbeddingWorkKind.Job
-      ),
-      runEmbeddingBackfillMigration(
-        database,
-        CandidateEmbeddingBackfillMigrationId,
-        CandidateEmbeddingBackfillDescriptor,
-        CandidateEmbeddingBackfillChecksum,
-        database.getCollection("users"),
-        Filters.and(
-          Filters.eq("role", "Candidate"),
-          Filters.eq("accountStatus", "Active"),
-          Filters.exists("profile")
-        ),
-        EmbeddingWorkKind.CandidateProfile
-      )
-    )
-
-  private def runEmbeddingBackfillMigration(
-      database: MongoDatabase,
-      id: String,
-      descriptor: String,
-      checksum: String,
-      source: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      sourceFilter: Bson,
-      kind: EmbeddingWorkKind
-  ): IO[Unit] = {
-    val ledger = database.getCollection(HiringMigrationLedger)
-    IO(UUID.randomUUID().toString).flatMap { owner =>
-      for {
-        now <- IO.realTimeInstant
-        _ <- ensureLedgerRecord(ledger, id, descriptor, checksum, now)
-        record <- PublisherBridge.first(ledger.find(Filters.eq("_id", id)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("embedding backfill ledger record was not created")))
-        _ <- validateLedgerRecord(record, id, descriptor, checksum)
-        claimed <- claimMigration(ledger, id, checksum, owner, now)
-        current <- claimed.fold(PublisherBridge.first(ledger.find(Filters.eq("_id", id)))
-          .flatMap(_.liftTo[IO](new IllegalStateException("embedding backfill ledger record disappeared"))))(IO.pure)
-        _ <- claimed match {
-          case None if current.getString("status") == "Applied" => verifyEmbeddingWorkIndexes(database)
-          case None => IO.raiseError(new IllegalStateException(
-            s"hiring migration '$id' is already applying; wait for its lease to expire before recovery"
-          ))
-          case Some(_) =>
-            backfillEmbeddingWork(source, sourceFilter, kind, ledger, id, checksum, owner, database) *>
-              verifyEmbeddingWorkIndexes(database) *>
-              markMigrationApplied(ledger, id, checksum, owner)
-        }
-      } yield ()
-    }
-  }
-
-  private def ensureLedgerRecord(
-      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      id: String,
-      descriptor: String,
-      checksum: String,
-      now: java.time.Instant
-  ): IO[Unit] =
-    PublisherBridge.first(ledger.updateOne(
-      Filters.eq("_id", id),
-      Updates.combine(
-        Updates.setOnInsert("_id", id),
-        Updates.setOnInsert("schemaVersion", 2),
-        Updates.setOnInsert("descriptor", descriptor),
-        Updates.setOnInsert("checksum", checksum),
-        Updates.setOnInsert("status", "Pending"),
-        Updates.setOnInsert("createdAt", Date.from(now))
-      ),
-      new UpdateOptions().upsert(true)
-    )).void
-
-  private def validateLedgerRecord(record: Document, id: String, descriptor: String, checksum: String): IO[Unit] =
-    if (record.getString("checksum") == checksum && record.getString("descriptor") == descriptor)
-      IO.unit
-    else IO.raiseError(new IllegalStateException(
-      s"hiring migration '$id' has an immutable descriptor or checksum mismatch"
-    ))
-
-  private def claimMigration(
-      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      id: String,
-      checksum: String,
-      owner: String,
-      now: java.time.Instant
-  ): IO[Option[Document]] =
-    PublisherBridge.first(ledger.findOneAndUpdate(
-      Filters.and(
-        Filters.eq("_id", id),
-        Filters.eq("checksum", checksum),
-        Filters.or(
-          Filters.eq("status", "Pending"),
-          Filters.and(Filters.eq("status", "Applying"), Filters.lte("leaseUntil", Date.from(now)))
-        )
-      ),
-      Updates.combine(
-        Updates.set("status", "Applying"),
-        Updates.set("owner", owner),
-        Updates.set("leaseUntil", Date.from(now.plusMillis(MigrationLease.toMillis))),
-        Updates.set("startedAt", Date.from(now))
-      ),
-      new FindOneAndUpdateOptions().returnDocument(ReturnDocument.AFTER)
-    ))
-
-  private def persistCheckpoint(
-      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      migrationId: String,
-      checksum: String,
-      owner: String,
-      lastProcessedId: String,
-      processedCount: Int
-  ): IO[Unit] =
-    IO.realTimeInstant.flatMap { now =>
-      PublisherBridge.first(ledger.updateOne(
-        Filters.and(
-          Filters.eq("_id", migrationId),
-          Filters.eq("checksum", checksum),
-          Filters.eq("status", "Applying"),
-          Filters.eq("owner", owner)
-        ),
-        Updates.combine(
-          Updates.set("lastProcessedId", lastProcessedId),
-          Updates.set("processedCount", java.lang.Integer.valueOf(processedCount)),
-          Updates.set("leaseUntil", Date.from(now.plusMillis(MigrationLease.toMillis))),
-          Updates.set("updatedAt", Date.from(now))
-        )
-      )).flatMap { result =>
-        if (result.exists(_.getMatchedCount == 1)) IO.unit
-        else IO.raiseError(new IllegalStateException(s"hiring migration '$migrationId' lost its lease"))
-      }
+  private def resetOwnedCollections(database: MongoDatabase): IO[Unit] =
+    PublisherBridge.collectWithin(database.listCollectionNames(), CollectionLimit).flatMap { names =>
+      names.filter(ownedCollections).traverse_(name => PublisherBridge.first(database.getCollection(name).drop()).void)
     }
 
-  private def markMigrationApplied(
-      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      id: String,
-      checksum: String,
-      owner: String
-  ): IO[Unit] =
-    IO.realTimeInstant.flatMap { now =>
-      PublisherBridge.first(ledger.updateOne(
-        Filters.and(
-          Filters.eq("_id", id),
-          Filters.eq("checksum", checksum),
-          Filters.eq("status", "Applying"),
-          Filters.eq("owner", owner)
-        ),
-        Updates.combine(
-          Updates.set("status", "Applied"),
-          Updates.set("appliedAt", Date.from(now)),
-          Updates.unset("owner"),
-          Updates.unset("leaseUntil")
-        )
-      )).flatMap { result =>
-        if (result.exists(_.getMatchedCount == 1)) IO.unit
-        else IO.raiseError(new IllegalStateException(s"hiring migration '$id' lost its lease before verification"))
-      }
-    }
-
-  private def verifyHiringUserSetup(database: MongoDatabase): IO[Unit] = {
-    val users = database.getCollection("users")
-    val expectedKeys = new Document("emailCanonical", 1)
-    PublisherBridge.collectWithin(users.listIndexes(), IndexMetadataLimit).flatMap { indexes =>
-      val names = indexes.map(_.getString("name")).toSet
-      val required = Set(UsersEmailIndex, UsersNameIndex, UsersStatusCreatedIndex, UsersRoleStatusCreatedIndex,
-        UsersAdminSingletonIndex, UsersEmbeddingMetaIndex)
-      indexes.find(_.getString("name") == UsersEmailIndex) match {
-        case Some(index) if Option(index.get("key", classOf[Document])).contains(expectedKeys) &&
-            index.getBoolean("unique", false) && index.getBoolean("sparse", false) && required.subsetOf(names) => IO.unit
-        case _ => IO.raiseError(new IllegalStateException("users security index verification failed"))
-      }
-    } *> verifyIndexes(database.getCollection("applications"), Set(
-      ApplicationsCandidateJobIndex, ApplicationsCandidateStatusCreatedIndex, ApplicationsCandidateCreatedIndex,
-      ApplicationsJobStatusCreatedIndex, ApplicationsJobCreatedIndex
-    )) *> verifyIndexes(database.getCollection("jobs"), Set(
-      JobsRecruiterStatusCreatedIndex, JobsRecruiterCreatedIndex, JobsCreatedIndex, JobsOpenCreatedIndex,
-      JobsOpenCityCreatedIndex, JobsEmbeddingMetaIndex
-    )) *> verifyIndexes(database.getCollection("application_events"), Set(ApplicationEventsApplicationCreatedIndex)) *>
-      verifyAccountRegistry(database) *> verifyUserProfileValidator(database)
-  }
-
-  private def verifyIndexes(
-      collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      required: Set[String]
-  ): IO[Unit] =
-    PublisherBridge.collectWithin(collection.listIndexes(), IndexMetadataLimit).flatMap { indexes =>
-      if (required.subsetOf(indexes.map(_.getString("name")).toSet)) IO.unit
-      else IO.raiseError(new IllegalStateException(s"${collection.getNamespace.getCollectionName} index verification failed"))
-    }
-
-  private def verifyAccountRegistry(database: MongoDatabase): IO[Unit] =
-    PublisherBridge.first(database.getCollection("account_registry").find(Filters.eq("_id", "user-account-registry"))).flatMap {
-      case Some(record) if Set("Initialized", "Uninitialized").contains(record.getString("state")) => IO.unit
-      case _ => IO.raiseError(new IllegalStateException("account registry verification failed"))
-    }
-
-  private def verifyUserProfileValidator(database: MongoDatabase): IO[Unit] =
-    PublisherBridge.first(database.listCollections().filter(Filters.eq("name", "users")).first()).flatMap {
-      case Some(collection) if Option(collection.get("options", classOf[Document]))
-            .flatMap(options => Option(options.get("validator", classOf[Document]))).nonEmpty => IO.unit
-      case _ => IO.raiseError(new IllegalStateException("users profile validator verification failed"))
-    }
-
-  private def ensureEmbeddingWorkIndexes(database: MongoDatabase): IO[Unit] =
-    createIndex(
-      database.getCollection("embedding_work"),
-      Indexes.ascending("state", "availableAt", "leaseUntil"),
-      new IndexOptions().name(EmbeddingWorkAvailableIndex)
-    )
-
-  private def ensureOperationalEventIndexes(database: MongoDatabase): IO[Unit] =
-    List(
-      createIndex(database.getCollection("event_outbox"),
-        Indexes.ascending("state", "availableAt", "leaseUntil", "_id"),
-        new IndexOptions().name(EventOutboxClaimIndex)),
-      createIndex(database.getCollection("event_outbox"),
-        Indexes.ascending("aggregateType", "aggregateId", "sequence"),
-        new IndexOptions().name(EventOutboxAggregateSequenceIndex).unique(true)
-          .partialFilterExpression(Filters.in("aggregateType", "Job", "Application"))),
-      createIndex(database.getCollection("event_outbox"),
-        Indexes.ascending("retentionExpiresAt"),
-        new IndexOptions().name(EventOutboxPublishedRetentionIndex).expireAfter(0L, TimeUnit.SECONDS)
-          .partialFilterExpression(Filters.eq("state", "Published"))),
-      createIndex(database.getCollection("search_sessions"),
-        Indexes.compoundIndex(Indexes.ascending("actorId"), Indexes.descending("occurredAt", "_id")),
-        new IndexOptions().name(SearchSessionsActorIndex)),
-      createIndex(database.getCollection("search_sessions"),
-        Indexes.ascending("expiresAt"),
-        new IndexOptions().name(SearchSessionsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
-      createIndex(database.getCollection("consumer_receipts"),
-        Indexes.ascending("consumerGroup", "eventId"),
-        new IndexOptions().name(ConsumerReceiptsIdIndex).unique(true)),
-      createIndex(database.getCollection("consumer_receipts"),
-        Indexes.ascending("consumerGroup", "aggregateType", "aggregateId", "sequence"),
-        new IndexOptions().name(ConsumerReceiptsAggregateSequenceIndex)),
-      createIndex(database.getCollection("consumer_receipts"),
-        Indexes.ascending("expiresAt"),
-        new IndexOptions().name(ConsumerReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
-      createIndex(database.getCollection("event_quarantine"),
-        Indexes.ascending("topic", "partition", "offset"),
-        new IndexOptions().name(EventQuarantineOffsetIndex).unique(true)),
-      createIndex(database.getCollection("event_quarantine"),
-        Indexes.ascending("expiresAt"),
-        new IndexOptions().name(EventQuarantineExpiryIndex).expireAfter(0L, TimeUnit.SECONDS))
-    ).sequence_
-
-  private def verifyOperationalEventIndexes(database: MongoDatabase): IO[Unit] =
-    verifyIndexes(database.getCollection("event_outbox"), Set(
-      EventOutboxClaimIndex, EventOutboxAggregateSequenceIndex, EventOutboxPublishedRetentionIndex
-    )) *> verifyIndexes(database.getCollection("search_sessions"), Set(
-      SearchSessionsActorIndex, SearchSessionsExpiryIndex
-    )) *> verifyIndexes(database.getCollection("consumer_receipts"), Set(
-      ConsumerReceiptsIdIndex, ConsumerReceiptsAggregateSequenceIndex, ConsumerReceiptsExpiryIndex
-    )) *> verifyIndexes(database.getCollection("event_quarantine"), Set(
-      EventQuarantineOffsetIndex, EventQuarantineExpiryIndex
-    ))
-
-  private def verifyEmbeddingWorkIndexes(database: MongoDatabase): IO[Unit] =
-    PublisherBridge.collectWithin(database.getCollection("embedding_work").listIndexes(), IndexMetadataLimit).flatMap { indexes =>
-      indexes.find(_.getString("name") == EmbeddingWorkAvailableIndex) match {
-        case Some(index) if Option(index.get("key", classOf[Document])).contains(
-              new Document("state", 1).append("availableAt", 1).append("leaseUntil", 1)
-            ) => IO.unit
-        case _ => IO.raiseError(new IllegalStateException("embedding work claim index verification failed"))
-      }
-    }
-
-  private def provisionAtlasIndexes(database: MongoDatabase, config: AtlasSearchIndexConfig): IO[Unit] = {
-    val jobs = database.getCollection("jobs")
-    val users = database.getCollection("users")
-    List(
-      ensureSearchIndex(jobs, new SearchIndexModel(config.jobVectorIndex, vectorDefinition(config, jobFilterFields), SearchIndexType.vectorSearch()), config),
-      ensureSearchIndex(users, new SearchIndexModel(config.candidateVectorIndex, vectorDefinition(config, candidateFilterFields), SearchIndexType.vectorSearch()), config),
-      ensureSearchIndex(jobs, new SearchIndexModel(config.jobLexicalIndex, lexicalDefinition, SearchIndexType.search()), config)
-    ).sequence_.void
-  }
-
-  private val jobFilterFields = List("status", "location.city", "skills", "createdAt", "recruiterId",
-    "embeddingMeta.model", "embeddingMeta.version")
-  private val candidateFilterFields = List("role", "embeddingMeta.model", "embeddingMeta.version")
-
-  private def vectorDefinition(config: AtlasSearchIndexConfig, filters: List[String]): Document =
-    new Document("fields", (new Document("type", "vector")
-      .append("path", "embedding")
-      .append("numDimensions", java.lang.Integer.valueOf(config.dimension))
-      .append("similarity", "cosine") :: filters.map(path => new Document("type", "filter").append("path", path))).asJava)
-
-  private val lexicalDefinition: Document =
-    new Document("mappings", new Document("dynamic", false).append("fields", new Document()
-      .append("title", new Document("type", "string"))
-      .append("description", new Document("type", "string"))
-      .append("requirements", new Document("type", "string"))
-      .append("skills", new Document("type", "string"))))
-
-  private def ensureSearchIndex(
-      collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      model: SearchIndexModel,
-      config: AtlasSearchIndexConfig
-  ): IO[Unit] = {
-    val name = model.getName
-    val expectedType = model.getType.toBsonValue.asString().getValue
-    PublisherBridge.first(collection.listSearchIndexes().name(name).first()).flatMap {
-      case None =>
-        createSearchIndex(collection, model) *> awaitReady(collection, name, expectedType, model.getDefinition, config)
-      case Some(existing) if searchIndexMatches(existing, expectedType, model.getDefinition) =>
-        awaitReady(collection, name, expectedType, model.getDefinition, config)
-      case Some(existing) if existing.getString("type", "search") != expectedType =>
-        IO.raiseError(new IllegalStateException(
-          s"Atlas search index '$name' has type '${existing.getString("type", "search")}', expected '$expectedType'; " +
-            "create a new configured index name and perform an explicit cutover migration"
-        ))
-      case Some(_) =>
-        IO.raiseError(new IllegalStateException(
-          s"Atlas search index '$name' has an incompatible definition; " +
-            "create a new configured index name and perform an explicit cutover migration"
-        ))
-    }
-  }
-
-  private def createSearchIndex(
-      collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      model: SearchIndexModel
-  ): IO[Unit] = PublisherBridge.first(collection.createSearchIndexes(List(model).asJava)).void
-
-  private def searchIndexMatches(existing: Document, expectedType: String, expectedDefinition: org.bson.conversions.Bson): Boolean =
-    existing.getString("type", "search") == expectedType &&
-      Option(existing.get("latestDefinition", classOf[Document])).exists(_ == expectedDefinition.asInstanceOf[Document])
-
-  private def awaitReady(
-      collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      name: String,
-      expectedType: String,
-      expectedDefinition: org.bson.conversions.Bson,
-      config: AtlasSearchIndexConfig
-  ): IO[Unit] = {
-    val timeout = config.readyTimeoutMillis.millis
-    def loop(start: FiniteDuration): IO[Unit] =
-      PublisherBridge.first(collection.listSearchIndexes().name(name).first()).flatMap {
-        case Some(index) if searchIndexMatches(index, expectedType, expectedDefinition) &&
-            index.getString("status", "").equalsIgnoreCase("READY") && index.getBoolean("queryable", false) =>
-          IO.unit
-        case Some(index) if index.getString("status", "").equalsIgnoreCase("FAILED") =>
-          IO.raiseError(new IllegalStateException(s"Atlas search index '$name' failed to build"))
-        case _ =>
-          IO.monotonic.flatMap { now =>
-            if (now - start >= timeout) IO.raiseError(new IllegalStateException(s"Atlas search index '$name' was not ready"))
-            else IO.sleep(config.pollIntervalMillis.millis) *> loop(start)
-          }
-      }
-    IO.monotonic.flatMap(loop)
-  }
-
-  private def createIndex(
-      collection: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      keys: org.bson.conversions.Bson,
-      options: IndexOptions
-  ): IO[Unit] =
-    PublisherBridge.first(collection.createIndex(keys, options)).void.handleErrorWith {
-      case error: MongoCommandException if options.getName == UsersNameIndex && error.getErrorCode == 11000 =>
-        IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
-      case error => IO.raiseError(error)
-    }
-
-  private def ensureUsersCollection(database: MongoDatabase): IO[Unit] =
-    PublisherBridge.first(database.createCollection("users")).void.handleErrorWith {
-      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
-    }
-
-  private def replaceEmailIndex(database: MongoDatabase): IO[Unit] = {
-    val users = database.getCollection("users")
-    val expectedKeys = new Document("emailCanonical", 1)
-    PublisherBridge.collectWithin(users.listIndexes(), IndexMetadataLimit).flatMap { indexes =>
-      indexes.find(_.getString("name") == UsersEmailIndex) match {
-        case Some(index) if Option(index.get("key", classOf[Document])).contains(expectedKeys) &&
-            index.getBoolean("unique", false) && index.getBoolean("sparse", false) =>
-          IO.unit
-        case Some(_) =>
-          IO.raiseError(new IllegalStateException(
-            s"users index '$UsersEmailIndex' is incompatible; create a replacement index and perform an explicit cutover migration"
-          ))
-        case None =>
-          createIndex(users, Indexes.ascending("emailCanonical"),
-            new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true))
-      }
-    }
-  }
-
-  private def profileMigrationUpdates(document: Document): IO[List[Bson]] =
-    IO.fromEither {
-      val role = Option(document.getString("role"))
-        .toRight(new IllegalStateException("users collection contains an account without a role"))
-      val status = Option(document.getString("accountStatus")).getOrElse("Active")
-      val profile = Option(document.get("profile", classOf[Document]))
-      val legacyRecruiter = Option(document.get("recruiterProfile", classOf[Document]))
-
-      role.flatMap {
-        case "Admin" if status == "Active" =>
-          if (Option(document.getString("adminSingletonKey")).contains("singleton-admin") &&
-              profile.isEmpty && legacyRecruiter.isEmpty)
-            Right(List(Updates.set("schemaVersion", 3)))
-          else Left(new IllegalStateException("active Admin must be the singleton account without a profile"))
-
-        case "Candidate" if status == "Active" =>
-          if (legacyRecruiter.nonEmpty)
-            Left(new IllegalStateException("Candidate account contains a recruiter profile"))
-          else profile match {
-            case None => Left(new IllegalStateException("active Candidate account is missing its profile"))
-            case Some(value) if Option(value.getString("kind")).exists(_ != "Candidate") =>
-              Left(new IllegalStateException("Candidate account contains a non-Candidate profile"))
-            case Some(_) =>
-              Right(List(Updates.set("profile.kind", "Candidate"), Updates.set("schemaVersion", 3)))
-          }
-
-        case "Recruiter" if status == "Active" =>
-          profile match {
-            case Some(_) if legacyRecruiter.nonEmpty =>
-              Left(new IllegalStateException("Recruiter account contains duplicate profiles"))
-            case Some(value) if Option(value.getString("kind")).exists(_ != "Recruiter") =>
-              Left(new IllegalStateException("Recruiter account contains a non-Recruiter profile"))
-            case Some(_) =>
-              Right(List(Updates.set("profile.kind", "Recruiter"), Updates.set("schemaVersion", 3)))
-            case None => legacyRecruiter match {
-              case None => Left(new IllegalStateException("active Recruiter account is missing its profile"))
-              case Some(value) =>
-                val migrated = new Document()
-                migrated.putAll(value)
-                migrated.put("kind", "Recruiter")
-                Right(List(
-                  Updates.set("profile", migrated),
-                  Updates.unset("recruiterProfile"),
-                  Updates.set("schemaVersion", 3)
-                ))
-            }
-          }
-
-        case _ if status == "Deleted" =>
-          Right(List(
-            Updates.unset("profile"),
-            Updates.unset("recruiterProfile"),
-            Updates.set("schemaVersion", 3)
-          ))
-
-        case other =>
-          Left(new IllegalStateException(s"unsupported user role '$other' in active account"))
-      }
-    }
-
-  private def ensureUserProfileValidator(database: MongoDatabase): IO[Unit] = {
-    val candidateProfile = new Document("bsonType", "object")
-      .append("required", List("kind", "skills").asJava)
-      .append("properties", new Document("kind", new Document("enum", List("Candidate").asJava))
-        .append("skills", new Document("bsonType", "array").append("minItems", 1)))
-    val recruiterProfile = new Document("bsonType", "object")
-      .append("required", List("kind", "organizationName").asJava)
-      .append("properties", new Document("kind", new Document("enum", List("Recruiter").asJava))
-        .append("organizationName", new Document("bsonType", "string")))
-    val noProfile = new Document("anyOf", List(
-      new Document("required", List("profile").asJava),
-      new Document("required", List("recruiterProfile").asJava)
-    ).asJava)
-    val deleted = new Document("properties", new Document("accountStatus", new Document("enum", List("Deleted").asJava)))
-      .append("not", noProfile)
-    val admin = new Document("required", List("adminSingletonKey").asJava)
-      .append("properties", new Document("accountStatus", new Document("enum", List("Active").asJava))
-        .append("role", new Document("enum", List("Admin").asJava))
-        .append("adminSingletonKey", new Document("enum", List("singleton-admin").asJava)))
-      .append("not", noProfile)
-    val candidate = new Document("required", List("profile").asJava)
-      .append("properties", new Document("accountStatus", new Document("enum", List("Active").asJava))
-        .append("role", new Document("enum", List("Candidate").asJava))
-        .append("profile", candidateProfile))
-      .append("not", new Document("anyOf", List(
-        new Document("required", List("recruiterProfile").asJava),
-        new Document("required", List("adminSingletonKey").asJava)
-      ).asJava))
-    val recruiter = new Document("required", List("profile").asJava)
-      .append("properties", new Document("accountStatus", new Document("enum", List("Active").asJava))
-        .append("role", new Document("enum", List("Recruiter").asJava))
-        .append("profile", recruiterProfile))
-      .append("not", new Document("anyOf", List(
-        new Document("required", List("recruiterProfile").asJava),
-        new Document("required", List("adminSingletonKey").asJava)
-      ).asJava))
-    val schema = new Document("bsonType", "object")
-      .append("required", List("role", "accountStatus").asJava)
-      .append("oneOf", List(deleted, admin, candidate, recruiter).asJava)
-    val command = new Document("collMod", "users")
-      .append("validator", new Document("$jsonSchema", schema))
-      .append("validationLevel", "strict")
-      .append("validationAction", "error")
-    PublisherBridge.first(database.runCommand(command)).void
-  }
-
-  private def userMigrationBatch(
-      users: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      after: Option[String]
-  ): IO[List[Document]] =
-    PublisherBridge.collectWithin(users.find(after.fold[org.bson.conversions.Bson](new Document())(Filters.gt("_id", _)))
-      .sort(Sorts.ascending("_id"))
-      .limit(UserMigrationBatchSize)
-      .batchSize(UserMigrationBatchSize), UserMigrationBatchSize)
-
-  private def migrateUsers(
-      users: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      owner: String
-  ): IO[Unit] = {
-    def update(document: Document): IO[Unit] =
-      userMigrationUpdates(document).flatMap {
-        case Nil => IO.unit
-        case updates => PublisherBridge.first(users.updateOne(
-          Filters.eq("_id", document.get("_id")),
-          Updates.combine(updates*)
-        )).void
-      }
-
-    def migrateAfter(lastId: Option[String]): IO[Unit] =
-      userMigrationBatch(users, lastId).flatMap { documents =>
-        documents.traverse_(update) *>
-          documents.lastOption.fold(IO.unit) { document =>
-            persistCheckpoint(ledger, HiringUserSetupMigrationId, HiringUserSetupChecksum, owner, document.getString("_id"), 0) *>
-              migrateAfter(Option(document.getString("_id")))
-          }
-      }
-    PublisherBridge.first(ledger.find(Filters.eq("_id", HiringUserSetupMigrationId))).flatMap {
-      case Some(record) => migrateAfter(Option(record.getString("lastProcessedId")))
-      case None => IO.raiseError(new IllegalStateException("hiring migration ledger record disappeared"))
-    }.handleErrorWith {
-      case error: MongoCommandException if error.getErrorCode == 11000 =>
-        IO.raiseError(new IllegalStateException("users collection contains duplicate canonical account names", error))
-      case error => IO.raiseError(error)
-    }
-  }
-
-  private def backfillEmbeddingWork(
-      source: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      sourceFilter: Bson,
-      kind: EmbeddingWorkKind,
-      ledger: com.mongodb.reactivestreams.client.MongoCollection[Document],
-      migrationId: String,
-      checksum: String,
-      owner: String,
-      database: MongoDatabase
-  ): IO[Unit] = {
-    val work = new MongoEmbeddingWorkRepository(database)
-
-    def batch(after: Option[String]): IO[List[Document]] = {
-      val cursorFilter = after.fold[Option[Bson]](None)(id => Some(Filters.gt("_id", id)))
-      PublisherBridge.collectWithin(source.find(Filters.and((List(Some(sourceFilter), cursorFilter).flatten)*))
-        .sort(Sorts.ascending("_id"))
-        .limit(UserMigrationBatchSize)
-        .batchSize(UserMigrationBatchSize), UserMigrationBatchSize)
-    }
-
-    def enqueue(document: Document): IO[Unit] =
-      for {
-        id <- IO.fromOption(Option(document.getString("_id")).filter(_.nonEmpty))(
-          new IllegalStateException(s"embedding backfill '$migrationId' found a document without a string _id")
-        )
-        now <- IO.realTimeInstant
-        result <- work.enqueue(EmbeddingWorkKey(kind, id), now)
-        _ <- IO.fromEither(result.leftMap(error => new IllegalStateException(s"embedding backfill '$migrationId' enqueue failed: $error")))
-      } yield ()
-
-    def migrateAfter(after: Option[String], processed: Int): IO[Unit] =
-      batch(after).flatMap { documents =>
-        documents.traverse_(enqueue) *>
-          documents.lastOption.fold(IO.unit) { document =>
-            val lastId = document.getString("_id")
-            persistCheckpoint(ledger, migrationId, checksum, owner, lastId, processed + documents.size) *>
-              migrateAfter(Some(lastId), processed + documents.size)
-          }
-      }
-
-    PublisherBridge.first(ledger.find(Filters.eq("_id", migrationId))).flatMap {
-      case Some(record) => migrateAfter(Option(record.getString("lastProcessedId")), record.getInteger("processedCount", 0))
-      case None => IO.raiseError(new IllegalStateException(s"embedding backfill '$migrationId' ledger record disappeared"))
-    }
-  }
-
-  private def userMigrationUpdates(document: Document): IO[List[Bson]] =
-    for {
-      profileUpdates <- profileMigrationUpdates(document)
-      nameUpdates <- IO.fromOption(Option(document.getString("name")).filter(_.trim.nonEmpty))(
-        new IllegalStateException("users collection contains an account without a valid name")
-      ).map { name =>
-        Option.when(!document.containsKey("nameCanonical"))(Updates.set("nameCanonical", AccountName.canonical(name))).toList
-      }
-    } yield {
-      val statusUpdates = Option.when(!document.containsKey("accountStatus"))(Updates.set("accountStatus", "Active")).toList
-      nameUpdates ++ statusUpdates ++ profileUpdates
-    }
-
-  private def ensureAccountRegistry(database: MongoDatabase): IO[Unit] =
+  private def createAccountRegistry(database: MongoDatabase): IO[Unit] =
     PublisherBridge.first(database.getCollection("account_registry").updateOne(
       Filters.eq("_id", "user-account-registry"),
-      Updates.combine(
-        Updates.setOnInsert("_id", "user-account-registry"),
-        Updates.setOnInsert("schemaVersion", 1),
-        Updates.setOnInsert("state", "Uninitialized")
-      ),
+      Updates.combine(Updates.setOnInsert("_id", "user-account-registry"), Updates.setOnInsert("state", "Uninitialized")),
       new UpdateOptions().upsert(true)
     )).void
 
-  private def sha256(value: String): String = SourceHash.sha256(value)
+  private def createIndexes(database: MongoDatabase): IO[Unit] = List(
+    index(database.getCollection("users"), Indexes.ascending("emailCanonical"), new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true)),
+    index(database.getCollection("users"), Indexes.ascending("nameCanonical"), new IndexOptions().name(UsersNameIndex).unique(true)),
+    index(database.getCollection("users"), Indexes.compoundIndex(Indexes.ascending("accountStatus"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(UsersStatusCreatedIndex)),
+    index(database.getCollection("users"), Indexes.compoundIndex(Indexes.ascending("role", "accountStatus"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(UsersRoleStatusCreatedIndex)),
+    index(database.getCollection("users"), Indexes.ascending("adminSingletonKey"), new IndexOptions().name(UsersAdminSingletonIndex).unique(true).partialFilterExpression(Filters.eq("role", "Admin"))),
+    index(database.getCollection("users"), Indexes.ascending("embeddingMeta.model", "role"), new IndexOptions().name(UsersEmbeddingMetaIndex)),
+    index(database.getCollection("jobs"), Indexes.compoundIndex(Indexes.ascending("recruiterId", "status"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(JobsRecruiterStatusCreatedIndex)),
+    index(database.getCollection("jobs"), Indexes.compoundIndex(Indexes.ascending("recruiterId"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(JobsRecruiterCreatedIndex)),
+    index(database.getCollection("jobs"), Indexes.descending("createdAt", "_id"), new IndexOptions().name(JobsCreatedIndex)),
+    index(database.getCollection("jobs"), Indexes.compoundIndex(Indexes.ascending("status"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(JobsOpenCreatedIndex)),
+    index(database.getCollection("jobs"), Indexes.compoundIndex(Indexes.ascending("status", "location.city"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(JobsOpenCityCreatedIndex)),
+    index(database.getCollection("jobs"), Indexes.ascending("embeddingMeta.model", "status", "location.city", "recruiterId"), new IndexOptions().name(JobsEmbeddingMetaIndex)),
+    index(database.getCollection("applications"), Indexes.ascending("candidateId", "jobId"), new IndexOptions().name(ApplicationsCandidateJobIndex).unique(true)),
+    index(database.getCollection("applications"), Indexes.compoundIndex(Indexes.ascending("candidateId", "status"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(ApplicationsCandidateStatusCreatedIndex)),
+    index(database.getCollection("applications"), Indexes.compoundIndex(Indexes.ascending("candidateId"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(ApplicationsCandidateCreatedIndex)),
+    index(database.getCollection("applications"), Indexes.compoundIndex(Indexes.ascending("jobId", "status"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(ApplicationsJobStatusCreatedIndex)),
+    index(database.getCollection("applications"), Indexes.compoundIndex(Indexes.ascending("jobId"), Indexes.descending("createdAt", "_id")), new IndexOptions().name(ApplicationsJobCreatedIndex)),
+    index(database.getCollection("application_events"), Indexes.compoundIndex(Indexes.ascending("applicationId"), Indexes.descending("occurredAt", "_id")), new IndexOptions().name(ApplicationEventsApplicationCreatedIndex)),
+    index(database.getCollection("embedding_work"), Indexes.ascending("state", "availableAt", "leaseUntil"), new IndexOptions().name(EmbeddingWorkAvailableIndex)),
+    index(database.getCollection("event_outbox"), Indexes.ascending("state", "availableAt", "leaseUntil", "occurredAt", "_id"), new IndexOptions().name(EventOutboxClaimIndex)),
+    index(database.getCollection("event_outbox"), Indexes.ascending("retentionExpiresAt"), new IndexOptions().name(EventOutboxPublishedRetentionIndex).expireAfter(0L, TimeUnit.SECONDS).partialFilterExpression(Filters.eq("state", "Published"))),
+    index(database.getCollection("search_sessions"), Indexes.compoundIndex(Indexes.ascending("actorId"), Indexes.descending("occurredAt", "_id")), new IndexOptions().name(SearchSessionsActorIndex)),
+    index(database.getCollection("search_sessions"), Indexes.ascending("expiresAt"), new IndexOptions().name(SearchSessionsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
+    index(database.getCollection("consumer_receipts"), Indexes.ascending("consumerGroup", "eventId"), new IndexOptions().name(ConsumerReceiptsIdIndex).unique(true)),
+    index(database.getCollection("consumer_receipts"), Indexes.ascending("expiresAt"), new IndexOptions().name(ConsumerReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
+    index(database.getCollection("event_quarantine"), Indexes.ascending("topic", "partition", "offset"), new IndexOptions().name(EventQuarantineOffsetIndex).unique(true)),
+    index(database.getCollection("event_quarantine"), Indexes.ascending("expiresAt"), new IndexOptions().name(EventQuarantineExpiryIndex).expireAfter(0L, TimeUnit.SECONDS))
+  ).sequence_.void
+
+  private def createUserValidator(database: MongoDatabase): IO[Unit] = {
+    def active(role: String, required: String) = new Document("required", List(required).asJava).append("properties", new Document()
+      .append("role", new Document("enum", List(role).asJava)).append("accountStatus", new Document("enum", List("Active").asJava)))
+    val admin = active("Admin", "adminSingletonKey")
+    admin.get("properties", classOf[Document]).append("adminSingletonKey", new Document("enum", List("singleton-admin").asJava))
+    val schema = new Document("$jsonSchema", new Document("bsonType", "object").append("required", List("role", "accountStatus").asJava)
+      .append("oneOf", List(active("Candidate", "profile"), active("Recruiter", "profile"), admin,
+        new Document("properties", new Document("accountStatus", new Document("enum", List("Deleted").asJava)))).asJava))
+    PublisherBridge.first(database.createCollection("users")).void.handleErrorWith {
+      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
+    } *> PublisherBridge.first(database.runCommand(new Document("collMod", "users").append("validator", schema)
+      .append("validationLevel", "strict").append("validationAction", "error"))).void
+  }
+
+  private def index(collection: MongoCollection[Document], keys: Bson, options: IndexOptions): IO[Unit] =
+    PublisherBridge.first(collection.createIndex(keys, options)).void
+
+  private def provisionAtlasIndexes(database: MongoDatabase, config: AtlasSearchIndexConfig): IO[Unit] = {
+    def vectorDefinition(filters: List[String]): Document = new Document("fields", (new Document("type", "vector")
+      .append("path", "embedding").append("numDimensions", Int.box(config.dimension)).append("similarity", "cosine") ::
+      filters.map(path => new Document("type", "filter").append("path", path))).asJava)
+    val lexicalDefinition = new Document("mappings", new Document("dynamic", false).append("fields", new Document()
+      .append("title", new Document("type", "string")).append("description", new Document("type", "string"))
+      .append("requirements", new Document("type", "string")).append("skills", new Document("type", "string"))))
+    def create(collection: MongoCollection[Document], model: SearchIndexModel): IO[Unit] =
+      PublisherBridge.first(collection.createSearchIndexes(List(model).asJava)).void
+    List(
+      create(database.getCollection("jobs"), new SearchIndexModel(config.jobVectorIndex,
+        vectorDefinition(List("status", "location.city", "skills", "createdAt", "recruiterId", "embeddingMeta.model")), SearchIndexType.vectorSearch())),
+      create(database.getCollection("users"), new SearchIndexModel(config.candidateVectorIndex,
+        vectorDefinition(List("role", "embeddingMeta.model")), SearchIndexType.vectorSearch())),
+      create(database.getCollection("jobs"), new SearchIndexModel(config.jobLexicalIndex, lexicalDefinition, SearchIndexType.search()))
+    ).sequence_.void
+  }
 }

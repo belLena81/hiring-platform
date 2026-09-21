@@ -587,7 +587,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |      score
         |      searchMode
         |      model
-        |      version
         |      searchId
         |    }
         | __typename
@@ -599,7 +598,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(payload.downField("results").downArray.downField("job").get[String]("id"), Right(jobId.value.toString))
       assertEquals(payload.downField("results").downArray.get[String]("searchMode"), Right("HYBRID"))
       assertEquals(payload.downField("results").downArray.get[String]("model"), Right("voyage-4-lite"))
-      assertEquals(payload.downField("results").downArray.get[Int]("version"), Right(1))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -761,7 +759,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       actor: Option[ActorContext],
       searchSessions: SearchSessionRepository[IO]
   ): IO[Json] = {
-    val meta = EmbeddingMeta("voyage-4-lite", 1, "hash", now)
+    val meta = EmbeddingMeta("voyage-4-lite", "hash", now)
     val embeddedJob = openJob.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), meta)))
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](List(candidate, recruiter).map(user => user.id -> user).toMap)
@@ -783,8 +781,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           meta,
           UUID.fromString("10000000-0000-0000-0000-000000000099")
         ))),
-        embeddingModel = "voyage-4-lite",
-        embeddingVersion = 1
+        embeddingModel = "voyage-4-lite"
       )
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
@@ -835,13 +832,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def updateEmbedding(
         id: UserId,
-        observedVersion: Long,
         embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
     ): IO[Either[RepositoryError, Unit]] =
       ref.modify { users =>
         users.get(id) match {
-          case Some(user) if user.version == observedVersion => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
-          case Some(_) => (users, Left(RepositoryError.Conflict))
+          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
           case None => (users, Left(RepositoryError.Conflict))
         }
       }

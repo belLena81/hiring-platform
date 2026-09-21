@@ -34,7 +34,7 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
   private val kafka = KafkaConfig(
     enabled = true,
     bootstrapServers = sys.props.getOrElse("phase5.compose.kafka", "127.0.0.1:9092"),
-    topic = "hiring.operational-events.v1",
+    topic = "hiring.operational-events",
     consumerGroup = s"phase5-evidence-${UUID.randomUUID()}",
     publisher = KafkaPublisherConfig("compose-evidence-writer", 50, 30, 1, 10, 100),
     consumer = KafkaConsumerConfig(enabled = true, receiptTtlDays = 8, quarantineTtlDays = 7)

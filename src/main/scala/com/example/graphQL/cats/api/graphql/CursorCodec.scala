@@ -13,9 +13,8 @@ import javax.crypto.spec.SecretKeySpec
 import scala.util.Try
 
 private[cats] object CursorCodec {
-  private val CurrentVersion = "v3"
   private val HmacAlgorithm = "HmacSHA256"
-  private val KeyDerivationLabel = "hiring-platform:graphql-cursor:v3"
+  private val KeyDerivationLabel = "hiring-platform:graphql-cursor"
   private val MacBytes = 16
   private val Base64Encoder = Base64.getUrlEncoder.withoutPadding()
   private val Base64Decoder = Base64.getUrlDecoder
@@ -72,7 +71,7 @@ private[cats] object CursorCodec {
   }
 
   def encode[A](value: A)(using keyed: Keyed[A], key: CursorKey): String = {
-    val payload = s"$CurrentVersion|${keyed.kind.tag}|${keyed.at(value)}|${keyed.id(value)}"
+    val payload = s"${keyed.kind.tag}|${keyed.at(value)}|${keyed.id(value)}"
     val mac = Base64Encoder.encodeToString(sign(payload, key).take(MacBytes))
     Base64Encoder.encodeToString(s"$payload|$mac".getBytes(StandardCharsets.UTF_8))
   }
@@ -81,13 +80,12 @@ private[cats] object CursorCodec {
     for {
       decoded <- decodeText(value)
       parts <- decoded.split("\\|", -1) match {
-        case Array(version, tag, at, id, mac) if version == CurrentVersion => Right((tag, at, id, mac))
-        case Array(version, _, _, _, _) if version != CurrentVersion => Left(CursorError.Malformed("Unsupported cursor version"))
+        case Array(tag, at, id, mac) => Right((tag, at, id, mac))
         case _ => Left(CursorError.Malformed("Invalid cursor shape"))
       }
       (tag, at, id, mac) = parts
       actualKind <- CursorKind.values.find(_.tag == tag).toRight(CursorError.Malformed("Unknown cursor kind"))
-      payload = s"$CurrentVersion|$tag|$at|$id"
+      payload = s"$tag|$at|$id"
       suppliedMac <- decodeMac(mac)
       _ <- Either.cond(
         MessageDigest.isEqual(suppliedMac, sign(payload, key).take(MacBytes)),

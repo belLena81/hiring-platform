@@ -178,7 +178,6 @@ object MongoHiringRuntime {
             jobs,
             embeddings,
             vectorSearch.voyageModel,
-            vectorSearch.embeddingVersion,
             vectorSearch.queueSize,
             vectorSearch.parallelism,
             vectorSearch.retryAttempts,
@@ -192,8 +191,7 @@ object MongoHiringRuntime {
               jobs,
               embeddings,
               search,
-              vectorSearch.voyageModel,
-              vectorSearch.embeddingVersion
+              vectorSearch.voyageModel
             )
             assemble(jobService, accountService, Some(semanticSearch))
           }
@@ -217,7 +215,6 @@ object MongoHiringRuntime {
       voyageEndpoint = "https://api.voyageai.com/v1/embeddings",
       voyageModel = "voyage-4-lite",
       voyageDimension = 1024,
-      embeddingVersion = 1,
       queueSize = 128,
       parallelism = 4,
       timeoutMillis = 5000,
@@ -268,7 +265,7 @@ object MongoHiringRuntime {
     KafkaConfig(
       enabled = false,
       bootstrapServers = "127.0.0.1:9092",
-      topic = "hiring.operational-events.v1",
+      topic = "hiring.operational-events",
       consumerGroup = "hiring-phase5-consumer",
       KafkaPublisherConfig("local-publisher", batchSize = 25, leaseSeconds = 30, retryDelaySeconds = 5, maxAttempts = 10, pollIntervalMillis = 500),
       KafkaConsumerConfig(enabled = false, receiptTtlDays = 8, quarantineTtlDays = 7)

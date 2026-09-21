@@ -11,7 +11,7 @@ import java.time.Instant
 trait UserRepository[F[_]] {
   def find(id: UserId): F[Either[RepositoryError, Option[User]]]
   def findMany(ids: List[UserId]): F[Either[RepositoryError, List[User]]]
-  def updateEmbedding(id: UserId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
+  def updateEmbedding(id: UserId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
 trait UserAccountRepository[F[_]] {
@@ -34,7 +34,7 @@ trait JobRepository[F[_]] {
   def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): F[Either[RepositoryError, Unit]]
   def update(job: Job, now: Instant): F[Either[RepositoryError, Job]]
   def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): F[Either[RepositoryError, Job]]
-  def updateEmbedding(id: JobId, observedVersion: Long, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
+  def updateEmbedding(id: JobId, embedding: EntityEmbedding): F[Either[RepositoryError, Unit]]
 }
 
 trait EmbeddingService[F[_]] {
@@ -113,7 +113,6 @@ trait OperationalEventOutboxRepository[F[_]] {
 
 trait ConsumerReceiptRepository[F[_]] {
   def exists(consumerGroup: String, eventId: java.util.UUID): F[Either[RepositoryError, Boolean]]
-  def latestSequence(consumerGroup: String, aggregateType: String, aggregateId: String): F[Either[RepositoryError, Option[Long]]]
   def record(consumerGroup: String, event: OperationalEventEnvelope, now: Instant, expiresAt: Instant): F[Either[RepositoryError, Boolean]]
 }
 

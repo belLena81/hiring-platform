@@ -8,7 +8,6 @@ enum SearchMode {
 
 final case class EmbeddingMeta(
     model: String,
-    version: Int,
     sourceHash: String,
     updatedAt: Instant
 )

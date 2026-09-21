@@ -18,8 +18,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   private val searchId = UUID.fromString("00000000-0000-0000-0000-000000000099")
   private val profile = CandidateProfile(Set("Scala"), Some("Backend engineer"), Some("resume://candidate"))
   private val candidateWithProfile = candidate.copy(profile = Some(UserProfile.Candidate(profile)))
-  private val meta = EmbeddingMeta("voyage-4-lite", 1, SourceHash.sha256(SearchableText.candidate(profile)), now)
-  private val jobMeta = EmbeddingMeta("voyage-4-lite", 1, SourceHash.sha256(SearchableText.job(openJob)), now)
+  private val meta = EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.candidate(profile)), now)
+  private val jobMeta = EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.job(openJob)), now)
   private val embedding = EntityEmbedding(List(0.1f, 0.2f), meta)
   private val jobEmbedding = EntityEmbedding(List(0.1f, 0.2f), jobMeta)
   private val pageSize = PageSize.fromInt(5).toOption.get
@@ -173,7 +173,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       embeddings: EmbeddingService[IO],
       search: SemanticSearchRepository[IO]
   ): SemanticSearchService =
-    SemanticSearchService(users, jobs, embeddings, search, embeddingModel = configuredModel, embeddingVersion = 1)
+    SemanticSearchService(users, jobs, embeddings, search, embeddingModel = configuredModel)
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService[IO] {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
