@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
+import com.example.graphQL.cats.shared.Parsing
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 
 import java.nio.charset.StandardCharsets
@@ -19,7 +20,17 @@ private[cats] object CursorCodec {
   private val Base64Encoder = Base64.getUrlEncoder.withoutPadding()
   private val Base64Decoder = Base64.getUrlDecoder
 
-  final class CursorKey private[graphql] (private[graphql] val bytes: Array[Byte])
+  final class CursorKey private[graphql] (private val bytes: Array[Byte]) {
+    private val keySpec = new SecretKeySpec(bytes, HmacAlgorithm)
+    private val mac = ThreadLocal.withInitial(() => {
+      val instance = Mac.getInstance(HmacAlgorithm)
+      instance.init(keySpec)
+      instance
+    })
+
+    private[graphql] def sign(payload: String): Array[Byte] =
+      mac.get().doFinal(payload.getBytes(StandardCharsets.UTF_8))
+  }
 
   trait Keyed[A] {
     def kind: CursorKind
@@ -94,7 +105,7 @@ private[cats] object CursorCodec {
       )
       _ <- Either.cond(actualKind == keyed.kind, (), CursorError.WrongKind(actualKind.tag))
       timestamp <- Try(Instant.parse(at)).toEither.left.map(_ => CursorError.Malformed("Invalid cursor timestamp"))
-      uuid <- Try(UUID.fromString(id)).toEither.left.map(_ => CursorError.Malformed("Invalid cursor id"))
+      uuid <- Parsing.parseUuid(id).left.map(_ => CursorError.Malformed("Invalid cursor id"))
     } yield keyed.make(timestamp, uuid)
 
   private def decodeText(value: String): Either[CursorError, String] =
@@ -106,9 +117,5 @@ private[cats] object CursorCodec {
       .left.map(error => CursorError.Malformed(error.getMessage))
       .flatMap(bytes => Either.cond(bytes.length == MacBytes, bytes, CursorError.Malformed("Invalid cursor signature")))
 
-  private def sign(payload: String, key: CursorKey): Array[Byte] = {
-    val mac = Mac.getInstance(HmacAlgorithm)
-    mac.init(new SecretKeySpec(key.bytes, HmacAlgorithm))
-    mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
-  }
+  private def sign(payload: String, key: CursorKey): Array[Byte] = key.sign(payload)
 }

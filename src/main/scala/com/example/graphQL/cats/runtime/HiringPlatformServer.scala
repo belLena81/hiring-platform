@@ -2,11 +2,12 @@ package com.example.graphQL.cats.runtime
 
 import cats.effect.{IO, Resource}
 import com.comcast.ip4s.{Host, Port}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import org.http4s.{HttpApp, Response, Status}
 import org.http4s.ember.server.EmberServerBuilder
 import org.http4s.server.Server
 import org.typelevel.log4cats.noop.NoOpLogger
-import org.typelevel.log4cats.StructuredLogger
 import scala.concurrent.duration.*
 
 object HiringPlatformServer {
@@ -14,7 +15,7 @@ object HiringPlatformServer {
       host: Host,
       port: Port,
       app: HttpApp[IO],
-      logger: StructuredLogger[IO] = NoOpLogger[IO]
+      diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, Server] =
     EmberServerBuilder.default[IO]
       .withHost(host)
@@ -27,7 +28,8 @@ object HiringPlatformServer {
       .withMaxHeaderSize(8192)
       .withMaxConnections(64)
       .withErrorHandler { case error =>
-        logger.error(error)("unhandled").as(Response[IO](Status.InternalServerError))
+        diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+          .as(Response[IO](Status.InternalServerError))
       }
       .build
 }

@@ -3,7 +3,7 @@ package com.example.graphQL.cats.api.http
 import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.graphql.{HiringGraphQLServices, RequestContextFactory}
+import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, HiringGraphQLServices, RequestContextFactory}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogFields, ProbeResult}
 import org.http4s.*
 import org.http4s.circe.*
@@ -62,6 +62,7 @@ object HiringApiRoutes {
       authenticate: Kleisli[IO, Request[IO], Either[AuthFailure, Option[ActorContext]]],
       ensureHiringReady: IO[ProbeResult],
       contextFactory: RequestContextFactory,
+      documentCache: GraphQLDocumentCache,
       rateLimiter: AuthRateLimiter,
       clientAddressResolver: ClientAddressResolver
   )

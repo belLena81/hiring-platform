@@ -59,7 +59,7 @@ enum ApplicationStatus {
 type AuthSuccess {
   user: User!
   accessToken: String!
-  expiresAt: String!
+  expiresAt: Instant!
 }
 
 input BootstrapAdminInput {

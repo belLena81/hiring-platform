@@ -1,10 +1,11 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{Deferred, IO, Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
+import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
 import com.example.graphQL.cats.api.http.AuthRateLimiter
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, Diagnostics, LogEvent, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
@@ -45,6 +46,8 @@ final class RequestContext private (
     probe: IO[ProbeResult],
     hiringReady: IO[ProbeResult],
     val actor: Option[ActorContext],
+    viewer: Option[IO[Either[UseCaseError, AuthenticatedActor]]],
+    viewerInvalidated: Ref[IO, Boolean],
     val hiring: HiringGraphQLServices,
     tracer: Tracer[IO],
     spanContext: Option[SpanContext],
@@ -56,6 +59,18 @@ final class RequestContext private (
   def readiness: IO[ProbeResult] = probe
 
   def hiringAvailable: IO[ProbeResult] = hiringReady
+
+  private[graphql] def authenticatedActor: IO[AuthenticatedActor] =
+    (actor, viewer) match {
+      case (Some(_), Some(resolveViewer)) =>
+        viewerInvalidated.get.flatMap {
+          case true => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)))
+          case false => read(resolveViewer)
+        }
+      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)))
+    }
+
+  private[graphql] def invalidateViewer: IO[Unit] = viewerInvalidated.set(true)
 
   private[graphql] def rateLimited(operation: AuthRateLimiter.Operation): IO[Unit] =
     rateLimit(AuthRateLimiter.Key(clientAddress, operation)).flatMap {
@@ -88,8 +103,9 @@ final class RequestContext private (
 
   def visibleEmailUsers(ids: List[UserId]): IO[List[EmailVisibility]] =
     actor match {
-      case Some(current) => read(hiring.readModel.canViewUserEmails(current, ids.distinct)).map(_.toList.map(EmailVisibility(_)))
       case None => IO.pure(Nil)
+      case Some(_) => authenticatedActor.flatMap(current =>
+        read(hiring.readModel.canViewUserEmails(current, ids.distinct)).map(_.toList.map(EmailVisibility(_))))
     }
 
   private def read[A](result: IO[Either[UseCaseError, A]]): IO[A] =
@@ -124,7 +140,9 @@ object RequestContext {
       closed <- Resource.eval(Deferred[IO, Unit])
       memoized <- Resource.eval(parameters.probe.memoize)
       memoizedHiringReady <- Resource.eval(parameters.ensureHiringReady.memoize)
-      context = new RequestContext(dispatcher, closed, memoized, memoizedHiringReady, parameters.actor, parameters.hiring,
+      memoizedViewer <- Resource.eval(parameters.actor.traverse(actor => parameters.hiring.readModel.viewer(actor).memoize))
+      viewerInvalidated <- Resource.eval(Ref.of[IO, Boolean](false))
+      context = new RequestContext(dispatcher, closed, memoized, memoizedHiringReady, parameters.actor, memoizedViewer, viewerInvalidated, parameters.hiring,
         parameters.tracer, spanContext, parameters.diagnostics, parameters.requestId, parameters.clientAddress, parameters.rateLimit)
       _ <- Resource.onFinalize(closed.complete(()).void)
     } yield context

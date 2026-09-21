@@ -2,7 +2,6 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.given
 import io.circe.Json
 import munit.CatsEffectSuite
 import sangria.execution.Executor

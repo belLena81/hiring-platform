@@ -106,7 +106,7 @@ private[graphql] object HiringGraphQLTypes {
   lazy val userConnectionType: ObjectType[RequestContext, Connection[User]] = connectionType("UserConnection", userEdgeType)
   lazy val authSuccessType: ObjectType[RequestContext, AuthSuccess] = ObjectType("AuthSuccess", fields[RequestContext, AuthSuccess](
     Field("user", userType, resolve = _.value.user), Field("accessToken", StringType, resolve = _.value.accessToken),
-    Field("expiresAt", StringType, resolve = _.value.expiresAt)))
+    Field("expiresAt", instantType, resolve = _.value.expiresAt)))
   lazy val deletionSuccessType: ObjectType[RequestContext, DeletionSuccess] = ObjectType("DeletionSuccess", fields[RequestContext, DeletionSuccess](
     Field("deleted", BooleanType, resolve = _.value.deleted)))
   lazy val interactionSuccessType: ObjectType[RequestContext, InteractionSuccess] = ObjectType("InteractionSuccess", fields[RequestContext, InteractionSuccess](

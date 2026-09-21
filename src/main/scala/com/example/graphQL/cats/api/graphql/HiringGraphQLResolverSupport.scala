@@ -39,7 +39,7 @@ private[graphql] object HiringGraphQLResolverSupport {
     ))
 
   def timestamped[A](f: (Instant, UUID) => IO[A]): IO[A] =
-    (IO.realTimeInstant, IO.randomUUID).mapN(f).flatten
+    (IO.realTimeInstant, IO.randomUUID).flatMapN(f)
 
   def searchEventId(searchId: UUID): UUID =
     UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))
@@ -194,14 +194,9 @@ private[graphql] object HiringGraphQLResolverSupport {
   }
 
   private def authenticated(context: Context[RequestContext, Unit]): IO[(ActorContext, HiringGraphQLServices)] =
-    context.ctx.actor match {
-      case Some(actor) =>
-        val hiring = context.ctx.hiring
-        context.ctx.hiringAvailable.flatMap {
-          case ProbeResult.Ready => IO.pure((actor, hiring))
-          case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(AvailabilityError.ServiceNotReady)))
-        }
-      case None => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+    context.ctx.hiringAvailable.flatMap {
+      case ProbeResult.Ready => context.ctx.authenticatedActor.map(_ -> context.ctx.hiring)
+      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(AvailabilityError.ServiceNotReady)))
     }
 
   private def cursorPage[A, B](

@@ -35,6 +35,7 @@ object TestGraphQLSupport {
   val emptyServices: HiringGraphQLServices = HiringGraphQLServices(
     new HiringReadModel {
       def user(id: UserId) = unsupported
+      def viewer(actor: ActorContext) = unsupported
       def users(ids: List[UserId]) = unsupported
       def canViewUserEmail(actor: ActorContext, userId: UserId) = unsupported
       def canViewUserEmails(actor: ActorContext, userIds: List[UserId]) = unsupported
@@ -83,7 +84,8 @@ object TestGraphQLSupport {
   ): Resource[IO, HiringApiRoutes.Dependencies] =
     for {
       factory <- RequestContextFactory.resource
+      documentCache <- GraphQLDocumentCache.resource
       limiter <- Resource.eval(AuthRateLimiter.create(authRateLimit))
-    } yield HiringApiRoutes.Dependencies(hiring, Kleisli(authenticate), hiringReady, factory, limiter,
+    } yield HiringApiRoutes.Dependencies(hiring, Kleisli(authenticate), hiringReady, factory, documentCache, limiter,
       ClientAddressResolver(trustedProxy))
 }

@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.auth
 
 import cats.effect.{IO, Ref}
+import cats.effect.std.Semaphore
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{UserAccountRepository, UserRepository}
@@ -190,8 +191,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   }
 
   test("Argon2 unknown-user verification accepts arbitrary credentials without retaining their hash") {
-    val hasher = new Argon2PasswordHasher(iterations = 1, memoryKilobytes = 8192, parallelism = 1)
-    hasher.verifyUnknown("first-password").flatMap(_ => hasher.verifyUnknown("second-password")).map(assertEquals(_, ()))
+    Semaphore[IO](1).flatMap { permits =>
+      val hasher = new Argon2PasswordHasher(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits)
+      hasher.verifyUnknown("first-password").flatMap(_ => hasher.verifyUnknown("second-password")).map(assertEquals(_, ()))
+    }
   }
 
   test("deleting an already deleted account is idempotent") {

@@ -17,6 +17,8 @@ import sangria.schema.*
 private[graphql] object HiringGraphQLSchemaAssembly {
   private val MaxQueryDepth = 16
   private val MaxQueryComplexity = 1000d
+  private val connectionComplexity: (RequestContext, Args, Double) => Double =
+    (_, args, child) => 1d + args.arg(firstArgument) * child
   final case class QueryComplexityExceeded(limit: Double)
       extends IllegalArgumentException(s"Query complexity exceeds $limit")
 
@@ -33,16 +35,22 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     Field("health", healthType, resolve = _ => ()),
     ioField("readiness", readinessType)(context => context.ctx.readiness),
     ioField("me", OptionType(userType))(accountMe),
-    ioField("users", userConnectionType, firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil)(users),
-    ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil)(jobs),
+    ioField("users", userConnectionType, firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil,
+      complexity = Some(connectionComplexity))(users),
+    ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil,
+      complexity = Some(connectionComplexity))(jobs),
     ioField("semanticJobSearch", rankedJobResultsType, queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil)(semanticJobSearch),
     ioField("recommendedJobs", rankedJobResultsType, firstArgument :: searchIdArgument :: Nil)(recommendedJobs),
     ioField("candidateMatches", rankedCandidateResultsType, jobIdArgument :: firstArgument :: searchIdArgument :: Nil)(candidateMatches),
     ioField("job", OptionType(jobType), idArgument :: Nil)(job),
-    ioField("myJobs", jobConnectionType, firstArgument :: afterArgument :: jobStatusArgument :: Nil)(myJobs),
-    ioField("myApplications", applicationConnectionType, firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(myApplications),
-    ioField("jobApplications", applicationConnectionType, jobIdArgument :: firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(jobApplications),
-    ioField("applicationHistory", applicationEventConnectionType, applicationIdArgument :: firstArgument :: afterArgument :: Nil)(applicationHistory)
+    ioField("myJobs", jobConnectionType, firstArgument :: afterArgument :: jobStatusArgument :: Nil,
+      complexity = Some(connectionComplexity))(myJobs),
+    ioField("myApplications", applicationConnectionType, firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
+      complexity = Some(connectionComplexity))(myApplications),
+    ioField("jobApplications", applicationConnectionType, jobIdArgument :: firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
+      complexity = Some(connectionComplexity))(jobApplications),
+    ioField("applicationHistory", applicationEventConnectionType, applicationIdArgument :: firstArgument :: afterArgument :: Nil,
+      complexity = Some(connectionComplexity))(applicationHistory)
   ))
 
   lazy val mutationType: ObjectType[RequestContext, Unit] = ObjectType("Mutation", fields[RequestContext, Unit](

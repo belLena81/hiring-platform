@@ -61,4 +61,10 @@ final class RequestContextSpec extends CatsEffectSuite {
       assertEquals(results, (ProbeResult.Ready, ProbeResult.Ready))
     }
   }
+
+  test("anonymous nested email visibility remains masked without resolving a viewer") {
+    TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use { context =>
+      context.visibleEmailUsers(Nil).map(result => assertEquals(result, Nil))
+    }
+  }
 }

@@ -20,16 +20,28 @@ object HiringGraphQLSchema {
       request: GraphQLRequest,
       context: Resource[IO, RequestContext]
   ): IO[Either[Failure, Json]] =
-    context.use(executeInContext(request, _))
+    GraphQLDocumentCache.resource.use(_.document(request.query).fold(
+      failure => IO.pure(Left(failure)),
+      document => context.use(executeInContext(request, document, _))))
 
   private[api] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
+    GraphQLDocumentCache.resource.use(_.document(request.query).fold(
+      failure => IO.pure(Left(failure)),
+      document => executeInContext(request, document, context)))
+
+  private[api] def executeInContext(
+      request: GraphQLRequest,
+      document: GraphQLDocument,
+      context: RequestContext
+  ): IO[Either[Failure, Json]] =
     IO.executionContext.flatMap { implicit executionContext =>
       IO.fromFuture(IO(Executor.execute(
         schema = schema,
-        queryAst = request.document,
+        queryAst = document.document,
         userContext = context,
         variables = request.variables,
         operationName = request.operationName,
+        queryValidator = document.queryValidator,
         exceptionHandler = ExceptionHandler {
           case (_, error: QueryAnalysisError) => throw error
           case (_, error: QueryComplexityExceeded) => throw error

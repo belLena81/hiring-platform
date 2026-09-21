@@ -43,9 +43,9 @@ final class GraphQLRequestSpec extends CatsEffectSuite {
     }
   }
 
-  test("maps GraphQL parser failures to the sanitized message") {
-    val failure = Json.obj("query" -> Json.fromString("{ health")).as[GraphQLRequest].left.toOption
+  test("retains raw query text for lazy parsing") {
+    val request = Json.obj("query" -> Json.fromString("{ health")).as[GraphQLRequest]
 
-    assertEquals(failure.map(_.message), Some("Invalid GraphQL query"))
+    assertEquals(request.map(_.query), Right("{ health"))
   }
 }

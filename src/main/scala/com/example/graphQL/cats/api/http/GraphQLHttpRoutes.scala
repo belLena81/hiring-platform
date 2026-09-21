@@ -61,28 +61,35 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
     else {
       request.attemptAs[GraphQLRequest](using jsonOf[IO, GraphQLRequest]).foldF(
         _ => rejected(HttpRejection.InvalidRequest, requestId, mediaType = mediaType),
-        parsed => {
+        parsed => dependencies.documentCache.document(parsed.query).fold(
+          _ => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType),
+          document => {
           def execute: IO[Response[IO]] = {
             val context = dependencies.contextFactory.resource(RequestContextParameters(
               service.readiness(Some(requestId)), actor, dependencies.hiring, dependencies.ensureHiringReady,
               tracer, diagnostics, Some(requestId), dependencies.clientAddressResolver.resolve(request),
               key => dependencies.rateLimiter.permit(key)))
-            HiringGraphQLSchema.execute(parsed, context).flatMap {
-              case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
+            context.use(HiringGraphQLSchema.executeInContext(parsed, document, _)).flatTap {
+              case Right(_) if !document.cached => dependencies.documentCache.store(parsed.query, document.document)
+              case _ => IO.unit
+            }.flatMap {
+              case Right(result) => completedGraphQL(parsed, result, requestId, mediaType, Some(document.document))
               case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
               case Left(HiringGraphQLSchema.Failure.Internal) => rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
             }
           }
 
           execute
-        }
+          }
+        )
       )
     }
   }
 
   private[http] def completedGraphQL(parsed: GraphQLRequest, result: Json, requestId: String,
-      mediaType: MediaType = MediaTypeNegotiation.graphqlResponse): IO[Response[IO]] = {
-    val operationName = parsed.document.operation(parsed.operationName).flatMap(_.name)
+      mediaType: MediaType = MediaTypeNegotiation.graphqlResponse,
+      document: Option[sangria.ast.Document] = None): IO[Response[IO]] = {
+    val operationName = document.flatMap(_.operation(parsed.operationName).flatMap(_.name)).orElse(parsed.operationName)
     val fields = Map(LogField.Outcome ->
       (if (result.hcursor.downField("errors").succeeded) "FIELD_ERROR" else "COMPLETED")) ++
       operationName.map(LogField.OperationName -> _)

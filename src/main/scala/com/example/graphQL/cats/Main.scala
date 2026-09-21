@@ -4,7 +4,7 @@ import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
-import com.example.graphQL.cats.api.graphql.RequestContextFactory
+import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, RequestContextFactory}
 import com.example.graphQL.cats.api.http.{AuthRateLimiter, ClientAddressResolver, HiringApiRoutes}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
@@ -15,8 +15,6 @@ import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntim
 import scala.util.control.NoStackTrace
 
 object Main extends IOApp {
-  System.setProperty("cats.effect.trackFiberContext", "true")
-
   private final case class ConfigInvalid(errors: NonEmptyList[ConfigError])
       extends RuntimeException with NoStackTrace
 
@@ -36,6 +34,7 @@ object Main extends IOApp {
     runtime <- MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
       config.jwtAuth, config.passwordHash, config.kafka, config.resetOnStart)
     contextFactory <- RequestContextFactory.resource
+    documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
     authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
     authenticate = Kleisli(authenticator.authenticate)
@@ -47,6 +46,7 @@ object Main extends IOApp {
         authenticate,
         runtime.hiringReadiness,
         contextFactory,
+        documentCache,
         rateLimiter,
         ClientAddressResolver(config.trustedProxy)
       ),
@@ -55,7 +55,7 @@ object Main extends IOApp {
     routeConfig = HiringApiRoutes.HttpConfig(config.admissionPermits, config.requestTimeout)
     routeSet <- Resource.eval(routeBuilder.httpRoutes(routeConfig))
     routes <- telemetry.instrument(routeSet)
-    _ <- HiringPlatformServer.resource(config.host, config.port, routes, telemetry.logger)
+    _ <- HiringPlatformServer.resource(config.host, config.port, routes, diagnostics)
     _ <- Resource.make(diagnostics.emit(LogEvent.Started, fields = Map(
       LogField.HttpHost -> config.host.toString,
       LogField.HttpPort -> config.port.toString

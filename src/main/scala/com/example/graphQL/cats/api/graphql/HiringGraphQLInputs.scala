@@ -4,15 +4,12 @@ import cats.syntax.either.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
-import io.circe.Decoder
-import io.circe.generic.semiauto.deriveDecoder
 import sangria.marshalling.circe.*
 import sangria.schema.*
 import sangria.validation.{ValueCoercionViolation, Violation}
 
 import java.time.Instant
 import java.util.{Locale, UUID}
-import scala.util.Try
 
 private[graphql] object HiringGraphQLInputs {
   private final case class IdCoercionViolation(typeName: String)
@@ -21,46 +18,16 @@ private[graphql] object HiringGraphQLInputs {
       extends ValueCoercionViolation(s"Invalid $typeName value; expected a string")
   private final case class InstantCoercionViolation()
       extends ValueCoercionViolation("Invalid Instant value; expected ISO-8601")
-  private given Decoder[UUID] = Decoder.decodeUUID
-  private given Decoder[JobId] = Decoder.decodeUUID.map(JobId.apply)
-  private given Decoder[ApplicationId] = Decoder.decodeUUID.map(ApplicationId.apply)
-  private given Decoder[UserRole] = Decoder.decodeString.emap { value =>
-    UserRole.values
-      .find(_.toString.equalsIgnoreCase(value))
-      .toRight(s"Unknown user role: $value")
-  }
-  private given Decoder[Instant] = Decoder.decodeString.emapTry(value => Try(Instant.parse(value)))
+  lazy val healthStatus: EnumType[String] = enumType("HealthStatus", List("UP"))
+  lazy val readinessStatus: EnumType[String] = enumType("ReadinessStatus", List("READY", "NOT_READY"))
+  lazy val jobStatus: EnumType[JobStatus] = enumType("JobStatus", JobStatus.values.toList)
+  lazy val applicationStatus: EnumType[ApplicationStatus] = enumType("ApplicationStatus", ApplicationStatus.values.toList)
+  lazy val userRole: EnumType[UserRole] = enumType("UserRole", UserRole.values.toList)
+  lazy val userStatus: EnumType[AccountStatus] = enumType("UserStatus", AccountStatus.values.toList)
+  lazy val searchMode: EnumType[SearchMode] = enumType("SearchMode", SearchMode.values.toList)
 
-  given Decoder[JobFilterGraphQLInput] = deriveDecoder
-  given Decoder[SubmitApplicationGraphQLInput] = deriveDecoder
-  given Decoder[JobGraphQLInput] = deriveDecoder
-  given Decoder[UpdateJobGraphQLInput] = deriveDecoder
-  given Decoder[JobActionGraphQLInput] = deriveDecoder
-  given Decoder[ApplicationActionGraphQLInput] = deriveDecoder
-  given Decoder[RejectApplicationGraphQLInput] = deriveDecoder
-  given Decoder[DeclineApplicationGraphQLInput] = deriveDecoder
-  given Decoder[SignUpGraphQLInput] = deriveDecoder
-  given Decoder[BootstrapAdminGraphQLInput] = deriveDecoder
-  given Decoder[LoginGraphQLInput] = deriveDecoder
-  given Decoder[UpdateProfileGraphQLInput] = deriveDecoder
-  given Decoder[RecordJobViewGraphQLInput] = deriveDecoder
-  given Decoder[RecordSearchResultClickGraphQLInput] = deriveDecoder
-
-  lazy val healthStatus: EnumType[String] =
-    EnumType("HealthStatus", values = List(EnumValue("UP", value = "UP")))
-  lazy val readinessStatus: EnumType[String] =
-    EnumType("ReadinessStatus", values = List(
-      EnumValue("READY", value = "READY"), EnumValue("NOT_READY", value = "NOT_READY")))
-  lazy val jobStatus: EnumType[JobStatus] =
-    EnumType("JobStatus", values = JobStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
-  lazy val applicationStatus: EnumType[ApplicationStatus] =
-    EnumType("ApplicationStatus", values = ApplicationStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
-  lazy val userRole: EnumType[UserRole] =
-    EnumType("UserRole", values = UserRole.values.toList.map(role => EnumValue(role.toString.toUpperCase(Locale.ROOT), value = role)))
-  lazy val userStatus: EnumType[AccountStatus] =
-    EnumType("UserStatus", values = AccountStatus.values.toList.map(status => EnumValue(status.toString.toUpperCase(Locale.ROOT), value = status)))
-  lazy val searchMode: EnumType[SearchMode] =
-    EnumType("SearchMode", values = SearchMode.values.toList.map(mode => EnumValue(mode.toString.toUpperCase(Locale.ROOT), value = mode)))
+  private def enumType[A](name: String, values: List[A]): EnumType[A] =
+    EnumType(name, values = values.map(value => EnumValue(value.toString.toUpperCase(Locale.ROOT), value = value)))
 
   private def stringScalar[A](name: String, parse: String => Either[Violation, A], render: A => String): ScalarType[A] =
     ScalarType[A](name,

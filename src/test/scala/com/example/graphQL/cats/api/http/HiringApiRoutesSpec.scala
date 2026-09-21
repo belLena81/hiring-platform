@@ -963,6 +963,20 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("connection complexity scales with first before resolver work") {
+    val selections = (1 to 20).map(index => s"name$index: name").mkString(" ")
+    val query = s"{ jobs(first: 100) { edges { node { recruiter { $selections } } } } }"
+    for {
+      calls <- Ref.of[IO, Int](0)
+      http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
+      response <- http(request(query))
+      count <- calls.get
+    } yield {
+      assertEquals(response.status, Status.BadRequest)
+      assertEquals(count, 0)
+    }
+  }
+
   test("named operation, variables, explicit nulls, methods and media negotiation") {
     val selected = health.withEntity(Json.obj(
       "query" -> Json.fromString("query First { readiness { status } } query Second($include: Boolean!) { health @include(if: $include) { status } }"),

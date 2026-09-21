@@ -66,7 +66,10 @@ private[graphql] object HiringGraphQLAccountResolvers {
 
   def deleteMyAccount(context: Context[RequestContext, Unit]): IO[Any] =
     authenticatedMutation(context) { case (actor, hiring) =>
-      IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now))
+      IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now)).flatTap {
+        case Right(_) => context.ctx.invalidateViewer
+        case Left(_) => IO.unit
+      }
         .flatMap(result => mutationResult(IO.pure(result.map(_ => DeletionSuccess(true))))(identity))
     }
 
@@ -111,7 +114,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
     }
 
   private def authSuccess(result: (User, AccountToken)): AuthSuccess =
-    AuthSuccess(result._1, result._2.value, result._2.expiresAt.toString)
+    AuthSuccess(result._1, result._2.value, result._2.expiresAt)
 
   private def userConnection(values: List[User], requested: Int)(using CursorCodec.CursorKey): Connection[User] =
     connection(values, requested)(user => CursorCodec.encode(UserCursor(user.createdAt, user.id)))

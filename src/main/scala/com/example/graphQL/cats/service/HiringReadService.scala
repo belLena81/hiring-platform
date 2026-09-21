@@ -20,6 +20,9 @@ final class HiringReadService(
   override def user(id: UserId): IO[Either[UseCaseError, Option[User]]] =
     read(users.find(id))
 
+  override def viewer(actor: ActorContext): IO[Either[UseCaseError, AuthenticatedActor]] =
+    authorization.resolve(actor).map(_.map(AuthenticatedActor(actor, _)))
+
   override def users(ids: List[UserId]): IO[Either[UseCaseError, List[User]]] =
     read(users.findMany(ids))
 

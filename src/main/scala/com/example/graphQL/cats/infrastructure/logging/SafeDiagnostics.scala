@@ -7,7 +7,7 @@ import io.circe.Json
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermission
-import org.slf4j.{LoggerFactory, MarkerFactory, MDC}
+import org.slf4j.LoggerFactory
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import scala.jdk.CollectionConverters.*
 
@@ -31,19 +31,15 @@ object SafeDiagnostics {
     }
 
   def apply(maskSensitive: Boolean = true): Diagnostics = {
-    val logger = LoggerFactory.getLogger(loggerName)
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
-    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) => IO.blocking {
-      val previousCategory = MDC.get("category")
-      MDC.put("category", event.category)
-      try event.level match {
-        case LogLevel.Trace => logger.trace(MarkerFactory.getMarker(event.marker), message)
-        case LogLevel.Debug => logger.debug(MarkerFactory.getMarker(event.marker), message)
-        case LogLevel.Info => logger.info(MarkerFactory.getMarker(event.marker), message)
-        case LogLevel.Warn => logger.warn(MarkerFactory.getMarker(event.marker), message)
-        case LogLevel.Error => logger.error(MarkerFactory.getMarker(event.marker), message)
-      } finally {
-        if (previousCategory == null) MDC.remove("category") else MDC.put("category", previousCategory)
+    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) => {
+      val logger = structuredLogger.addContext(Map("category" -> event.category, "marker" -> event.marker))
+      event.level match {
+        case LogLevel.Trace => logger.trace(message)
+        case LogLevel.Debug => logger.debug(message)
+        case LogLevel.Info => logger.info(message)
+        case LogLevel.Warn => logger.warn(message)
+        case LogLevel.Error => logger.error(message)
       }
     })
   }
@@ -73,11 +69,22 @@ object SafeDiagnostics {
     Option(logger.getClass.getMethod("iteratorForAppenders").invoke(logger))
       .collect { case iterator: java.util.Iterator[?] => iterator.asScala.toList }
       .getOrElse(Nil)
-      .flatMap { appender =>
-        Option(appender.getClass.getMethod("getFile").invoke(appender)).collect {
-          case file: String if file.nonEmpty => Paths.get(file).toAbsolutePath.normalize
-        }
-      }
+      .flatMap(appenderFiles)
+  }
+
+  private def appenderFiles(appender: Any): List[Path] = {
+    val direct = try Option(appender.getClass.getMethod("getFile").invoke(appender)).collect {
+      case file: String if file.nonEmpty => Paths.get(file).toAbsolutePath.normalize
+    }.toList catch {
+      case _: ReflectiveOperationException => Nil
+    }
+    val nested = try Option(appender.getClass.getMethod("iteratorForAppenders").invoke(appender))
+      .collect { case iterator: java.util.Iterator[?] => iterator.asScala.toList }
+      .getOrElse(Nil)
+      .flatMap(appenderFiles) catch {
+      case _: ReflectiveOperationException => Nil
+    }
+    direct ++ nested
   }
 
   private def restrictToCurrentUser(path: Path): Unit =

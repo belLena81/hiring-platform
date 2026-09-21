@@ -3,21 +3,28 @@ package com.example.graphQL.cats.service.auth
 import cats.Monad
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.UserRepository
-import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, User, UserRole}
 
 final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
   def resolve(actor: ActorContext, allowDeleted: Boolean = false): F[Either[UseCaseError, User]] =
-    users.find(actor.userId).map(_.leftMap(UseCaseError.Repository.apply).flatMap {
-      case None => UseCaseError.Authentication(AuthenticationError.Unauthorized).asLeft[User]
-      case Some(user) if user.accountStatus != AccountStatus.Active && !allowDeleted =>
-        UseCaseError.Authentication(AuthenticationError.Unauthorized).asLeft[User]
-      case Some(user) if user.role != actor.role => UseCaseError.Domain(DomainError.Forbidden).asLeft[User]
-      case Some(user) if user.role == UserRole.Admin && !user.adminSingleton =>
-        UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation).asLeft[User]
-      case Some(user) => user.asRight[UseCaseError]
-    })
+    actor match {
+      case authenticated: AuthenticatedActor => Monad[F].pure(validate(authenticated.claims, authenticated.viewer, allowDeleted))
+      case _ => users.find(actor.userId).map(
+        _.leftMap(UseCaseError.Repository.apply)
+          .flatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+          .flatMap(validate(actor, _, allowDeleted))
+      )
+    }
+
+  def validate(actor: ActorContext, user: User, allowDeleted: Boolean = false): Either[UseCaseError, User] =
+    if (user.accountStatus != AccountStatus.Active && !allowDeleted)
+      UseCaseError.Authentication(AuthenticationError.Unauthorized).asLeft[User]
+    else if (user.role != actor.role) UseCaseError.Domain(DomainError.Forbidden).asLeft[User]
+    else if (user.role == UserRole.Admin && !user.adminSingleton)
+      UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation).asLeft[User]
+    else user.asRight[UseCaseError]
 
   def canManageJobs(user: User): Boolean =
     user.role == UserRole.Recruiter || (user.role == UserRole.Admin && user.adminSingleton)

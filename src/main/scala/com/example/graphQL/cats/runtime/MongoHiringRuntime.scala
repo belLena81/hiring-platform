@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Resource}
+import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
@@ -103,7 +104,8 @@ object MongoHiringRuntime {
       kafka: KafkaConfig,
       resetOnStart: Boolean = false
   ): Resource[IO, MongoHiringRuntime] =
-    MongoDatabaseProbe.clientResource(uri).flatMap { client =>
+    Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong)).flatMap { passwordHashPermits =>
+      MongoDatabaseProbe.clientResource(uri).flatMap { client =>
       val database = client.getDatabase(databaseName)
       val embeddingWork = Option.when(vectorSearch.enabled)(new MongoEmbeddingWorkRepository(database))
       val users = MongoUserRepository.transactional(database, client, embeddingWork)
@@ -113,7 +115,7 @@ object MongoHiringRuntime {
       val outbox = new MongoOperationalEventOutboxRepository(database)
       val receipts = new MongoConsumerReceiptRepository(database)
       val quarantine = new MongoEventQuarantineRepository(database)
-      hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, jwtAuth, passwordHash).flatMap { services =>
+      hiringServices(database, users, jobs, applications, searchSessions, vectorSearch, embeddingService, jwtAuth, passwordHash, passwordHashPermits).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, vectorSearch, resetOnStart), diagnostics).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine, diagnostics).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(uri, databaseName)
@@ -126,6 +128,7 @@ object MongoHiringRuntime {
           }
         }
       }
+      }
     }
 
   private def hiringServices(
@@ -137,9 +140,15 @@ object MongoHiringRuntime {
       vectorSearch: VectorSearchConfig,
       embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService[IO]],
       jwtAuth: JwtAuthConfig,
-      passwordHash: PasswordHashConfig
+      passwordHash: PasswordHashConfig,
+      passwordHashPermits: Semaphore[IO]
   ): Resource[IO, HiringGraphQLServices] =
-    val hasher = new Argon2PasswordHasher(passwordHash.iterations, passwordHash.memoryKilobytes, passwordHash.parallelism)
+    val hasher = new Argon2PasswordHasher(
+      passwordHash.iterations,
+      passwordHash.memoryKilobytes,
+      passwordHash.parallelism,
+      passwordHashPermits
+    )
     val tokenIssuer = new JwtAccessTokenIssuer(jwtAuth)
     val readModel = HiringReadService(users, jobs, applications)
     val applicationService = ApplicationService(users, jobs, applications)

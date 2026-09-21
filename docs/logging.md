@@ -1,6 +1,6 @@
 # Filtering and tracing hiring platform logs
 
-Application diagnostics are single-line JSON records in `_logs/hiring-platform.log` at the project root. The packaged [logback.xml](../src/main/resources/logback.xml) is the only severity filter: it defaults to `INFO`, writes synchronously, rolls at 20 MiB, and retains ten previous `.log` files. To investigate an incident with `DEBUG` or `TRACE`, change the packaged logger level, rebuild, and redeploy. There is no application `LOG_LEVEL` setting and no live reload.
+Application diagnostics are single-line JSON records in `_logs/hiring-platform.log` at the project root. The packaged [logback.xml](../src/main/resources/logback.xml) is the only severity filter: it defaults to `INFO`, enqueues records through a bounded asynchronous appender, rolls at 20 MiB, and retains ten previous `.log` files. To investigate an incident with `DEBUG` or `TRACE`, change the packaged logger level, rebuild, and redeploy. There is no application `LOG_LEVEL` setting and no live reload.
 
 The application uses log4cats `StructuredLogger` for structured fields and otel4s for tracing. The active OpenTelemetry trace ID is the request correlation ID. HTTP server spans, W3C propagation, active-request metrics and duration metrics are owned by the http4s otel4s middleware. Application diagnostics retain bounded rejection, GraphQL, readiness and child-operation records without synthetic HTTP completion/cancellation events.
 
@@ -21,4 +21,4 @@ With masking disabled, diagnostics may reveal approved typed values only: UUID a
 
 Credentials, authorization and cookie headers, JWTs, raw GraphQL documents, request bodies/variables, descriptions, requirements, feedback, decline reasons, resumes, search text, vectors, BSON filters, Mongo URIs, raw exception messages, and stack traces are never emitted, even with masking disabled. Trace attributes follow the same restriction.
 
-Logging remains best effort: a failing sink cannot change an HTTP result, cancellation, resource finalizer, or http4s concurrency middleware cleanup. Output is synchronous by the selected operational policy, so TRACE can add storage latency during a short investigation; the rolling-file retention bound limits disk use but does not guarantee a latency SLO.
+Logging remains best effort: a failing sink cannot change an HTTP result, cancellation, resource finalizer, or http4s concurrency middleware cleanup. The bounded asynchronous queue prevents routine file I/O from adding storage latency to application fibers; the rolling-file retention bound limits disk use but does not guarantee a latency SLO.

@@ -14,6 +14,7 @@ lazy val jwtScalaVersion       = "11.0.4"
 lazy val argon2Version         = "2.12"
 lazy val log4catsVersion       = "2.8.0"
 lazy val catsRetryVersion      = "4.0.0"
+lazy val caffeineVersion       = "3.2.0"
 lazy val logbackVersion        = "1.6.3"
 lazy val mongoVersion          = "5.12.0"
 lazy val munitVersion          = "1.3.6"
@@ -35,11 +36,13 @@ lazy val root = (project in file("."))
     version := "0.1.0",
     publish / skip := true,
     Compile / run / fork := true,
+    Compile / run / javaOptions += "-Dcats.effect.trackFiberContext=true",
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
     IntegrationTest / resourceDirectory := baseDirectory.value / "src" / "it" / "resources",
     IntegrationTest / parallelExecution := false,
     Test / fork := true,
     Test / javaOptions += "-Dcats.effect.trackFiberContext=true",
+    IntegrationTest / javaOptions += "-Dcats.effect.trackFiberContext=true",
     scalacOptions ++= Seq(
       "-encoding", "utf-8", "-release:17", "-deprecation", "-feature",
       "-unchecked", "-Wunused:all", "-Wvalue-discard", "-Werror"
@@ -75,6 +78,7 @@ lazy val root = (project in file("."))
       "io.github.iltotore"    %% "iron-pureconfig"        % ironVersion,
       "org.typelevel"       %% "log4cats-slf4j"         % log4catsVersion,
       "com.github.cb372"    %% "cats-retry"             % catsRetryVersion,
+      "com.github.ben-manes.caffeine" % "caffeine"       % caffeineVersion,
       "ch.qos.logback"       % "logback-classic"        % logbackVersion % Runtime,
       "org.scalameta"       %% "munit"                  % munitVersion % Test,
       "org.typelevel"       %% "munit-cats-effect"       % munitCatsEffectVersion % Test,

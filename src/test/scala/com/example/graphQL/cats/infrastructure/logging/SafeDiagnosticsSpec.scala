@@ -22,7 +22,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     }).as(assert(!evaluated.get()))
   }
 
-  test("LOG-01 actual SLF4J events carry the matching severity and marker") {
+  test("LOG-01 actual SLF4J events carry the matching severity and structured context") {
     val logger = LoggerFactory.getLogger("hiring.foundation").asInstanceOf[ch.qos.logback.classic.Logger]
     val requestId = "fe211944-7015-4e73-8dc1-000000000099"
     Resource.make(IO {
@@ -37,12 +37,14 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       val events = List(LogEvent.Started, LogEvent.RequestRejected, LogEvent.RuntimeFailed)
       events.traverse_(event => SafeDiagnostics().event(event, Some(requestId))) *> IO {
         val captured = appender.list.asScala.toList.filter(_.getFormattedMessage.contains(requestId))
-        assertEquals(captured.size, events.size)
-        captured.zip(events).foreach { case (record, event) =>
-          assertEquals(record.getLevel.toString, event.severity)
-          assertEquals(record.getMarkerList.asScala.map(_.getName).toList, List(event.marker))
-          assertEquals(record.getMDCPropertyMap.get("category"), event.category)
-        }
+          assertEquals(captured.size, events.size)
+          captured.zip(events).foreach { case (record, event) =>
+            assertEquals(record.getLevel.toString, event.severity)
+            assertEquals(record.getMDCPropertyMap.get("category"), event.category)
+            assertEquals(record.getMDCPropertyMap.get("marker"), event.marker)
+            assertEquals(parse(record.getFormattedMessage).flatMap(_.hcursor.get[String]("marker")), Right(event.marker))
+            assert(record.getThrowableProxy == null)
+          }
       }
     }
   }

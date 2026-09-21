@@ -7,13 +7,14 @@ import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, App
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.time.Instant
 import java.util.UUID
 
 trait HiringReadModel {
   def user(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): IO[Either[UseCaseError, Option[User]]]
+  def viewer(actor: ActorContext): IO[Either[UseCaseError, AuthenticatedActor]]
   def users(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): IO[Either[UseCaseError, List[User]]]
   def canViewUserEmail(actor: ActorContext, userId: UserId): IO[Either[UseCaseError, Boolean]]
   def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): IO[Either[UseCaseError, Set[UserId]]]
