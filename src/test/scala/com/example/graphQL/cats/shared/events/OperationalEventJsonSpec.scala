@@ -10,6 +10,41 @@ import java.util.UUID
 class OperationalEventJsonSpec extends FunSuite {
   private val eventId = UUID.fromString("00000000-0000-0000-0000-000000000201")
   private val actorId = UserId(UUID.fromString("00000000-0000-0000-0000-000000000202"))
+  private val envelope = OperationalEventEnvelope(
+    eventId,
+    OperationalEventType.APPLICATION_STATUS_CHANGED,
+    OperationalEventEnvelope.SchemaVersion,
+    Instant.parse("2026-09-19T10:15:30Z"),
+    OperationalAggregateType.Application,
+    "application-1",
+    7L,
+    7L,
+    actorId,
+    Json.obj(
+      "applicationId" -> Json.fromString("application-1"),
+      "previousStatus" -> Json.fromString("Interview"),
+      "newStatus" -> Json.fromString("Hired")
+    )
+  )
+
+  test("derived codec preserves the envelope wire shape and round-trips") {
+    assertEquals(
+      OperationalEventJson.json(envelope),
+      Json.obj(
+        "eventId" -> Json.fromString(eventId.toString),
+        "eventType" -> Json.fromString("APPLICATION_STATUS_CHANGED"),
+        "schemaVersion" -> Json.fromInt(1),
+        "occurredAt" -> Json.fromString("2026-09-19T10:15:30Z"),
+        "aggregateType" -> Json.fromString("Application"),
+        "aggregateId" -> Json.fromString("application-1"),
+        "aggregateVersion" -> Json.fromLong(7L),
+        "sequence" -> Json.fromLong(7L),
+        "actorId" -> Json.fromString(actorId.value.toString),
+        "payload" -> envelope.payload
+      )
+    )
+    assertEquals(OperationalEventJson.decode(OperationalEventJson.bytes(envelope)), Right(envelope))
+  }
 
   test("v1 envelope fixture decodes unchanged") {
     val fixture =
@@ -67,5 +102,26 @@ class OperationalEventJsonSpec extends FunSuite {
         |}""".stripMargin
 
     assertEquals(OperationalEventJson.decode(unsupported.getBytes(java.nio.charset.StandardCharsets.UTF_8)), Left("UnsupportedVersion"))
+  }
+
+  test("malformed derived fields are normalized to the envelope error") {
+    val malformed = List(
+      OperationalEventJson.json(envelope).mapObject(_.add("eventId", Json.fromString("invalid"))),
+      OperationalEventJson.json(envelope).mapObject(_.add("eventType", Json.fromString("UNKNOWN"))),
+      OperationalEventJson.json(envelope).mapObject(_.add("occurredAt", Json.fromString("invalid"))),
+      OperationalEventJson.json(envelope).mapObject(_.add("aggregateType", Json.fromString("Unknown"))),
+      OperationalEventJson.json(envelope).mapObject(_.add("actorId", Json.fromString("invalid"))),
+      OperationalEventJson.json(envelope).mapObject(_.remove("payload"))
+    )
+
+    malformed.foreach(value => assertEquals(OperationalEventJson.decode(value), Left("MalformedEnvelope")))
+  }
+
+  test("unsupported schema wins before malformed envelope fields") {
+    val unsupported = OperationalEventJson.json(envelope).mapObject { fields =>
+      fields.add("schemaVersion", Json.fromInt(99)).add("eventId", Json.fromString("invalid"))
+    }
+
+    assertEquals(OperationalEventJson.decode(unsupported), Left("UnsupportedVersion"))
   }
 }

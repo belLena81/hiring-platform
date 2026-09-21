@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, SearchSession}
@@ -56,7 +57,7 @@ final class MongoSearchSessionRepository(
     session.fold(PublisherBridge.first(target.insertOne(document)))(active => PublisherBridge.first(target.insertOne(active, document)))
 
   private def sameEvent(document: Document, event: OperationalEventEnvelope): Boolean =
-    MongoHiringCodecs.readOperationalEvent(document).exists(existing =>
+    MongoHiringCodecs.readOperationalEvent(document).toOption.exists(existing =>
       existing.eventId == event.eventId &&
         existing.eventType == event.eventType &&
         existing.schemaVersion == event.schemaVersion &&
@@ -186,14 +187,14 @@ final class MongoOperationalEventOutboxRepository(database: MongoDatabase)
       case None => Left(RepositoryError.Unavailable)
     }.handleError(_ => Left(RepositoryError.Unavailable))
 
-  private def readClaimed(document: Document): Either[MongoHiringCodecs.StoredDocumentError, ClaimedOperationalEvent] =
-    for {
-      event <- MongoHiringCodecs.readOperationalEvent(document)
-      bytes <- envelopeBytes(document)
-      partitionKey <- requiredString(document, "partitionKey")
-      leaseToken <- requiredString(document, "leaseToken")
-      attempts <- requiredInt(document, "attempts")
-    } yield ClaimedOperationalEvent(event, bytes, partitionKey, leaseToken, attempts)
+  private def readClaimed(document: Document): Either[NonEmptyList[MongoHiringCodecs.StoredDocumentError], ClaimedOperationalEvent] =
+    (
+      MongoHiringCodecs.readOperationalEvent(document),
+      envelopeBytes(document).toValidatedNel,
+      requiredString(document, "partitionKey").toValidatedNel,
+      requiredString(document, "leaseToken").toValidatedNel,
+      requiredInt(document, "attempts").toValidatedNel
+    ).mapN(ClaimedOperationalEvent.apply).toEither
 
   private def envelopeBytes(document: Document): Either[MongoHiringCodecs.StoredDocumentError, Array[Byte]] =
     Option(document.get("envelopeBytes")) match {

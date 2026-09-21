@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.data.{NonEmptyList, ValidatedNel}
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.protocol.*
@@ -201,25 +202,25 @@ private[mongo] object MongoTransactionRunner {
 }
 
 private[mongo] object MongoStoredDocumentDecoding {
-  def repository[A](decoded: Either[MongoHiringCodecs.StoredDocumentError, A]): Either[RepositoryError, A] =
-    decoded.leftMap(_ => RepositoryError.Unavailable)
+  def repository[A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]): Either[RepositoryError, A] =
+    decoded.toEither.leftMap(_ => RepositoryError.Unavailable)
 
-  def optional[A](decoded: Either[MongoHiringCodecs.StoredDocumentError, Option[A]]): Either[RepositoryError, Option[A]] =
+  def optional[A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, Option[A]]): Either[RepositoryError, Option[A]] =
     repository(decoded)
 
-  def values[A](decoded: List[Either[MongoHiringCodecs.StoredDocumentError, A]]): Either[RepositoryError, List[A]] =
+  def values[A](decoded: List[ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]]): Either[RepositoryError, List[A]] =
     repository(decoded.sequence)
 }
 
 private[mongo] object MongoKeysetPaging {
-  def byId[A](collection: MongoCollection[Document], ids: List[String])(read: Document => Either[MongoHiringCodecs.StoredDocumentError, A]): IO[Either[RepositoryError, List[A]]] =
+  def byId[A](collection: MongoCollection[Document], ids: List[String])(read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]): IO[Either[RepositoryError, List[A]]] =
     if (ids.isEmpty) IO.pure(Right(Nil))
     else PublisherBridge.collectWithin(collection.find(Filters.in("_id", ids.distinct*)), ids.distinct.size)
       .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
   def page[A](collection: MongoCollection[Document], filter: Bson, timestampField: String, pageSize: PageSize)(
-      read: Document => Either[MongoHiringCodecs.StoredDocumentError, A]
+      read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
   ): IO[Either[RepositoryError, List[A]]] =
     PublisherBridge.collectWithin(
       collection.find(filter)
@@ -803,8 +804,8 @@ private[mongo] object MongoSemanticSearchResult {
   def rankedCandidates(documents: List[Document], query: VectorSearchQuery): Either[RepositoryError, List[Option[RankedCandidate]]] =
     documents.traverse(rankedCandidate(_, query)).leftMap(_ => RepositoryError.Unavailable)
 
-  def rankedJob(document: Document, query: VectorSearchQuery): Either[MongoHiringCodecs.StoredDocumentError, Option[RankedJob]] =
-    MongoHiringCodecs.readJob(document).map { job =>
+  def rankedJob(document: Document, query: VectorSearchQuery): Either[NonEmptyList[MongoHiringCodecs.StoredDocumentError], Option[RankedJob]] =
+    MongoHiringCodecs.readJob(document).toEither.map { job =>
       for {
       embedding <- job.embedding
       if embedding.meta.model == query.model
@@ -814,8 +815,8 @@ private[mongo] object MongoSemanticSearchResult {
     } yield RankedJob(job, score.doubleValue, query.mode, embedding.meta, query.searchId)
     }
 
-  def rankedCandidate(document: Document, query: VectorSearchQuery): Either[MongoHiringCodecs.StoredDocumentError, Option[RankedCandidate]] =
-    MongoHiringCodecs.readUser(document).map { candidate =>
+  def rankedCandidate(document: Document, query: VectorSearchQuery): Either[NonEmptyList[MongoHiringCodecs.StoredDocumentError], Option[RankedCandidate]] =
+    MongoHiringCodecs.readUser(document).toEither.map { candidate =>
       for {
       profile <- candidate.candidateProfile
       embedding <- candidate.embedding

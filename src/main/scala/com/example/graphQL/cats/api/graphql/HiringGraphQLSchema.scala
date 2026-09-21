@@ -2,9 +2,10 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
-import com.example.graphQL.cats.service.{ActorContext, HealthService, ProbeResult, TraceContext}
+import com.example.graphQL.cats.service.{ActorContext, HealthService, ProbeResult}
 import com.example.graphQL.cats.service.{RepositoryError, UseCaseError}
 import io.circe.Json
+import org.typelevel.otel4s.trace.Tracer
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
 import sangria.marshalling.circe.*
 import sangria.renderer.SchemaRenderer
@@ -26,9 +27,9 @@ object HiringGraphQLSchema {
       hiring: HiringGraphQLServices,
       ensureHiringReady: IO[ProbeResult],
       contextFactory: RequestContextFactory,
-      traceContext: Option[TraceContext] = None
+      tracer: Tracer[IO] = Tracer.noop[IO]
   ): IO[Either[Failure, Json]] =
-    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, traceContext).use { context =>
+    contextFactory.resource(service.readiness(Some(requestId)), actor, hiring, ensureHiringReady, tracer).use { context =>
       executeInContext(request, context)
     }
 

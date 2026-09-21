@@ -708,11 +708,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(first.headers.get(CIString("X-Request-ID")).map(_.head.value), Some(inboundId))
       assertEquals(second.headers.get(CIString("X-Request-ID")).map(_.head.value), Some(inboundId))
       val traceIds = captured.collect {
-        case (LogEvent.SpanStarted, _, fields) if fields.get(LogField.SpanName).contains("http.request") => fields(LogField.TraceId)
-      }
-      assertEquals(traceIds.size, 2)
-      assertEquals(traceIds.distinct.size, 2)
-      assert(!traceIds.contains(inboundId))
+        case (LogEvent.SpanStarted, _, fields) if fields.get(LogField.SpanName).contains("http.request") => fields.get(LogField.TraceId)
+      }.flatten
+      assertEquals(traceIds, Vector.empty)
     }
   }
 

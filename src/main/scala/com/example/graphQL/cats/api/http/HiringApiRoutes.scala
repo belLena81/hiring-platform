@@ -5,7 +5,7 @@ import cats.effect.IO
 import cats.effect.kernel.Unique
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, RequestContextFactory}
-import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult, TraceContext}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
 import io.circe.Json
 import org.http4s.*
 import org.http4s.circe.*
@@ -76,8 +76,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private def responseMediaType(request: Request[IO]): Option[MediaType] =
     HiringApiRoutes.selectResponseMediaType(request.headers.get[Accept])
 
-  private def graphql(request: Request[IO], requestId: String, trace: TraceContext,
-      mediaType: MediaType): IO[Response[IO]] = {
+  private def graphql(request: Request[IO], requestId: String, mediaType: MediaType): IO[Response[IO]] = {
     if (!request.contentType.exists(_.mediaType == MediaType.application.json))
       rejected(Rejection.UnsupportedMedia, requestId, mediaType = mediaType)
     else admitted(requestId) {
@@ -95,7 +94,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
 
         def execute(actor: Option[ActorContext]): IO[Response[IO]] =
           HiringGraphQLSchema.execute(parsed, service, requestId, actor, dependencies.hiring,
-            dependencies.ensureHiringReady, dependencies.contextFactory, Some(trace)).flatMap {
+            dependencies.ensureHiringReady, dependencies.contextFactory, tracer).flatMap {
             case Right(result) => completedGraphQL(parsed, result, requestId, mediaType)
             case Left(HiringGraphQLSchema.Failure.InvalidQuery) => rejected(Rejection.InvalidQuery, requestId, mediaType = mediaType)
             case Left(HiringGraphQLSchema.Failure.Internal) => rejected(Rejection.Internal, requestId, mediaType = mediaType)
@@ -182,7 +181,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private def requestIdOf(request: Request[IO]): String =
     request.attributes.lookup(RequestId.requestIdAttrKey).getOrElse("unknown")
 
-  private final case class RequestScope(requestId: String, trace: TraceContext)
+  private final case class RequestScope(requestId: String)
 
   private val requestScopeKey: Key[RequestScope] = new Key[RequestScope](new Unique.Token())
 
@@ -211,7 +210,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
     }
     case request @ POST -> Root / "graphql" => requestScope(request).flatMap { scope =>
       responseMediaType(request) match {
-        case Some(mediaType) => graphql(request, scope.requestId, scope.trace, mediaType)
+        case Some(mediaType) => graphql(request, scope.requestId, mediaType)
         case None => rejected(Rejection.NotAcceptable, scope.requestId)
       }
     }
@@ -227,7 +226,6 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
   private val tracedApp: HttpApp[IO] = Kleisli[IO, Request[IO], Response[IO]] { request =>
     val requestId = requestIdOf(request)
     tracer.joinOrRoot(request.headers) {
-      IO.randomUUID.flatMap(traceId => TraceContext.root(traceId.toString)).flatMap { trace =>
       val method = request.method.name
       val path = request.uri.path.renderString
       val metadata = Map(LogField.Method -> (if (LogFields.validPublic(LogField.Method, method)) method else "OTHER"),
@@ -236,8 +234,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
         def timedFields: IO[Map[LogField, String]] = IO.monotonic.map { now =>
           metadata + (LogField.DurationMs -> (now - started).toMillis.toString)
         }
-        Diagnostics.spanWith(diagnostics, trace, "http.request", metadata) { child =>
-          val scopedRequest = request.withAttribute(requestScopeKey, RequestScope(requestId, child))
+        Diagnostics.spanWith(diagnostics, "http.request", metadata, requestId = Some(requestId))({
+          val scopedRequest = request.withAttribute(requestScopeKey, RequestScope(requestId))
           routedApp(scopedRequest)
           .handleErrorWith {
             case _: EntityLimiter.EntityTooLarge => rejected(Rejection.PayloadTooLarge, requestId)
@@ -255,9 +253,8 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics, ad
               LogField.Outcome -> (if (response.status.isSuccess) "COMPLETED" else "REJECTED")))))
           .onCancel(timedFields.flatMap(fields => Diagnostics.emit(diagnostics, LogEvent.RequestCancelled,
             Some(requestId), fields ++ Map(LogField.Reason -> "CANCELLED", LogField.Outcome -> "CANCELLED"))))
-        }
+        })(using tracer)
       }
-    }
     }
   }
 

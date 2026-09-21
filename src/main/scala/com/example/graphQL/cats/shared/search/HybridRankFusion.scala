@@ -19,14 +19,9 @@ object HybridRankFusion {
       current.updated(key, current.get(key).fold(Entry(job, None, Some(index + 1)))(_.copy(lexicalRank = Some(index + 1))))
     }
 
-    entries.valuesIterator.toList.sortWith { (left, right) =>
-      if (left.score != right.score) left.score > right.score
-      else if (left.vectorRank != right.vectorRank) compareRanks(left.vectorRank, right.vectorRank)
-      else if (left.lexicalRank != right.lexicalRank) compareRanks(left.lexicalRank, right.lexicalRank)
-      else left.job.job.id.value.toString < right.job.job.id.value.toString
-    }.take(limit).map(entry => entry.job.copy(score = entry.score, mode = entry.job.mode))
+    entries.valuesIterator.toList
+      .sortBy(entry => (-entry.score, entry.vectorRank.getOrElse(Int.MaxValue), entry.lexicalRank.getOrElse(Int.MaxValue), entry.job.job.id.value.toString))
+      .take(limit)
+      .map(entry => entry.job.copy(score = entry.score, mode = entry.job.mode))
   }
-
-  private def compareRanks(left: Option[Int], right: Option[Int]): Boolean =
-    left.getOrElse(Int.MaxValue) < right.getOrElse(Int.MaxValue)
 }

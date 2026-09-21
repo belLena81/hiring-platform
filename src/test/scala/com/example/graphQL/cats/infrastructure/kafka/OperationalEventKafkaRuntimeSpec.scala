@@ -4,13 +4,14 @@ import cats.effect.{Deferred, IO, Ref}
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, RepositoryError}
 import com.example.graphQL.cats.shared.events.*
 import io.circe.Json
 import munit.CatsEffectSuite
 
 import java.time.Instant
 import java.util.UUID
+import scala.concurrent.duration.*
 
 class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   private val now = Instant.parse("2026-09-20T00:00:00Z")
@@ -143,5 +144,61 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       }
       count <- arrivals.get
     } yield assertEquals(count, 2)
+  }
+
+  test("resilient stream retries failed effects until they recover") {
+    for {
+      attempts <- Ref.of[IO, Int](0)
+      stream = OperationalEventKafkaRuntime.resilientStream(
+        Diagnostics.noop,
+        fs2.Stream.eval {
+          attempts.updateAndGet(_ + 1).flatMap { count =>
+            if (count < 3) IO.raiseError[Unit](new IllegalStateException("transient kafka failure"))
+            else IO.unit
+          }
+        },
+        1.millis
+      )
+      _ <- stream.compile.drain
+      result <- attempts.get
+    } yield assertEquals(result, 3)
+  }
+
+  test("resilient stream emits sanitized runtime failure diagnostics") {
+    for {
+      attempts <- Ref.of[IO, Int](0)
+      records <- Ref.of[IO, Vector[(LogEvent, Map[LogField, String])]](Vector.empty)
+      diagnostics = new Diagnostics {
+        override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          records.update(_ :+ (event -> fields))
+      }
+      _ <- OperationalEventKafkaRuntime.resilientStream(
+        diagnostics,
+        fs2.Stream.eval {
+          attempts.updateAndGet(_ + 1).flatMap { count =>
+            if (count == 1) IO.raiseError[Unit](new IllegalStateException("transient kafka failure"))
+            else IO.unit
+          }
+        },
+        1.millis
+      ).compile.drain
+      emitted <- records.get
+    } yield {
+      assertEquals(emitted.map(_._1), Vector(LogEvent.RuntimeFailed))
+      assertEquals(emitted.head._2.get(LogField.ErrorType), Some("java.lang.IllegalStateException"))
+    }
+  }
+
+  test("resilient stream cancellation interrupts retry backoff") {
+    for {
+      attempted <- Deferred[IO, Unit]
+      fiber <- OperationalEventKafkaRuntime.resilientStream(
+        Diagnostics.noop,
+        fs2.Stream.eval(attempted.complete(()) *> IO.raiseError[Unit](new IllegalStateException("broker unavailable"))),
+        1.hour
+      ).compile.drain.start
+      _ <- attempted.get
+      _ <- fiber.cancel
+    } yield assert(true)
   }
 }

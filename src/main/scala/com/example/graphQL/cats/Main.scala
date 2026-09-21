@@ -20,14 +20,14 @@ object Main extends IOApp {
     AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
       val tracingEnabled = sys.env.get("OTEL_TRACES_EXPORTER").exists(value => value.nonEmpty && value != "none")
       TelemetryRuntime.resource(tracingEnabled).use { telemetry =>
-      SafeDiagnostics.configure(maskSensitive, telemetry.tracer).flatMap { fallback =>
+      SafeDiagnostics.configure(maskSensitive).flatMap { fallback =>
         AppConfig.load.flatMap {
           case Left(errors) => Diagnostics.emit(fallback, LogEvent.ConfigInvalid,
             fields = Map(LogField.ConfigKey -> errors.head.key)).as(ExitCode.Error)
-          case Right(config) => SafeDiagnostics.configure(config.maskSensitive, telemetry.tracer).flatMap { diagnostics =>
+          case Right(config) => SafeDiagnostics.configure(config.maskSensitive).flatMap { diagnostics =>
             MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
               config.jwtAuth,
-              config.resolverTimeout, config.passwordHash, config.kafka)
+              config.resolverTimeout, config.passwordHash, config.kafka, telemetry.tracer)
               .flatMap { runtime =>
                 for {
                   admission <- Admission.resource(config.admissionPermits)

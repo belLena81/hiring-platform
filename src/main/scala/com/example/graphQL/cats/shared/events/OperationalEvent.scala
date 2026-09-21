@@ -3,11 +3,13 @@ package com.example.graphQL.cats.shared.events
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
-import io.circe.Json
+import io.circe.{Decoder, Encoder, Json}
+import io.circe.generic.semiauto.*
 import io.circe.parser.parse
 import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import scala.util.Try
 
 enum OperationalEventType {
   case JOB_CREATED, JOB_UPDATED, JOB_CLOSED, JOB_VIEWED, SEARCH_PERFORMED, SEARCH_RESULT_CLICKED,
@@ -40,19 +42,41 @@ object OperationalEventEnvelope {
 }
 
 object OperationalEventJson {
+  private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
+
+  private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
+    Try(UUID.fromString(raw)).toEither.left.map(_ => "invalid UUID")
+  }
+
+  private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
+
+  private given Decoder[Instant] = Decoder.decodeString.emap { raw =>
+    Try(Instant.parse(raw)).toEither.left.map(_ => "invalid timestamp")
+  }
+
+  private given Encoder[OperationalEventType] = Encoder.encodeString.contramap(_.toString)
+
+  private given Decoder[OperationalEventType] = Decoder.decodeString.emap { raw =>
+    OperationalEventType.values.find(_.toString == raw).toRight("invalid event type")
+  }
+
+  private given Encoder[OperationalAggregateType] = Encoder.encodeString.contramap(_.toString)
+
+  private given Decoder[OperationalAggregateType] = Decoder.decodeString.emap { raw =>
+    OperationalAggregateType.values.find(_.toString == raw).toRight("invalid aggregate type")
+  }
+
+  private given Encoder[UserId] = Encoder.encodeString.contramap(_.value.toString)
+
+  private given Decoder[UserId] = Decoder.decodeString.emap { raw =>
+    Try(UUID.fromString(raw)).toEither.left.map(_ => "invalid actorId").map(UserId(_))
+  }
+
+  private given Encoder[OperationalEventEnvelope] = deriveEncoder
+  private given Decoder[OperationalEventEnvelope] = deriveDecoder
+
   def json(value: OperationalEventEnvelope): Json =
-    Json.obj(
-      "eventId" -> Json.fromString(value.eventId.toString),
-      "eventType" -> Json.fromString(value.eventType.toString),
-      "schemaVersion" -> Json.fromInt(value.schemaVersion),
-      "occurredAt" -> Json.fromString(value.occurredAt.toString),
-      "aggregateType" -> Json.fromString(value.aggregateType.toString),
-      "aggregateId" -> Json.fromString(value.aggregateId),
-      "aggregateVersion" -> Json.fromLong(value.aggregateVersion),
-      "sequence" -> Json.fromLong(value.sequence),
-      "actorId" -> Json.fromString(value.actorId.value.toString),
-      "payload" -> value.payload
-    )
+    summon[Encoder[OperationalEventEnvelope]].apply(value)
 
   def bytes(value: OperationalEventEnvelope): Array[Byte] =
     json(value).noSpaces.getBytes(StandardCharsets.UTF_8)
@@ -60,25 +84,12 @@ object OperationalEventJson {
   def decode(bytes: Array[Byte]): Either[String, OperationalEventEnvelope] =
     parse(new String(bytes, StandardCharsets.UTF_8)).leftMap(_ => "MalformedEnvelope").flatMap(decode)
 
-  def decode(json: Json): Either[String, OperationalEventEnvelope] = {
-    val cursor = json.hcursor
+  def decode(json: Json): Either[String, OperationalEventEnvelope] =
     for {
-      schemaVersion <- cursor.get[Int]("schemaVersion").leftMap(_ => "MalformedEnvelope")
+      schemaVersion <- json.hcursor.get[Int]("schemaVersion").leftMap(_ => "MalformedEnvelope")
       _ <- Either.cond(schemaVersion == OperationalEventEnvelope.SchemaVersion, (), "UnsupportedVersion")
-      eventId <- cursor.get[String]("eventId").flatMap(value => Either.catchNonFatal(UUID.fromString(value)).leftMap(_ => io.circe.DecodingFailure("eventId", Nil))).leftMap(_ => "MalformedEnvelope")
-      eventTypeText <- cursor.get[String]("eventType").leftMap(_ => "MalformedEnvelope")
-      eventType <- OperationalEventType.values.find(_.toString == eventTypeText).toRight("MalformedEnvelope")
-      occurredAtText <- cursor.get[String]("occurredAt").leftMap(_ => "MalformedEnvelope")
-      occurredAt <- Either.catchNonFatal(Instant.parse(occurredAtText)).leftMap(_ => "MalformedEnvelope")
-      aggregateTypeText <- cursor.get[String]("aggregateType").leftMap(_ => "MalformedEnvelope")
-      aggregateType <- OperationalAggregateType.values.find(_.toString == aggregateTypeText).toRight("MalformedEnvelope")
-      aggregateId <- cursor.get[String]("aggregateId").leftMap(_ => "MalformedEnvelope")
-      aggregateVersion <- cursor.get[Long]("aggregateVersion").leftMap(_ => "MalformedEnvelope")
-      sequence <- cursor.get[Long]("sequence").leftMap(_ => "MalformedEnvelope")
-      actorId <- cursor.get[String]("actorId").flatMap(value => Either.catchNonFatal(UserId(UUID.fromString(value))).leftMap(_ => io.circe.DecodingFailure("actorId", Nil))).leftMap(_ => "MalformedEnvelope")
-      payload <- cursor.get[Json]("payload").leftMap(_ => "MalformedEnvelope")
-    } yield OperationalEventEnvelope(eventId, eventType, schemaVersion, occurredAt, aggregateType, aggregateId, aggregateVersion, sequence, actorId, payload)
-  }
+      value <- summon[Decoder[OperationalEventEnvelope]].decodeJson(json).leftMap(_ => "MalformedEnvelope")
+    } yield value
 }
 
 final case class SearchSessionResult(

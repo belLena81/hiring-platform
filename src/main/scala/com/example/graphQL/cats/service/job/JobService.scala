@@ -159,9 +159,9 @@ final class JobService[F[_]](
       )
 
   private def persistCreatedJob(result: Either[UseCaseError, Job], actorId: UserId): F[Either[UseCaseError, Job]] =
-    result match {
-      case Left(error) => error.asLeft[Job].pure[F]
-      case Right(job) =>
+    result.fold(
+      _.asLeft[Job].pure[F],
+      job => {
         val event = OperationalEvents.jobEvent(
           OperationalEventType.JOB_CREATED,
           eventId(job, OperationalEventType.JOB_CREATED, job.version),
@@ -170,19 +170,21 @@ final class JobService[F[_]](
           job.createdAt
         )
         notifyAfterCommit(jobs.createWithEvents(job, job.createdAt, List(event)).map(_.widenUseCase.as(job)))
-    }
+      }
+    )
 
   private def persistUpdatedJob(result: Either[UseCaseError, Job], actorId: UserId): F[Either[UseCaseError, Job]] =
     persistJob(result, actorId, OperationalEventType.JOB_UPDATED)
 
   private def persistJob(result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType): F[Either[UseCaseError, Job]] =
-    result match {
-      case Left(error) => error.asLeft[Job].pure[F]
-      case Right(job) =>
+    result.fold(
+      _.asLeft[Job].pure[F],
+      job => {
         val persisted = job.copy(version = job.version + 1L)
         val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, persisted.version), persisted, actorId, job.updatedAt)
         notifyAfterCommit(jobs.updateWithEvents(job, job.updatedAt, List(event)).map(_.widenUseCase))
-    }
+      }
+    )
 
   private def notifyAfterCommit(result: F[Either[UseCaseError, Job]]): F[Either[UseCaseError, Job]] =
     result.flatTap(_.fold(_ => MonadError[F, Throwable].unit, _ => embeddingWork.wake.handleError(_ => ())))

@@ -1,39 +1,12 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{Deferred, IO, IOLocal, Ref, Resource}
-import cats.effect.std.Dispatcher
-import com.example.graphQL.cats.service.{ProbeResult, TraceContext}
+import cats.effect.{Deferred, IO, Ref, Resource}
+import com.example.graphQL.cats.service.ProbeResult
 import munit.CatsEffectSuite
 
 import scala.concurrent.duration.*
 
 final class RequestContextSpec extends CatsEffectSuite {
-  test("dispatcher trace binding clears its value after success, failure, and cancellation") {
-    Dispatcher.sequential[IO].use { dispatcher =>
-      for {
-        local <- IOLocal[Option[TraceContext]](None)
-        requestTrace <- TraceContext.root("00000000-0000-0000-0000-000000000002")
-        hiring = TestGraphQLSupport.emptyServices.copy(traceLocal = Some(local))
-        contextResource = RequestContext.withDispatcher(dispatcher, IO.pure(ProbeResult.Ready), None, hiring,
-          IO.pure(ProbeResult.Ready), Some(requestTrace))
-        _ <- contextResource.use { context =>
-          for {
-            observed <- IO.fromFuture(IO(context.unsafeToFuture(local.get)))
-            _ <- IO(assertEquals(observed, Some(requestTrace)))
-            failure <- IO.fromFuture(IO(context.unsafeToFuture(IO.raiseError[Unit](new RuntimeException("expected"))))).attempt
-            _ <- IO(assert(failure.isLeft))
-            cleared <- IO.fromFuture(IO(dispatcher.unsafeToFuture(local.get)))
-            _ <- IO(assertEquals(cleared, None))
-          } yield ()
-        }
-        cancelled <- Deferred[IO, Unit]
-        _ <- contextResource.use(context => IO(context.unsafeToFuture(IO.canceled.onCancel(cancelled.complete(()).void))))
-        _ <- cancelled.get.timeout(1.second)
-        cleared <- IO.fromFuture(IO(dispatcher.unsafeToFuture(local.get)))
-      } yield assertEquals(cleared, None)
-    }
-  }
-
   test("closing rejects submissions while resolver cancellation finalizers are still running") {
     for {
       entered <- Deferred[IO, Unit]

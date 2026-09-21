@@ -8,7 +8,6 @@ import java.nio.file.{Files, Path, Paths}
 import java.nio.file.attribute.PosixFilePermission
 import org.slf4j.LoggerFactory
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import org.typelevel.otel4s.trace.Tracer
 import scala.jdk.CollectionConverters.*
 
 /** The application classifies records; Logback is the sole severity policy. */
@@ -16,10 +15,10 @@ object SafeDiagnostics {
   private val loggerName = "hiring.foundation"
   private val DefaultLogDirectory = Paths.get("_logs")
 
-  def configure(maskSensitive: Boolean = true, tracer: Tracer[IO] = Tracer.noop[IO]): IO[Diagnostics] =
+  def configure(maskSensitive: Boolean = true): IO[Diagnostics] =
     IO.blocking {
       Files.createDirectories(DefaultLogDirectory)
-      val diagnostics = apply(maskSensitive, tracer)
+      val diagnostics = apply(maskSensitive)
       if (!maskSensitive) {
         restrictToCurrentUser(DefaultLogDirectory)
         activeLogFiles.foreach(restrictToCurrentUser)
@@ -30,7 +29,7 @@ object SafeDiagnostics {
       if (maskSensitive) IO.unit else Diagnostics.emit(diagnostics, LogEvent.LocalUnmasked)
     }
 
-  def apply(maskSensitive: Boolean = true, tracer: Tracer[IO] = Tracer.noop[IO]): Diagnostics = {
+  def apply(maskSensitive: Boolean = true): Diagnostics = {
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
     withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) =>
       event.level match {
@@ -39,7 +38,7 @@ object SafeDiagnostics {
         case LogLevel.Info => structuredLogger.info(Map("category" -> event.category))(message)
         case LogLevel.Warn => structuredLogger.warn(Map("category" -> event.category))(message)
         case LogLevel.Error => structuredLogger.error(Map("category" -> event.category))(message)
-      }, tracer)
+      })
   }
 
   private[logging] def withSink(sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =
@@ -114,10 +113,8 @@ object SafeDiagnostics {
   private def withEventSink(
       maskSensitive: Boolean,
       isEnabled: LogLevel => IO[Boolean],
-      sink: (LogEvent, String) => IO[Unit],
-      traceProvider: Tracer[IO] = Tracer.noop[IO]
+      sink: (LogEvent, String) => IO[Unit]
   ): Diagnostics = new Diagnostics {
-    override val tracer: Tracer[IO] = traceProvider
     def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO.defer {
       isEnabled(event.level).flatMap { enabled =>
       if (!enabled) IO.unit

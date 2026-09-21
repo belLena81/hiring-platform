@@ -1,7 +1,6 @@
 package com.example.graphQL.cats.service
 
-import cats.effect.{IO, IOLocal}
-import cats.syntax.all.*
+import cats.effect.IO
 import org.typelevel.otel4s.trace.Tracer
 
 enum LogLevel {
@@ -53,9 +52,7 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
   case HttpHost extends LogField("httpHost", true)
   case TraceId extends LogField("traceId", true)
   case SpanId extends LogField("spanId", true)
-  case ParentSpanId extends LogField("parentSpanId", true)
   case SpanName extends LogField("spanName")
-  case Sequence extends LogField("sequence")
   case EntityId extends LogField("entityId", true)
   case ActorId extends LogField("actorId", true)
   case Count extends LogField("count")
@@ -125,9 +122,11 @@ object LogFields {
       value.startsWith(s"$file:") && value.drop(file.length + 1).matches("[1-9][0-9]{0,5}")
     }
     case LogField.Environment => Set("local", "production").contains(value)
-    case LogField.TraceId | LogField.SpanId | LogField.ParentSpanId | LogField.EntityId | LogField.ActorId =>
+    case LogField.TraceId => value.matches("[0-9a-fA-F]{32}")
+    case LogField.SpanId => value.matches("[0-9a-fA-F]{16}")
+    case LogField.EntityId | LogField.ActorId =>
       value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-    case LogField.Sequence | LogField.Count => value.toLongOption.exists(_ >= 0)
+    case LogField.Count => value.toLongOption.exists(_ >= 0)
     case LogField.SpanName => value.matches("[A-Za-z][A-Za-z0-9_.-]{0,127}")
     case LogField.Remote => Set("true", "false").contains(value)
     case LogField.JobStatus => Set("Draft", "Open", "Closed").contains(value)
@@ -137,9 +136,6 @@ object LogFields {
 
 trait Diagnostics {
   def event(event: LogEvent, requestId: Option[String] = None, fields: => Map[LogField, String] = Map.empty): IO[Unit]
-
-  /** Compatibility seam for legacy adapters; new boundaries receive Tracer directly. */
-  def tracer: Tracer[IO] = Tracer.noop[IO]
 }
 
 object Diagnostics {
@@ -152,62 +148,36 @@ object Diagnostics {
     IO.defer(diagnostics.event(event, requestId, fields)).handleError(_ => ())
 
   /** Emits a complete lifecycle for an effect without changing its cancellation semantics. */
-  def span[A](diagnostics: Diagnostics, context: TraceContext, name: String, fields: Map[LogField, String] = Map.empty)(
+  def spanWith[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty,
+      requestId: Option[String] = None)(
       action: IO[A]
-  ): IO[A] = spanWith(diagnostics, context, name, fields)(_ => action)
-
-  /** Supplies the span child explicitly across framework interop boundaries. */
-  def spanWith[A](diagnostics: Diagnostics, context: TraceContext, name: String, fields: Map[LogField, String] = Map.empty)(
-      action: TraceContext => IO[A]
-  ): IO[A] =
-    context.child.flatMap { child =>
-      val base = child.fields + (LogField.SpanName -> name) ++ fields
-      emit(diagnostics, LogEvent.SpanParameters, Some(child.traceId), base) *>
-        emit(diagnostics, LogEvent.SpanStarted, Some(child.traceId), base) *>
-        IO.monotonic.flatMap { started =>
-          def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
-            emit(diagnostics, event, Some(child.traceId), base + (LogField.DurationMs -> (now - started).toMillis.toString))
+  )(using tracer: Tracer[IO]): IO[A] =
+    tracer.span(name).surround {
+      tracer.currentSpanContext.map(_.fold(fields + (LogField.SpanName -> name)) { context =>
+        fields ++ Map(
+          LogField.SpanName -> name,
+          LogField.TraceId -> context.traceIdHex,
+          LogField.SpanId -> context.spanIdHex
+        )
+      }).flatMap { base =>
+        emit(diagnostics, LogEvent.SpanParameters, requestId, base) *>
+          emit(diagnostics, LogEvent.SpanStarted, requestId, base) *>
+          IO.monotonic.flatMap { started =>
+            def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
+              emit(diagnostics, event, requestId, base + (LogField.DurationMs -> (now - started).toMillis.toString))
+            }
+            action.guaranteeCase {
+              case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
+              case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
+              case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)
+            }
           }
-          diagnostics.tracer.span(name).surround(action(child)).guaranteeCase {
-            case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
-            case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
-            case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)
-          }
-        }
+      }
     }
 
   /** A boundary without an inbound request context (for example a repository adapter). */
-  def operation[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty)(action: IO[A]): IO[A] =
-    IO.randomUUID.map(_.toString).flatMap(root => TraceContext.root(root).flatMap(span(diagnostics, _, name, fields)(action)))
-
-  def operation[A](diagnostics: Diagnostics, local: IOLocal[Option[TraceContext]], name: String,
-      fields: Map[LogField, String])(action: IO[A]): IO[A] =
-    local.get.flatMap {
-      case Some(context) => span(diagnostics, context, name, fields)(action)
-      case None => operation(diagnostics, name, fields)(action)
-    }
-}
-
-final case class TraceContext private (
-    traceId: String,
-    spanId: String,
-    parentSpanId: Option[String],
-    spanSequence: Long,
-    sequence: cats.effect.Ref[IO, Long]
-) {
-  def child: IO[TraceContext] =
-    (IO.randomUUID.map(_.toString), sequence.updateAndGet(_ + 1)).mapN { (nextSpan, nextSequence) =>
-      TraceContext(traceId, nextSpan, Some(spanId), nextSequence, sequence)
-    }
-
-  def fields: Map[LogField, String] = Map(
-    LogField.TraceId -> traceId,
-    LogField.SpanId -> spanId,
-    LogField.Sequence -> spanSequence.toString
-  ) ++ parentSpanId.map(LogField.ParentSpanId -> _)
-}
-
-object TraceContext {
-  def root(requestId: String): IO[TraceContext] =
-    cats.effect.Ref.of[IO, Long](0).map(TraceContext(requestId, requestId, None, 0, _))
+  def operation[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty)(
+      action: IO[A]
+  )(using tracer: Tracer[IO]): IO[A] =
+    spanWith(diagnostics, name, fields)(action)
 }

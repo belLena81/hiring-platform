@@ -7,12 +7,13 @@ import com.example.graphQL.cats.repository.protocol.{
   ClaimedOperationalEvent, ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository,
   OperationalEventFailureCategory, OperationalEventOutboxRepository
 }
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields, RepositoryError}
 import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventJson}
 import fs2.Stream
 import fs2.kafka.*
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
+import retry.{HandlerDecision, RetryPolicies, retryingOnErrors}
 
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -22,20 +23,22 @@ object OperationalEventKafkaRuntime {
       config: KafkaConfig,
       outbox: OperationalEventOutboxRepository[IO],
       receipts: ConsumerReceiptRepository[IO],
-      quarantine: EventQuarantineRepository[IO]
+      quarantine: EventQuarantineRepository[IO],
+      diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, Unit] =
     if (!config.enabled) Resource.unit
     else {
-      val publisher = publisherResource(config, outbox)
+      val publisher = publisherResource(config, outbox, diagnostics)
       val consumer =
-        if (config.consumer.enabled) consumerResource(config, receipts, quarantine)
+        if (config.consumer.enabled) consumerResource(config, receipts, quarantine, diagnostics)
         else Resource.unit
       publisher *> consumer
     }
 
   private def publisherResource(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository[IO]
+      outbox: OperationalEventOutboxRepository[IO],
+      diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
     val settings =
       ProducerSettings(
@@ -48,7 +51,8 @@ object OperationalEventKafkaRuntime {
 
     KafkaProducer.resource(settings).flatMap { producer =>
       background(
-        restartOnError(
+        resilientStream(
+          diagnostics,
           Stream.awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
             .evalMap(_ => publishBatch(config, outbox, producer)),
           config.publisher.retryDelaySeconds.seconds
@@ -95,7 +99,8 @@ object OperationalEventKafkaRuntime {
   private def consumerResource(
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository[IO],
-      quarantine: EventQuarantineRepository[IO]
+      quarantine: EventQuarantineRepository[IO],
+      diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
     val settings =
       ConsumerSettings(
@@ -109,7 +114,8 @@ object OperationalEventKafkaRuntime {
         .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
 
     background(
-      restartOnError(
+      resilientStream(
+        diagnostics,
         KafkaConsumer.stream(settings)
           .subscribeTo(config.topic)
           .records
@@ -211,8 +217,18 @@ object OperationalEventKafkaRuntime {
       case OperationalAggregateType.Search => event.sequence < 1L
     }
 
-  private def restartOnError(stream: => Stream[IO, Unit], delay: FiniteDuration): Stream[IO, Unit] =
-    stream.handleErrorWith(_ => Stream.sleep_[IO](delay) ++ restartOnError(stream, delay))
+  private[kafka] def resilientStream(
+      diagnostics: Diagnostics,
+      stream: Stream[IO, Unit],
+      baseDelay: FiniteDuration
+  ): Stream[IO, Unit] =
+    Stream.eval(
+      retryingOnErrors(stream.compile.drain)(
+        policy = RetryPolicies.fullJitter[IO](baseDelay),
+        errorHandler = (error, _) =>
+          Diagnostics.emit(diagnostics, LogEvent.RuntimeFailed, fields = LogFields.failure(error)).as(HandlerDecision.Continue)
+      )
+    )
 
   private def background(stream: Stream[IO, ?]): Resource[IO, Unit] =
     Resource.make(stream.compile.drain.start)(_.cancel).void

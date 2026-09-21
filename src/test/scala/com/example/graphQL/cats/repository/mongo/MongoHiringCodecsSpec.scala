@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
 import com.example.graphQL.cats.service.RepositoryError
+import cats.data.NonEmptyList
 import java.time.Instant
 import java.util.{Date, UUID}
 import munit.FunSuite
@@ -27,7 +28,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val result = MongoHiringCodecs.readUser(MongoHiringCodecs.user(user))
 
-    assertEquals(result, Right(user))
+    assertEquals(result.toEither, Right(user))
     assertEquals(MongoHiringCodecs.user(user).get("profile", classOf[Document]).getString("kind"), "Candidate")
     assert(!MongoHiringCodecs.user(user).containsKey("recruiterProfile"))
   }
@@ -44,7 +45,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val document = MongoHiringCodecs.user(user)
 
-    assertEquals(MongoHiringCodecs.readUser(document), Right(user))
+    assertEquals(MongoHiringCodecs.readUser(document).toEither, Right(user))
     assertEquals(document.get("profile", classOf[Document]).getString("kind"), "Recruiter")
     assert(!document.containsKey("recruiterProfile"))
   }
@@ -60,7 +61,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val result = MongoHiringCodecs.readUser(legacyDocument)
 
-    assertEquals(result, Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
+    assertEquals(result.toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
   }
 
   test("job codec preserves closedAt round-trip for closed jobs") {
@@ -82,7 +83,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     val result = MongoHiringCodecs.readJob(document)
 
     assertEquals(document.getDate("closedAt"), Date.from(later))
-    assertEquals(result, Right(job))
+    assertEquals(result.toEither, Right(job))
   }
 
   test("job codec preserves embedding metadata when present") {
@@ -106,7 +107,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     assert(document.containsKey("embedding"))
     assert(document.containsKey("embeddingMeta"))
-    assertEquals(result.map(_.embedding), Right(Some(embedding)))
+    assertEquals(result.map(_.embedding).toEither, Right(Some(embedding)))
   }
 
   test("job codec reads legacy documents without closedAt as absent close timestamp") {
@@ -125,7 +126,7 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     val result = MongoHiringCodecs.readJob(legacyDocument)
 
-    assertEquals(result.map(_.closedAt), Right(None))
+    assertEquals(result.map(_.closedAt).toEither, Right(None))
   }
 
   test("malformed stored documents decode to non-sensitive typed errors") {
@@ -137,12 +138,28 @@ class MongoHiringCodecsSpec extends FunSuite {
       .append("embedding", List("not-a-number").asJava)
       .append("embeddingMeta", new Document("model", "model"))
 
-    assertEquals(MongoHiringCodecs.readUser(missingName), Left(MongoHiringCodecs.StoredDocumentError.MissingField("name")))
-    assertEquals(MongoHiringCodecs.readUser(invalidRole), Left(MongoHiringCodecs.StoredDocumentError.InvalidField("role")))
-    assertEquals(MongoHiringCodecs.readJob(invalidEmbedding), Left(MongoHiringCodecs.StoredDocumentError.InvalidField("embedding")))
+    assertEquals(MongoHiringCodecs.readUser(missingName).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.MissingField("name"))))
+    assertEquals(MongoHiringCodecs.readUser(invalidRole).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("role"))))
+    assertEquals(MongoHiringCodecs.readJob(invalidEmbedding).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("embedding"))))
     assertEquals(
       MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readUser(missingName)),
       Left(RepositoryError.Unavailable)
+    )
+  }
+
+  test("codec accumulates independent malformed user fields in document order") {
+    val malformed = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+    malformed.remove("name")
+    malformed.put("role", "NotARole")
+    malformed.put("createdAt", "not-a-date")
+
+    assertEquals(
+      MongoHiringCodecs.readUser(malformed).toEither,
+      Left(NonEmptyList.of(
+        MongoHiringCodecs.StoredDocumentError.MissingField("name"),
+        MongoHiringCodecs.StoredDocumentError.InvalidField("role"),
+        MongoHiringCodecs.StoredDocumentError.InvalidField("createdAt")
+      ))
     )
   }
 
@@ -166,7 +183,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     ))
     adminWithoutSingleton.remove("adminSingletonKey")
 
-    assertEquals(MongoHiringCodecs.readUser(candidateWithRecruiterProfile), Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
-    assertEquals(MongoHiringCodecs.readUser(adminWithoutSingleton), Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
+    assertEquals(MongoHiringCodecs.readUser(candidateWithRecruiterProfile).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
+    assertEquals(MongoHiringCodecs.readUser(adminWithoutSingleton).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
   }
 }
