@@ -138,7 +138,7 @@ object MongoHiringRuntime {
     val readModel = HiringReadService(users, jobs, applications)
     val applicationService = ApplicationService(users, jobs, applications)
     val interactionService = OperationalTelemetryService(users, jobs, searchSessions)
-    val cursorCodec = CursorCodec.fromSecret(jwtAuth.hmacSecret)
+    val cursorKey = CursorCodec.keyFromSecret(jwtAuth.hmacSecret)
 
     def assemble(
         jobService: JobUseCases,
@@ -149,7 +149,7 @@ object MongoHiringRuntime {
         readModel,
         jobService,
         applicationService,
-        cursorCodec,
+        cursorKey,
         accountService,
         semanticSearch,
         Some(interactionService),

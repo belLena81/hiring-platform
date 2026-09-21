@@ -32,13 +32,13 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   lazy val queryType: ObjectType[RequestContext, Unit] = ObjectType("Query", fields[RequestContext, Unit](
     Field("health", healthType, resolve = _ => ()),
     ioField("readiness", readinessType)(context => context.ctx.readiness),
-    ioField("me", userPayloadType)(accountMe),
+    ioField("me", OptionType(userType))(accountMe),
     ioField("users", userConnectionType, firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil)(users),
     ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil)(jobs),
     ioField("semanticJobSearch", rankedJobResultsType, queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil)(semanticJobSearch),
     ioField("recommendedJobs", rankedJobResultsType, firstArgument :: searchIdArgument :: Nil)(recommendedJobs),
     ioField("candidateMatches", rankedCandidateResultsType, jobIdArgument :: firstArgument :: searchIdArgument :: Nil)(candidateMatches),
-    ioField("job", jobPayloadType, idArgument :: Nil)(job),
+    ioField("job", OptionType(jobType), idArgument :: Nil)(job),
     ioField("myJobs", jobConnectionType, firstArgument :: afterArgument :: jobStatusArgument :: Nil)(myJobs),
     ioField("myApplications", applicationConnectionType, firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(myApplications),
     ioField("jobApplications", applicationConnectionType, jobIdArgument :: firstArgument :: afterArgument :: applicationStatusArgument :: Nil)(jobApplications),
@@ -46,23 +46,23 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   ))
 
   lazy val mutationType: ObjectType[RequestContext, Unit] = ObjectType("Mutation", fields[RequestContext, Unit](
-    ioField("submitApplication", applicationPayloadType, submitApplicationInputArgument :: Nil)(submitApplication),
-    ioField("createJob", jobPayloadType, createJobInputArgument :: Nil)(createJob),
-    ioField("updateJob", jobPayloadType, updateJobInputArgument :: Nil)(updateJob),
-    ioField("publishJob", jobPayloadType, jobActionInputArgument :: Nil)(context => changeJob(context, _.publishJob)),
-    ioField("closeJob", jobPayloadType, jobActionInputArgument :: Nil)(context => changeJob(context, _.closeJob)),
-    ioField("acceptApplication", applicationPayloadType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Accepted)),
-    ioField("moveApplicationToInterview", applicationPayloadType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Interview)),
-    ioField("hireApplication", applicationPayloadType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Hired)),
-    ioField("rejectApplication", applicationPayloadType, rejectApplicationInputArgument :: Nil)(rejectApplication),
-    ioField("declineApplication", applicationPayloadType, declineApplicationInputArgument :: Nil)(declineApplication),
-    ioField("signUp", accountPayloadType, signUpInputArgument :: Nil)(signUp),
-    ioField("login", accountPayloadType, loginInputArgument :: Nil)(login),
-    ioField("bootstrapAdmin", accountPayloadType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
-    ioField("updateMyProfile", userPayloadType, updateProfileInputArgument :: Nil)(updateMyProfile),
-    ioField("deleteMyAccount", deleteAccountPayloadType)(deleteMyAccount),
-    ioField("recordJobView", interactionPayloadType, recordJobViewInputArgument :: Nil)(recordJobView),
-    ioField("recordSearchResultClick", interactionPayloadType, recordSearchResultClickInputArgument :: Nil)(recordSearchResultClick)
+    ioField("submitApplication", submitApplicationResultType, submitApplicationInputArgument :: Nil)(submitApplication),
+    ioField("createJob", createJobResultType, createJobInputArgument :: Nil)(createJob),
+    ioField("updateJob", updateJobResultType, updateJobInputArgument :: Nil)(updateJob),
+    ioField("publishJob", publishJobResultType, jobActionInputArgument :: Nil)(context => changeJob(context, _.publishJob)),
+    ioField("closeJob", closeJobResultType, jobActionInputArgument :: Nil)(context => changeJob(context, _.closeJob)),
+    ioField("acceptApplication", acceptApplicationResultType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Accepted)),
+    ioField("moveApplicationToInterview", interviewApplicationResultType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Interview)),
+    ioField("hireApplication", hireApplicationResultType, applicationActionInputArgument :: Nil)(context => applicationStatusAction(context, ApplicationStatus.Hired)),
+    ioField("rejectApplication", rejectApplicationResultType, rejectApplicationInputArgument :: Nil)(rejectApplication),
+    ioField("declineApplication", declineApplicationResultType, declineApplicationInputArgument :: Nil)(declineApplication),
+    ioField("signUp", signUpResultType, signUpInputArgument :: Nil)(signUp),
+    ioField("login", loginResultType, loginInputArgument :: Nil)(login),
+    ioField("bootstrapAdmin", bootstrapAdminResultType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
+    ioField("updateMyProfile", updateMyProfileResultType, updateProfileInputArgument :: Nil)(updateMyProfile),
+    ioField("deleteMyAccount", deleteMyAccountResultType)(deleteMyAccount),
+    ioField("recordJobView", recordJobViewResultType, recordJobViewInputArgument :: Nil)(recordJobView),
+    ioField("recordSearchResultClick", recordSearchResultClickResultType, recordSearchResultClickInputArgument :: Nil)(recordSearchResultClick)
   ))
 
   lazy val schema: Schema[RequestContext, Unit] = Schema(queryType, Some(mutationType))

@@ -15,7 +15,10 @@ private[graphql] object HiringGraphQLTypes {
   lazy val readinessType: ObjectType[RequestContext, ProbeResult] = ObjectType("Readiness", fields[RequestContext, ProbeResult](
     Field("status", readinessStatus, resolve = context =>
       if (context.value == ProbeResult.Ready) "READY" else "NOT_READY")))
-  lazy val errorType: ObjectType[RequestContext, GraphQLError] = ObjectType("PayloadError", fields[RequestContext, GraphQLError](
+  lazy val validationErrorType: ObjectType[RequestContext, ValidationError] = ObjectType("ValidationError", fields[RequestContext, ValidationError](
+    Field("code", StringType, resolve = _.value.code),
+    Field("message", StringType, resolve = _.value.message)))
+  lazy val domainErrorType: ObjectType[RequestContext, DomainError] = ObjectType("DomainError", fields[RequestContext, DomainError](
     Field("code", StringType, resolve = _.value.code),
     Field("message", StringType, resolve = _.value.message)))
   lazy val pageInfoType: ObjectType[RequestContext, PageInfo] = ObjectType("PageInfo", fields[RequestContext, PageInfo](
@@ -101,24 +104,13 @@ private[graphql] object HiringGraphQLTypes {
     connectionType("ApplicationEventConnection", applicationEventEdgeType)
   lazy val userEdgeType: ObjectType[RequestContext, Edge[User]] = edgeType("UserEdge", userType)
   lazy val userConnectionType: ObjectType[RequestContext, Connection[User]] = connectionType("UserConnection", userEdgeType)
-  lazy val accountPayloadType: ObjectType[RequestContext, AccountPayload] = ObjectType("AuthPayload", fields[RequestContext, AccountPayload](
-    Field("user", OptionType(userType), resolve = _.value.user), Field("accessToken", OptionType(StringType), resolve = _.value.accessToken),
-    Field("expiresAt", OptionType(StringType), resolve = _.value.expiresAt), Field("errors", ListType(errorType), resolve = _.value.errors)))
-  lazy val userPayloadType: ObjectType[RequestContext, UserPayload] = ObjectType("UserPayload", fields[RequestContext, UserPayload](
-    Field("user", OptionType(userType), resolve = _.value.user), Field("errors", ListType(errorType), resolve = _.value.errors)))
-  lazy val deleteAccountPayloadType: ObjectType[RequestContext, DeleteAccountPayload] =
-    ObjectType("DeleteAccountPayload", fields[RequestContext, DeleteAccountPayload](
-      Field("deleted", BooleanType, resolve = _.value.deleted), Field("errors", ListType(errorType), resolve = _.value.errors)))
-  lazy val interactionPayloadType: ObjectType[RequestContext, InteractionPayload] =
-    ObjectType("InteractionPayload", fields[RequestContext, InteractionPayload](
-      Field("recorded", BooleanType, resolve = _.value.recorded), Field("errors", ListType(errorType), resolve = _.value.errors)))
-  lazy val jobPayloadType: ObjectType[RequestContext, JobPayload] = ObjectType("JobPayload", fields[RequestContext, JobPayload](
-    Field("job", OptionType(jobType), resolve = _.value.job),
-    Field("errors", ListType(errorType), resolve = _.value.errors)))
-  lazy val applicationPayloadType: ObjectType[RequestContext, ApplicationPayload] =
-    ObjectType("ApplicationPayload", fields[RequestContext, ApplicationPayload](
-      Field("application", OptionType(applicationType), resolve = _.value.application),
-      Field("errors", ListType(errorType), resolve = _.value.errors)))
+  lazy val authSuccessType: ObjectType[RequestContext, AuthSuccess] = ObjectType("AuthSuccess", fields[RequestContext, AuthSuccess](
+    Field("user", userType, resolve = _.value.user), Field("accessToken", StringType, resolve = _.value.accessToken),
+    Field("expiresAt", StringType, resolve = _.value.expiresAt)))
+  lazy val deletionSuccessType: ObjectType[RequestContext, DeletionSuccess] = ObjectType("DeletionSuccess", fields[RequestContext, DeletionSuccess](
+    Field("deleted", BooleanType, resolve = _.value.deleted)))
+  lazy val interactionSuccessType: ObjectType[RequestContext, InteractionSuccess] = ObjectType("InteractionSuccess", fields[RequestContext, InteractionSuccess](
+    Field("recorded", BooleanType, resolve = _.value.recorded)))
   lazy val rankedJobType: ObjectType[RequestContext, RankedJobPayload] = ObjectType("RankedJob", fields[RequestContext, RankedJobPayload](
     Field("job", jobType, resolve = _.value.job),
     Field("score", FloatType, resolve = _.value.score),
@@ -136,12 +128,28 @@ private[graphql] object HiringGraphQLTypes {
       Field("searchId", IDType, resolve = _.value.searchId)))
   lazy val rankedJobResultsType: ObjectType[RequestContext, RankedJobResults] =
     ObjectType("RankedJobResults", fields[RequestContext, RankedJobResults](
-      Field("results", ListType(rankedJobType), resolve = _.value.results),
-      Field("errors", ListType(errorType), resolve = _.value.errors)))
+      Field("results", ListType(rankedJobType), resolve = _.value.results)))
   lazy val rankedCandidateResultsType: ObjectType[RequestContext, RankedCandidateResults] =
     ObjectType("RankedCandidateResults", fields[RequestContext, RankedCandidateResults](
-      Field("results", ListType(rankedCandidateType), resolve = _.value.results),
-      Field("errors", ListType(errorType), resolve = _.value.errors)))
+      Field("results", ListType(rankedCandidateType), resolve = _.value.results)))
+
+  lazy val createJobResultType: OutputType[Any] = mutationResultType("CreateJobResult", jobType)
+  lazy val updateJobResultType: OutputType[Any] = mutationResultType("UpdateJobResult", jobType)
+  lazy val publishJobResultType: OutputType[Any] = mutationResultType("PublishJobResult", jobType)
+  lazy val closeJobResultType: OutputType[Any] = mutationResultType("CloseJobResult", jobType)
+  lazy val submitApplicationResultType: OutputType[Any] = mutationResultType("SubmitApplicationResult", applicationType)
+  lazy val acceptApplicationResultType: OutputType[Any] = mutationResultType("AcceptApplicationResult", applicationType)
+  lazy val interviewApplicationResultType: OutputType[Any] = mutationResultType("MoveApplicationToInterviewResult", applicationType)
+  lazy val hireApplicationResultType: OutputType[Any] = mutationResultType("HireApplicationResult", applicationType)
+  lazy val rejectApplicationResultType: OutputType[Any] = mutationResultType("RejectApplicationResult", applicationType)
+  lazy val declineApplicationResultType: OutputType[Any] = mutationResultType("DeclineApplicationResult", applicationType)
+  lazy val signUpResultType: OutputType[Any] = mutationResultType("SignUpResult", authSuccessType)
+  lazy val loginResultType: OutputType[Any] = mutationResultType("LoginResult", authSuccessType)
+  lazy val bootstrapAdminResultType: OutputType[Any] = mutationResultType("BootstrapAdminResult", authSuccessType)
+  lazy val updateMyProfileResultType: OutputType[Any] = mutationResultType("UpdateMyProfileResult", userType)
+  lazy val deleteMyAccountResultType: OutputType[Any] = mutationResultType("DeleteMyAccountResult", deletionSuccessType)
+  lazy val recordJobViewResultType: OutputType[Any] = mutationResultType("RecordJobViewResult", interactionSuccessType)
+  lazy val recordSearchResultClickResultType: OutputType[Any] = mutationResultType("RecordSearchResultClickResult", interactionSuccessType)
 
   private def edgeType[A](name: String, nodeType: OutputType[A]): ObjectType[RequestContext, Edge[A]] =
     ObjectType(name, fields[RequestContext, Edge[A]](
@@ -152,6 +160,8 @@ private[graphql] object HiringGraphQLTypes {
     ObjectType(name, fields[RequestContext, Connection[A]](
       Field("edges", ListType(edgeType), resolve = _.value.edges),
       Field("pageInfo", pageInfoType, resolve = _.value.pageInfo),
-      Field("searchId", OptionType(IDType), resolve = _.value.searchId),
-      Field("errors", ListType(errorType), resolve = _.value.errors)))
+      Field("searchId", OptionType(IDType), resolve = _.value.searchId)))
+
+  private def mutationResultType(name: String, successType: ObjectType[RequestContext, ?]): OutputType[Any] =
+    UnionType[RequestContext](name, List(successType, validationErrorType, domainErrorType))
 }

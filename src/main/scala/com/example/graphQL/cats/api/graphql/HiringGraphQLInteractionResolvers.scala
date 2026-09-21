@@ -7,24 +7,24 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInteractionResolvers {
-  def recordJobView(context: Context[RequestContext, Unit]): IO[InteractionPayload] =
-    authenticatedPayload(InteractionPayload(false, _))(context) { case (actor, hiring) =>
+  def recordJobView(context: Context[RequestContext, Unit]): IO[Any] =
+    authenticatedMutation(context) { case (actor, hiring) =>
       val input = context.arg(recordJobViewInputArgument)
-      hiring.interactionService.fold(IO.pure(InteractionPayload(true, Nil))) { interaction =>
+      hiring.interactionService.fold(IO.pure(InteractionSuccess(true): Any)) { interaction =>
         IO.realTimeInstant.flatMap(now =>
           interaction.recordJobView(actor, input.eventId, input.jobId, input.searchId, now)
-            .map(_.fold(error => InteractionPayload(false, List(toGraphQLError(error))), _ => InteractionPayload(true, Nil)))
+            .flatMap(result => mutationResult(IO.pure(result.map(_ => InteractionSuccess(true))))(identity))
         )
       }
     }
 
-  def recordSearchResultClick(context: Context[RequestContext, Unit]): IO[InteractionPayload] =
-    authenticatedPayload(InteractionPayload(false, _))(context) { case (actor, hiring) =>
+  def recordSearchResultClick(context: Context[RequestContext, Unit]): IO[Any] =
+    authenticatedMutation(context) { case (actor, hiring) =>
       val input = context.arg(recordSearchResultClickInputArgument)
-      hiring.interactionService.fold(IO.pure(InteractionPayload(true, Nil))) { interaction =>
+      hiring.interactionService.fold(IO.pure(InteractionSuccess(true): Any)) { interaction =>
         IO.realTimeInstant.flatMap(now =>
           interaction.recordSearchResultClick(actor, input.eventId, input.searchId, input.resultId.toString, now)
-            .map(_.fold(error => InteractionPayload(false, List(toGraphQLError(error))), _ => InteractionPayload(true, Nil)))
+            .flatMap(result => mutationResult(IO.pure(result.map(_ => InteractionSuccess(true))))(identity))
         )
       }
     }

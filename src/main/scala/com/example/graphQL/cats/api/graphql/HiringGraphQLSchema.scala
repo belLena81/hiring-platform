@@ -2,8 +2,6 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
-import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.UseCaseError
 import io.circe.Json
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
 import sangria.marshalling.circe.*
@@ -35,8 +33,11 @@ object HiringGraphQLSchema {
         exceptionHandler = ExceptionHandler {
           case (_, error: QueryAnalysisError) => throw error
           case (_, error: QueryComplexityExceeded) => throw error
-          case (_, RequestContext.ReadFailure(UseCaseError.Repository(RepositoryError.Unavailable))) =>
-            HandledException("Repository unavailable")
+          case (marshaller, RequestContext.ReadFailure(error)) =>
+            val failure = HiringGraphQLResolverSupport.toGraphQLFailure(error)
+            HandledException(failure.message, Map("code" -> marshaller.scalarNode(failure.code, "String", Set.empty)))
+          case (marshaller, RequestContext.FieldFailure(code, message)) =>
+            HandledException(message, Map("code" -> marshaller.scalarNode(code, "String", Set.empty)))
           case (_, RequestContext.RequestClosed) =>
             HandledException("Execution failed")
           case (_, error) =>

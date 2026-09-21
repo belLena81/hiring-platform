@@ -1,149 +1,116 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.syntax.all.*
-import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
-import io.circe.generic.semiauto.*
-import io.circe.syntax.*
-import io.circe.{Decoder, Encoder}
+import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
+
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.{Base64, UUID}
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
-import pdi.jwt.{JwtAlgorithm, JwtCirce}
-
-private[cats] trait CursorCodec[A] {
-  def encode(value: A): String
-  def decode(value: String): Either[CursorCodec.CursorError, A]
-}
+import scala.util.Try
 
 private[cats] object CursorCodec {
-  private val CurrentVersion = 2
+  private val CurrentVersion = "v3"
   private val HmacAlgorithm = "HmacSHA256"
-  private val KeyDerivationLabel = "hiring-platform:graphql-cursor:v2"
+  private val KeyDerivationLabel = "hiring-platform:graphql-cursor:v3"
+  private val MacBytes = 16
+  private val Base64Encoder = Base64.getUrlEncoder.withoutPadding()
+  private val Base64Decoder = Base64.getUrlDecoder
+
+  final class CursorKey private[graphql] (private[graphql] val bytes: Array[Byte])
+
+  trait Keyed[A] {
+    def kind: CursorKind
+    def at(value: A): Instant
+    def id(value: A): UUID
+    def make(at: Instant, id: UUID): A
+  }
+
+  enum CursorKind(val tag: String) {
+    case Job extends CursorKind("j")
+    case Application extends CursorKind("a")
+    case Event extends CursorKind("e")
+    case User extends CursorKind("u")
+  }
 
   enum CursorError {
     case Malformed(message: String)
-    case WrongKind(expected: String)
+    case WrongKind(actual: String)
   }
 
-  private enum CursorKind(val value: String) {
-    case Job extends CursorKind("job")
-    case Application extends CursorKind("application")
-    case ApplicationEvent extends CursorKind("applicationEvent")
-    case User extends CursorKind("user")
-  }
+  given Keyed[JobCursor] with
+    def kind: CursorKind = CursorKind.Job
+    def at(value: JobCursor): Instant = value.createdAt
+    def id(value: JobCursor): UUID = value.id.value
+    def make(at: Instant, id: UUID): JobCursor = JobCursor(at, JobId(id))
 
-  private final case class Cursor(v: Int, kind: CursorKind, createdAt: Option[Instant], occurredAt: Option[Instant], id: UUID)
+  given Keyed[ApplicationCursor] with
+    def kind: CursorKind = CursorKind.Application
+    def at(value: ApplicationCursor): Instant = value.createdAt
+    def id(value: ApplicationCursor): UUID = value.id.value
+    def make(at: Instant, id: UUID): ApplicationCursor = ApplicationCursor(at, ApplicationId(id))
 
-  final class CursorCodecs private[CursorCodec] (cursorKey: String) {
-    val jobCursorCodec: CursorCodec[JobCursor] = typed(
-      CursorKind.Job,
-      "job",
-      cursor => cursor.createdAt,
-      cursor => cursor.id.value,
-      (timestamp, id) => JobCursor(timestamp, JobId(id))
-    )
+  given Keyed[ApplicationEventCursor] with
+    def kind: CursorKind = CursorKind.Event
+    def at(value: ApplicationEventCursor): Instant = value.occurredAt
+    def id(value: ApplicationEventCursor): UUID = value.id.value
+    def make(at: Instant, id: UUID): ApplicationEventCursor = ApplicationEventCursor(at, ApplicationEventId(id))
 
-    val applicationCursorCodec: CursorCodec[ApplicationCursor] = typed(
-      CursorKind.Application,
-      "application",
-      cursor => cursor.createdAt,
-      cursor => cursor.id.value,
-      (timestamp, id) => ApplicationCursor(timestamp, ApplicationId(id))
-    )
+  given Keyed[UserCursor] with
+    def kind: CursorKind = CursorKind.User
+    def at(value: UserCursor): Instant = value.createdAt
+    def id(value: UserCursor): UUID = value.id.value
+    def make(at: Instant, id: UUID): UserCursor = UserCursor(at, UserId(id))
 
-    val eventCursorCodec: CursorCodec[ApplicationEventCursor] = typed(
-      CursorKind.ApplicationEvent,
-      "event",
-      cursor => cursor.occurredAt,
-      cursor => cursor.id.value,
-      (timestamp, id) => ApplicationEventCursor(timestamp, ApplicationEventId(id))
-    )
-
-    val userCursorCodec: CursorCodec[UserCursor] = typed(
-      CursorKind.User,
-      "user",
-      cursor => cursor.createdAt,
-      cursor => cursor.id.value,
-      (timestamp, id) => UserCursor(timestamp, UserId(id))
-    )
-
-    private def typed[A](
-        kind: CursorKind,
-        label: String,
-        timestamp: A => Instant,
-        id: A => UUID,
-        build: (Instant, UUID) => A
-    ): CursorCodec[A] = new CursorCodec[A] {
-      def encode(value: A): String = {
-        val encodedTimestamp = timestamp(value)
-        val (createdAt, occurredAt) =
-          if kind == CursorKind.ApplicationEvent then (None, Some(encodedTimestamp))
-          else (Some(encodedTimestamp), None)
-        val cursor = Cursor(
-          CurrentVersion,
-          kind,
-          createdAt,
-          occurredAt,
-          id(value)
-        )
-        JwtCirce.encode(cursor.asJson, cursorKey, JwtAlgorithm.HS256)
-      }
-
-      def decode(value: String): Either[CursorError, A] =
-        CursorCodec.decodeCursor(cursorKey, value).flatMap {
-          case Cursor(_, actualKind, _, _, _) if actualKind != kind =>
-            Left(CursorError.WrongKind(actualKind.value))
-          case Cursor(_, _, createdAt, occurredAt, cursorId) =>
-            val expectedTimestamp = if kind == CursorKind.ApplicationEvent then occurredAt else createdAt
-            val unexpectedTimestamp = if kind == CursorKind.ApplicationEvent then createdAt else occurredAt
-            (expectedTimestamp, unexpectedTimestamp) match {
-              case (Some(value), None) => Right(build(value, cursorId))
-              case _ => Left(CursorError.Malformed(s"Invalid $label cursor shape"))
-            }
-        }
-    }
-
-  }
-
-  def fromSecret(jwtSecret: String): CursorCodecs =
-    new CursorCodecs(Base64.getEncoder.encodeToString(deriveKey(jwtSecret)))
-
-  private given Encoder[CursorKind] = Encoder.encodeString.contramap(_.value)
-
-  private given Decoder[CursorKind] = Decoder.decodeString.emap { raw =>
-    CursorKind.values.find(_.value == raw).toRight(s"Unknown cursor kind: $raw")
-  }
-
-  private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
-
-  private given Decoder[Instant] = Decoder.decodeString.emap { raw =>
-    Either.catchNonFatal(Instant.parse(raw)).left.map(_ => "Invalid cursor timestamp")
-  }
-
-  private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
-
-  private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
-    Either.catchNonFatal(UUID.fromString(raw)).left.map(_ => "Invalid cursor id")
-  }
-
-  private given Encoder[Cursor] = deriveEncoder[Cursor]
-
-  private given Decoder[Cursor] = deriveDecoder[Cursor].ensure { cursor =>
-    if cursor.v == CurrentVersion then Nil else List(s"Unsupported cursor version: ${cursor.v}")
-  }
-
-  private def deriveKey(secret: String): Array[Byte] = {
+  def keyFromSecret(secret: String): CursorKey = {
     val mac = Mac.getInstance(HmacAlgorithm)
     mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), HmacAlgorithm))
-    mac.doFinal(KeyDerivationLabel.getBytes(StandardCharsets.UTF_8))
+    new CursorKey(mac.doFinal(KeyDerivationLabel.getBytes(StandardCharsets.UTF_8)))
   }
 
-  private def decodeCursor(secret: String, value: String): Either[CursorError, Cursor] =
-    JwtCirce.decodeJson(value, secret, Seq(JwtAlgorithm.HS256)).toEither
+  def encode[A](value: A)(using keyed: Keyed[A], key: CursorKey): String = {
+    val payload = s"$CurrentVersion|${keyed.kind.tag}|${keyed.at(value)}|${keyed.id(value)}"
+    val mac = Base64Encoder.encodeToString(sign(payload, key).take(MacBytes))
+    Base64Encoder.encodeToString(s"$payload|$mac".getBytes(StandardCharsets.UTF_8))
+  }
+
+  def decode[A](value: String)(using keyed: Keyed[A], key: CursorKey): Either[CursorError, A] =
+    for {
+      decoded <- decodeText(value)
+      parts <- decoded.split("\\|", -1) match {
+        case Array(version, tag, at, id, mac) if version == CurrentVersion => Right((tag, at, id, mac))
+        case Array(version, _, _, _, _) if version != CurrentVersion => Left(CursorError.Malformed("Unsupported cursor version"))
+        case _ => Left(CursorError.Malformed("Invalid cursor shape"))
+      }
+      (tag, at, id, mac) = parts
+      actualKind <- CursorKind.values.find(_.tag == tag).toRight(CursorError.Malformed("Unknown cursor kind"))
+      payload = s"$CurrentVersion|$tag|$at|$id"
+      suppliedMac <- decodeMac(mac)
+      _ <- Either.cond(
+        MessageDigest.isEqual(suppliedMac, sign(payload, key).take(MacBytes)),
+        (),
+        CursorError.Malformed("Invalid cursor signature")
+      )
+      _ <- Either.cond(actualKind == keyed.kind, (), CursorError.WrongKind(actualKind.tag))
+      timestamp <- Try(Instant.parse(at)).toEither.left.map(_ => CursorError.Malformed("Invalid cursor timestamp"))
+      uuid <- Try(UUID.fromString(id)).toEither.left.map(_ => CursorError.Malformed("Invalid cursor id"))
+    } yield keyed.make(timestamp, uuid)
+
+  private def decodeText(value: String): Either[CursorError, String] =
+    Try(new String(Base64Decoder.decode(value), StandardCharsets.UTF_8)).toEither
       .left.map(error => CursorError.Malformed(error.getMessage))
-      .flatMap(_.asJson.as[Cursor].left.map(error => CursorError.Malformed(error.getMessage)))
+
+  private def decodeMac(value: String): Either[CursorError, Array[Byte]] =
+    Try(Base64Decoder.decode(value)).toEither
+      .left.map(error => CursorError.Malformed(error.getMessage))
+      .flatMap(bytes => Either.cond(bytes.length == MacBytes, bytes, CursorError.Malformed("Invalid cursor signature")))
+
+  private def sign(payload: String, key: CursorKey): Array[Byte] = {
+    val mac = Mac.getInstance(HmacAlgorithm)
+    mac.init(new SecretKeySpec(key.bytes, HmacAlgorithm))
+    mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
+  }
 }

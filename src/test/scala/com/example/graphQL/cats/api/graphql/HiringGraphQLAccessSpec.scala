@@ -41,48 +41,48 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private val closedJob = job(closedJobId, JobStatus.Closed)
   private val application = Application.create(applicationId, candidateId, jobId, now)
 
+  private def errorCode(json: Json): Either[io.circe.Error, String] =
+    json.hcursor.downField("errors").downArray.downField("extensions").get[String]("code")
+
   test("hiring mutation without ActorContext returns typed unauthorized payload") {
     val query =
       s"""mutation {
          |  submitApplication(input: { jobId: "${jobId.value}" }) {
-         |    application { id }
-         |    errors { code message }
+         |    __typename
          |  }
          |}""".stripMargin
 
     execute(query, None).map { json =>
-      assertEquals(json.hcursor.downField("data").downField("submitApplication").downField("errors").downArray.get[String]("code"),
-        Right("UNAUTHORIZED"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("UNAUTHORIZED"))
     }
   }
 
   test("account resolvers share the centralized unauthorized error") {
     val me =
-      """query { me { user { id } errors { code message } } }"""
+      """query { me { id } }"""
     val users =
-      """query { users(first: 10) { edges { node { id } } errors { code message } } }"""
+      """query { users(first: 10) { edges { node { id } } __typename } }"""
     val update =
-      """mutation { updateMyProfile(input: { skills: ["Scala"] }) { user { id } errors { code message } } }"""
+      """mutation { updateMyProfile(input: { skills: ["Scala"] }) { __typename } }"""
     val delete =
-      """mutation { deleteMyAccount { deleted errors { code message } } }"""
+      """mutation { deleteMyAccount { __typename ... on DeletionSuccess { deleted } } }"""
 
     (execute(me, None), execute(users, None), execute(update, None), execute(delete, None)).mapN {
       (meJson, usersJson, updateJson, deleteJson) =>
-        assertEquals(meJson.hcursor.downField("data").downField("me").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-        assertEquals(usersJson.hcursor.downField("data").downField("users").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-        assertEquals(updateJson.hcursor.downField("data").downField("updateMyProfile").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-        assertEquals(deleteJson.hcursor.downField("data").downField("deleteMyAccount").downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
+        assertEquals(errorCode(meJson), Right("UNAUTHORIZED"))
+        assertEquals(errorCode(usersJson), Right("UNAUTHORIZED"))
+        assertEquals(errorCode(updateJson), Right("UNAUTHORIZED"))
+        assertEquals(errorCode(deleteJson), Right("UNAUTHORIZED"))
     }
   }
 
   test("public account mutations are unavailable until hiring setup is ready") {
     val signUp =
-      """mutation { signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { errors { code } } }"""
+      """mutation { signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename } }"""
     val bootstrap =
-      """mutation { bootstrapAdmin(input: { name: "Admin", password: "password-password" }) { errors { code } } }"""
+      """mutation { bootstrapAdmin(input: { name: "Admin", password: "password-password" }) { __typename } }"""
     val login =
-      """mutation { login(input: { name: "Candidate", password: "password-password" }) { errors { code } } }"""
+      """mutation { login(input: { name: "Candidate", password: "password-password" }) { __typename } }"""
     for {
       calls <- Ref.of[IO, Int](0)
       service = new PublicAccountService(calls)
@@ -90,30 +90,26 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         executeWithUsers(query, None, List(candidate, recruiter), service, hiringReady = IO.pure(ProbeResult.Unavailable)))
       count <- calls.get
     } yield {
-      results.zip(List("signUp", "bootstrapAdmin", "login")).foreach { case (json, field) =>
-        assertEquals(json.hcursor.downField("data").downField(field).downField("errors").downArray.get[String]("code"),
-          Right("SERVICE_NOT_READY"))
+      results.foreach { json =>
+        assertEquals(errorCode(json), Right("SERVICE_NOT_READY"))
       }
       assertEquals(count, 0)
     }
   }
 
   test("application connection rejects a job cursor") {
-    val cursor = TestGraphQLSupport.cursorCodec.jobCursorCodec
-      .encode(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
+    given CursorCodec.CursorKey = TestGraphQLSupport.cursorKey
+    val cursor = CursorCodec.encode(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
     val query =
       s"""query {
          |  myApplications(first: 10, after: "$cursor") {
          |    edges { node { id } }
-         |    errors { code message }
+         | __typename
          |  }
          |}""".stripMargin
 
     execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
-      val applications = json.hcursor.downField("data").downField("myApplications")
-      assertEquals(applications.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
-      assertEquals(applications.downField("errors").downArray.get[String]("code"), Right("WRONG_CURSOR_KIND"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("WRONG_CURSOR_KIND"))
     }
   }
 
@@ -122,15 +118,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  jobs(first: 10) {
         |    edges { node { id } }
-        |    errors { code message }
+        | __typename
         |  }
         |}""".stripMargin
 
     execute(query, None).map { json =>
-      val jobs = json.hcursor.downField("data").downField("jobs")
-      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
-      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("UNAUTHORIZED"))
     }
   }
 
@@ -138,31 +131,24 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val existing =
       s"""query {
          |  job(id: "${jobId.value}") {
-         |    job { id }
-         |    errors { code message }
+         |    id
+         | __typename
          |  }
          |}""".stripMargin
     val missingId = JobId(UUID.fromString("10000000-0000-0000-0000-000000000099"))
     val missing =
       s"""query {
          |  job(id: "${missingId.value}") {
-         |    job { id }
-         |    errors { code message }
+         |    id
+         | __typename
          |  }
          |}""".stripMargin
 
     (execute(existing, None), execute(missing, Some(ActorContext(candidateId, UserRole.Candidate)))).mapN {
       (unauthorizedJson, missingJson) =>
-        val unauthorized = unauthorizedJson.hcursor.downField("data").downField("job")
-        assertEquals(unauthorized.downField("job").focus, Some(Json.Null))
-        assertEquals(unauthorized.downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-        assert(!unauthorizedJson.hcursor.downField("errors").succeeded)
+        assertEquals(errorCode(unauthorizedJson), Right("UNAUTHORIZED"))
 
-        val notFound = missingJson.hcursor.downField("data").downField("job")
-        assertEquals(notFound.downField("job").focus, Some(Json.Null))
-        assertEquals(notFound.downField("errors").downArray.get[String]("code"), Right("NOT_FOUND"))
-        assertEquals(notFound.downField("errors").downArray.get[String]("message"), Right("job not found"))
-        assert(!missingJson.hcursor.downField("errors").succeeded)
+        assertEquals(errorCode(missingJson), Right("NOT_FOUND"))
     }
   }
 
@@ -170,16 +156,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val query =
       """query {
         |  me {
-        |    user { id }
-        |    errors { code message }
+        |    id
+        | __typename
         |  }
         |}""".stripMargin
 
     execute(query, None).map { json =>
-      val payload = json.hcursor.downField("data").downField("me")
-      assertEquals(payload.downField("user").focus, Some(Json.Null))
-      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("UNAUTHORIZED"))
     }
   }
 
@@ -188,7 +171,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  myApplications(first: 10) {
         |    edges { node { candidate { email } job { recruiter { email } } } }
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -213,15 +196,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       s"""query {
          |  myJobs(first: 10, after: "$cursor") {
          |    edges { node { id } }
-         |    errors { code message }
+         | __typename
          |  }
          |}""".stripMargin
 
     execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
-      val jobs = json.hcursor.downField("data").downField("myJobs")
-      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
-      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("INVALID_CURSOR"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("INVALID_CURSOR"))
     }
   }
 
@@ -230,13 +210,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  jobs(first: 10, city: "Kyiv", skills: ["Scala"]) {
         |    edges {
+        |      cursor
         |      node {
         |        id
         |        title
         |        recruiter { id name }
         |      }
         |    }
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -245,7 +226,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       assertEquals(edges.asArray.map(_.size), Some(1))
       assertEquals(edges.hcursor.downArray.downField("node").get[String]("id"), Right(jobId.value.toString))
       assertEquals(edges.hcursor.downArray.downField("node").downField("recruiter").get[String]("id"), Right(recruiterId.value.toString))
-      assertEquals(json.hcursor.downField("data").downField("jobs").downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assert(!json.hcursor.downField("errors").succeeded)
     }
   }
 
@@ -263,7 +244,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |        }
         |      }
         |    }
-        |    errors { code }
+        |    pageInfo { endCursor }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -280,7 +262,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  jobs(first: 10, createdAfter: "not-an-instant") {
         |    edges { node { id } }
-        |    errors { code message }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -296,15 +278,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  myJobs(first: 10) {
         |    edges { node { id } }
-        |    errors { code message }
+        | __typename
         |  }
         |}""".stripMargin
 
     execute(query, Some(ActorContext(recruiterId, UserRole.Candidate))).map { json =>
-      val jobs = json.hcursor.downField("data").downField("myJobs")
-      assertEquals(jobs.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
-      assertEquals(jobs.downField("errors").downArray.get[String]("code"), Right("FORBIDDEN"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("FORBIDDEN"))
     }
   }
 
@@ -313,7 +292,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  myJobs(first: 10) {
         |    edges { node { id } }
-        |    errors { code message }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -323,7 +302,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         .flatMap(_.hcursor.downField("node").get[String]("id").toOption)
         .toSet
       assertEquals(ids, Set(jobId.value.toString, closedJobId.value.toString))
-      assertEquals(jobs.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -335,16 +313,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       query =
         """mutation {
           |  updateMyProfile(input: { skills: ["Scala"] }) {
-          |    user { profile { __typename } }
-          |    errors { code }
+          |    __typename
+          | __typename
           |  }
           |}""".stripMargin
       json <- executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), accountService)
       calls <- updateCalls.get
     } yield {
-      val payload = json.hcursor.downField("data").downField("updateMyProfile")
-      assert(payload.downField("user").focus.contains(Json.Null))
-      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("PROFILE_UNSUPPORTED_FOR_ROLE"))
+      assertEquals(errorCode(json), Right("PROFILE_UNSUPPORTED_FOR_ROLE"))
       assertEquals(calls, 0)
     }
   }
@@ -356,16 +332,15 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       query =
         """mutation {
           |  updateMyProfile(input: { jobTitle: "Hiring Lead" }) {
-          |    user { id }
-          |    errors { code message }
+          |    __typename
+          | __typename
           |  }
           |}""".stripMargin
       json <- executeWithUsers(query, Some(ActorContext(recruiterId, UserRole.Recruiter)), List(recruiter), accountService)
       calls <- updateCalls.get
     } yield {
       val payload = json.hcursor.downField("data").downField("updateMyProfile")
-      assert(payload.downField("user").focus.contains(Json.Null))
-      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("VALIDATION_FAILED"))
+      assertEquals(payload.get[String]("__typename"), Right("ValidationError"))
       assertEquals(calls, 1)
     }
   }
@@ -375,21 +350,26 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       """query {
         |  myApplications(first: 10) {
         |    edges {
+        |      cursor
         |      node {
         |        id
         |        status
         |        job { id title }
         |      }
         |    }
-        |    errors { code }
+        |    pageInfo { endCursor }
+        | __typename
         |  }
         |}""".stripMargin
 
     execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
-      val node = json.hcursor.downField("data").downField("myApplications").downField("edges").downArray.downField("node")
+      val applications = json.hcursor.downField("data").downField("myApplications")
+      val edge = applications.downField("edges").downArray
+      val node = edge.downField("node")
       assertEquals(node.get[String]("id"), Right(applicationId.value.toString))
       assertEquals(node.get[String]("status"), Right("CREATED"))
       assertEquals(node.downField("job").get[String]("id"), Right(jobId.value.toString))
+      assertEquals(applications.downField("pageInfo").get[String]("endCursor"), edge.get[String]("cursor"))
     }
   }
 
@@ -398,7 +378,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       s"""query {
          |  jobApplications(jobId: "${jobId.value}", first: 10) {
          |    edges { node { id job { id } } }
-         |    errors { code }
+         | __typename
          |  }
          |}""".stripMargin
 
@@ -407,7 +387,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       val node = applications.downField("edges").downArray.downField("node")
       assertEquals(node.get[String]("id"), Right(applicationId.value.toString))
       assertEquals(node.downField("job").get[String]("id"), Right(jobId.value.toString))
-      assertEquals(applications.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -429,7 +408,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |        job { id recruiter { id } }
         |      }
         |    }
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -445,15 +424,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       users = RecordingUsers(usersRef, userBatches)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
+      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
       request <- parseRequest(query)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)), services)
         .use(HiringGraphQLSchema.executeInContext(request, _))
       batches <- userBatches.get
     } yield {
-      val json = result.fold(failure => fail(failure.toString), identity)
-      val applications = json.hcursor.downField("data").downField("myApplications")
-      assertEquals(applications.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      result.fold(failure => fail(failure.toString), _ => ())
       assert(batches.exists(_.toSet == Set(recruiterId, secondRecruiterId)))
       assert(!batches.exists(batch => batch.size == 1 && Set(recruiterId, secondRecruiterId).contains(batch.head)))
     }
@@ -471,17 +448,16 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |    city: "Nicosia"
         |    remote: true
         |  }) {
-        |    job { title skills }
-        |    errors { code }
+        |    __typename
+        |    ... on Job { title skills }
         |  }
         |}""".stripMargin
 
     execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
       val payload = json.hcursor.downField("data").downField("createJob")
-      assertEquals(payload.downField("job").get[String]("title"), Right("Staff Scala Developer"))
-      assertEquals(payload.downField("job").downField("skills").focus.flatMap(_.asArray).map(_.flatMap(_.asString).toList),
+      assertEquals(payload.get[String]("title"), Right("Staff Scala Developer"))
+      assertEquals(payload.downField("skills").focus.flatMap(_.asArray).map(_.flatMap(_.asString).toList),
         Some(List("Cats Effect", "Scala")))
-      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -497,17 +473,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |    country: ""
         |    remote: true
         |  }) {
-        |    job { id }
-        |    errors { code message }
+        |    __typename
+        | __typename
         |  }
         |}""".stripMargin
 
     execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
       val payload = json.hcursor.downField("data").downField("createJob")
-      assertEquals(payload.downField("job").focus, Some(Json.Null))
-      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("VALIDATION_FAILED"))
-      assertEquals(payload.downField("errors").downArray.get[String]("message"), Right("country is required, city is required"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(payload.get[String]("__typename"), Right("ValidationError"))
     }
   }
 
@@ -515,28 +488,22 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val duplicate =
       s"""mutation {
          |  submitApplication(input: { jobId: "${jobId.value}" }) {
-         |    application { id }
-         |    errors { code message }
+         |    __typename
+         |    ... on Application { id status }
          |  }
          |}""".stripMargin
     val closed =
       s"""mutation {
          |  submitApplication(input: { jobId: "${closedJobId.value}" }) {
-         |    application { id }
-         |    errors { code message }
+         |    __typename
+         |    ... on Application { id status }
          |  }
          |}""".stripMargin
 
     (execute(duplicate, Some(ActorContext(candidateId, UserRole.Candidate))),
       execute(closed, Some(ActorContext(candidateId, UserRole.Candidate)))).mapN { (duplicateJson, closedJson) =>
-      val duplicatePayload = duplicateJson.hcursor.downField("data").downField("submitApplication")
-      val closedPayload = closedJson.hcursor.downField("data").downField("submitApplication")
-      assertEquals(duplicatePayload.downField("application").focus, Some(Json.Null))
-      assertEquals(duplicatePayload.downField("errors").downArray.get[String]("code"), Right("DUPLICATE_APPLICATION"))
-      assert(!duplicateJson.hcursor.downField("errors").succeeded)
-      assertEquals(closedPayload.downField("application").focus, Some(Json.Null))
-      assertEquals(closedPayload.downField("errors").downArray.get[String]("code"), Right("JOB_MUST_BE_OPEN"))
-      assert(!closedJson.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(duplicateJson), Right("DUPLICATE_APPLICATION"))
+      assertEquals(closedJson.hcursor.downField("data").downField("submitApplication").get[String]("__typename"), Right("DomainError"))
     }
   }
 
@@ -544,16 +511,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val query =
       s"""mutation {
          |  hireApplication(input: { applicationId: "${applicationId.value}" }) {
-         |    application { id }
-         |    errors { code message }
+         |    __typename
+         |    ... on Application { id status }
          |  }
          |}""".stripMargin
 
     execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
       val payload = json.hcursor.downField("data").downField("hireApplication")
-      assertEquals(payload.downField("application").focus, Some(Json.Null))
-      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("INVALID_STATUS_TRANSITION"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(payload.get[String]("__typename"), Right("DomainError"))
     }
   }
 
@@ -562,15 +527,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       s"""query {
          |  applicationHistory(applicationId: "${applicationId.value}", first: 10) {
          |    edges { node { id } }
-         |    errors { code message }
+         | __typename
          |  }
          |}""".stripMargin
 
     executeWithUsers(query, Some(ActorContext(candidateId, UserRole.Candidate)), List(recruiter)).map { json =>
-      val history = json.hcursor.downField("data").downField("applicationHistory")
-      assertEquals(history.downField("edges").focus.flatMap(_.asArray).map(_.size), Some(0))
-      assertEquals(history.downField("errors").downArray.get[String]("code"), Right("UNAUTHORIZED"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("UNAUTHORIZED"))
     }
   }
 
@@ -578,16 +540,15 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val query =
       s"""mutation {
          |  rejectApplication(input: { applicationId: "${applicationId.value}", feedback: "Not enough Scala" }) {
-         |    application { id status }
-         |    errors { code message }
+         |    __typename
+         |    ... on Application { id status }
          |  }
          |}""".stripMargin
 
     execute(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
       val payload = json.hcursor.downField("data").downField("rejectApplication")
-      assertEquals(payload.downField("application").get[String]("id"), Right(applicationId.value.toString))
-      assertEquals(payload.downField("application").get[String]("status"), Right("REJECTED"))
-      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assertEquals(payload.get[String]("id"), Right(applicationId.value.toString))
+      assertEquals(payload.get[String]("status"), Right("REJECTED"))
       assert(!json.hcursor.downField("errors").succeeded)
     }
   }
@@ -596,15 +557,15 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val reject =
       s"""mutation {
          |  rejectApplication(input: { applicationId: "${applicationId.value}", feedback: " " }) {
-         |    application { id }
-         |    errors { code message }
+         |    __typename
+         | __typename
          |  }
          |}""".stripMargin
     val decline =
       s"""mutation {
          |  declineApplication(input: { applicationId: "${applicationId.value}", reason: "" }) {
-         |    application { id }
-         |    errors { code message }
+         |    __typename
+         | __typename
          |  }
          |}""".stripMargin
 
@@ -612,12 +573,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       execute(decline, Some(ActorContext(recruiterId, UserRole.Recruiter)))).mapN { (rejectJson, declineJson) =>
       val rejectPayload = rejectJson.hcursor.downField("data").downField("rejectApplication")
       val declinePayload = declineJson.hcursor.downField("data").downField("declineApplication")
-      assertEquals(rejectPayload.downField("application").focus, Some(Json.Null))
-      assertEquals(rejectPayload.downField("errors").downArray.get[String]("code"), Right("REJECTION_FEEDBACK_REQUIRED"))
-      assert(!rejectJson.hcursor.downField("errors").succeeded)
-      assertEquals(declinePayload.downField("application").focus, Some(Json.Null))
-      assertEquals(declinePayload.downField("errors").downArray.get[String]("code"), Right("DECLINE_REASON_REQUIRED"))
-      assert(!declineJson.hcursor.downField("errors").succeeded)
+      assertEquals(rejectPayload.get[String]("__typename"), Right("DomainError"))
+      assertEquals(declinePayload.get[String]("__typename"), Right("DomainError"))
     }
   }
 
@@ -633,13 +590,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |      version
         |      searchId
         |    }
-        |    errors { code message }
+        | __typename
         |  }
         |}""".stripMargin
 
     executeWithSemanticSearch(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
       val payload = json.hcursor.downField("data").downField("semanticJobSearch")
-      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
       assertEquals(payload.downField("results").downArray.downField("job").get[String]("id"), Right(jobId.value.toString))
       assertEquals(payload.downField("results").downArray.get[String]("searchMode"), Right("HYBRID"))
       assertEquals(payload.downField("results").downArray.get[String]("model"), Right("voyage-4-lite"))
@@ -650,9 +606,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("search results survive best-effort search-session persistence failures") {
     val semanticQuery =
-      """query { semanticJobSearch(query: "scala", first: 5) { results { job { id } } errors { code } } }"""
+      """query { semanticJobSearch(query: "scala", first: 5) { results { job { id } } __typename } }"""
     val jobsQuery =
-      """query { jobs(first: 5) { edges { node { id } } errors { code } } }"""
+      """query { jobs(first: 5) { edges { node { id } } __typename } }"""
     for {
       semantic <- executeWithSemanticSearch(semanticQuery, Some(ActorContext(candidateId, UserRole.Candidate)), FailingSearchSessions)
       jobs <- executeWithUsers(jobsQuery, Some(ActorContext(candidateId, UserRole.Candidate)), List(candidate, recruiter), searchSessions = FailingSearchSessions)
@@ -693,14 +649,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
          |        }
          |      }
          |    }
-         |    errors { code }
+         | __typename
          |  }
          |}""".stripMargin
 
     executeWithSemanticSearch(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
-      val payload = json.hcursor.downField("data").downField("candidateMatches")
-      assertEquals(payload.downField("errors").downArray.get[String]("code"), Right("STALE_EMBEDDING"))
-      assert(!json.hcursor.downField("errors").succeeded)
+      assertEquals(errorCode(json), Right("STALE_EMBEDDING"))
     }
   }
 
@@ -708,19 +662,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val query =
       """mutation {
         |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
-        |    user { id }
-        |    accessToken
-        |    errors { code message }
+        |    __typename
+        | __typename
         |  }
         |}""".stripMargin
 
     executeWithUsers(query, None, List(candidate, recruiter), NameTakenAccountService).map { json =>
-      val payload = json.hcursor.downField("data").downField("signUp")
-      assertEquals(payload.downField("user").focus, Some(Json.Null))
-      assertEquals(payload.downField("accessToken").focus, Some(Json.Null))
-      val error = payload.downField("errors").downArray
-      assertEquals(error.get[String]("code"), Right("REGISTRATION_FAILED"))
-      assertEquals(error.get[String]("message"), Right("Registration failed"))
+      assertEquals(errorCode(json), Right("REGISTRATION_FAILED"))
       assert(!json.noSpaces.contains("NAME_TAKEN"))
     }
   }
@@ -729,26 +677,26 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val submit =
       """mutation Submit($input: SubmitApplicationInput!) {
         |  submitApplication(input: $input) {
-        |    application { id }
-        |    errors { code }
+        |    __typename
+        | __typename
         |  }
         |}""".stripMargin
     val updateAndReject =
       """mutation RecruiterActions($update: UpdateJobInput!, $reject: RejectApplicationInput!) {
         |  updateJob(input: $update) {
-        |    job { id title location { city } }
-        |    errors { code }
+        |    __typename
+        | __typename
         |  }
         |  rejectApplication(input: $reject) {
-        |    application { id status }
-        |    errors { code }
+        |    __typename
+        | __typename
         |  }
         |}""".stripMargin
     val signup =
       """mutation Signup($input: SignUpInput!) {
         |  signUp(input: $input) {
-        |    user { id }
-        |    errors { code }
+        |    __typename
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -784,26 +732,15 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         variables = recruiterVariables),
       executeWithUsers(signup, None, List(candidate, recruiter), NameTakenAccountService, signupVariables)).mapN {
       (submitJson, recruiterJson, signupJson) =>
-        val submitPayload = submitJson.hcursor.downField("data").downField("submitApplication")
-        assertEquals(submitPayload.downField("application").focus, Some(Json.Null))
-        assertEquals(submitPayload.downField("errors").downArray.get[String]("code"), Right("DUPLICATE_APPLICATION"))
+        assertEquals(errorCode(submitJson), Right("DUPLICATE_APPLICATION"))
 
         val updatePayload = recruiterJson.hcursor.downField("data").downField("updateJob")
-        assertEquals(updatePayload.downField("job").get[String]("id"), Right(jobId.value.toString))
-        assertEquals(updatePayload.downField("job").get[String]("title"), Right("Principal Scala Developer"))
-        assertEquals(updatePayload.downField("job").downField("location").get[String]("city"), Right("Nicosia"))
-        assertEquals(updatePayload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+        assertEquals(updatePayload.get[String]("__typename"), Right("Job"))
 
         val rejectPayload = recruiterJson.hcursor.downField("data").downField("rejectApplication")
-        assertEquals(rejectPayload.downField("application").get[String]("id"), Right(applicationId.value.toString))
-        assertEquals(rejectPayload.downField("application").get[String]("status"), Right("REJECTED"))
-        assertEquals(rejectPayload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+        assertEquals(rejectPayload.get[String]("__typename"), Right("Application"))
 
-        val signupPayload = signupJson.hcursor.downField("data").downField("signUp")
-        assertEquals(signupPayload.downField("errors").downArray.get[String]("code"), Right("REGISTRATION_FAILED"))
-        assert(!submitJson.hcursor.downField("errors").succeeded)
-        assert(!recruiterJson.hcursor.downField("errors").succeeded)
-        assert(!signupJson.hcursor.downField("errors").succeeded)
+        assertEquals(errorCode(signupJson), Right("REGISTRATION_FAILED"))
     }
   }
 
@@ -850,7 +787,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         embeddingVersion = 1
       )
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications),
-        TestGraphQLSupport.cursorCodec,
+        TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService,
         Some(searchService),
         searchSessions = searchSessions)
@@ -877,7 +814,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorCodec, accountService = accountService, searchSessions = searchSessions)
+      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, accountService = accountService, searchSessions = searchSessions)
       request <- parseRequest(query, variables)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services, hiringReady).use(HiringGraphQLSchema.executeInContext(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)

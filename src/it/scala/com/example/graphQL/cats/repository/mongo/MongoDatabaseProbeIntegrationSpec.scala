@@ -11,7 +11,6 @@ import munit.CatsEffectSuite
 import org.bson.Document
 import org.http4s.{Method, Request, Status, Uri}
 import org.http4s.circe.*
-import org.typelevel.ci.CIString
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName

@@ -1,7 +1,5 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.data.EitherT
-import cats.effect.IO
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 
@@ -9,16 +7,15 @@ import java.time.Instant
 import java.util.UUID
 
 private[graphql] object HiringGraphQLModel {
-  final case class GraphQLError(code: String, message: String)
+  final case class GraphQLFailure(code: String, message: String)
+  final case class ValidationError(code: String, message: String)
+  final case class DomainError(code: String, message: String)
+  final case class AuthSuccess(user: User, accessToken: String, expiresAt: String)
+  final case class DeletionSuccess(deleted: Boolean)
+  final case class InteractionSuccess(recorded: Boolean)
   final case class PageInfo(hasNextPage: Boolean, endCursor: Option[String])
   final case class Edge[A](node: A, cursor: String)
-  final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, errors: List[GraphQLError] = Nil, searchId: Option[String] = None)
-  final case class JobPayload(job: Option[Job], errors: List[GraphQLError])
-  final case class ApplicationPayload(application: Option[Application], errors: List[GraphQLError])
-  final case class AccountPayload(user: Option[User], accessToken: Option[String], expiresAt: Option[String], errors: List[GraphQLError])
-  final case class UserPayload(user: Option[User], errors: List[GraphQLError])
-  final case class DeleteAccountPayload(deleted: Boolean, errors: List[GraphQLError])
-  final case class InteractionPayload(recorded: Boolean, errors: List[GraphQLError])
+  final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, searchId: Option[String] = None)
   final case class JobFilterGraphQLInput(city: Option[String], skills: Option[List[String]], createdAfter: Option[Instant])
   final case class CandidateMatchProfile(skills: Set[String], experienceSummary: Option[String])
   final case class CandidateMatchCandidate(id: String, name: String, profile: Option[CandidateMatchProfile])
@@ -30,10 +27,8 @@ private[graphql] object HiringGraphQLModel {
 
   final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
   final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, version: Int, searchId: String)
-  final case class RankedJobResults(results: List[RankedJobPayload], errors: List[GraphQLError])
-  final case class RankedCandidateResults(results: List[RankedCandidatePayload], errors: List[GraphQLError])
-
-  type GraphQLStep[A] = EitherT[IO, GraphQLError, A]
+  final case class RankedJobResults(results: List[RankedJobPayload])
+  final case class RankedCandidateResults(results: List[RankedCandidatePayload])
 
   final case class SubmitApplicationGraphQLInput(jobId: JobId)
   final case class JobGraphQLInput(

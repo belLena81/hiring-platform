@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.data.EitherT
 import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
@@ -12,37 +11,37 @@ import sangria.schema.Context
 
 private[graphql] object HiringGraphQLApplicationResolvers {
   def myApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
-    complete(authenticatedStep(context) { case (actor, hiring) =>
-      val cursorCodec = context.ctx.hiring.cursorCodec.applicationCursorCodec
+    authenticatedMutation(context) { case (actor, hiring) =>
+      given CursorCodec.CursorKey = hiring.cursorKey
       for {
-        (pageRequest, requested) <- EitherT.fromEither[IO](applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
+        (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), CursorCodec.decode[ApplicationCursor]))
         values                   <- liftUseCase(hiring.applicationService.myApplications(actor, pageRequest))
-      } yield applicationConnection(values, requested, cursorCodec)
-    }, graphQLErrorConnection[Application])
+      } yield applicationConnection(values, requested)
+    }
 
   def jobApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
-    complete(authenticatedStep(context) { case (actor, hiring) =>
-      val cursorCodec = context.ctx.hiring.cursorCodec.applicationCursorCodec
+    authenticatedMutation(context) { case (actor, hiring) =>
+      given CursorCodec.CursorKey = hiring.cursorKey
       val jobId = context.arg(jobIdArgument)
       for {
-        (pageRequest, requested) <- EitherT.fromEither[IO](applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursorCodec))
+        (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), CursorCodec.decode[ApplicationCursor]))
         values                   <- liftUseCase(hiring.applicationService.jobApplications(actor, jobId, pageRequest))
-      } yield applicationConnection(values, requested, cursorCodec)
-    }, graphQLErrorConnection[Application])
+      } yield applicationConnection(values, requested)
+    }
 
   def applicationHistory(context: Context[RequestContext, Unit]): IO[Connection[ApplicationEvent]] =
-    complete(authenticatedStep(context) { case (actor, hiring) =>
-      val cursorCodec = context.ctx.hiring.cursorCodec.eventCursorCodec
+    authenticatedMutation(context) { case (actor, hiring) =>
+      given CursorCodec.CursorKey = hiring.cursorKey
       val applicationId = context.arg(applicationIdArgument)
       for {
-        (pageRequest, requested) <- EitherT.fromEither[IO](pageEvent(context.arg(firstArgument), context.arg(afterArgument), cursorCodec))
+        (pageRequest, requested) <- inputResult(pageEvent(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decode[ApplicationEventCursor]))
         _                        <- liftUseCase(hiring.readModel.canViewApplication(actor, applicationId))
         values                   <- liftUseCase(hiring.readModel.applicationHistory(applicationId, pageRequest))
-      } yield eventConnection(values, requested, cursorCodec)
-    }, graphQLErrorConnection[ApplicationEvent])
+      } yield eventConnection(values, requested)
+    }
 
-  def submitApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] =
-    authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
+  def submitApplication(context: Context[RequestContext, Unit]): IO[Any] =
+    authenticatedMutation(context) { case (actor, hiring) =>
       val jobId = context.arg(submitApplicationInputArgument).jobId
       timestamped { (now, applicationId) =>
         IO.randomUUID.flatMap { eventId =>
@@ -54,20 +53,20 @@ private[graphql] object HiringGraphQLApplicationResolvers {
             now
           )
         }
-      }.map(applicationPayload)
+      }.flatMap(result => mutationResult(IO.pure(result))(identity))
     }
 
-  def applicationStatusAction(context: Context[RequestContext, Unit], status: ApplicationStatus): IO[ApplicationPayload] = {
+  def applicationStatusAction(context: Context[RequestContext, Unit], status: ApplicationStatus): IO[Any] = {
     val input = context.arg(applicationActionInputArgument)
     changeApplicationStatus(context, input.applicationId, status, None, None)
   }
 
-  def rejectApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] = {
+  def rejectApplication(context: Context[RequestContext, Unit]): IO[Any] = {
     val input = context.arg(rejectApplicationInputArgument)
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Rejected, input.feedback, None)
   }
 
-  def declineApplication(context: Context[RequestContext, Unit]): IO[ApplicationPayload] = {
+  def declineApplication(context: Context[RequestContext, Unit]): IO[Any] = {
     val input = context.arg(declineApplicationInputArgument)
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Declined, None, input.reason)
   }
@@ -78,30 +77,25 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       status: ApplicationStatus,
       feedback: Option[String],
       reason: Option[String]
-  ): IO[ApplicationPayload] =
-    authenticatedPayload(ApplicationPayload(None, _))(context) { case (actor, hiring) =>
+  ): IO[Any] =
+    authenticatedMutation(context) { case (actor, hiring) =>
       timestamped { (now, eventId) =>
         hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
-      }.map(applicationPayload)
+      }.flatMap(result => mutationResult(IO.pure(result))(identity))
     }
 
   private def applicationConnection(
       values: List[Application],
-      requested: Int,
-      cursorCodec: CursorCodec[ApplicationCursor]
+      requested: Int
+  )(using CursorCodec.CursorKey
   ): Connection[Application] =
-    connection(values, requested)(application => cursorCodec.encode(ApplicationCursor(application.createdAt, application.id)))
+    connection(values, requested)(application => CursorCodec.encode(ApplicationCursor(application.createdAt, application.id)))
 
   private def eventConnection(
       values: List[ApplicationEvent],
-      requested: Int,
-      cursorCodec: CursorCodec[ApplicationEventCursor]
+      requested: Int
+  )(using CursorCodec.CursorKey
   ): Connection[ApplicationEvent] =
-    connection(values, requested)(event => cursorCodec.encode(ApplicationEventCursor(event.occurredAt, event.id)))
+    connection(values, requested)(event => CursorCodec.encode(ApplicationEventCursor(event.occurredAt, event.id)))
 
-  private def applicationPayload(result: Either[com.example.graphQL.cats.service.UseCaseError, Application]): ApplicationPayload =
-    result.fold(applicationErrorPayload, application => ApplicationPayload(Some(application), Nil))
-
-  private def applicationErrorPayload(error: com.example.graphQL.cats.service.UseCaseError): ApplicationPayload =
-    ApplicationPayload(None, List(toGraphQLError(error)))
 }

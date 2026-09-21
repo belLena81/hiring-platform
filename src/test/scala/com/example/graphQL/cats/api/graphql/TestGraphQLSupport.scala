@@ -19,8 +19,8 @@ import java.time.Instant
 object TestGraphQLSupport {
   private def unsupported[A]: IO[A] = IO.raiseError(new IllegalStateException("Request context services are not configured"))
 
-  val cursorCodec: CursorCodec.CursorCodecs =
-    CursorCodec.fromSecret("test-cursor-secret-01234567890123456789")
+  val cursorKey: CursorCodec.CursorKey =
+    CursorCodec.keyFromSecret("test-cursor-secret-01234567890123456789")
 
   val accountService: AccountUseCases = new AccountUseCases {
     def signUp(input: SignUpInput, now: Instant, userId: UserId) = unsupported
@@ -59,7 +59,7 @@ object TestGraphQLSupport {
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
       def changeStatus(actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String], eventId: ApplicationEventId, now: Instant) = unsupported
     },
-    cursorCodec,
+    cursorKey,
     accountService
   )
 

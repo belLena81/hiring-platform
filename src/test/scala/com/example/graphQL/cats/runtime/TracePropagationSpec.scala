@@ -58,7 +58,7 @@ final class TracePropagationSpec extends CatsEffectSuite {
           HiringReadService(users, jobs, applications),
           JobService(users, jobs),
           ApplicationService(users, jobs, applications),
-          TestGraphQLSupport.cursorCodec,
+          TestGraphQLSupport.cursorKey,
           TestGraphQLSupport.accountService
         )
         probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }

@@ -16,7 +16,7 @@ final case class HiringGraphQLServices(
     readModel: HiringReadModel,
     jobService: JobUseCases,
     applicationService: ApplicationUseCases,
-    cursorCodec: CursorCodec.CursorCodecs,
+    cursorKey: CursorCodec.CursorKey,
     accountService: AccountUseCases,
     semanticSearchService: Option[SearchUseCases] = None,
     interactionService: Option[InteractionUseCases] = None,
@@ -99,6 +99,7 @@ object RequestContextFactory {
 
 object RequestContext {
   final case class ReadFailure(error: UseCaseError) extends RuntimeException with NoStackTrace
+  final case class FieldFailure(code: String, message: String) extends RuntimeException with NoStackTrace
   case object RequestClosed extends RuntimeException with NoStackTrace
 
   private[graphql] def withDispatcher(

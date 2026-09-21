@@ -1,142 +1,75 @@
 package com.example.graphQL.cats.api.graphql
 
-import com.example.graphQL.cats.api.graphql.CursorCodec
-import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
-import io.circe.Json
+import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
 import munit.FunSuite
-import pdi.jwt.{JwtAlgorithm, JwtCirce}
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.{Base64, UUID}
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 final class CursorCodecSpec extends FunSuite {
   private val secret = "test-cursor-secret-01234567890123456789"
-  private val codec = CursorCodec.fromSecret(secret)
+  private given CursorCodec.CursorKey = CursorCodec.keyFromSecret(secret)
   private val instant = Instant.parse("2026-09-17T08:00:00Z")
   private val id = UUID.fromString("10000000-0000-0000-0000-000000000001")
-  test("job cursors only decode as job cursors") {
-    val encoded = codec.jobCursorCodec.encode(JobCursor(instant, JobId(id)))
 
-    assertEquals(codec.jobCursorCodec.decode(encoded), Right(JobCursor(instant, JobId(id))))
-    assertEquals(codec.applicationCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("job")))
-    assertEquals(codec.eventCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("job")))
+  test("all cursor types round-trip through the compact v3 format") {
+    assertEquals(CursorCodec.decode[JobCursor](CursorCodec.encode(JobCursor(instant, JobId(id)))), Right(JobCursor(instant, JobId(id))))
+    assertEquals(CursorCodec.decode[ApplicationCursor](CursorCodec.encode(ApplicationCursor(instant, ApplicationId(id)))), Right(ApplicationCursor(instant, ApplicationId(id))))
+    assertEquals(CursorCodec.decode[ApplicationEventCursor](CursorCodec.encode(ApplicationEventCursor(instant, ApplicationEventId(id)))), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
+    assertEquals(CursorCodec.decode[UserCursor](CursorCodec.encode(UserCursor(instant, UserId(id)))), Right(UserCursor(instant, UserId(id))))
   }
 
-  test("encoded cursors use a signed JWT envelope") {
-    val encoded = codec.jobCursorCodec.encode(JobCursor(instant, JobId(id)))
+  test("cursors are one compact base64url envelope rather than JWTs") {
+    val encoded = CursorCodec.encode(JobCursor(instant, JobId(id)))
+    val decoded = new String(Base64.getUrlDecoder.decode(encoded), StandardCharsets.UTF_8)
 
-    assertEquals(encoded.split("\\.", -1).length, 3)
+    assert(!encoded.contains('.'))
+    assertEquals(decoded.split("\\|", -1).toList.take(4), List("v3", "j", instant.toString, id.toString))
+    assertEquals(decoded.split("\\|", -1).length, 5)
   }
 
-  test("application cursors only decode as application cursors") {
-    val encoded = codec.applicationCursorCodec.encode(ApplicationCursor(instant, ApplicationId(id)))
+  test("cursor kinds remain isolated") {
+    val job = CursorCodec.encode(JobCursor(instant, JobId(id)))
+    val application = CursorCodec.encode(ApplicationCursor(instant, ApplicationId(id)))
+    val event = CursorCodec.encode(ApplicationEventCursor(instant, ApplicationEventId(id)))
 
-    assertEquals(codec.jobCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("application")))
-    assertEquals(codec.applicationCursorCodec.decode(encoded), Right(ApplicationCursor(instant, ApplicationId(id))))
-    assertEquals(codec.eventCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("application")))
+    assertEquals(CursorCodec.decode[ApplicationCursor](job), Left(CursorCodec.CursorError.WrongKind("j")))
+    assertEquals(CursorCodec.decode[JobCursor](application), Left(CursorCodec.CursorError.WrongKind("a")))
+    assertEquals(CursorCodec.decode[JobCursor](event), Left(CursorCodec.CursorError.WrongKind("e")))
   }
 
-  test("application event cursors only decode as event cursors") {
-    val encoded = codec.eventCursorCodec.encode(ApplicationEventCursor(instant, ApplicationEventId(id)))
+  test("malformed, legacy, and JWT-shaped cursors do not decode") {
+    assert(CursorCodec.decode[JobCursor]("not-base64").isLeft)
+    assert(CursorCodec.decode[JobCursor]("eyJhbGciOiJIUzI1NiJ9.eyJ2IjoyfQ.signature").isLeft)
 
-    assertEquals(codec.jobCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("applicationEvent")))
-    assertEquals(codec.applicationCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("applicationEvent")))
-    assertEquals(codec.eventCursorCodec.decode(encoded), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
+    val legacy = Base64.getUrlEncoder.withoutPadding().encodeToString("v2|j|$instant|$id".getBytes(StandardCharsets.UTF_8))
+    assert(CursorCodec.decode[JobCursor](legacy).isLeft)
   }
 
-  test("user cursors only decode as user cursors") {
-    val expected = UserCursor(instant, UserId(id))
-    val encoded = codec.userCursorCodec.encode(expected)
+  test("payload and MAC tampering do not decode") {
+    val encoded = CursorCodec.encode(JobCursor(instant, JobId(id)))
+    val decoded = new String(Base64.getUrlDecoder.decode(encoded), StandardCharsets.UTF_8)
+    val fields = decoded.split("\\|", -1)
+    val changedPayload = fields.updated(3, UUID.randomUUID().toString).mkString("|")
+    val changedMac = fields.updated(4, fields(4).updated(0, if fields(4).head == 'A' then 'B' else 'A')).mkString("|")
 
-    assertEquals(codec.userCursorCodec.decode(encoded), Right(expected))
-    assertEquals(codec.jobCursorCodec.decode(encoded), Left(CursorCodec.CursorError.WrongKind("user")))
+    assert(CursorCodec.decode[JobCursor](encodeText(changedPayload)).isLeft)
+    assert(CursorCodec.decode[JobCursor](encodeText(changedMac)).isLeft)
   }
 
-  test("malformed cursors do not decode") {
-    assert(codec.jobCursorCodec.decode("not-base64").isLeft)
-    assert(codec.applicationCursorCodec.decode("not-base64").isLeft)
-    assert(codec.eventCursorCodec.decode("not-base64").isLeft)
+  test("invalid field values and versions are rejected") {
+    val invalidTimestamp = encodeText(s"v3|j|not-an-instant|$id|AAAAAAAAAAAAAAAAAAAAAA")
+    val invalidId = encodeText(s"v3|j|$instant|not-a-uuid|AAAAAAAAAAAAAAAAAAAAAA")
+    val unsupportedVersion = encodeText(s"v2|j|$instant|$id|AAAAAAAAAAAAAAAAAAAAAA")
+
+    assert(CursorCodec.decode[JobCursor](invalidTimestamp).isLeft)
+    assert(CursorCodec.decode[JobCursor](invalidId).isLeft)
+    assert(CursorCodec.decode[JobCursor](unsupportedVersion).isLeft)
   }
 
-  test("tampered signed cursors do not decode") {
-    val encoded = codec.jobCursorCodec.encode(JobCursor(instant, JobId(id)))
-    val tampered = encoded.updated(0, if (encoded.head == 'A') 'B' else 'A')
-
-    assert(codec.jobCursorCodec.decode(tampered).isLeft)
-  }
-
-  test("access-token signed JWTs do not decode as cursors") {
-    val accessTokenSignedCursor = JwtCirce.encode(cursorJson("job", Some(instant.toString), None, id.toString), secret, JwtAlgorithm.HS256)
-
-    assert(codec.jobCursorCodec.decode(accessTokenSignedCursor).isLeft)
-  }
-
-  test("old unsigned cursors do not decode") {
-    val legacy = Base64.getUrlEncoder.withoutPadding().encodeToString(Json.obj(
-      "v" -> Json.fromInt(1),
-      "kind" -> Json.fromString("job"),
-      "createdAt" -> Json.fromString(instant.toString),
-      "id" -> Json.fromString(id.toString)
-    ).noSpaces.getBytes(StandardCharsets.UTF_8))
-
-    assert(codec.jobCursorCodec.decode(legacy).isLeft)
-  }
-
-  test("unsupported cursor versions report the received version") {
-    val versionOne = Json.obj(
-      "v" -> Json.fromInt(1),
-      "kind" -> Json.fromString("job"),
-      "createdAt" -> Json.fromString(instant.toString),
-      "occurredAt" -> Json.Null,
-      "id" -> Json.fromString(id.toString)
-    )
-
-    val mac = Mac.getInstance("HmacSHA256")
-    mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"))
-    val cursorKey = Base64.getEncoder.encodeToString(mac.doFinal("hiring-platform:graphql-cursor:v2".getBytes(StandardCharsets.UTF_8)))
-    codec.jobCursorCodec.decode(JwtCirce.encode(versionOne, cursorKey, JwtAlgorithm.HS256)) match {
-      case Left(CursorCodec.CursorError.Malformed(message)) => assert(message.contains("Unsupported cursor version: 1"))
-      case other => fail(s"Expected unsupported-version failure, received $other")
-    }
-  }
-
-  test("old custom signed cursor envelopes do not decode") {
-    val payload = Base64.getUrlEncoder.withoutPadding().encodeToString(Json.obj(
-      "v" -> Json.fromInt(2),
-      "kind" -> Json.fromString("job"),
-      "createdAt" -> Json.fromString(instant.toString),
-      "occurredAt" -> Json.Null,
-      "id" -> Json.fromString(id.toString)
-    ).noSpaces.getBytes(StandardCharsets.UTF_8))
-
-    assert(codec.jobCursorCodec.decode(s"$payload.signature").isLeft)
-  }
-
-  test("malformed cursor fields do not throw or decode") {
-    val badCreatedAt = cursorJson("job", Some("not-an-instant"), None, id.toString)
-    val badOccurredAt = cursorJson("applicationEvent", None, Some("not-an-instant"), id.toString)
-    val badId = cursorJson("application", Some(instant.toString), None, "not-a-uuid")
-
-    assert(codec.jobCursorCodec.decode(encode(badCreatedAt)).isLeft)
-    assert(codec.eventCursorCodec.decode(encode(badOccurredAt)).isLeft)
-    assert(codec.applicationCursorCodec.decode(encode(badId)).isLeft)
-  }
-
-  private def cursorJson(kind: String, createdAt: Option[String], occurredAt: Option[String], id: String): Json =
-    Json.obj(
-      "kind" -> Json.fromString(kind),
-      "v" -> Json.fromInt(2),
-      "createdAt" -> createdAt.fold(Json.Null)(Json.fromString),
-      "occurredAt" -> occurredAt.fold(Json.Null)(Json.fromString),
-      "id" -> Json.fromString(id)
-    )
-
-  private def encode(json: Json): String = {
-    JwtCirce.encode(json, secret, JwtAlgorithm.HS256)
-  }
+  private def encodeText(value: String): String =
+    Base64.getUrlEncoder.withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8))
 }

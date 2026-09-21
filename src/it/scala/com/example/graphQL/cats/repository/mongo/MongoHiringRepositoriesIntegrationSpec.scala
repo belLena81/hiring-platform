@@ -780,8 +780,8 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           token = signedToken(candidateId, jwt)
           submit = s"""mutation {
                       |  submitApplication(input: { jobId: "${jobId.value}" }) {
-                      |    application { id status }
-                      |    errors { code }
+                      |    __typename
+                      |    ... on Application { status }
                       |  }
                       |}""".stripMargin
           first <- http(graphqlRequest(submit, token)).flatMap(_.as[Json])
@@ -796,11 +796,9 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           }
         } yield {
           assertEquals(first.hcursor.downField("data").downField("submitApplication")
-            .downField("application").get[String]("status"), Right("Created"))
-          assertEquals(first.hcursor.downField("data").downField("submitApplication")
-            .downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
-          assertEquals(duplicate.hcursor.downField("data").downField("submitApplication")
-            .downField("errors").downArray.get[String]("code"), Right("DUPLICATE_APPLICATION"))
+            .get[String]("status"), Right("CREATED"))
+          assertEquals(duplicate.hcursor.downField("errors").downArray
+            .downField("extensions").get[String]("code"), Right("DUPLICATE_APPLICATION"))
           assert(database._1.contains(MongoHiringSetup.ApplicationsCandidateJobIndex))
           assertEquals(database._2.map(_.getString("status")), Some("Applied"))
         }

@@ -1,3 +1,5 @@
+union AcceptApplicationResult = Application | ValidationError | DomainError
+
 type Application {
   id: ApplicationID!
   status: ApplicationStatus!
@@ -15,7 +17,6 @@ type ApplicationConnection {
   edges: [ApplicationEdge!]!
   pageInfo: PageInfo!
   searchId: ID
-  errors: [PayloadError!]!
 }
 
 type ApplicationEdge {
@@ -37,7 +38,6 @@ type ApplicationEventConnection {
   edges: [ApplicationEventEdge!]!
   pageInfo: PageInfo!
   searchId: ID
-  errors: [PayloadError!]!
 }
 
 type ApplicationEventEdge {
@@ -46,11 +46,6 @@ type ApplicationEventEdge {
 }
 
 scalar ApplicationID
-
-type ApplicationPayload {
-  application: Application
-  errors: [PayloadError!]!
-}
 
 enum ApplicationStatus {
   CREATED
@@ -61,17 +56,18 @@ enum ApplicationStatus {
   REJECTED
 }
 
-type AuthPayload {
-  user: User
-  accessToken: String
-  expiresAt: String
-  errors: [PayloadError!]!
+type AuthSuccess {
+  user: User!
+  accessToken: String!
+  expiresAt: String!
 }
 
 input BootstrapAdminInput {
   name: String!
   password: String!
 }
+
+union BootstrapAdminResult = AuthSuccess | ValidationError | DomainError
 
 type CandidateMatchCandidate {
   id: ID!
@@ -90,14 +86,26 @@ type CandidateProfile {
   resumeRef: String
 }
 
+union CloseJobResult = Job | ValidationError | DomainError
+
+union CreateJobResult = Job | ValidationError | DomainError
+
 input DeclineApplicationInput {
   applicationId: ApplicationID!
   reason: String
 }
 
-type DeleteAccountPayload {
+union DeclineApplicationResult = Application | ValidationError | DomainError
+
+union DeleteMyAccountResult = DeletionSuccess | ValidationError | DomainError
+
+type DeletionSuccess {
   deleted: Boolean!
-  errors: [PayloadError!]!
+}
+
+type DomainError {
+  code: String!
+  message: String!
 }
 
 type Health {
@@ -108,11 +116,12 @@ enum HealthStatus {
   UP
 }
 
+union HireApplicationResult = Application | ValidationError | DomainError
+
 scalar Instant
 
-type InteractionPayload {
+type InteractionSuccess {
   recorded: Boolean!
-  errors: [PayloadError!]!
 }
 
 type Job {
@@ -136,7 +145,6 @@ type JobConnection {
   edges: [JobEdge!]!
   pageInfo: PageInfo!
   searchId: ID
-  errors: [PayloadError!]!
 }
 
 type JobEdge {
@@ -162,11 +170,6 @@ input JobInput {
   remote: Boolean!
 }
 
-type JobPayload {
-  job: Job
-  errors: [PayloadError!]!
-}
-
 enum JobStatus {
   DRAFT
   OPEN
@@ -184,24 +187,28 @@ input LoginInput {
   password: String!
 }
 
+union LoginResult = AuthSuccess | ValidationError | DomainError
+
+union MoveApplicationToInterviewResult = Application | ValidationError | DomainError
+
 type Mutation {
-  submitApplication(input: SubmitApplicationInput!): ApplicationPayload!
-  createJob(input: JobInput!): JobPayload!
-  updateJob(input: UpdateJobInput!): JobPayload!
-  publishJob(input: JobActionInput!): JobPayload!
-  closeJob(input: JobActionInput!): JobPayload!
-  acceptApplication(input: ApplicationActionInput!): ApplicationPayload!
-  moveApplicationToInterview(input: ApplicationActionInput!): ApplicationPayload!
-  hireApplication(input: ApplicationActionInput!): ApplicationPayload!
-  rejectApplication(input: RejectApplicationInput!): ApplicationPayload!
-  declineApplication(input: DeclineApplicationInput!): ApplicationPayload!
-  signUp(input: SignUpInput!): AuthPayload!
-  login(input: LoginInput!): AuthPayload!
-  bootstrapAdmin(input: BootstrapAdminInput!): AuthPayload!
-  updateMyProfile(input: UpdateMyProfileInput!): UserPayload!
-  deleteMyAccount: DeleteAccountPayload!
-  recordJobView(input: RecordJobViewInput!): InteractionPayload!
-  recordSearchResultClick(input: RecordSearchResultClickInput!): InteractionPayload!
+  submitApplication(input: SubmitApplicationInput!): SubmitApplicationResult!
+  createJob(input: JobInput!): CreateJobResult!
+  updateJob(input: UpdateJobInput!): UpdateJobResult!
+  publishJob(input: JobActionInput!): PublishJobResult!
+  closeJob(input: JobActionInput!): CloseJobResult!
+  acceptApplication(input: ApplicationActionInput!): AcceptApplicationResult!
+  moveApplicationToInterview(input: ApplicationActionInput!): MoveApplicationToInterviewResult!
+  hireApplication(input: ApplicationActionInput!): HireApplicationResult!
+  rejectApplication(input: RejectApplicationInput!): RejectApplicationResult!
+  declineApplication(input: DeclineApplicationInput!): DeclineApplicationResult!
+  signUp(input: SignUpInput!): SignUpResult!
+  login(input: LoginInput!): LoginResult!
+  bootstrapAdmin(input: BootstrapAdminInput!): BootstrapAdminResult!
+  updateMyProfile(input: UpdateMyProfileInput!): UpdateMyProfileResult!
+  deleteMyAccount: DeleteMyAccountResult!
+  recordJobView(input: RecordJobViewInput!): RecordJobViewResult!
+  recordSearchResultClick(input: RecordSearchResultClickInput!): RecordSearchResultClickResult!
 }
 
 type PageInfo {
@@ -209,21 +216,18 @@ type PageInfo {
   endCursor: String
 }
 
-type PayloadError {
-  code: String!
-  message: String!
-}
+union PublishJobResult = Job | ValidationError | DomainError
 
 type Query {
   health: Health!
   readiness: Readiness!
-  me: UserPayload!
+  me: User
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!
   recommendedJobs(first: Int!, searchId: UUID): RankedJobResults!
   candidateMatches(jobId: JobID!, first: Int!, searchId: UUID): RankedCandidateResults!
-  job(id: JobID!): JobPayload!
+  job(id: JobID!): Job
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
   jobApplications(jobId: JobID!, first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
@@ -241,7 +245,6 @@ type RankedCandidate {
 
 type RankedCandidateResults {
   results: [RankedCandidate!]!
-  errors: [PayloadError!]!
 }
 
 type RankedJob {
@@ -255,7 +258,6 @@ type RankedJob {
 
 type RankedJobResults {
   results: [RankedJob!]!
-  errors: [PayloadError!]!
 }
 
 type Readiness {
@@ -273,11 +275,15 @@ input RecordJobViewInput {
   searchId: UUID
 }
 
+union RecordJobViewResult = InteractionSuccess | ValidationError | DomainError
+
 input RecordSearchResultClickInput {
   eventId: UUID!
   searchId: UUID!
   resultId: UUID!
 }
+
+union RecordSearchResultClickResult = InteractionSuccess | ValidationError | DomainError
 
 type RecruiterProfile {
   organizationName: String!
@@ -288,6 +294,8 @@ input RejectApplicationInput {
   applicationId: ApplicationID!
   feedback: String
 }
+
+union RejectApplicationResult = Application | ValidationError | DomainError
 
 enum SearchMode {
   FILTER
@@ -306,9 +314,13 @@ input SignUpInput {
   jobTitle: String
 }
 
+union SignUpResult = AuthSuccess | ValidationError | DomainError
+
 input SubmitApplicationInput {
   jobId: JobID!
 }
+
+union SubmitApplicationResult = Application | ValidationError | DomainError
 
 scalar UUID
 
@@ -317,6 +329,8 @@ input UpdateJobInput {
   patch: JobInput!
 }
 
+union UpdateJobResult = Job | ValidationError | DomainError
+
 input UpdateMyProfileInput {
   skills: [String!]
   experienceSummary: String
@@ -324,6 +338,8 @@ input UpdateMyProfileInput {
   organizationName: String
   jobTitle: String
 }
+
+union UpdateMyProfileResult = User | ValidationError | DomainError
 
 type User {
   id: UserID!
@@ -339,7 +355,6 @@ type UserConnection {
   edges: [UserEdge!]!
   pageInfo: PageInfo!
   searchId: ID
-  errors: [PayloadError!]!
 }
 
 type UserEdge {
@@ -348,11 +363,6 @@ type UserEdge {
 }
 
 scalar UserID
-
-type UserPayload {
-  user: User
-  errors: [PayloadError!]!
-}
 
 union UserProfile = CandidateProfile | RecruiterProfile
 
@@ -365,4 +375,9 @@ enum UserRole {
 enum UserStatus {
   ACTIVE
   DELETED
+}
+
+type ValidationError {
+  code: String!
+  message: String!
 }

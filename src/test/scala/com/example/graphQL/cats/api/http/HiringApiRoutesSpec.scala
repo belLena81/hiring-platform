@@ -132,15 +132,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val mutation =
       s"""mutation {
          |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
-         |    application { id status }
-         |    errors { code message }
+         |    __typename
+         |    ... on Application { status }
          |  }
          |}""".stripMargin
     val applicationsQuery =
       """query {
         |  myApplications(first: 10) {
         |    edges { node { status job { id } candidate { id } } }
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
     for {
@@ -157,7 +157,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
+      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
         authenticate = authenticator.authenticateDetailed).flatMap(defaultApp)
@@ -166,8 +166,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
     } yield {
       val payload = submitted.hcursor.downField("data").downField("submitApplication")
-      assertEquals(payload.downField("application").get[String]("status"), Right("CREATED"))
-      assertEquals(payload.downField("errors").focus.flatMap(_.asArray).map(_.size), Some(0))
+      assertEquals(payload.get[String]("status"), Right("CREATED"))
       val edge = listed.hcursor.downField("data").downField("myApplications").downField("edges").downArray
       assertEquals(edge.downField("node").get[String]("status"), Right("CREATED"))
       assertEquals(edge.downField("node").downField("job").get[String]("id"), Right(ServiceFixtures.jobId.value.toString))
@@ -180,8 +179,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val mutation =
       s"""mutation {
          |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
-         |    application { id status }
-         |    errors { code message }
+         |    __typename
+         | __typename
          |  }
          |}""".stripMargin
     for {
@@ -198,7 +197,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
+      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
         authenticate = authenticator.authenticateDetailed, hiringReady = IO.pure(ProbeResult.Unavailable)).flatMap(defaultApp)
@@ -208,9 +207,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       applicationsAfter <- applicationsRef.get
     } yield {
       assertEquals(response.status, Status.Ok)
-      val errors = body.hcursor.downField("data").downField("submitApplication").downField("errors").downArray
-      assertEquals(errors.get[String]("code"), Right("SERVICE_NOT_READY"))
-      assertEquals(errors.get[String]("message"), Right("Service not ready"))
+      val error = body.hcursor.downField("errors").downArray
+      assertEquals(error.downField("extensions").get[String]("code"), Right("SERVICE_NOT_READY"))
+      assertEquals(error.get[String]("message"), Right("Service not ready"))
       assert(!body.noSpaces.contains("UNAUTHORIZED"))
       assertEquals(applicationsAfter, Map.empty)
     }
@@ -230,7 +229,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorCodec, TestGraphQLSupport.accountService)
+      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
       authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
         authenticate = authenticator.authenticateDetailed,
@@ -254,8 +253,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val mutation =
       s"""mutation {
          |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
-         |    application { id }
-         |    errors { code }
+         |    __typename
+         | __typename
          |  }
          |}""".stripMargin
     for {
@@ -265,7 +264,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       body <- response.as[Json]
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(body.hcursor.downField("data").downField("submitApplication").downField("errors").downArray.get[String]("code"),
+      assertEquals(body.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
         Right("UNAUTHORIZED"))
     }
   }
@@ -274,13 +273,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val login =
       """mutation {
         |  login(input: { name: "Candidate", password: "password-password" }) {
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
     val signup =
       """mutation {
         |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -339,24 +338,24 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("account admission rejects multiple selected sensitive root fields before authentication or execution") {
     val repeatedAliases =
       """mutation {
-        |  first: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
-        |  second: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  second: login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
     val mixedOperations =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
-        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { errors { code } }
+        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |}""".stripMargin
     val cyclicFragments =
       """mutation {
         |  ...First
         |}
         |fragment First on Mutation {
-        |  first: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |  ...Second
         |}
         |fragment Second on Mutation {
-        |  second: signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { errors { code } }
+        |  second: signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |  ...First
         |}""".stripMargin
 
@@ -382,8 +381,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("account admission only inspects the selected operation") {
     val document =
       """mutation UnselectedSensitive {
-        |  first: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
-        |  second: login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  second: login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |}
         |mutation Harmless {
         |  createJob(input: {
@@ -394,10 +393,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |    country: "Cyprus"
         |    city: "Nicosia"
         |    remote: false
-        |  }) { errors { code } }
+        |  }) { __typename }
         |}
         |mutation SelectedSingle {
-        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
 
     for {
@@ -423,14 +422,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}
         |fragment LoginFragment on Mutation {
         |  login(input: { name: "Candidate", password: "password-password" }) {
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
     val inlineSignup =
       """mutation {
         |  ... on Mutation {
         |    signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
-        |      errors { code }
+        | __typename
         |    }
         |  }
         |}""".stripMargin
@@ -440,7 +439,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}
         |fragment BootstrapFragment on Mutation {
         |  firstAdmin: bootstrapAdmin(input: { name: "Admin", password: "password-password" }) {
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
 
@@ -469,7 +468,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val fragments = (0 until fragmentCount).map {
       case 0 =>
         """fragment Fragment0 on Mutation {
-          |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+          |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
           |}""".stripMargin
       case index =>
         s"""fragment Fragment$index on Mutation {
@@ -505,7 +504,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |    city: "Nicosia"
         |    remote: false
         |  }) {
-        |    errors { code }
+        | __typename
         |  }
         |}""".stripMargin
     val operationNamedLogin =
@@ -532,11 +531,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("trusted Forwarded client addresses isolate auth rate-limit buckets") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
     val signup =
       """mutation {
-        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { errors { code } }
+        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |}""".stripMargin
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
@@ -564,7 +563,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("untrusted peers cannot evade auth rate limits with Forwarded") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
 
     for {
@@ -582,7 +581,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("trusted X-Forwarded-For client addresses isolate auth rate-limit buckets") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { errors { code } }
+        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 

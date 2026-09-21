@@ -345,13 +345,16 @@ mutation SubmitApplication(
   $input: SubmitApplicationInput!
 ) {
   submitApplication(input: $input) {
-    application {
+    ... on Application {
       id
       status
       createdAt
     }
-
-    errors {
+    ... on ValidationError {
+      code
+      message
+    }
+    ... on DomainError {
       code
       message
     }
