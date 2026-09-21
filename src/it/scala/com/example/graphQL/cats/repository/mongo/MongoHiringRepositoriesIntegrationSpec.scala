@@ -13,6 +13,7 @@ import com.example.graphQL.cats.repository.protocol.{
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.job.CreateJobInput
 import com.example.graphQL.cats.shared.crypto.SourceHash
+import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import com.example.graphQL.cats.config.{JwtAuthConfig, VectorSearchConfig}
@@ -530,6 +531,36 @@ class MongoHiringRepositoriesIntegrationSpec extends CatsEffectSuite {
           assertEquals(result, Left(RepositoryError.Conflict))
           assertEquals(storedApplication, Right(None))
           assertEquals(history.size, 1)
+        }
+      }
+    }
+  }
+
+  test("transactional job creation rolls back when its operational outbox insert fails") {
+    replicaSetContainer.use { uri =>
+      MongoDatabaseProbe.clientResource(uri).use { client =>
+        val database = client.getDatabase("hiring_job_outbox_rollback")
+        val jobs = MongoJobRepository.transactional(database, client)
+        val job = jobFixture(jobId, JobStatus.Open)
+        val operationalEvent = OperationalEvents.jobEvent(
+          OperationalEventType.JOB_CREATED,
+          UUID.fromString("00000000-0000-0000-0000-000000000110"),
+          job,
+          recruiterId,
+          now
+        )
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          _ <- PublisherBridge.first(database.getCollection("event_outbox").insertOne(
+            MongoHiringCodecs.outboxRecord(operationalEvent, now)
+          ))
+          result <- jobs.createWithEvents(job, now, List(operationalEvent))
+          storedJob <- jobs.find(jobId)
+          outbox <- PublisherBridge.collectWithin(database.getCollection("event_outbox").find(), 32)
+        } yield {
+          assertEquals(result, Left(RepositoryError.Conflict))
+          assertEquals(storedJob, Right(None))
+          assertEquals(outbox.size, 1)
         }
       }
     }

@@ -25,7 +25,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         size     <- EitherT(pageSize(context.arg(firstArgument)))
         searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         results  <- liftUseCase(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
-        _        <- saveRankedJobs(hiring, actor.userId, "semanticJobSearch", searchId, Some(context.arg(queryArgument)), filterJson(filter), results)
+        _        <- saveRankedJobs(hiring, actor.userId, "semanticJobSearch", searchId, filterJson(filter), results)
       } yield rankedJobResults(results)
     }, error => RankedJobResults(Nil, List(error)))
 
@@ -35,7 +35,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         size     <- EitherT(pageSize(context.arg(firstArgument)))
         searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         results  <- liftUseCase(service.recommendedJobs(actor, size, searchId))
-        _        <- saveRankedJobs(hiring, actor.userId, "recommendedJobs", searchId, None, Json.obj(), results)
+        _        <- saveRankedJobs(hiring, actor.userId, "recommendedJobs", searchId, Json.obj(), results)
       } yield rankedJobResults(results)
     }, error => RankedJobResults(Nil, List(error)))
 
@@ -46,7 +46,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         size     <- EitherT(pageSize(context.arg(firstArgument)))
         searchId <- EitherT(searchIdValue(context.arg(searchIdArgument)))
         results  <- liftUseCase(service.candidateMatches(actor, jobId, size, searchId))
-        _        <- saveRankedCandidates(hiring, actor.userId, "candidateMatches", searchId, None,
+        _        <- saveRankedCandidates(hiring, actor.userId, "candidateMatches", searchId,
                       Json.obj("jobId" -> Json.fromString(jobId.value.toString)), results)
       } yield rankedCandidateResults(results)
     }, error => RankedCandidateResults(Nil, List(error)))
@@ -62,7 +62,6 @@ private[graphql] object HiringGraphQLSearchResolvers {
       actorId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       kind: String,
       searchId: UUID,
-      query: Option[String],
       filter: Json,
       values: List[RankedJob]
   ): GraphQLStep[Unit] =
@@ -71,7 +70,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         searchId,
         actorId,
         kind,
-        query,
+        None,
         filter,
         values.headOption.map(_.meta.model),
         values.headOption.map(_.meta.version),
@@ -90,7 +89,6 @@ private[graphql] object HiringGraphQLSearchResolvers {
       actorId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
       kind: String,
       searchId: UUID,
-      query: Option[String],
       filter: Json,
       values: List[RankedCandidate]
   ): GraphQLStep[Unit] =
@@ -99,7 +97,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
         searchId,
         actorId,
         kind,
-        query,
+        None,
         filter,
         values.headOption.map(_.meta.model),
         values.headOption.map(_.meta.version),

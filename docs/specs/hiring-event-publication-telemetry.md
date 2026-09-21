@@ -1,6 +1,6 @@
 # Hiring Event Publication And Telemetry
 
-Status: implemented locally; Docker Kafka integration evidence and independent review gates pending.
+Status: implemented locally; focused and Compose evidence recorded; independent review gates pending refresh.
 
 ## Scope
 
@@ -22,7 +22,10 @@ No Spark, Delta, managed Kafka, Saga workflow, account/profile events, historica
 ## Current Checkpoint
 
 - Source inspected: service protocols, job/application/search services, Mongo repositories/setup/codecs, GraphQL schema/input/model/resolvers, runtime wiring, config, Compose.
-- Implemented: sanitized v1 operational envelope JSON, transactional Mongo outbox writes for job/application/account-deletion facts, search sessions, authenticated view/click telemetry, outbox leasing/retry/failure states, Kafka publisher resource, receipt/quarantine repositories, consumer offset discipline, local Kafka Compose service, and additive GraphQL `searchId` support.
+- Implemented: sanitized v1 operational envelope JSON, transactional Mongo outbox writes for job/application/account-deletion facts, search sessions with structured filter/model/result metadata but no verbatim free-form query retention, authenticated view/click telemetry, outbox leasing/retry/failure states, Kafka publisher resource, receipt/quarantine repositories, consumer offset discipline, local Kafka Compose service, and additive GraphQL `searchId` support.
 - Local unit evidence: `sbt test` passed 264 tests on 2026-09-20 after the Kafka/runtime/schema changes.
 - Local Mongo integration evidence: `sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec'` passed 18 tests on 2026-09-20 after fixing stale repository API calls and vector transactional setup.
-- Evidence pending: Docker-backed Kafka integration with 100 events and commit-to-receipt latency, full `IntegrationTest / test` still has an unrelated `MongoDatabaseProbeIntegrationSpec` diagnostic-correlation failure, and independent Code Reviewer, Security Engineer, and QA verdicts must be rerun after fixes.
+- Local Mongo integration evidence: `sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.MongoHiringRepositoriesIntegrationSpec'` passed 19 tests on 2026-09-20, including transactional job rollback when the outbox insert conflicts.
+- Kafka handler evidence: `sbt testOnly com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntimeSpec` passed the 267-test unit suite, covering malformed/unsupported quarantine, duplicate acknowledgement, sequence gaps, and first-observed hire rejection.
+- Compose evidence: with `docker compose up -d`, `PHASE5_COMPOSE_EVIDENCE=true sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.OperationalEventComposeIntegrationSpec'` passed one test on 2026-09-20 using 100 events from one writer, a disposable replica set, and one broker; clean-topic commit-to-receipt p95 was 8,061 ms. This is local evidence only.
+- Remaining evidence: broker-outage/restart/lost-ack and consumer-restart/quarantine offset-discipline scenarios still require live failure-injection runs; full `IntegrationTest / test` still has the unrelated `MongoDatabaseProbeIntegrationSpec` diagnostic-correlation failure. Independent Code Reviewer, Security Engineer, and QA verdicts must be rerun after these changes.

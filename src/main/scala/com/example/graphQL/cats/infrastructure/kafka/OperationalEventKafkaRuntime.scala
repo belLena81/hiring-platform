@@ -117,7 +117,7 @@ object OperationalEventKafkaRuntime {
     )
   }
 
-  private def handleRecord(
+  private[kafka] def handleRecord(
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository[IO],
       quarantine: EventQuarantineRepository[IO],
@@ -158,7 +158,7 @@ object OperationalEventKafkaRuntime {
       }
     }
 
-  private def validateReceiptOrder(
+  private[kafka] def validateReceiptOrder(
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository[IO],
       event: OperationalEventEnvelope

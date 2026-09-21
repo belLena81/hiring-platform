@@ -14,7 +14,7 @@ services:
       start_period: 10s
 
   kafka:
-    image: apache/kafka:3.9.2
+    image: apache/kafka:3.9.2@sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02
     ports:
       - "127.0.0.1:9092:9092"
     environment:
@@ -30,5 +30,3 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
       KAFKA_LOG_RETENTION_HOURS: "168"
-    volumes:
-      - ./.local/data/kafka:/tmp/kafka-logs
