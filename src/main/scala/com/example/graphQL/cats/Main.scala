@@ -57,7 +57,7 @@ object Main extends IOApp {
                 } yield server
               }
               .use(_ => Diagnostics.emit(diagnostics, LogEvent.Started, fields = Map(
-                LogField.HttpHost -> config.host,
+                LogField.HttpHost -> config.host.toString,
                 LogField.HttpPort -> config.port.toString
               )) *> IO.never[ExitCode])
               .guarantee(Diagnostics.emit(diagnostics, LogEvent.Shutdown))

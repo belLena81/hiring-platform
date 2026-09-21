@@ -1,11 +1,14 @@
 package com.example.graphQL.cats.runtime
 
 import cats.effect.{Deferred, IO, Ref, Resource}
+import com.comcast.ip4s.{Host, Port}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.config.AuthRateLimitConfig
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
 import org.http4s.server.Server
+import org.slf4j.LoggerFactory
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 import io.circe.Json
 import io.circe.parser.parse
 import java.net.{InetSocketAddress, Socket, URI}
@@ -15,6 +18,7 @@ import java.time.Duration
 import java.util.UUID
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 class HiringPlatformServerSpec extends CatsEffectSuite {
   private lazy val client = HttpClient.newBuilder()
@@ -44,8 +48,43 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
         Diagnostics.noop,
         dependencies
       ).httpApp(HiringApiRoutes.HttpConfig(AdmissionPermits, 5.seconds)))
-      server <- HiringPlatformServer.resource(host, port, app)
+      server <- HiringPlatformServer.resource(
+        Host.fromString(host).getOrElse(fail(s"Invalid test host: $host")),
+        Port.fromInt(port).getOrElse(fail(s"Invalid test port: $port")),
+        app
+      )
     } yield server
+
+  test("P1-AC02 unexpected application failures return 500 and are logged") {
+    val logger = LoggerFactory.getLogger("hiring.server-test").asInstanceOf[ch.qos.logback.classic.Logger]
+    val failure = new IllegalStateException("synthetic server failure")
+    Resource.make(IO {
+      val appender = new ch.qos.logback.core.read.ListAppender[ch.qos.logback.classic.spi.ILoggingEvent]()
+      appender.start()
+      logger.setLevel(ch.qos.logback.classic.Level.ERROR)
+      logger.addAppender(appender)
+      appender
+    })(appender => IO {
+      val _ = logger.detachAppender(appender)
+      logger.setLevel(null)
+      appender.stop()
+    }).use { appender =>
+      val failingApp = org.http4s.HttpApp[IO](_ => IO.raiseError[org.http4s.Response[IO]](failure))
+      HiringPlatformServer.resource(
+        Host.fromString("127.0.0.1").get,
+        Port.fromInt(0).get,
+        failingApp,
+        Slf4jLogger.getLoggerFromName[IO]("hiring.server-test")
+      ).use { server =>
+        request(server.address.getPort, "/failure").map { response =>
+          assertEquals(response.statusCode(), 500)
+          val events = appender.list.asScala.toList
+          assert(events.exists(event => event.getFormattedMessage == "unhandled"))
+          assert(events.exists(event => Option(event.getThrowableProxy).exists(_.getClassName == failure.getClass.getName)))
+        }
+      }
+    }
+  }
 
   private def request(port: Int, path: String, body: Option[String] = None): IO[HttpResponse[String]] =
     IO.fromCompletableFuture(IO {

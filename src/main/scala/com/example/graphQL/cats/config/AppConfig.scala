@@ -3,7 +3,7 @@ package com.example.graphQL.cats.config
 import cats.data.{NonEmptyList, ValidatedNel}
 import cats.effect.IO
 import cats.syntax.all.*
-import com.comcast.ip4s.{Cidr, IpAddress}
+import com.comcast.ip4s.{Cidr, Host, IpAddress, Port as Ip4sPort}
 import com.example.graphQL.cats.shared.pagination.PageSize
 import com.mongodb.ConnectionString
 import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions}
@@ -96,7 +96,7 @@ type Parallelism = Int :| Interval.Closed[1, 64]
 type TimeoutMs = Int :| Interval.Closed[100, 60000]
 type HttpsUrl = String :| StartWith["https://"]
 
-final case class AppConfig(host: String, port: Int, admissionPermits: Int, requestTimeout: FiniteDuration,
+final case class AppConfig(host: Host, port: Ip4sPort, admissionPermits: Int, requestTimeout: FiniteDuration,
     resolverTimeout: FiniteDuration, trustedProxy: TrustedProxyConfig,
     mongoUri: String, mongoDatabase: String,
     maskSensitive: Boolean, jwtAuth: JwtAuthConfig, passwordHash: PasswordHashConfig, authRateLimit: AuthRateLimitConfig,
@@ -134,7 +134,7 @@ object AppConfig {
     val indexes = vector.indexes
 
     val transport =
-      (validHost(http.host), http.port.validNel[ConfigError], http.admissionPermits.validNel[ConfigError],
+      (validHost(http.host), validPort(http.port), http.admissionPermits.validNel[ConfigError],
         validRequestTimeout(http.requestTimeoutMs), validResolverTimeout(http.resolverTimeoutMs, http.requestTimeoutMs),
         validTrustedProxyCidrs(http.trustedProxyCidrs),
         validMongoUri(mongo.uri), validMongoDatabase(mongo.database)).mapN {
@@ -192,8 +192,10 @@ object AppConfig {
   private def bounded[A: Ordering](min: A, max: A, error: ConfigError)(value: A): ValidatedNel[ConfigError, A] =
     Either.cond(Ordering[A].lteq(min, value) && Ordering[A].lteq(value, max), value, error).toValidatedNel
 
-  private def validHost(value: String): ValidatedNel[ConfigError, String] =
-    Either.cond(IpAddress.fromString(value).isDefined, value, ConfigError.InvalidHost).toValidatedNel
+  private def validHost(value: String): ValidatedNel[ConfigError, Host] =
+    IpAddress.fromString(value).map(ip => ip: Host).toValidNel(ConfigError.InvalidHost)
+  private def validPort(value: Port): ValidatedNel[ConfigError, Ip4sPort] =
+    Ip4sPort.fromInt(value).toValidNel(ConfigError.InvalidPort)
   private def validMongoUri(value: String): ValidatedNel[ConfigError, String] =
     Try(new ConnectionString(value)).toEither.leftMap(_ => ConfigError.InvalidMongoUri).toValidatedNel.map(_ => value)
   private def validMongoDatabase(value: String): ValidatedNel[ConfigError, String] =

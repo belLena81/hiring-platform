@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.config
 
 import com.example.graphQL.cats.shared.pagination.PageSize
+import com.comcast.ip4s.{Host, Port as Ip4sPort}
 import munit.FunSuite
 import cats.data.NonEmptyList
 import scala.concurrent.duration.*
@@ -210,7 +211,7 @@ class AppConfigSpec extends FunSuite {
     assertEquals(AppConfig.fromConfig(config, Map(
       "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
-    )), Right(AppConfig("::1", 65535, 64, 5.seconds, 4.seconds, TrustedProxyConfig(Nil),
+    )), Right(AppConfig(Host.fromString("::1").get, Ip4sPort.fromInt(65535).get, 64, 5.seconds, 4.seconds, TrustedProxyConfig(Nil),
       "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
       "hiring_test-2", maskSensitive = true,
       JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
@@ -254,7 +255,7 @@ class AppConfigSpec extends FunSuite {
         |auth.jwt.hs256-secret = "01234567890123456789012345678901"
         |""".stripMargin
     val result = AppConfig.fromConfig(raw + local, Map.empty)
-    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri)),
+    assertEquals(result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017")))
   }
 
@@ -268,7 +269,7 @@ class AppConfigSpec extends FunSuite {
       "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901",
       "VOYAGE_MODEL" -> "voyage-4-lite"
     ))
-    assertEquals(result.map(config => (config.host, config.port, config.admissionPermits, config.mongoUri)),
+    assertEquals(result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018")))
   }
 
@@ -297,7 +298,7 @@ class AppConfigSpec extends FunSuite {
         |logging.mask-sensitive = false
         |""".stripMargin
     val loaded = AppConfig.fromConfig(defaultConfig + local, Map.empty)
-    assertEquals(loaded.map(config => (config.port, config.maskSensitive)), Right((9090, false)))
+    assertEquals(loaded.map(config => (config.port.value, config.maskSensitive)), Right((9090, false)))
   }
 
   test("P1-AC01 HOCON overrides apply before environment resolution") {
@@ -390,7 +391,7 @@ class AppConfigSpec extends FunSuite {
         |""".stripMargin
 
     assertEquals(AppConfig.fromConfig(defaults + local, Map.empty).map(config =>
-      (config.host, config.port, config.admissionPermits, config.mongoUri)),
+      (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018")))
   }
 
@@ -450,7 +451,8 @@ class AppConfigSpec extends FunSuite {
       "::ffff:127.0.0.1").foreach { host =>
       val result = AppConfig.fromConfig(defaultConfig +
         s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
-      assertEquals(result.map(value => (value.host, value.maskSensitive)), Right((host, false)), clues(host))
+      assertEquals(result.map(value => (value.host.toString, value.maskSensitive)),
+        Right((Host.fromString(host).get.toString, false)), clues(host))
     }
   }
 
@@ -462,7 +464,7 @@ class AppConfigSpec extends FunSuite {
       assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
     }
     assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
-      Right(AppConfig("127.0.0.1", 8080, 16, 5.seconds, 4.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
+      Right(AppConfig(Host.fromString("127.0.0.1").get, Ip4sPort.fromInt(8080).get, 16, 5.seconds, 4.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
         maskSensitive = false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false), defaultKafka)))
   }
 
