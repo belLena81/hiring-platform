@@ -131,7 +131,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("served GraphQL hiring workflow derives ActorContext from a signed bearer token") {
     val mutation =
       s"""mutation {
-         |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
+         |  submitApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", jobId: "${ServiceFixtures.jobId.value}" }) {
          |    __typename
          |    ... on Application { status }
          |  }
@@ -178,7 +178,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("served GraphQL hiring setup failure returns typed service-not-ready instead of unauthorized") {
     val mutation =
       s"""mutation {
-         |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
+         |  submitApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000002", jobId: "${ServiceFixtures.jobId.value}" }) {
          |    __typename
          | __typename
          |  }
@@ -252,7 +252,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("served GraphQL hiring operation without a valid token returns typed unauthorized payload") {
     val mutation =
       s"""mutation {
-         |  submitApplication(input: { jobId: "${ServiceFixtures.jobId.value}" }) {
+         |  submitApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000003", jobId: "${ServiceFixtures.jobId.value}" }) {
          |    __typename
          | __typename
          |  }
@@ -272,13 +272,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("login and signup fields return GraphQL rate-limit errors by remote address and operation") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) {
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000004", name: "Candidate", password: "password-password" }) {
         | __typename
         |  }
         |}""".stripMargin
     val signup =
       """mutation {
-        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000005", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
         | __typename
         |  }
         |}""".stripMargin
@@ -339,13 +339,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("rate limiting applies to independently executed sensitive mutation fields") {
     val repeatedAliases =
       """mutation {
-        |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
-        |  second: login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  first: login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000006", name: "Candidate", password: "password-password" }) { __typename }
+        |  second: login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000007", name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
     val mixedOperations =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
-        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000008", name: "Candidate", password: "password-password" }) { __typename }
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000009", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |}""".stripMargin
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
@@ -364,11 +364,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("selected operation execution rate limits only the selected sensitive fields") {
     val document =
       """mutation UnselectedSensitive {
-        |  first: login(input: { name: "Candidate", password: "password-password" }) { __typename }
-        |  second: login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  first: login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000010", name: "Candidate", password: "password-password" }) { __typename }
+        |  second: login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000011", name: "Candidate", password: "password-password" }) { __typename }
         |}
         |mutation Harmless {
         |  createJob(input: {
+        |    idempotencyKey: "00000000-0000-0000-0000-000000000012"
         |    title: "Platform developer"
         |    description: "Build platform services"
         |    requirements: ["Scala"]
@@ -379,7 +380,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |  }) { __typename }
         |}
         |mutation SelectedSingle {
-        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000013", name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
 
     for {
@@ -406,14 +407,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |  ...LoginFragment
         |}
         |fragment LoginFragment on Mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) {
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000014", name: "Candidate", password: "password-password" }) {
         | __typename
         |  }
         |}""".stripMargin
     val inlineSignup =
       """mutation {
         |  ... on Mutation {
-        |    signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
+        |    signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000015", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
         | __typename
         |    }
         |  }
@@ -423,7 +424,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |  ...BootstrapFragment
         |}
         |fragment BootstrapFragment on Mutation {
-        |  firstAdmin: bootstrapAdmin(input: { name: "Admin", password: "password-password" }) {
+        |  firstAdmin: bootstrapAdmin(input: { idempotencyKey: "00000000-0000-0000-0000-000000000016", name: "Admin", password: "password-password" }) {
         | __typename
         |  }
         |}""".stripMargin
@@ -458,6 +459,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val createJob =
       """mutation {
         |  createJob(input: {
+        |    idempotencyKey: "00000000-0000-0000-0000-000000000017"
         |    title: "Senior login signUp platform developer"
         |    description: "Build platform services"
         |    requirements: ["Scala"]
@@ -493,11 +495,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("trusted Forwarded client addresses isolate auth rate-limit buckets") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000018", name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
     val signup =
       """mutation {
-        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000019", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename }
         |}""".stripMargin
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
@@ -529,7 +531,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("untrusted peers cannot evade auth rate limits with Forwarded") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000020", name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
 
     for {
@@ -549,7 +551,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("trusted X-Forwarded-For client addresses isolate auth rate-limit buckets") {
     val login =
       """mutation {
-        |  login(input: { name: "Candidate", password: "password-password" }) { __typename }
+        |  login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000021", name: "Candidate", password: "password-password" }) { __typename }
         |}""".stripMargin
     val trustedProxy = TrustedProxyConfig(List(Cidr.fromString("10.0.0.0/8").get))
 
@@ -591,7 +593,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       ).as[GraphQLRequest].leftMap(error => new IllegalArgumentException("Invalid test query", error)))
       execution <- TestGraphQLSupport.context(IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")), diagnostics = executionSink,
         requestId = Some("00000000-0000-0000-0000-000000000901")).use { context =>
-        HiringGraphQLSchema.executeInContext(parsed, context).flatTap(_ => executionFailure.get.timeout(5.seconds))
+        TestGraphQLSupport.parseAndExecute(parsed, context).flatTap(_ => executionFailure.get.timeout(5.seconds))
       }
       result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
@@ -1002,6 +1004,21 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(accept.status, Status.NotAcceptable)
       assertEquals(zeroQuality.status, Status.NotAcceptable)
       assertEquals(charset.status, Status.Ok)
+    }
+  }
+
+  test("canonical endpoints reject trailing slashes") {
+    for {
+      http <- app(IO.pure(ProbeResult.Ready))
+      health <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health/")))
+      ready <- http(Request[IO](Method.GET, Uri.unsafeFromString("/ready/")))
+      graphql <- http(request("{ health { status } }").withUri(Uri.unsafeFromString("/graphql/")))
+      schema <- http(Request[IO](Method.GET, Uri.unsafeFromString("/schema.graphql/")))
+    } yield {
+      assertEquals(health.status, Status.NotFound)
+      assertEquals(ready.status, Status.NotFound)
+      assertEquals(graphql.status, Status.NotFound)
+      assertEquals(schema.status, Status.NotFound)
     }
   }
 

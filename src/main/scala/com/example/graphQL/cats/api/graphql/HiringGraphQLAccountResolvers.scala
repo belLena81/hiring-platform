@@ -8,6 +8,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.{AccountError, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{AccountProfileInput, BootstrapAdminInput, LoginInput, SignUpInput}
+import com.example.graphQL.cats.repository.protocol.MutationEntityReference
+import io.circe.Json
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLAccountResolvers {
@@ -20,12 +22,22 @@ private[graphql] object HiringGraphQLAccountResolvers {
       publicMutation(context) { hiring =>
         signUpProfile(input).fold(
           error => mutationResult(Left(error): Either[UseCaseError, AuthSuccess]),
-          profile => timestamped { (now, id) =>
-            hiring.accountService.signUp(
-              SignUpInput(input.name, input.role, input.password, profile),
-              now,
-              Identifiers.UserId(id)
-            )
+          profile => executeMutation[(User, AccountToken)](
+            hiring,
+            "signUp",
+            publicActorScope(input.name),
+            input.idempotencyKey,
+            Json.fromString(input.toString),
+            result => MutationEntityReference("user", result._1.id.value.toString),
+            reference => replayAuth(hiring, reference)
+          ) { _ =>
+            timestamped { (now, id) =>
+              hiring.accountService.signUp(
+                SignUpInput(input.name, input.role, input.password, profile),
+                now,
+                Identifiers.UserId(id)
+              )
+            }
           }.map(_.map(authSuccess)).flatMap(mutationResult)
         )
       }
@@ -35,12 +47,22 @@ private[graphql] object HiringGraphQLAccountResolvers {
     rateLimited(context, Operation.BootstrapAdmin).flatMap { _ =>
       val input = context.arg(bootstrapAdminInputArgument)
       publicMutation(context) { hiring =>
-        timestamped { (now, id) =>
-          hiring.accountService.bootstrapAdmin(
-            BootstrapAdminInput(input.name, input.password),
-            now,
-            Identifiers.UserId(id)
-          )
+        executeMutation[(User, AccountToken)](
+          hiring,
+          "bootstrapAdmin",
+          publicActorScope(input.name),
+          input.idempotencyKey,
+          Json.fromString(input.toString),
+          result => MutationEntityReference("user", result._1.id.value.toString),
+          reference => replayAuth(hiring, reference)
+        ) { _ =>
+          timestamped { (now, id) =>
+            hiring.accountService.bootstrapAdmin(
+              BootstrapAdminInput(input.name, input.password),
+              now,
+              Identifiers.UserId(id)
+            )
+          }
         }.map(_.map(authSuccess)).flatMap(mutationResult)
       }
     }
@@ -49,8 +71,17 @@ private[graphql] object HiringGraphQLAccountResolvers {
     rateLimited(context, Operation.Login).flatMap { _ =>
       val input = context.arg(loginInputArgument)
       publicMutation(context) { hiring =>
-        IO.realTimeInstant.flatMap(now => hiring.accountService.login(LoginInput(input.name, input.password), now))
-          .map(_.map(authSuccess)).flatMap(mutationResult)
+        executeMutation[(User, AccountToken)](
+          hiring,
+          "login",
+          publicActorScope(input.name),
+          input.idempotencyKey,
+          Json.fromString(input.toString),
+          result => MutationEntityReference("user", result._1.id.value.toString),
+          reference => replayAuth(hiring, reference)
+        ) { _ =>
+          IO.realTimeInstant.flatMap(now => hiring.accountService.login(LoginInput(input.name, input.password), now))
+        }.map(_.map(authSuccess)).flatMap(mutationResult)
       }
     }
 
@@ -59,14 +90,34 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
         error => mutationResult(Left(error): Either[UseCaseError, User]),
-        profile => IO.realTimeInstant.flatMap(now => hiring.accountService.updateMyProfile(actor, profile, now))
-          .flatMap(mutationResult)
+        profile => executeMutation[User](
+          hiring,
+          "updateMyProfile",
+          actorScope(actor),
+          input.idempotencyKey,
+          Json.fromString(input.toString),
+          user => MutationEntityReference("user", user.id.value.toString),
+          _ => hiring.accountService.me(actor)
+        ) { _ =>
+          IO.realTimeInstant.flatMap(now => hiring.accountService.updateMyProfile(actor, profile, now))
+        }.flatMap(mutationResult)
       )
     }
 
   def deleteMyAccount(context: Context[RequestContext, Unit]): IO[MutationOutcome[DeletionSuccess]] =
     authenticated(context) { case (actor, hiring) =>
-      IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now)).flatTap {
+      val input = context.arg(deleteMyAccountInputArgument)
+      executeMutation(
+        hiring,
+        "deleteMyAccount",
+        actorScope(actor),
+        input.idempotencyKey,
+        Json.fromString(input.toString),
+        _ => MutationEntityReference("user", actor.userId.value.toString),
+        _ => IO.pure(Right(()))
+      ) { _ =>
+        IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now))
+      }.flatTap {
         case Right(_) => context.ctx.invalidateViewer
         case Left(_) => IO.unit
       }
@@ -113,8 +164,18 @@ private[graphql] object HiringGraphQLAccountResolvers {
         Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole))
     }
 
-  private def authSuccess(result: (User, AccountToken)): AuthSuccess =
-    AuthSuccess(result._1, result._2.value, result._2.expiresAt)
+  private def authSuccess(result: (User, AccountToken)): AuthSuccess = result match {
+    case (user, token) => AuthSuccess(user, token.value, token.expiresAt)
+  }
+
+  private def replayAuth(
+      hiring: HiringGraphQLServices,
+      reference: MutationEntityReference
+  ): IO[Either[UseCaseError, (User, AccountToken)]] =
+    scala.util.Try(Identifiers.UserId(java.util.UUID.fromString(reference.entityId))).toEither.fold(
+      _ => IO.pure(Left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable))),
+      id => IO.realTimeInstant.flatMap(now => hiring.accountService.issueToken(id, now))
+    )
 
   private def userConnection(values: List[User], requested: Int)(using CursorCodec.CursorKey): Connection[User] =
     connection(values, requested)(user => CursorCodec.encode(UserCursor(user.createdAt, user.id)))

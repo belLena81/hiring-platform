@@ -47,7 +47,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("hiring mutation without ActorContext returns typed unauthorized payload") {
     val query =
       s"""mutation {
-         |  submitApplication(input: { jobId: "${jobId.value}" }) {
+         |  submitApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", jobId: "${jobId.value}" }) {
          |    __typename
          |  }
          |}""".stripMargin
@@ -63,9 +63,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val users =
       """query { users(first: 10) { edges { node { id } } __typename } }"""
     val update =
-      """mutation { updateMyProfile(input: { skills: ["Scala"] }) { __typename } }"""
+      """mutation { updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", skills: ["Scala"] }) { __typename } }"""
     val delete =
-      """mutation { deleteMyAccount { __typename ... on DeletionSuccess { deleted } } }"""
+      """mutation { deleteMyAccount(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001" }) { __typename ... on DeletionSuccess { deleted } } }"""
 
     (execute(me, None), execute(users, None), execute(update, None), execute(delete, None)).mapN {
       (meJson, usersJson, updateJson, deleteJson) =>
@@ -78,11 +78,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("public account mutations are unavailable until hiring setup is ready") {
     val signUp =
-      """mutation { signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename } }"""
+      """mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename } }"""
     val bootstrap =
-      """mutation { bootstrapAdmin(input: { name: "Admin", password: "password-password" }) { __typename } }"""
+      """mutation { bootstrapAdmin(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Admin", password: "password-password" }) { __typename } }"""
     val login =
-      """mutation { login(input: { name: "Candidate", password: "password-password" }) { __typename } }"""
+      """mutation { login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", password: "password-password" }) { __typename } }"""
     for {
       calls <- Ref.of[IO, Int](0)
       service = new PublicAccountService(calls)
@@ -269,7 +269,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     for {
       request <- parseRequest(query)
       context <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate))).allocated
-      result <- HiringGraphQLSchema.executeInContext(request, context._1).guarantee(context._2)
+      result <- TestGraphQLSupport.parseAndExecute(request, context._1).guarantee(context._2)
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 
@@ -312,7 +312,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService = new RecordingAccountService(updateCalls)
       query =
         """mutation {
-          |  updateMyProfile(input: { skills: ["Scala"] }) {
+          |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", skills: ["Scala"] }) {
           |    __typename
           | __typename
           |  }
@@ -331,7 +331,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService = new RecordingAccountService(updateCalls)
       query =
         """mutation {
-          |  updateMyProfile(input: { jobTitle: "Hiring Lead" }) {
+          |  updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", jobTitle: "Hiring Lead" }) {
           |    __typename
           | __typename
           |  }
@@ -427,7 +427,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
       request <- parseRequest(query)
       result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), Some(ActorContext(candidateId, UserRole.Candidate)), services)
-        .use(HiringGraphQLSchema.executeInContext(request, _))
+        .use(TestGraphQLSupport.parseAndExecute(request, _))
       batches <- userBatches.get
     } yield {
       result.fold(failure => fail(failure.toString), _ => ())
@@ -439,7 +439,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("createJob input publishes skills under the domain field name") {
     val query =
       """mutation {
-        |  createJob(input: {
+        |  createJob(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001",
         |    title: "Staff Scala Developer"
         |    description: "Build platform services"
         |    requirements: ["Scala"]
@@ -465,7 +465,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("createJob validation failures use the named validation error case") {
     val query =
       """mutation {
-        |  createJob(input: {
+        |  createJob(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001",
         |    title: "Staff Scala Developer"
         |    description: "Build platform services"
         |    requirements: ["Scala"]
@@ -487,14 +487,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("submitApplication duplicate and closed-job failures stay in typed payloads") {
     val duplicate =
       s"""mutation {
-         |  submitApplication(input: { jobId: "${jobId.value}" }) {
+         |  submitApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", jobId: "${jobId.value}" }) {
          |    __typename
          |    ... on Application { id status }
          |  }
          |}""".stripMargin
     val closed =
       s"""mutation {
-         |  submitApplication(input: { jobId: "${closedJobId.value}" }) {
+         |  submitApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", jobId: "${closedJobId.value}" }) {
          |    __typename
          |    ... on Application { id status }
          |  }
@@ -510,7 +510,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("application status mutation invalid transition stays in typed payloads") {
     val query =
       s"""mutation {
-         |  hireApplication(input: { applicationId: "${applicationId.value}" }) {
+         |  hireApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", applicationId: "${applicationId.value}" }) {
          |    __typename
          |    ... on Application { id status }
          |  }
@@ -539,7 +539,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("application rejection uses reject input object and returns typed payload errors") {
     val query =
       s"""mutation {
-         |  rejectApplication(input: { applicationId: "${applicationId.value}", feedback: "Not enough Scala" }) {
+         |  rejectApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", applicationId: "${applicationId.value}", feedback: "Not enough Scala" }) {
          |    __typename
          |    ... on Application { id status }
          |  }
@@ -556,14 +556,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("application rejection and decline validation failures stay in typed payloads") {
     val reject =
       s"""mutation {
-         |  rejectApplication(input: { applicationId: "${applicationId.value}", feedback: " " }) {
+         |  rejectApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", applicationId: "${applicationId.value}", feedback: " " }) {
          |    __typename
          | __typename
          |  }
          |}""".stripMargin
     val decline =
       s"""mutation {
-         |  declineApplication(input: { applicationId: "${applicationId.value}", reason: "" }) {
+         |  declineApplication(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", applicationId: "${applicationId.value}", reason: "" }) {
          |    __typename
          | __typename
          |  }
@@ -630,7 +630,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     for {
       request <- parseRequest(query)
-      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(HiringGraphQLSchema.executeInContext(request, _))
+      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(TestGraphQLSupport.parseAndExecute(request, _))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 
@@ -659,7 +659,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("signup canonical-name conflicts return a generic registration failure") {
     val query =
       """mutation {
-        |  signUp(input: { name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
+        |  signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) {
         |    __typename
         | __typename
         |  }
@@ -698,9 +698,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |  }
         |}""".stripMargin
 
-    val submitVariables = Json.obj("input" -> Json.obj("jobId" -> Json.fromString(jobId.value.toString)))
+    val submitVariables = Json.obj("input" -> Json.obj(
+      "idempotencyKey" -> Json.fromString("00000000-0000-0000-0000-000000000001"),
+      "jobId" -> Json.fromString(jobId.value.toString)))
     val recruiterVariables = Json.obj(
       "update" -> Json.obj(
+        "idempotencyKey" -> Json.fromString("00000000-0000-0000-0000-000000000001"),
         "id" -> Json.fromString(jobId.value.toString),
         "patch" -> Json.obj(
           "title" -> Json.fromString("Principal Scala Developer"),
@@ -713,11 +716,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         )
       ),
       "reject" -> Json.obj(
+        "idempotencyKey" -> Json.fromString("00000000-0000-0000-0000-000000000001"),
         "applicationId" -> Json.fromString(applicationId.value.toString),
         "feedback" -> Json.fromString("Not enough Scala")
       )
     )
     val signupVariables = Json.obj("input" -> Json.obj(
+      "idempotencyKey" -> Json.fromString("00000000-0000-0000-0000-000000000001"),
       "name" -> Json.fromString("Candidate"),
       "role" -> Json.fromString("CANDIDATE"),
       "password" -> Json.fromString("password-password"),
@@ -789,7 +794,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         Some(searchService),
         searchSessions = searchSessions)
       request <- parseRequest(query)
-      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services).use(HiringGraphQLSchema.executeInContext(request, _))
+      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services).use(TestGraphQLSupport.parseAndExecute(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
   }
 
@@ -813,7 +818,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, accountService = accountService, searchSessions = searchSessions)
       request <- parseRequest(query, variables)
-      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services, hiringReady).use(HiringGraphQLSchema.executeInContext(request, _))
+      result <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready), actor, services, hiringReady).use(TestGraphQLSupport.parseAndExecute(request, _))
     } yield result.fold(failure => fail(failure.toString), identity)
   }
 

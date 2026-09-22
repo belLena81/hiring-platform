@@ -43,11 +43,16 @@ final case class MutationReceipt(
 /** Opaque transaction capability supplied only by a persistence adapter. */
 trait MutationWriteContext
 
+object MutationWriteContext {
+  val noop: MutationWriteContext = new MutationWriteContext {}
+}
+
 final case class MutationReceiptWrite[+A](value: A, entity: MutationEntityReference)
 
-enum MutationReceiptExecution[+A] {
+enum MutationReceiptExecution[+A, +E] {
   case Applied(value: A, entity: MutationEntityReference)
   case Replay(entity: MutationEntityReference)
+  case Rejected(error: E)
   case FingerprintMismatch
   case InProgress
 }
@@ -57,12 +62,24 @@ enum MutationReceiptExecution[+A] {
   * The callback must use the supplied context for every participating write.
   */
 trait MutationReceiptRepository {
-  def execute[A](
+  def execute[A, E](
       key: MutationReceiptKey,
       fingerprint: MutationReceiptFingerprint,
       now: Instant,
       expiresAt: Instant
-  )(write: MutationWriteContext => IO[Either[RepositoryError, MutationReceiptWrite[A]]]): IO[Either[RepositoryError, MutationReceiptExecution[A]]]
+  )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]]
+}
+
+object MutationReceiptRepository {
+  val noop: MutationReceiptRepository = new MutationReceiptRepository {
+    override def execute[A, E](
+        key: MutationReceiptKey,
+        fingerprint: MutationReceiptFingerprint,
+        now: Instant,
+        expiresAt: Instant
+    )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
+      write(MutationWriteContext.noop).map(_.map(_.fold(MutationReceiptExecution.Rejected(_), value => MutationReceiptExecution.Applied(value.value, value.entity))))
+  }
 }
 
 trait UserRepository {

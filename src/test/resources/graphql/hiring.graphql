@@ -10,6 +10,7 @@ type Application {
 }
 
 input ApplicationActionInput {
+  idempotencyKey: UUID!
   applicationId: ApplicationID!
 }
 
@@ -63,6 +64,7 @@ type AuthSuccess {
 }
 
 input BootstrapAdminInput {
+  idempotencyKey: UUID!
   name: String!
   password: String!
 }
@@ -88,14 +90,30 @@ type CandidateProfile {
 
 union CloseJobResult = Job | ValidationError | DomainError
 
+input CreateJobInput {
+  idempotencyKey: UUID!
+  title: String!
+  description: String!
+  requirements: [String!]!
+  skills: [String!]!
+  country: String!
+  city: String
+  remote: Boolean!
+}
+
 union CreateJobResult = Job | ValidationError | DomainError
 
 input DeclineApplicationInput {
+  idempotencyKey: UUID!
   applicationId: ApplicationID!
   reason: String
 }
 
 union DeclineApplicationResult = Application | ValidationError | DomainError
+
+input DeleteMyAccountInput {
+  idempotencyKey: UUID!
+}
 
 union DeleteMyAccountResult = DeletionSuccess | ValidationError | DomainError
 
@@ -138,6 +156,7 @@ type Job {
 }
 
 input JobActionInput {
+  idempotencyKey: UUID!
   jobId: JobID!
 }
 
@@ -183,6 +202,7 @@ type Location {
 }
 
 input LoginInput {
+  idempotencyKey: UUID!
   name: String!
   password: String!
 }
@@ -193,7 +213,7 @@ union MoveApplicationToInterviewResult = Application | ValidationError | DomainE
 
 type Mutation {
   submitApplication(input: SubmitApplicationInput!): SubmitApplicationResult!
-  createJob(input: JobInput!): CreateJobResult!
+  createJob(input: CreateJobInput!): CreateJobResult!
   updateJob(input: UpdateJobInput!): UpdateJobResult!
   publishJob(input: JobActionInput!): PublishJobResult!
   closeJob(input: JobActionInput!): CloseJobResult!
@@ -206,7 +226,7 @@ type Mutation {
   login(input: LoginInput!): LoginResult!
   bootstrapAdmin(input: BootstrapAdminInput!): BootstrapAdminResult!
   updateMyProfile(input: UpdateMyProfileInput!): UpdateMyProfileResult!
-  deleteMyAccount: DeleteMyAccountResult!
+  deleteMyAccount(input: DeleteMyAccountInput!): DeleteMyAccountResult!
   recordJobView(input: RecordJobViewInput!): RecordJobViewResult!
   recordSearchResultClick(input: RecordSearchResultClickInput!): RecordSearchResultClickResult!
 }
@@ -268,6 +288,7 @@ enum ReadinessStatus {
 }
 
 input RecordJobViewInput {
+  idempotencyKey: UUID!
   eventId: UUID!
   jobId: JobID!
   searchId: UUID
@@ -276,6 +297,7 @@ input RecordJobViewInput {
 union RecordJobViewResult = InteractionSuccess | ValidationError | DomainError
 
 input RecordSearchResultClickInput {
+  idempotencyKey: UUID!
   eventId: UUID!
   searchId: UUID!
   resultId: UUID!
@@ -289,6 +311,7 @@ type RecruiterProfile {
 }
 
 input RejectApplicationInput {
+  idempotencyKey: UUID!
   applicationId: ApplicationID!
   feedback: String
 }
@@ -302,6 +325,7 @@ enum SearchMode {
 }
 
 input SignUpInput {
+  idempotencyKey: UUID!
   name: String!
   role: UserRole!
   password: String!
@@ -316,6 +340,7 @@ union SignUpResult = AuthSuccess | ValidationError | DomainError
 
 input SubmitApplicationInput {
   jobId: JobID!
+  idempotencyKey: UUID!
 }
 
 union SubmitApplicationResult = Application | ValidationError | DomainError
@@ -323,6 +348,7 @@ union SubmitApplicationResult = Application | ValidationError | DomainError
 scalar UUID
 
 input UpdateJobInput {
+  idempotencyKey: UUID!
   id: JobID!
   patch: JobInput!
 }
@@ -330,6 +356,7 @@ input UpdateJobInput {
 union UpdateJobResult = Job | ValidationError | DomainError
 
 input UpdateMyProfileInput {
+  idempotencyKey: UUID!
   skills: [String!]
   experienceSummary: String
   resumeRef: String

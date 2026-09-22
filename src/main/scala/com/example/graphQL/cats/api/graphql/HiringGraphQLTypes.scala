@@ -110,10 +110,12 @@ private[graphql] object HiringGraphQLTypes {
   lazy val authSuccessType: ObjectType[RequestContext, AuthSuccess] = ObjectType("AuthSuccess", fields[RequestContext, AuthSuccess](
     Field("user", userType, resolve = _.value.user), Field("accessToken", StringType, resolve = _.value.accessToken),
     Field("expiresAt", instantType, resolve = _.value.expiresAt)))
-  lazy val deletionSuccessType: ObjectType[RequestContext, DeletionSuccess] = ObjectType("DeletionSuccess", fields[RequestContext, DeletionSuccess](
-    Field("deleted", BooleanType, resolve = _.value.deleted)))
-  lazy val interactionSuccessType: ObjectType[RequestContext, InteractionSuccess] = ObjectType("InteractionSuccess", fields[RequestContext, InteractionSuccess](
-    Field("recorded", BooleanType, resolve = _.value.recorded)))
+  lazy val deletionSuccessType: ObjectType[RequestContext, DeletionSuccess] =
+    ObjectType("DeletionSuccess", fields[RequestContext, DeletionSuccess](
+      Field("deleted", BooleanType, resolve = _.value.deleted)))
+  lazy val interactionSuccessType: ObjectType[RequestContext, InteractionSuccess] =
+    ObjectType("InteractionSuccess", fields[RequestContext, InteractionSuccess](
+      Field("recorded", BooleanType, resolve = _.value.recorded)))
   lazy val rankedJobType: ObjectType[RequestContext, RankedJobPayload] = ObjectType("RankedJob", fields[RequestContext, RankedJobPayload](
     Field("job", jobType, resolve = _.value.job),
     Field("score", FloatType, resolve = _.value.score),

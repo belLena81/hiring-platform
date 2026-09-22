@@ -30,12 +30,12 @@ final class MongoMutationReceiptRepository(
 ) extends MutationReceiptRepository {
   private val collection = database.getCollection("mutation_receipts")
 
-  override def execute[A](
+  override def execute[A, E](
       key: MutationReceiptKey,
       fingerprint: MutationReceiptFingerprint,
       now: Instant,
       expiresAt: Instant
-  )(write: MutationWriteContext => IO[Either[RepositoryError, MutationReceiptWrite[A]]]): IO[Either[RepositoryError, MutationReceiptExecution[A]]] =
+  )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
     transactionRunner.run { session =>
       find(session, key).flatMap {
         case Some(receipt) if receipt.fingerprint != fingerprint =>
@@ -53,8 +53,9 @@ final class MongoMutationReceiptRepository(
             case Left(error) => IO.pure(Left(error))
             case Right(()) =>
               write(MongoMutationWriteContext(session)).flatMap {
-                case Left(error) => IO.pure(Left(error))
-                case Right(completed) =>
+                case Left(error) => remove(session, key).as(Left(error))
+                case Right(Left(error)) => remove(session, key).as(Right(MutationReceiptExecution.Rejected(error)))
+                case Right(Right(completed)) =>
                   complete(session, key, fingerprint, completed.entity, now, expiresAt).map(_.map { _ =>
                     MutationReceiptExecution.Applied(completed.value, completed.entity)
                   })
@@ -95,6 +96,11 @@ final class MongoMutationReceiptRepository(
       case Some(_) => Left(RepositoryError.Conflict)
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
+
+  private def remove(session: Option[ClientSession], key: MutationReceiptKey): IO[Unit] =
+    session.fold(
+      PublisherBridge.first(collection.deleteOne(keyFilter(key)))
+    )(active => PublisherBridge.first(collection.deleteOne(active, keyFilter(key)))).void.handleError(_ => ())
 
   private def keyFilter(key: MutationReceiptKey): Bson =
     Filters.and(

@@ -9,24 +9,25 @@ import com.example.graphQL.cats.shared.HiringHttpPaths
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogFields, ProbeResult}
 import org.http4s.*
 import org.http4s.circe.*
+import org.http4s.dsl.Http4sDsl
 import org.typelevel.otel4s.trace.Tracer
 import scala.concurrent.duration.*
 
 final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
     dependencies: HiringApiRoutes.Dependencies, tracer: Tracer[IO] = Tracer.noop[IO]) {
-  private val probePaths = Set(HiringHttpPaths.Health, HiringHttpPaths.Ready)
+  private object dsl extends Http4sDsl[IO]
+  import dsl.*
+
+  private val probePaths = Set(HiringHttpPaths.HealthPath, HiringHttpPaths.ReadyPath)
 
   private val healthRoutes: HttpRoutes[IO] = HttpRoutes.of[IO] {
-    case request if request.method == Method.GET && request.uri.path.renderString == HiringHttpPaths.Health =>
-      IO.pure(Response[IO](Status.Ok).withEntity(io.circe.Json.obj("status" -> io.circe.Json.fromString("UP")))
-        (using jsonEncoderOf[IO, io.circe.Json]))
-    case request if request.method == Method.GET && request.uri.path.renderString == HiringHttpPaths.Ready =>
+    case GET -> Root / "health" =>
+      Ok(io.circe.Json.obj("status" -> io.circe.Json.fromString("UP")))
+    case request @ GET -> Root / "ready" =>
       HttpMiddleware.requestId(request).flatMap { correlationId =>
-        service.readiness(Some(correlationId)).map { result =>
-          val ready = result == ProbeResult.Ready
-          Response[IO](if (ready) Status.Ok else Status.ServiceUnavailable)
-            .withEntity(io.circe.Json.obj("status" -> io.circe.Json.fromString(if (ready) "READY" else "NOT_READY")))
-            (using jsonEncoderOf[IO, io.circe.Json])
+        service.readiness(Some(correlationId)).flatMap {
+          case ProbeResult.Ready => Ok(io.circe.Json.obj("status" -> io.circe.Json.fromString("READY")))
+          case _ => ServiceUnavailable(io.circe.Json.obj("status" -> io.circe.Json.fromString("NOT_READY")))
         }
       }
   }
@@ -43,7 +44,7 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
       probeRoutes <- HttpMiddleware(config, healthRoutes.orNotFound, diagnostics, tracer, onError, onEntityTooLarge,
         applyAdmissionControl = false)
     } yield Kleisli { request =>
-      val app = if (probePaths.contains(request.uri.path.renderString)) probeRoutes
+      val app = if (probePaths.contains(request.uri.path)) probeRoutes
       else protectedRoutes
       OptionT.liftF(app(request))
     }

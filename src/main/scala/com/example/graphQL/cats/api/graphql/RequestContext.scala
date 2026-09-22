@@ -9,7 +9,7 @@ import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, Diagn
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
-import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
+import com.example.graphQL.cats.repository.protocol.{MutationReceiptRepository, SearchSessionRepository}
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, InteractionUseCases, JobUseCases, SearchUseCases}
 import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.service.events.SearchSessionHandoff
@@ -25,7 +25,8 @@ final case class HiringGraphQLServices(
     semanticSearchService: Option[SearchUseCases] = None,
     interactionService: InteractionUseCases = InteractionUseCases.noop,
     searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
-    searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop
+    searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
+    mutationReceipts: MutationReceiptRepository = MutationReceiptRepository.noop
 )
 
 final case class EmailVisibility(userId: UserId)

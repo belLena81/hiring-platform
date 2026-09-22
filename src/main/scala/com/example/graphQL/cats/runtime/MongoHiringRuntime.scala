@@ -19,7 +19,7 @@ import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoConsumerReceiptRepository, MongoDatabaseProbe, MongoEventQuarantineRepository, MongoHiringSetup, MongoJobRepository,
-  MongoOperationalEventOutboxRepository, MongoSearchSessionRepository, MongoSearchSessionWorkRepository, MongoSemanticSearchRepository,
+  MongoMutationReceiptRepository, MongoOperationalEventOutboxRepository, MongoSearchSessionRepository, MongoSearchSessionWorkRepository, MongoSemanticSearchRepository,
   MongoUserRepository, MongoEmbeddingWorkRepository, AtlasSearchIndexConfig
 }
 import com.mongodb.reactivestreams.client.MongoDatabase
@@ -78,8 +78,9 @@ object MongoHiringRuntime {
       val searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
       val outbox = new MongoOperationalEventOutboxRepository(database)
       val receipts = new MongoConsumerReceiptRepository(database)
+      val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
       val quarantine = new MongoEventQuarantineRepository(database)
-      hiringServices(database, users, jobs, applications, searchSessions, searchSessionWork, config.vectorSearch, config.embeddingService, config.jwtAuth, config.passwordHash, passwordHashPermits, config.diagnostics).flatMap { services =>
+      hiringServices(database, users, jobs, applications, searchSessions, searchSessionWork, mutationReceipts, config.vectorSearch, config.embeddingService, config.jwtAuth, config.passwordHash, passwordHashPermits, config.diagnostics).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, config.vectorSearch, config.resetOnStart), config.diagnostics).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
@@ -102,6 +103,7 @@ object MongoHiringRuntime {
       applications: MongoApplicationRepository,
       searchSessions: MongoSearchSessionRepository,
       searchSessionWork: MongoSearchSessionWorkRepository,
+      mutationReceipts: MongoMutationReceiptRepository,
       vectorSearch: VectorSearchConfig,
       embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService],
       jwtAuth: JwtAuthConfig,
@@ -136,7 +138,8 @@ object MongoHiringRuntime {
         semanticSearch,
         interactionService,
         searchSessions,
-        searchSessionHandoff
+        searchSessionHandoff,
+        mutationReceipts
       )
 
     SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).flatMap { searchSessionHandoff =>

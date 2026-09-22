@@ -76,6 +76,15 @@ final class UserAccountService(
     }
   }
 
+  override def issueToken(userId: UserId, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
+    users.find(userId).flatMap {
+      case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
+      case Right(None) => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+      case Right(Some(user)) if user.accountStatus != AccountStatus.Active =>
+        IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+      case Right(Some(user)) => token(user, now)
+    }
+
   override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
     authorization.resolve(actor)
 

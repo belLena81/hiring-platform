@@ -16,11 +16,6 @@ object HiringGraphQLSchema {
     case InvalidQuery, Internal
   }
 
-  private[api] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
-    GraphQLDocumentCache.resource.use(_.document(request.query).fold(
-      failure => IO.pure(Left(failure)),
-      document => executeInContext(request, document, context)))
-
   private[api] def executeInContext(
       request: GraphQLRequest,
       document: GraphQLDocument,

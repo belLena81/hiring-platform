@@ -33,7 +33,7 @@ private[http] enum HttpRejection(val status: Status, val message: String, val re
 
 private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics: Diagnostics,
     dependencies: HiringApiRoutes.Dependencies, tracer: Tracer[IO] = Tracer.noop[IO]) {
-  private val dsl = new Http4sDsl[IO] {}
+  private object dsl extends Http4sDsl[IO]
   import dsl.*
 
   private def json(status: Status, body: Json): Response[IO] =
@@ -112,8 +112,8 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
 
   private val authenticatedGraphQL: HttpRoutes[IO] = {
     val graphqlRoutes: AuthedRoutes[Option[ActorContext], IO] = AuthedRoutes.of {
-      case request as actor if request.method == Method.POST &&
-          request.uri.path.renderString == HiringHttpPaths.GraphQL =>
+      case authedRequest @ POST -> Root / "graphql" as actor =>
+        val request = authedRequest.req
         HttpMiddleware.requestId(request).flatMap { requestId =>
           MediaTypeNegotiation.selectResponseMediaType(request.headers.get[Accept]) match {
             case Some(mediaType) => graphql(request, requestId, mediaType, actor)
@@ -124,18 +124,18 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
     val middleware: AuthMiddleware[IO, Option[ActorContext]] =
       AuthMiddleware(dependencies.authenticate, authenticationFailures)
     Kleisli { request =>
-      if (request.method == Method.POST && request.uri.path.renderString == HiringHttpPaths.GraphQL) middleware(graphqlRoutes)(request)
+      if (request.method == Method.POST && request.uri.path == HiringHttpPaths.GraphQLPath) middleware(graphqlRoutes)(request)
       else OptionT.none[IO, Response[IO]]
     }
   }
 
   def routes: HttpRoutes[IO] = {
     val schema = HttpRoutes.of[IO] {
-      case request if request.method == Method.GET && request.uri.path.renderString == HiringHttpPaths.Schema =>
-        IO.pure(Response[IO](Status.Ok).withEntity(HiringGraphQLSchema.sdl)(using EntityEncoder.stringEncoder[IO]))
+      case GET -> Root / "schema.graphql" =>
+        Ok(HiringGraphQLSchema.sdl)
     }
     val fallback = HttpRoutes.of[IO] {
-      case request if request.uri.path.renderString == HiringHttpPaths.GraphQL => HttpMiddleware.requestId(request).flatMap { requestId =>
+      case request if request.uri.path == HiringHttpPaths.GraphQLPath => HttpMiddleware.requestId(request).flatMap { requestId =>
         rejected(HttpRejection.MethodNotAllowed, requestId).map(_.putHeaders(Allow(Method.POST)))
       }
       case request => HttpMiddleware.requestId(request).flatMap { requestId => rejected(HttpRejection.NotFound, requestId) }

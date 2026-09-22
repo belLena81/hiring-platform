@@ -40,7 +40,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     for {
       parsed <- parseRequest("{ readiness { status } }")
       closed <- TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use(IO.pure)
-      result <- HiringGraphQLSchema.executeInContext(parsed, closed)
+      result <- TestGraphQLSupport.parseAndExecute(parsed, closed)
     } yield {
       val body = result.fold(failure => fail(failure.toString), identity)
       val errors = body.hcursor.downField("errors").as[Vector[Json]]
@@ -66,9 +66,9 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
 
   test("malformed UUID interaction inputs fail standard GraphQL validation") {
     val operations = List(
-      "mutation { recordJobView(input: { eventId: \"invalid\", jobId: \"00000000-0000-0000-0000-000000000001\" }) { recorded } }",
-      "mutation { recordJobView(input: { eventId: \"00000000-0000-0000-0000-000000000001\", jobId: \"00000000-0000-0000-0000-000000000001\", searchId: \"invalid\" }) { recorded } }",
-      "mutation { recordSearchResultClick(input: { eventId: \"invalid\", searchId: \"invalid\", resultId: \"invalid\" }) { recorded } }"
+      "mutation { recordJobView(input: { idempotencyKey: \"00000000-0000-0000-0000-000000000001\", eventId: \"invalid\", jobId: \"00000000-0000-0000-0000-000000000001\" }) { recorded } }",
+      "mutation { recordJobView(input: { idempotencyKey: \"00000000-0000-0000-0000-000000000001\", eventId: \"00000000-0000-0000-0000-000000000001\", jobId: \"00000000-0000-0000-0000-000000000001\", searchId: \"invalid\" }) { recorded } }",
+      "mutation { recordSearchResultClick(input: { idempotencyKey: \"00000000-0000-0000-0000-000000000001\", eventId: \"invalid\", searchId: \"invalid\", resultId: \"invalid\" }) { recorded } }"
     )
 
     operations.traverse(parseRequest).flatMap { requests =>

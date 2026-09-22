@@ -43,7 +43,17 @@ private[graphql] object HiringGraphQLModel {
   final case class RankedJobResults(results: List[RankedJobPayload])
   final case class RankedCandidateResults(results: List[RankedCandidatePayload])
 
-  final case class SubmitApplicationGraphQLInput(jobId: JobId) derives Decoder
+  final case class SubmitApplicationGraphQLInput(jobId: JobId, idempotencyKey: UUID) derives Decoder
+  final case class CreateJobGraphQLInput(
+      idempotencyKey: UUID,
+      title: String,
+      description: String,
+      requirements: List[String],
+      skills: List[String],
+      country: String,
+      city: Option[String],
+      remote: Boolean
+  ) derives Decoder
   final case class JobGraphQLInput(
       title: String,
       description: String,
@@ -53,12 +63,13 @@ private[graphql] object HiringGraphQLModel {
       city: Option[String],
       remote: Boolean
   ) derives Decoder
-  final case class UpdateJobGraphQLInput(id: JobId, patch: JobGraphQLInput) derives Decoder
-  final case class JobActionGraphQLInput(jobId: JobId) derives Decoder
-  final case class ApplicationActionGraphQLInput(applicationId: ApplicationId) derives Decoder
-  final case class RejectApplicationGraphQLInput(applicationId: ApplicationId, feedback: Option[String]) derives Decoder
-  final case class DeclineApplicationGraphQLInput(applicationId: ApplicationId, reason: Option[String]) derives Decoder
+  final case class UpdateJobGraphQLInput(idempotencyKey: UUID, id: JobId, patch: JobGraphQLInput) derives Decoder
+  final case class JobActionGraphQLInput(idempotencyKey: UUID, jobId: JobId) derives Decoder
+  final case class ApplicationActionGraphQLInput(idempotencyKey: UUID, applicationId: ApplicationId) derives Decoder
+  final case class RejectApplicationGraphQLInput(idempotencyKey: UUID, applicationId: ApplicationId, feedback: Option[String]) derives Decoder
+  final case class DeclineApplicationGraphQLInput(idempotencyKey: UUID, applicationId: ApplicationId, reason: Option[String]) derives Decoder
   final case class SignUpGraphQLInput(
+      idempotencyKey: UUID,
       name: String,
       role: UserRole,
       password: String,
@@ -68,15 +79,17 @@ private[graphql] object HiringGraphQLModel {
       organizationName: Option[String],
       jobTitle: Option[String]
   ) derives Decoder
-  final case class BootstrapAdminGraphQLInput(name: String, password: String) derives Decoder
-  final case class LoginGraphQLInput(name: String, password: String) derives Decoder
+  final case class BootstrapAdminGraphQLInput(idempotencyKey: UUID, name: String, password: String) derives Decoder
+  final case class LoginGraphQLInput(idempotencyKey: UUID, name: String, password: String) derives Decoder
   final case class UpdateProfileGraphQLInput(
+      idempotencyKey: UUID,
       skills: Option[List[String]],
       experienceSummary: Option[String],
       resumeRef: Option[String],
       organizationName: Option[String],
       jobTitle: Option[String]
   ) derives Decoder
-  final case class RecordJobViewGraphQLInput(eventId: UUID, jobId: JobId, searchId: Option[UUID]) derives Decoder
-  final case class RecordSearchResultClickGraphQLInput(eventId: UUID, searchId: UUID, resultId: UUID) derives Decoder
+  final case class DeleteMyAccountGraphQLInput(idempotencyKey: UUID) derives Decoder
+  final case class RecordJobViewGraphQLInput(idempotencyKey: UUID, eventId: UUID, jobId: JobId, searchId: Option[UUID]) derives Decoder
+  final case class RecordSearchResultClickGraphQLInput(idempotencyKey: UUID, eventId: UUID, searchId: UUID, resultId: UUID) derives Decoder
 }

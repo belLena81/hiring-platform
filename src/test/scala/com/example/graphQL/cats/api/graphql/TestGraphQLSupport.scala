@@ -13,6 +13,7 @@ import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, JobUseCases, LoginInput, SignUpInput}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
+import io.circe.Json
 import org.http4s.Request
 import java.time.Instant
 
@@ -75,6 +76,11 @@ object TestGraphQLSupport {
   ): Resource[IO, RequestContext] =
     RequestContextFactory.resource.flatMap(_.resource(RequestContextParameters(probe, actor, hiring, hiringReady,
       diagnostics = diagnostics, requestId = requestId)))
+
+  def parseAndExecute(request: GraphQLRequest, context: RequestContext): IO[Either[HiringGraphQLSchema.Failure, Json]] =
+    GraphQLDocumentCache.resource.use(_.document(request.query).fold(
+      failure => IO.pure(Left(failure)),
+      document => HiringGraphQLSchema.executeInContext(request, document, context)))
 
   def dependencies(
       hiring: HiringGraphQLServices = emptyServices,
