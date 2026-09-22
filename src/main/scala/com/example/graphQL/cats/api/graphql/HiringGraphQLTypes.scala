@@ -15,10 +15,13 @@ private[graphql] object HiringGraphQLTypes {
   lazy val readinessType: ObjectType[RequestContext, ProbeResult] = ObjectType("Readiness", fields[RequestContext, ProbeResult](
     Field("status", readinessStatus, resolve = context =>
       if (context.value == ProbeResult.Ready) "READY" else "NOT_READY")))
-  lazy val validationErrorType: ObjectType[RequestContext, ValidationError] = ObjectType("ValidationError", fields[RequestContext, ValidationError](
+  lazy val userErrorType: InterfaceType[RequestContext, UserError] = InterfaceType("UserError", fields[RequestContext, UserError](
     Field("code", StringType, resolve = _.value.code),
     Field("message", StringType, resolve = _.value.message)))
-  lazy val domainErrorType: ObjectType[RequestContext, DomainError] = ObjectType("DomainError", fields[RequestContext, DomainError](
+  lazy val validationErrorType: ObjectType[RequestContext, ValidationError] = ObjectType("ValidationError", List(PossibleInterface[RequestContext, ValidationError](userErrorType)), fields[RequestContext, ValidationError](
+    Field("code", StringType, resolve = _.value.code),
+    Field("message", StringType, resolve = _.value.message)))
+  lazy val domainErrorType: ObjectType[RequestContext, DomainError] = ObjectType("DomainError", List(PossibleInterface[RequestContext, DomainError](userErrorType)), fields[RequestContext, DomainError](
     Field("code", StringType, resolve = _.value.code),
     Field("message", StringType, resolve = _.value.message)))
   lazy val pageInfoType: ObjectType[RequestContext, PageInfo] = ObjectType("PageInfo", fields[RequestContext, PageInfo](
@@ -131,23 +134,23 @@ private[graphql] object HiringGraphQLTypes {
     ObjectType("RankedCandidateResults", fields[RequestContext, RankedCandidateResults](
       Field("results", ListType(rankedCandidateType), resolve = _.value.results)))
 
-  lazy val createJobResultType: OutputType[Any] = mutationResultType("CreateJobResult", jobType)
-  lazy val updateJobResultType: OutputType[Any] = mutationResultType("UpdateJobResult", jobType)
-  lazy val publishJobResultType: OutputType[Any] = mutationResultType("PublishJobResult", jobType)
-  lazy val closeJobResultType: OutputType[Any] = mutationResultType("CloseJobResult", jobType)
-  lazy val submitApplicationResultType: OutputType[Any] = mutationResultType("SubmitApplicationResult", applicationType)
-  lazy val acceptApplicationResultType: OutputType[Any] = mutationResultType("AcceptApplicationResult", applicationType)
-  lazy val interviewApplicationResultType: OutputType[Any] = mutationResultType("MoveApplicationToInterviewResult", applicationType)
-  lazy val hireApplicationResultType: OutputType[Any] = mutationResultType("HireApplicationResult", applicationType)
-  lazy val rejectApplicationResultType: OutputType[Any] = mutationResultType("RejectApplicationResult", applicationType)
-  lazy val declineApplicationResultType: OutputType[Any] = mutationResultType("DeclineApplicationResult", applicationType)
-  lazy val signUpResultType: OutputType[Any] = mutationResultType("SignUpResult", authSuccessType)
-  lazy val loginResultType: OutputType[Any] = mutationResultType("LoginResult", authSuccessType)
-  lazy val bootstrapAdminResultType: OutputType[Any] = mutationResultType("BootstrapAdminResult", authSuccessType)
-  lazy val updateMyProfileResultType: OutputType[Any] = mutationResultType("UpdateMyProfileResult", userType)
-  lazy val deleteMyAccountResultType: OutputType[Any] = mutationResultType("DeleteMyAccountResult", deletionSuccessType)
-  lazy val recordJobViewResultType: OutputType[Any] = mutationResultType("RecordJobViewResult", interactionSuccessType)
-  lazy val recordSearchResultClickResultType: OutputType[Any] = mutationResultType("RecordSearchResultClickResult", interactionSuccessType)
+  lazy val createJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("CreateJobResult", jobType)
+  lazy val updateJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("UpdateJobResult", jobType)
+  lazy val publishJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("PublishJobResult", jobType)
+  lazy val closeJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("CloseJobResult", jobType)
+  lazy val submitApplicationResultType: OutputType[MutationOutcome[Application]] = mutationResultType("SubmitApplicationResult", applicationType)
+  lazy val acceptApplicationResultType: OutputType[MutationOutcome[Application]] = mutationResultType("AcceptApplicationResult", applicationType)
+  lazy val interviewApplicationResultType: OutputType[MutationOutcome[Application]] = mutationResultType("MoveApplicationToInterviewResult", applicationType)
+  lazy val hireApplicationResultType: OutputType[MutationOutcome[Application]] = mutationResultType("HireApplicationResult", applicationType)
+  lazy val rejectApplicationResultType: OutputType[MutationOutcome[Application]] = mutationResultType("RejectApplicationResult", applicationType)
+  lazy val declineApplicationResultType: OutputType[MutationOutcome[Application]] = mutationResultType("DeclineApplicationResult", applicationType)
+  lazy val signUpResultType: OutputType[MutationOutcome[AuthSuccess]] = mutationResultType("SignUpResult", authSuccessType)
+  lazy val loginResultType: OutputType[MutationOutcome[AuthSuccess]] = mutationResultType("LoginResult", authSuccessType)
+  lazy val bootstrapAdminResultType: OutputType[MutationOutcome[AuthSuccess]] = mutationResultType("BootstrapAdminResult", authSuccessType)
+  lazy val updateMyProfileResultType: OutputType[MutationOutcome[User]] = mutationResultType("UpdateMyProfileResult", userType)
+  lazy val deleteMyAccountResultType: OutputType[MutationOutcome[DeletionSuccess]] = mutationResultType("DeleteMyAccountResult", deletionSuccessType)
+  lazy val recordJobViewResultType: OutputType[MutationOutcome[InteractionSuccess]] = mutationResultType("RecordJobViewResult", interactionSuccessType)
+  lazy val recordSearchResultClickResultType: OutputType[MutationOutcome[InteractionSuccess]] = mutationResultType("RecordSearchResultClickResult", interactionSuccessType)
 
   private def edgeType[A](name: String, nodeType: OutputType[A]): ObjectType[RequestContext, Edge[A]] =
     ObjectType(name, fields[RequestContext, Edge[A]](
@@ -160,6 +163,6 @@ private[graphql] object HiringGraphQLTypes {
       Field("pageInfo", pageInfoType, resolve = _.value.pageInfo),
       Field("searchId", OptionType(IDType), resolve = _.value.searchId)))
 
-  private def mutationResultType(name: String, successType: ObjectType[RequestContext, ?]): OutputType[Any] =
-    UnionType[RequestContext](name, List(successType, validationErrorType, domainErrorType))
+  private def mutationResultType[A](name: String, successType: ObjectType[RequestContext, A]): OutputType[MutationOutcome[A]] =
+    UnionType[RequestContext](name, List(successType, validationErrorType, domainErrorType)).mapValue[MutationOutcome[A]](identity)
 }

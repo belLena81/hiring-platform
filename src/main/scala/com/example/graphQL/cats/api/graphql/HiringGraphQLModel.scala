@@ -15,8 +15,14 @@ private[graphql] object HiringGraphQLModel {
   }
 
   final case class GraphQLFailure(code: String, message: String)
-  final case class ValidationError(code: String, message: String)
-  final case class DomainError(code: String, message: String)
+  sealed trait UserError {
+    def code: String
+    def message: String
+  }
+
+  final case class ValidationError(code: String, message: String) extends UserError
+  final case class DomainError(code: String, message: String) extends UserError
+  type MutationOutcome[+A] = A | ValidationError | DomainError
   final case class AuthSuccess(user: User, accessToken: String, expiresAt: Instant)
   final case class DeletionSuccess(deleted: Boolean)
   final case class InteractionSuccess(recorded: Boolean)

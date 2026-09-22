@@ -320,7 +320,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       json <- executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), accountService)
       calls <- updateCalls.get
     } yield {
-      assertEquals(errorCode(json), Right("PROFILE_UNSUPPORTED_FOR_ROLE"))
+      assertEquals(json.hcursor.downField("data").downField("updateMyProfile").get[String]("__typename"), Right("DomainError"))
       assertEquals(calls, 0)
     }
   }
@@ -502,7 +502,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     (execute(duplicate, Some(ActorContext(candidateId, UserRole.Candidate))),
       execute(closed, Some(ActorContext(candidateId, UserRole.Candidate)))).mapN { (duplicateJson, closedJson) =>
-      assertEquals(errorCode(duplicateJson), Right("DUPLICATE_APPLICATION"))
+      assertEquals(duplicateJson.hcursor.downField("data").downField("submitApplication").get[String]("__typename"), Right("DomainError"))
       assertEquals(closedJson.hcursor.downField("data").downField("submitApplication").get[String]("__typename"), Right("DomainError"))
     }
   }
@@ -666,7 +666,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         |}""".stripMargin
 
     executeWithUsers(query, None, List(candidate, recruiter), NameTakenAccountService).map { json =>
-      assertEquals(errorCode(json), Right("REGISTRATION_FAILED"))
+      assertEquals(json.hcursor.downField("data").downField("signUp").get[String]("__typename"), Right("DomainError"))
       assert(!json.noSpaces.contains("NAME_TAKEN"))
     }
   }
@@ -730,7 +730,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         variables = recruiterVariables),
       executeWithUsers(signup, None, List(candidate, recruiter), NameTakenAccountService, signupVariables)).mapN {
       (submitJson, recruiterJson, signupJson) =>
-        assertEquals(errorCode(submitJson), Right("DUPLICATE_APPLICATION"))
+        assertEquals(submitJson.hcursor.downField("data").downField("submitApplication").get[String]("__typename"), Right("DomainError"))
 
         val updatePayload = recruiterJson.hcursor.downField("data").downField("updateJob")
         assertEquals(updatePayload.get[String]("__typename"), Right("Job"))
@@ -738,7 +738,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         val rejectPayload = recruiterJson.hcursor.downField("data").downField("rejectApplication")
         assertEquals(rejectPayload.get[String]("__typename"), Right("Application"))
 
-        assertEquals(errorCode(signupJson), Right("REGISTRATION_FAILED"))
+        assertEquals(signupJson.hcursor.downField("data").downField("signUp").get[String]("__typename"), Right("DomainError"))
     }
   }
 

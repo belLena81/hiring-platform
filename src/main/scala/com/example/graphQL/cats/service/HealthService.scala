@@ -10,9 +10,9 @@ final class HealthService(probe: DatabaseProbe, diagnostics: Diagnostics) {
   def readiness(requestId: Option[String]): IO[ProbeResult] =
     IO.defer(probe.check(requestId)).map(result => ProbeOutcome(result, Map.empty, Duration.Zero))
       .timeoutTo(2.seconds, IO.delay(ProbeOutcome(ProbeResult.Unavailable,
-        LogFields.failure(new java.util.concurrent.TimeoutException()) + (LogField.Reason -> Rejection.ProbeTimeout.reason), 2.seconds)))
+        LogFields.failure(new java.util.concurrent.TimeoutException()) + (LogField.Reason -> FailureReason.ProbeTimeout.reason), 2.seconds)))
       .handleError(error => ProbeOutcome(ProbeResult.Unavailable,
-        LogFields.failure(error) + (LogField.Reason -> Rejection.DatabaseError.reason), Duration.Zero))
+        LogFields.failure(error) + (LogField.Reason -> FailureReason.DatabaseError.reason), Duration.Zero))
       .timed.map { case (elapsed, outcome) => outcome.copy(elapsed = elapsed) }
       .flatMap { outcome =>
         val result = outcome.result
@@ -20,7 +20,7 @@ final class HealthService(probe: DatabaseProbe, diagnostics: Diagnostics) {
         val elapsed = outcome.elapsed
         val fields = Map(LogField.DurationMs -> elapsed.toMillis.toString,
           LogField.Outcome -> "NOT_READY", LogField.Reason ->
-            (if (result == ProbeResult.AuthenticationFailed) Rejection.AuthenticationFailed.reason else Rejection.DatabaseUnavailable.reason)) ++ failure
+            (if (result == ProbeResult.AuthenticationFailed) FailureReason.AuthenticationFailed.reason else FailureReason.DatabaseUnavailable.reason)) ++ failure
         val diagnostic = result match {
           case ProbeResult.Ready => IO.unit
           case ProbeResult.Unavailable => diagnostics.emit(LogEvent.MongoUnavailable, requestId, fields = fields)

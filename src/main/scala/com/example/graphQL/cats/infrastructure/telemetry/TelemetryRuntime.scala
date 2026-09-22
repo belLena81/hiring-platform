@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.infrastructure.telemetry
 
 import cats.effect.{IO, Resource}
+import com.example.graphQL.cats.shared.HiringHttpPaths
 import org.http4s.{HttpApp, HttpRoutes, Request, Uri}
 import org.http4s.otel4s.middleware.metrics.OtelMetrics
 import org.http4s.otel4s.middleware.server.RouteClassifier
@@ -57,7 +58,7 @@ final case class TelemetryRuntime(
 
 object TelemetryRuntime {
   private val TracerName = "hiring-platform"
-  private[telemetry] val safePaths = Set("/health", "/ready", "/graphql", "/schema.graphql")
+  private[telemetry] val safePaths = HiringHttpPaths.public
 
   private[telemetry] def routeLabel(request: Request[IO]): String =
     if (safePaths.contains(request.uri.path.renderString)) request.uri.path.renderString else "_unmatched"

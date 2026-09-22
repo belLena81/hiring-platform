@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.shared.events.OperationalEvents
-import com.example.graphQL.cats.repository.protocol.{JobRepository, SearchSessionRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{JobRepository, SearchSessionLookup, SearchSessionRepository, SearchSessionWorkRepository, UserRepository}
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
@@ -17,7 +17,8 @@ import java.util.UUID
 final class OperationalTelemetryService(
     users: UserRepository,
     jobs: JobRepository,
-    searchSessions: SearchSessionRepository
+    searchSessions: SearchSessionRepository,
+    searchSessionWork: SearchSessionWorkRepository
 ) extends InteractionUseCases {
   private val authorization = ActorAuthorization(users)
 
@@ -58,14 +59,26 @@ final class OperationalTelemetryService(
       searchId: UUID,
       resultId: String
   ): IO[Either[UseCaseError, Int]] =
-    searchSessions.find(searchId).map(_.widenUseCase.flatMap {
+    searchSessions.find(searchId).flatMap(_.widenUseCase.fold(
+      error => IO.pure(error.asLeft[Int]),
+      session => session match {
       case None => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[Int]
       case Some(session) if session.actorId != actor.userId => UseCaseError.Domain(DomainError.Forbidden).asLeft[Int]
       case Some(session) =>
         session.results.find(_.resultId == resultId)
           .map(result => result.rank.asRight[UseCaseError])
           .getOrElse(UseCaseError.Domain(DomainError.Forbidden).asLeft[Int])
-    })
+      } match {
+        case value @ Right(_) => IO.pure(value)
+        case Left(UseCaseError.Domain(DomainError.NotFound("search session"))) =>
+          searchSessionWork.findForActor(actor.userId, searchId).map(_.widenUseCase.flatMap {
+            case Some(SearchSessionLookup.Pending) => UseCaseError.Domain(DomainError.SearchSessionPending).asLeft[Int]
+            case Some(SearchSessionLookup.Failed) => UseCaseError.Domain(DomainError.SearchSessionUnavailable).asLeft[Int]
+            case _ => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[Int]
+          })
+        case value => IO.pure(value)
+      }
+    ))
 }
 
 object OperationalTelemetryService {
@@ -74,5 +87,13 @@ object OperationalTelemetryService {
       jobs: JobRepository,
       searchSessions: SearchSessionRepository
   ): OperationalTelemetryService =
-    new OperationalTelemetryService(users, jobs, searchSessions)
+    new OperationalTelemetryService(users, jobs, searchSessions, SearchSessionWorkRepository.noop)
+
+  def apply(
+      users: UserRepository,
+      jobs: JobRepository,
+      searchSessions: SearchSessionRepository,
+      searchSessionWork: SearchSessionWorkRepository
+  ): OperationalTelemetryService =
+    new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork)
 }

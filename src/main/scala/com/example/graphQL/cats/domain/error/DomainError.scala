@@ -8,6 +8,8 @@ enum DomainError {
   case RecruiterRequired
   case JobMustBeOpen
   case DuplicateApplication
+  case SearchSessionPending
+  case SearchSessionUnavailable
   case Forbidden
   case NotFound(entity: String)
   case InvalidJobTransition(from: JobStatus, to: JobStatus)

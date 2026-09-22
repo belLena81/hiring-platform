@@ -1111,36 +1111,51 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       response <- http(slow)
       _ <- finalized.get.timeout(1.second)
       successful <- http(health)
+      body <- response.as[Json]
       captured <- records.get
     } yield {
       assertEquals(large.status, Status.PayloadTooLarge)
       assertEquals(response.status, Status.GatewayTimeout)
+      assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj(
+        "message" -> Json.fromString("Request deadline exceeded")))))
       assertEquals(successful.status, Status.Ok)
       val id = requestId(response)
       val deadline = captured.filter(record => !spanEvent(record._1) && record._2 == id)
       assertEquals(deadline.map(_._1), Vector(LogEvent.RequestRejected))
-      assert(deadline.filter(_._1 == LogEvent.RequestRejected).forall(_._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED")))
+      assert(deadline.filter(_._1 == LogEvent.RequestRejected).forall(record =>
+        record._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED") &&
+          record._3.get(LogField.Status).contains("504")))
     }
   }
 
   test("saturation rejects work and preserves probe liveness") {
     for {
+      records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       started <- Ref.of[IO, Int](0)
       allStarted <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
       http <- app(
         started.updateAndGet(_ + 1).flatMap(count => if (count == 16) allStarted.complete(()).void else IO.unit) *>
-          release.get.as(ProbeResult.Ready))
+          release.get.as(ProbeResult.Ready), diagnostics = capture(records))
       _ <- List.fill(16)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use { fibers =>
         for {
           _ <- allStarted.get.timeout(5.seconds)
           rejected <- http(health)
+          rejectedBody <- rejected.as[Json]
           liveness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
           _ <- release.complete(())
           _ <- fibers.traverse_(_.joinWithNever)
+          captured <- records.get
           _ <- IO {
             assertEquals(rejected.status, Status.ServiceUnavailable)
+            assertEquals(rejectedBody, Json.obj("errors" -> Json.arr(Json.obj(
+              "message" -> Json.fromString("Server busy")))))
             assertEquals(liveness.status, Status.Ok)
+            val id = requestId(rejected)
+            assert(id.exists(value => captured.exists(record =>
+              record._1 == LogEvent.RequestRejected && record._2.contains(value) &&
+                record._3.get(LogField.Reason).contains("OVERLOADED") &&
+                record._3.get(LogField.Status).contains("503"))))
           }
         } yield ()
       }

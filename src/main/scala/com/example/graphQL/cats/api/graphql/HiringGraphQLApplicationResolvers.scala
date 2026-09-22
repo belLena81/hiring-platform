@@ -40,7 +40,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       } yield eventConnection(values, requested)
     }
 
-  def submitApplication(context: Context[RequestContext, Unit]): IO[Any] =
+  def submitApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] =
     authenticated(context) { case (actor, hiring) =>
       val jobId = context.arg(submitApplicationInputArgument).jobId
       timestamped { (now, applicationId) =>
@@ -53,20 +53,20 @@ private[graphql] object HiringGraphQLApplicationResolvers {
             now
           )
         }
-      }.flatMap(result => mutationResult(IO.pure(result))(identity))
+      }.flatMap(mutationResult)
     }
 
-  def applicationStatusAction(context: Context[RequestContext, Unit], status: ApplicationStatus): IO[Any] = {
+  def applicationStatusAction(context: Context[RequestContext, Unit], status: ApplicationStatus): IO[MutationOutcome[Application]] = {
     val input = context.arg(applicationActionInputArgument)
     changeApplicationStatus(context, input.applicationId, status, None, None)
   }
 
-  def rejectApplication(context: Context[RequestContext, Unit]): IO[Any] = {
+  def rejectApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] = {
     val input = context.arg(rejectApplicationInputArgument)
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Rejected, input.feedback, None)
   }
 
-  def declineApplication(context: Context[RequestContext, Unit]): IO[Any] = {
+  def declineApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] = {
     val input = context.arg(declineApplicationInputArgument)
     changeApplicationStatus(context, input.applicationId, ApplicationStatus.Declined, None, input.reason)
   }
@@ -77,11 +77,11 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       status: ApplicationStatus,
       feedback: Option[String],
       reason: Option[String]
-  ): IO[Any] =
+  ): IO[MutationOutcome[Application]] =
     authenticated(context) { case (actor, hiring) =>
       timestamped { (now, eventId) =>
         hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
-      }.flatMap(result => mutationResult(IO.pure(result))(identity))
+      }.flatMap(mutationResult)
     }
 
   private def applicationConnection(

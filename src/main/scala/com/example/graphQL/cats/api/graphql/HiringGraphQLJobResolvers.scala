@@ -47,30 +47,30 @@ private[graphql] object HiringGraphQLJobResolvers {
       } yield jobConnection(values, requested)
     }
 
-  def createJob(context: Context[RequestContext, Unit]): IO[Any] =
+  def createJob(context: Context[RequestContext, Unit]): IO[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val input = jobInput(context.arg(createJobInputArgument), JobStatus.Open)
       timestamped { (now, jobId) =>
         hiring.jobService.createJob(actor, input, now, JobId(jobId))
-      }.flatMap(result => mutationResult(IO.pure(result))(identity))
+      }.flatMap(mutationResult)
     }
 
-  def updateJob(context: Context[RequestContext, Unit]): IO[Any] =
+  def updateJob(context: Context[RequestContext, Unit]): IO[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateJobInputArgument)
       val patch = updateInput(input.patch)
       IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, input.id, patch, now))
-        .flatMap(result => mutationResult(IO.pure(result))(identity))
+        .flatMap(mutationResult)
     }
 
   def changeJob(
       context: Context[RequestContext, Unit],
       method: JobUseCases => (com.example.graphQL.cats.service.ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
-  ): IO[Any] =
+  ): IO[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val jobId = context.arg(jobActionInputArgument).jobId
       IO.realTimeInstant.flatMap(now => method(hiring.jobService)(actor, jobId, now))
-        .flatMap(result => mutationResult(IO.pure(result))(identity))
+        .flatMap(mutationResult)
     }
 
   private def jobInput(input: JobGraphQLInput, status: JobStatus): CreateJobInput =

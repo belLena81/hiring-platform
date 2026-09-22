@@ -12,6 +12,7 @@ import com.example.graphQL.cats.domain.model.{Job, User}
 import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, InteractionUseCases, JobUseCases, SearchUseCases}
 import com.example.graphQL.cats.service.UseCaseError
+import com.example.graphQL.cats.service.events.SearchSessionHandoff
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
 import scala.util.control.NoStackTrace
 
@@ -22,8 +23,9 @@ final case class HiringGraphQLServices(
     cursorKey: CursorCodec.CursorKey,
     accountService: AccountUseCases,
     semanticSearchService: Option[SearchUseCases] = None,
-    interactionService: Option[InteractionUseCases] = None,
-    searchSessions: SearchSessionRepository = SearchSessionRepository.noop
+    interactionService: InteractionUseCases = InteractionUseCases.noop,
+    searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
+    searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop
 )
 
 final case class EmailVisibility(userId: UserId)

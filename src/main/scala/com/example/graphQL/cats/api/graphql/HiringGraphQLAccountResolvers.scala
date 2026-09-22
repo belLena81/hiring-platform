@@ -14,24 +14,24 @@ private[graphql] object HiringGraphQLAccountResolvers {
   def accountMe(context: Context[RequestContext, Unit]): IO[User] =
     authenticated(context) { case (actor, hiring) => raiseOnUseCaseError(hiring.accountService.me(actor)) }
 
-  def signUp(context: Context[RequestContext, Unit]): IO[Any] =
+  def signUp(context: Context[RequestContext, Unit]): IO[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.SignUp).flatMap { _ =>
       val input = context.arg(signUpInputArgument)
       publicMutation(context) { hiring =>
         signUpProfile(input).fold(
-          error => mutationResult(IO.pure(Left(error): Either[UseCaseError, (User, AccountToken)]))(authSuccess),
+          error => mutationResult(Left(error): Either[UseCaseError, AuthSuccess]),
           profile => timestamped { (now, id) =>
             hiring.accountService.signUp(
               SignUpInput(input.name, input.role, input.password, profile),
               now,
               Identifiers.UserId(id)
             )
-          }.flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+          }.map(_.map(authSuccess)).flatMap(mutationResult)
         )
       }
     }
 
-  def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[Any] =
+  def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.BootstrapAdmin).flatMap { _ =>
       val input = context.arg(bootstrapAdminInputArgument)
       publicMutation(context) { hiring =>
@@ -41,36 +41,36 @@ private[graphql] object HiringGraphQLAccountResolvers {
             now,
             Identifiers.UserId(id)
           )
-        }.flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+        }.map(_.map(authSuccess)).flatMap(mutationResult)
       }
     }
 
-  def login(context: Context[RequestContext, Unit]): IO[Any] =
+  def login(context: Context[RequestContext, Unit]): IO[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.Login).flatMap { _ =>
       val input = context.arg(loginInputArgument)
       publicMutation(context) { hiring =>
         IO.realTimeInstant.flatMap(now => hiring.accountService.login(LoginInput(input.name, input.password), now))
-          .flatMap(result => mutationResult(IO.pure(result))(authSuccess))
+          .map(_.map(authSuccess)).flatMap(mutationResult)
       }
     }
 
-  def updateMyProfile(context: Context[RequestContext, Unit]): IO[Any] =
+  def updateMyProfile(context: Context[RequestContext, Unit]): IO[MutationOutcome[User]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
-        error => mutationResult(IO.pure(Left(error): Either[UseCaseError, User]))(identity),
+        error => mutationResult(Left(error): Either[UseCaseError, User]),
         profile => IO.realTimeInstant.flatMap(now => hiring.accountService.updateMyProfile(actor, profile, now))
-          .flatMap(result => mutationResult(IO.pure(result))(identity))
+          .flatMap(mutationResult)
       )
     }
 
-  def deleteMyAccount(context: Context[RequestContext, Unit]): IO[Any] =
+  def deleteMyAccount(context: Context[RequestContext, Unit]): IO[MutationOutcome[DeletionSuccess]] =
     authenticated(context) { case (actor, hiring) =>
       IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now)).flatTap {
         case Right(_) => context.ctx.invalidateViewer
         case Left(_) => IO.unit
       }
-        .flatMap(result => mutationResult(IO.pure(result.map(_ => DeletionSuccess(true))))(identity))
+        .map(_.map(_ => DeletionSuccess(true))).flatMap(mutationResult)
     }
 
   def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =

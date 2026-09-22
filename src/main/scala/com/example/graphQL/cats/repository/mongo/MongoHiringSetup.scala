@@ -20,7 +20,7 @@ object MongoHiringSetup {
   private val CollectionLimit = 128
   private val ownedCollections = Set(
     "users", "jobs", "applications", "application_events", "account_registry", "embedding_work",
-    "event_outbox", "search_sessions", "consumer_receipts", "event_quarantine", "hiring_migration_ledger"
+    "event_outbox", "search_sessions", "search_session_work", "consumer_receipts", "mutation_receipts", "event_quarantine", "hiring_migration_ledger"
   )
 
   val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
@@ -46,8 +46,12 @@ object MongoHiringSetup {
   val EventOutboxPublishedRetentionIndex = "event_outbox_published_retention"
   val SearchSessionsActorIndex = "search_sessions_actor_created"
   val SearchSessionsExpiryIndex = "search_sessions_expiry"
+  val SearchSessionWorkClaimIndex = "search_session_work_claim"
+  val SearchSessionWorkRetentionIndex = "search_session_work_retention"
   val ConsumerReceiptsIdIndex = "consumer_receipts_group_event"
   val ConsumerReceiptsExpiryIndex = "consumer_receipts_expiry"
+  val MutationReceiptsKeyIndex = "mutation_receipts_operation_scope_key"
+  val MutationReceiptsExpiryIndex = "mutation_receipts_expiry"
   val EventQuarantineOffsetIndex = "event_quarantine_offset"
   val EventQuarantineExpiryIndex = "event_quarantine_expiry"
 
@@ -94,8 +98,12 @@ object MongoHiringSetup {
     index(database.getCollection("event_outbox"), Indexes.ascending("retentionExpiresAt"), new IndexOptions().name(EventOutboxPublishedRetentionIndex).expireAfter(0L, TimeUnit.SECONDS).partialFilterExpression(Filters.eq("state", "Published"))),
     index(database.getCollection("search_sessions"), Indexes.compoundIndex(Indexes.ascending("actorId"), Indexes.descending("occurredAt", "_id")), new IndexOptions().name(SearchSessionsActorIndex)),
     index(database.getCollection("search_sessions"), Indexes.ascending("expiresAt"), new IndexOptions().name(SearchSessionsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
+    index(database.getCollection("search_session_work"), Indexes.ascending("state", "availableAt", "leaseUntil", "createdAt"), new IndexOptions().name(SearchSessionWorkClaimIndex)),
+    index(database.getCollection("search_session_work"), Indexes.ascending("retentionExpiresAt"), new IndexOptions().name(SearchSessionWorkRetentionIndex).expireAfter(0L, TimeUnit.SECONDS).partialFilterExpression(Filters.eq("state", "Failed"))),
     index(database.getCollection("consumer_receipts"), Indexes.ascending("consumerGroup", "eventId"), new IndexOptions().name(ConsumerReceiptsIdIndex).unique(true)),
     index(database.getCollection("consumer_receipts"), Indexes.ascending("expiresAt"), new IndexOptions().name(ConsumerReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
+    index(database.getCollection("mutation_receipts"), Indexes.ascending("operation", "actorScope", "idempotencyKey"), new IndexOptions().name(MutationReceiptsKeyIndex).unique(true)),
+    index(database.getCollection("mutation_receipts"), Indexes.ascending("expiresAt"), new IndexOptions().name(MutationReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
     index(database.getCollection("event_quarantine"), Indexes.ascending("topic", "partition", "offset"), new IndexOptions().name(EventQuarantineOffsetIndex).unique(true)),
     index(database.getCollection("event_quarantine"), Indexes.ascending("expiresAt"), new IndexOptions().name(EventQuarantineExpiryIndex).expireAfter(0L, TimeUnit.SECONDS))
   ).sequence_.void

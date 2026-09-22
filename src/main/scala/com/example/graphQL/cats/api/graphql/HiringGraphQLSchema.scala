@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSchemaAssembly.QueryComplexityExceeded
 import io.circe.Json
 import sangria.execution.{ExceptionHandler, Executor, HandledException, QueryAnalysisError}
@@ -15,14 +15,6 @@ object HiringGraphQLSchema {
   enum Failure {
     case InvalidQuery, Internal
   }
-
-  def execute(
-      request: GraphQLRequest,
-      context: Resource[IO, RequestContext]
-  ): IO[Either[Failure, Json]] =
-    GraphQLDocumentCache.resource.use(_.document(request.query).fold(
-      failure => IO.pure(Left(failure)),
-      document => context.use(executeInContext(request, document, _))))
 
   private[api] def executeInContext(request: GraphQLRequest, context: RequestContext): IO[Either[Failure, Json]] =
     GraphQLDocumentCache.resource.use(_.document(request.query).fold(

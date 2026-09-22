@@ -103,7 +103,7 @@ type DeletionSuccess {
   deleted: Boolean!
 }
 
-type DomainError {
+type DomainError implements UserError {
   code: String!
   message: String!
 }
@@ -360,6 +360,11 @@ type UserEdge {
   cursor: String!
 }
 
+interface UserError {
+  code: String!
+  message: String!
+}
+
 scalar UserID
 
 union UserProfile = CandidateProfile | RecruiterProfile
@@ -375,7 +380,7 @@ enum UserStatus {
   DELETED
 }
 
-type ValidationError {
+type ValidationError implements UserError {
   code: String!
   message: String!
 }

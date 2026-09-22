@@ -26,7 +26,7 @@ import java.util.Date
 import scala.jdk.CollectionConverters.*
 
 private[mongo] trait MongoTransactionRunner {
-  def run(operation: Option[ClientSession] => IO[Either[RepositoryError, Unit]]): IO[Either[RepositoryError, Unit]]
+  def run[A](operation: Option[ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]]
 }
 
 private[mongo] trait MongoConflictWriteMapping {
@@ -97,21 +97,25 @@ private[mongo] object MongoTransactionRunner {
       }
   }
 
-  private enum CommitOutcome {
-    case Completed(result: Either[RepositoryError, Unit])
+  private enum CommitOutcome[+A] {
+    case Completed(result: Either[RepositoryError, A])
     case RetryTransaction(error: Throwable)
     case RetryCommit(error: Throwable)
   }
 
   val noTransaction: MongoTransactionRunner =
-    operation => operation(None)
+    new MongoTransactionRunner {
+      override def run[A](operation: Option[ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]] =
+        operation(None)
+    }
 
   def sessions(
       client: MongoClient,
       duplicateKeyError: RepositoryError,
       retryPolicy: RetryPolicy = RetryPolicy()
   ): MongoTransactionRunner =
-    operation => {
+    new MongoTransactionRunner {
+      override def run[A](operation: Option[ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]] = {
       def withSession[A](use: ClientSession => IO[A]): IO[A] =
         Resource.make(PublisherBridge.first(client.startSession()).flatMap {
           case Some(session) => IO.pure(session)
@@ -121,14 +125,14 @@ private[mongo] object MongoTransactionRunner {
       def abort(session: ClientSession): IO[Unit] =
         PublisherBridge.first(session.abortTransaction()).attempt.void
 
-      val transactionBackoff = backoff[CommitOutcome](retryPolicy, retryPolicy.maxTransactionAttempts)
-      val commitBackoff = backoff[CommitOutcome](retryPolicy, retryPolicy.maxCommitAttempts)
+      val transactionBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxTransactionAttempts)
+      val commitBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxCommitAttempts)
 
       def labels(error: MongoException): Set[String] =
         Set("TransientTransactionError", "UnknownTransactionCommitResult").filter(error.hasErrorLabel)
 
-      def commit(session: ClientSession): IO[CommitOutcome] = {
-        val commitAttempt = PublisherBridge.first(session.commitTransaction()).as(CommitOutcome.Completed(Right(()))).handleError {
+      def commit(session: ClientSession, result: A): IO[CommitOutcome[A]] = {
+        val commitAttempt = PublisherBridge.first(session.commitTransaction()).as(CommitOutcome.Completed(Right(result))).handleError {
           case error: MongoException => RetryDecision.decide(RetryStage.Commit, labels(error)) match {
             case RetryDecision.RetryCommit => CommitOutcome.RetryCommit(error)
             case RetryDecision.RetryTransaction => CommitOutcome.RetryTransaction(error)
@@ -146,7 +150,7 @@ private[mongo] object MongoTransactionRunner {
         ).map(_.fold(identity, identity))
       }
 
-      def attemptOnce: IO[CommitOutcome] = withSession { session =>
+      def attemptOnce: IO[CommitOutcome[A]] = withSession { session =>
         IO.delay(session.startTransaction()) *> operation(Some(session)).attempt.flatMap {
           case Left(error) =>
             error match {
@@ -156,11 +160,11 @@ private[mongo] object MongoTransactionRunner {
             }
           case Right(Left(error)) =>
             abort(session).as(CommitOutcome.Completed(Left(error)))
-          case Right(Right(())) =>
-            commit(session).flatMap {
-              case retry: CommitOutcome.RetryTransaction => abort(session).as(retry)
+          case Right(Right(result)) =>
+            commit(session, result).flatMap {
+              case retry @ CommitOutcome.RetryTransaction(_) => abort(session).as(retry)
               case CommitOutcome.RetryCommit(error) => abort(session).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
-              case completed: CommitOutcome.Completed => IO.pure(completed)
+              case completed @ CommitOutcome.Completed(_) => IO.pure(completed)
             }
         }
       }
@@ -172,9 +176,10 @@ private[mongo] object MongoTransactionRunner {
           case _ => HandlerDecision.Stop
         })
       ).map(_.fold(toResult, toResult))
+      }
     }
 
-  private def toResult(outcome: CommitOutcome): Either[RepositoryError, Unit] = outcome match {
+  private def toResult[A](outcome: CommitOutcome[A]): Either[RepositoryError, A] = outcome match {
     case CommitOutcome.Completed(result) => result
     case CommitOutcome.RetryTransaction(_) => Left(RepositoryError.Conflict)
     case CommitOutcome.RetryCommit(_) => Left(RepositoryError.Unavailable)
@@ -184,7 +189,7 @@ private[mongo] object MongoTransactionRunner {
     limitRetries[IO](math.max(maxAttempts - 1, 0)) join
       capDelay(policy.maxDelay, exponentialBackoff[IO](policy.initialDelay))
 
-  private def mapWrite(error: Throwable, duplicateKeyError: RepositoryError): Either[RepositoryError, Unit] =
+  private def mapWrite[A](error: Throwable, duplicateKeyError: RepositoryError): Either[RepositoryError, A] =
     error match {
       case write: MongoWriteException if write.getError.getCode == 11000 => Left(duplicateKeyError)
       case mongo: MongoException if isTransientTransactionError(mongo) => Left(RepositoryError.Conflict)

@@ -28,15 +28,15 @@ private[graphql] object HiringGraphQLResolverSupport {
   def inputResult[A](value: Either[GraphQLFailure, A]): IO[A] =
     IO.fromEither(value.leftMap(error => RequestContext.FieldFailure(error.code, error.message)))
 
-  def mutationResult[A](value: IO[Either[UseCaseError, A]])(success: A => Any): IO[Any] =
-    value.flatMap(_.fold(
-      error => error match {
-        case UseCaseError.ValidationFailed(errors) => IO.pure(validationError(errors))
-        case UseCaseError.Domain(error) => IO.pure(domainError(error))
-        case other => IO.raiseError(RequestContext.ReadFailure(other))
-      },
-      result => IO.pure(success(result))
-    ))
+  def mutationResult[A](value: IO[Either[UseCaseError, A]]): IO[MutationOutcome[A]] =
+    value.flatMap {
+      case Right(result) => IO.pure(result)
+      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(validationError(errors))
+      case Left(error) => expectedMutationError(error).fold(liftUseCase(error))(IO.pure)
+    }
+
+  def mutationResult[A](value: Either[UseCaseError, A]): IO[MutationOutcome[A]] =
+    mutationResult(IO.pure(value))
 
   def timestamped[A](f: (Instant, UUID) => IO[A]): IO[A] =
     (IO.realTimeInstant, IO.randomUUID).flatMapN(f)
@@ -79,8 +79,8 @@ private[graphql] object HiringGraphQLResolverSupport {
         now,
         now.plusSeconds(7.days.toSeconds)
       )
-      hiring.searchSessions.save(session, OperationalEvents.searchPerformed(searchEventId(searchId), session)).void
-    }.handleError(_ => ())
+      hiring.searchSessionHandoff.enqueue(session, OperationalEvents.searchPerformed(searchEventId(searchId), session))
+    }
 
   def authenticated[A](context: Context[RequestContext, Unit])(
       action: (ActorContext, HiringGraphQLServices) => IO[A]
@@ -162,6 +162,8 @@ private[graphql] object HiringGraphQLResolverSupport {
       case UseCaseError.Domain(DomainFailure.Forbidden) => GraphQLFailure("FORBIDDEN", "Forbidden")
       case UseCaseError.Domain(DomainFailure.NotFound(entity)) => GraphQLFailure("NOT_FOUND", s"$entity not found")
       case UseCaseError.Domain(DomainFailure.DuplicateApplication) => GraphQLFailure("DUPLICATE_APPLICATION", "Application already exists")
+      case UseCaseError.Domain(DomainFailure.SearchSessionPending) => GraphQLFailure("SEARCH_SESSION_PENDING", "Search session is being prepared; retry shortly")
+      case UseCaseError.Domain(DomainFailure.SearchSessionUnavailable) => GraphQLFailure("SEARCH_SESSION_UNAVAILABLE", "Search session is unavailable")
       case UseCaseError.Domain(DomainFailure.JobMustBeOpen) => GraphQLFailure("JOB_MUST_BE_OPEN", "Job must be open")
       case UseCaseError.Domain(DomainFailure.CandidateRequired) => GraphQLFailure("CANDIDATE_REQUIRED", "Candidate role required")
       case UseCaseError.Domain(DomainFailure.RecruiterRequired) => GraphQLFailure("RECRUITER_REQUIRED", "Recruiter role required")
@@ -192,6 +194,22 @@ private[graphql] object HiringGraphQLResolverSupport {
     val failure = toGraphQLFailure(UseCaseError.Domain(error))
     DomainError(failure.code, failure.message)
   }
+
+  private def expectedMutationError(error: UseCaseError): Option[DomainError] =
+    error match {
+      case UseCaseError.Domain(DomainFailure.Forbidden) => None
+      case UseCaseError.Domain(domain) => Some(domainError(domain))
+      case UseCaseError.Repository(RepositoryError.DuplicateApplication | RepositoryError.Conflict) =>
+        val failure = toGraphQLFailure(error)
+        Some(DomainError(failure.code, failure.message))
+      case UseCaseError.Account(_) =>
+        val failure = toGraphQLFailure(error)
+        Some(DomainError(failure.code, failure.message))
+      case _ => None
+    }
+
+  private def liftUseCase[A](error: UseCaseError): IO[A] =
+    IO.raiseError(RequestContext.ReadFailure(error))
 
   private def authenticated(context: Context[RequestContext, Unit]): IO[(ActorContext, HiringGraphQLServices)] =
     context.ctx.hiringAvailable.flatMap {

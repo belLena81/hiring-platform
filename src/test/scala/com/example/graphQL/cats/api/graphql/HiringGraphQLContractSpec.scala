@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
@@ -21,6 +21,16 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
   private def parseRequest(query: String): IO[GraphQLRequest] =
     IO.fromEither(Json.obj("query" -> Json.fromString(query)).as[GraphQLRequest]
       .left.map(error => new IllegalArgumentException("Invalid test operation", error)))
+
+  private def executeRequest(
+      request: GraphQLRequest,
+      documentCache: GraphQLDocumentCache,
+      context: Resource[IO, RequestContext]
+  ): IO[Either[HiringGraphQLSchema.Failure, Json]] =
+    documentCache.document(request.query).fold(
+      failure => IO.pure(Left(failure)),
+      document => context.use(HiringGraphQLSchema.executeInContext(request, document, _))
+    )
 
   test("served SDL matches the deterministic contract fixture") {
     fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))
@@ -48,7 +58,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     for {
       parsed <- parseRequest("{ job(id: \"not-a-uuid\") { id } }")
       result <- TestGraphQLSupport.dependencies().use(dependencies =>
-        HiringGraphQLSchema.execute(parsed, dependencies.contextFactory.resource(RequestContextParameters(
+        executeRequest(parsed, dependencies.documentCache, dependencies.contextFactory.resource(RequestContextParameters(
           service.readiness(Some("00000000-0000-0000-0000-000000000001")), None, dependencies.hiring,
           dependencies.ensureHiringReady, requestId = Some("00000000-0000-0000-0000-000000000001")))))
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
@@ -64,7 +74,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     operations.traverse(parseRequest).flatMap { requests =>
       TestGraphQLSupport.dependencies().use { dependencies =>
           requests.traverse { request =>
-          HiringGraphQLSchema.execute(request, dependencies.contextFactory.resource(RequestContextParameters(
+          executeRequest(request, dependencies.documentCache, dependencies.contextFactory.resource(RequestContextParameters(
             service.readiness(Some("00000000-0000-0000-0000-000000000001")), None, dependencies.hiring,
             dependencies.ensureHiringReady, requestId = Some("00000000-0000-0000-0000-000000000001"))))
         }
@@ -78,7 +88,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
         query <- fixture(name)
         parsed <- parseRequest(query)
         result <- TestGraphQLSupport.dependencies().use(dependencies =>
-          HiringGraphQLSchema.execute(parsed, dependencies.contextFactory.resource(RequestContextParameters(
+          executeRequest(parsed, dependencies.documentCache, dependencies.contextFactory.resource(RequestContextParameters(
             service.readiness(Some("00000000-0000-0000-0000-000000000001")), None, dependencies.hiring,
             dependencies.ensureHiringReady, requestId = Some("00000000-0000-0000-0000-000000000001")))))
       } yield {

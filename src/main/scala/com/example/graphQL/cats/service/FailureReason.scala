@@ -1,0 +1,28 @@
+package com.example.graphQL.cats.service
+
+enum FailureReason(val reason: String) {
+  case InvalidRequest extends FailureReason("INVALID_REQUEST")
+  case InvalidQuery extends FailureReason("INVALID_QUERY")
+  case UnsupportedMedia extends FailureReason("UNSUPPORTED_MEDIA")
+  case NotAcceptable extends FailureReason("NOT_ACCEPTABLE")
+  case PayloadTooLarge extends FailureReason("PAYLOAD_TOO_LARGE")
+  case Overloaded extends FailureReason("OVERLOADED")
+  case DeadlineExceeded extends FailureReason("DEADLINE_EXCEEDED")
+  case InternalError extends FailureReason("INTERNAL_ERROR")
+  case MethodNotAllowed extends FailureReason("METHOD_NOT_ALLOWED")
+  case NotFound extends FailureReason("NOT_FOUND")
+  case AuthenticationFailed extends FailureReason("AUTHENTICATION_FAILED")
+  case RateLimited extends FailureReason("RATE_LIMITED")
+  case DatabaseUnavailable extends FailureReason("DATABASE_UNAVAILABLE")
+  case DatabaseTimeout extends FailureReason("DATABASE_TIMEOUT")
+  case DatabaseNetwork extends FailureReason("DATABASE_NETWORK")
+  case DatabaseError extends FailureReason("DATABASE_ERROR")
+  case EmptyResult extends FailureReason("EMPTY_RESULT")
+  case Cancelled extends FailureReason("CANCELLED")
+  case ProbeTimeout extends FailureReason("PROBE_TIMEOUT")
+  case ConfigInvalid extends FailureReason("CONFIG_INVALID")
+  case BindFailed extends FailureReason("BIND_FAILED")
+  case StartupFailed extends FailureReason("STARTUP_FAILED")
+  case RuntimeFailed extends FailureReason("RUNTIME_FAILED")
+  case OperationCompleted extends FailureReason("OPERATION_COMPLETED")
+}

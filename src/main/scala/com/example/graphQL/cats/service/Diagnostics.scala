@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service
 
 import cats.effect.IO
+import com.example.graphQL.cats.shared.HiringHttpPaths
 import org.typelevel.otel4s.trace.Tracer
 
 enum LogLevel {
@@ -62,7 +63,7 @@ enum LogField(val key: String, val sensitive: Boolean = false) {
 }
 
 object LogFields {
-  val reasons: Set[String] = Rejection.values.map(_.reason).toSet
+  val reasons: Set[String] = FailureReason.values.map(_.reason).toSet
 
   private val errorTypes = Set(
     "java.net.BindException", "java.net.ConnectException", "java.net.SocketTimeoutException",
@@ -85,7 +86,7 @@ object LogFields {
 
   def validPublic(field: LogField, value: String): Boolean = field match {
     case LogField.Method => Set("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER").contains(value)
-    case LogField.Route => Set("/health", "/ready", "/graphql", "/schema.graphql", "_unmatched").contains(value)
+    case LogField.Route => HiringHttpPaths.public.contains(value) || value == "_unmatched"
     case LogField.Status => value.toIntOption.exists(status => status >= 100 && status <= 599)
     case LogField.DurationMs | LogField.BodyBytes => value.toLongOption.exists(_ >= 0)
     case LogField.HttpPort => value.toIntOption.exists(port => port >= 1 && port <= 65535)

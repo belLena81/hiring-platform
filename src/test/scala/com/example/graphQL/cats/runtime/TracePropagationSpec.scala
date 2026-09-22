@@ -81,6 +81,12 @@ final class TracePropagationSpec extends CatsEffectSuite {
         val resolverSpan = span(captured, "graphql.field.jobs")
 
         assertEquals(response.status, Status.Ok)
+        val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
+        assert(requestId.exists(_.matches("[0-9a-fA-F]{32}")))
+        assert(records.filterNot(record => record._1 match {
+          case LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
+          case _ => false
+        }).forall(_._2 == requestId))
         val traceparent = response.headers.get(CIString("traceparent")).map(_.head.value)
         assert(traceparent.exists(_.contains(resolverSpan(LogField.TraceId))))
         assert(!records.exists(_._3.get(LogField.SpanName).contains("http.request")))

@@ -4,9 +4,66 @@ import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{AccountCredentials, Application, ApplicationEvent, EntityEmbedding, Job, User, UserPageRequest, UserProfile}
 import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, SearchSession}
+import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
 import java.time.Instant
+import java.util.UUID
+
+/** A stable, caller-scoped key for replaying a state-changing operation. */
+final case class MutationReceiptKey(operation: String, actorScope: String, idempotencyKey: UUID)
+
+/** A one-way fingerprint of the canonical mutation input. Never persist source input here. */
+final case class MutationReceiptFingerprint private (value: String)
+
+object MutationReceiptFingerprint {
+  def fromCanonicalInput(input: String): MutationReceiptFingerprint =
+    MutationReceiptFingerprint(SourceHash.sha256(input))
+
+  private[repository] def stored(value: String): MutationReceiptFingerprint = MutationReceiptFingerprint(value)
+}
+
+/** A non-sensitive reference from a completed receipt to its authoritative result. */
+final case class MutationEntityReference(entityType: String, entityId: String)
+
+enum MutationReceiptState {
+  case InProgress, Completed
+}
+
+final case class MutationReceipt(
+    key: MutationReceiptKey,
+    fingerprint: MutationReceiptFingerprint,
+    state: MutationReceiptState,
+    entity: Option[MutationEntityReference],
+    createdAt: Instant,
+    completedAt: Option[Instant],
+    expiresAt: Instant
+)
+
+/** Opaque transaction capability supplied only by a persistence adapter. */
+trait MutationWriteContext
+
+final case class MutationReceiptWrite[+A](value: A, entity: MutationEntityReference)
+
+enum MutationReceiptExecution[+A] {
+  case Applied(value: A, entity: MutationEntityReference)
+  case Replay(entity: MutationEntityReference)
+  case FingerprintMismatch
+  case InProgress
+}
+
+/**
+  * Runs a state write and its idempotency receipt atomically when the adapter supports transactions.
+  * The callback must use the supplied context for every participating write.
+  */
+trait MutationReceiptRepository {
+  def execute[A](
+      key: MutationReceiptKey,
+      fingerprint: MutationReceiptFingerprint,
+      now: Instant,
+      expiresAt: Instant
+  )(write: MutationWriteContext => IO[Either[RepositoryError, MutationReceiptWrite[A]]]): IO[Either[RepositoryError, MutationReceiptExecution[A]]]
+}
 
 trait UserRepository {
   def find(id: UserId): IO[Either[RepositoryError, Option[User]]]

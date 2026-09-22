@@ -7,25 +7,21 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInteractionResolvers {
-  def recordJobView(context: Context[RequestContext, Unit]): IO[Any] =
+  def recordJobView(context: Context[RequestContext, Unit]): IO[MutationOutcome[InteractionSuccess]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(recordJobViewInputArgument)
-      hiring.interactionService.fold(IO.pure(InteractionSuccess(true): Any)) { interaction =>
-        IO.realTimeInstant.flatMap(now =>
-          interaction.recordJobView(actor, input.eventId, input.jobId, input.searchId, now)
-            .flatMap(result => mutationResult(IO.pure(result.map(_ => InteractionSuccess(true))))(identity))
-        )
-      }
+      IO.realTimeInstant.flatMap(now =>
+        hiring.interactionService.recordJobView(actor, input.eventId, input.jobId, input.searchId, now)
+          .map(_.map(_ => InteractionSuccess(true))).flatMap(mutationResult)
+      )
     }
 
-  def recordSearchResultClick(context: Context[RequestContext, Unit]): IO[Any] =
+  def recordSearchResultClick(context: Context[RequestContext, Unit]): IO[MutationOutcome[InteractionSuccess]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(recordSearchResultClickInputArgument)
-      hiring.interactionService.fold(IO.pure(InteractionSuccess(true): Any)) { interaction =>
-        IO.realTimeInstant.flatMap(now =>
-          interaction.recordSearchResultClick(actor, input.eventId, input.searchId, input.resultId.toString, now)
-            .flatMap(result => mutationResult(IO.pure(result.map(_ => InteractionSuccess(true))))(identity))
-        )
-      }
+      IO.realTimeInstant.flatMap(now =>
+        hiring.interactionService.recordSearchResultClick(actor, input.eventId, input.searchId, input.resultId.toString, now)
+          .map(_.map(_ => InteractionSuccess(true))).flatMap(mutationResult)
+      )
     }
 }
