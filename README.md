@@ -27,6 +27,22 @@ docker compose up -d mongodb kafka
 
 Kafka publishes to `hiring.operational-events` with seven-day broker retention. MongoDB readiness and HTTP startup do not depend on Kafka availability; operational mutations write a transactional Mongo outbox first and the background publisher retries broker delivery.
 
+### Local analytics batch
+
+The analytics batch is an opt-in, one-shot Compose profile. It reads one explicit Kafka partition/offset range, writes local Delta data under the ignored `.local/data/analytics/` directory, and exits. It is not a streaming daemon and does not run with the default application stack.
+
+```bash
+docker compose up -d kafka
+ANALYTICS_RUN_ID=local-001 \
+  HIRING_ANALYTICS_HMAC_SECRET_BASE64="[REDACTED_SECRET]" \
+  ANALYTICS_PARTITION=0 \
+  ANALYTICS_START_OFFSET=0 \
+  ANALYTICS_END_OFFSET_EXCLUSIVE=100 \
+  docker compose --profile analytics run --rm analytics-batch
+```
+
+The profile uses Kafka's internal `kafka:9092` listener. Local host clients continue to use `127.0.0.1:9092`. Choose a range that exists in the local broker; the batch validates neither a live report publication nor account-erasure processing. See the [analytics specification](docs/specs/hiring-analytics-lakehouse.md) for the retention and release boundaries.
+
 `GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
 
 See the [API reference](docs/api.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for the active contract and verification evidence.

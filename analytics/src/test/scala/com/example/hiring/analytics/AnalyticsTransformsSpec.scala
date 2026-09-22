@@ -2,13 +2,20 @@ package com.example.hiring.analytics
 
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions.col
+
+import java.nio.file.Files
+import java.time.Instant
 
 class AnalyticsTransformsSpec extends FunSuite {
+  private val pseudonymizer = SubjectPseudonymizer.fromSecret("analytics-test-secret".getBytes("UTF-8"))
   private lazy val spark: SparkSession = SparkSession.builder()
     .master("local[2]")
     .appName("AnalyticsTransformsSpec")
     .config("spark.ui.enabled", "false")
     .config("spark.sql.shuffle.partitions", "2")
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
     .getOrCreate()
 
   override def afterAll(): Unit =
@@ -32,6 +39,8 @@ class AnalyticsTransformsSpec extends FunSuite {
     s"""{"eventId":"$id","eventType":"$eventType","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"$aggregateType","aggregateId":"$aggregateId","actorId":"actor-1","payload":${payload.getOrElse(defaultPayload)}}"""
   }
 
+  private def emptyMarkers = AnalyticsSubjectPrivacy.emptyMarkers(records(Seq.empty))
+
   test("bronze deduplicates Kafka delivery by topic partition and offset") {
     val source = records(Seq(
       ("hiring.operational-events", 0, 1L, event("event-1", "APPLICATION_CREATED")),
@@ -50,7 +59,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )))
     val valid = OperationalEventTransforms.validEvents(parsed)
     assertEquals(OperationalEventTransforms.conflictingEventIds(valid).count(), 1L)
-    assertEquals(OperationalEventTransforms.silver(valid).count(), 0L)
+    assertEquals(OperationalEventTransforms.silver(valid, pseudonymizer, emptyMarkers).count(), 0L)
   }
 
   test("malformed envelopes are excluded from valid records") {
@@ -65,7 +74,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val events = (1 to 10).map(index =>
       ("hiring.operational-events", 0, index.toLong, event(s"created-$index", "APPLICATION_CREATED", aggregateId = s"application-$index"))
     ) ++ Seq(("hiring.operational-events", 0, 11L, event("hired-1", "CANDIDATE_HIRED")))
-    val silver = OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(events))))
+    val silver = OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(events))), pseudonymizer, emptyMarkers)
     val result = HiringGoldTransforms.funnelActivity(silver).select("eventType", "contributingApplications").collect().toSeq
     assertEquals(result.map(_.getString(0)).toSet, Set("APPLICATION_CREATED"))
     assertEquals(result.head.getLong(1), 10L)
@@ -77,7 +86,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       ("hiring.operational-events", 0, index.toLong, event(s"job-$index", "JOB_CREATED", "Job", s"job-$index", Some(payload)))
     )
     val update = ("hiring.operational-events", 0, 20L, event("update-1", "JOB_UPDATED", "Job", "job-update", Some(payload)))
-    val silver = OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(created :+ update))))
+    val silver = OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(created :+ update))), pseudonymizer, emptyMarkers)
     val result = HiringGoldTransforms.skillPostingActivity(silver).collect()
     assertEquals(result.length, 1)
     assertEquals(result.head.getString(result.head.fieldIndex("skill")), "scala")
@@ -92,5 +101,65 @@ class AnalyticsTransformsSpec extends FunSuite {
       PartitionOffsetRange("topic", 0, 0L, 1L),
       PartitionOffsetRange("topic", 0, 1L, 2L)
     )))
+  }
+
+  test("Kafka offset bounds are valid JSON without escaped structural quotes") {
+    val ranges = Vector(PartitionOffsetRange("hiring.operational-events", 0, 3L, 8L))
+    assertEquals(KafkaOffsetRangeSource.offsetJson(ranges, _.startOffset), "{\"hiring.operational-events\":{\"0\":3}}")
+    assertEquals(KafkaOffsetRangeSource.offsetJson(ranges, _.endOffsetExclusive), "{\"hiring.operational-events\":{\"0\":8}}")
+  }
+
+  test("bounded batch persists replayable layers, quarantines conflicts, and publishes Gold descriptors") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-batch").toUri.toString.stripSuffix("/")
+    val input = records((1 to 10).map(index =>
+      ("hiring.operational-events", 0, index.toLong, event(s"created-$index", "APPLICATION_CREATED", aggregateId = s"application-$index"))
+    ) ++ Seq(
+      ("hiring.operational-events", 0, 11L, event("bad", "APPLICATION_CREATED")),
+      ("hiring.operational-events", 0, 12L, event("bad", "APPLICATION_STATUS_CHANGED")),
+      ("hiring.operational-events", 0, 13L, event("outside", "APPLICATION_CREATED"))
+    ))
+    val manifest = AnalyticsRunManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 13L)))
+    val publication = new HiringAnalyticsBatch(AnalyticsLakehousePaths(lakehouse), pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers), () => Instant.parse("2026-09-22T12:00:00Z"))
+      .run(spark, DataFrameBatchSource(input), manifest)
+
+    assertEquals(publication.bronzeRecords, 12L)
+    assertEquals(publication.conflictingEventIds, 1L)
+    assertEquals(publication.quarantinedRecords, 2L)
+    assertEquals(spark.read.format("delta").load(publication.funnelGoldPath).count(), 1L)
+    assertEquals(spark.read.format("delta").load(AnalyticsLakehousePaths(lakehouse).silver).count(), 10L)
+    assertEquals(spark.read.format("delta").load(AnalyticsLakehousePaths(lakehouse).manifests)
+      .filter(col("status") === "COMPLETED").count(), 1L)
+  }
+
+  test("data frame source honors the manifest offset boundary") {
+    val source = records(Seq(
+      ("hiring.operational-events", 0, 1L, event("in", "APPLICATION_CREATED")),
+      ("hiring.operational-events", 0, 2L, event("out", "APPLICATION_CREATED"))
+    ))
+    val manifest = AnalyticsRunManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+    assertEquals(DataFrameBatchSource(source).read(spark, manifest).count(), 1L)
+  }
+
+  test("subject tokens are deterministic opaque HMAC values") {
+    val token = pseudonymizer.token("candidate-1")
+    assertEquals(token, pseudonymizer.token("candidate-1"))
+    assertNotEquals(token, pseudonymizer.token("candidate-2"))
+    assert(!token.contains("candidate-1"))
+    assert(token.startsWith("hmac-v1_"))
+  }
+
+  test("active deletion tokens are excluded before Silver persistence without retaining raw identities") {
+    val parsed = OperationalEventTransforms.parseKafkaRecords(records(Seq(
+      ("hiring.operational-events", 0, 1L, event("deleted", "APPLICATION_CREATED", aggregateId = "application-deleted")),
+      ("hiring.operational-events", 0, 2L, event("kept", "APPLICATION_CREATED", aggregateId = "application-kept", payload = Some("{\"applicationId\":\"application-kept\",\"candidateId\":\"candidate-2\",\"jobId\":\"job-1\"}")))
+    )))
+    import spark.implicits._
+    val markers = Seq(pseudonymizer.token("candidate-1")).toDF("subjectToken")
+    val silver = OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, markers)
+
+    assertEquals(silver.select("eventId").as[String].collect().toSet, Set("kept"))
+    assertEquals(silver.select("subjectToken").as[String].collect().toSet, Set(pseudonymizer.token("candidate-2")))
+    assert(!silver.columns.contains("actorId"))
+    assert(!silver.columns.contains("candidateId"))
   }
 }

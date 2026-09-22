@@ -3,13 +3,14 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepository, AnalyticsFunnelDay, AnalyticsReportRepository, AnalyticsReportSnapshot, AnalyticsSkillPostingDay, AnalyticsTimeToHire, MutationWriteContext, RepositoryError}
-import com.mongodb.client.model.{Filters, Sorts, UpdateOptions, Updates}
+import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepository, AnalyticsFunnelDay, AnalyticsReportRepository, AnalyticsReportSnapshot, AnalyticsReportSnapshotPublisher, AnalyticsSkillPostingDay, AnalyticsTimeToHire, MutationWriteContext, RepositoryError}
+import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.{MongoClient, MongoDatabase}
 import org.bson.Document
 
 import java.util.Date
 import java.time.Instant
+import scala.jdk.CollectionConverters.*
 
 /** Stores one idempotent erasure request per subject in the same Mongo transaction as account deletion. */
 final class MongoAnalyticsErasureRequestRepository(
@@ -41,21 +42,71 @@ object MongoAnalyticsErasureRequestRepository {
     new MongoAnalyticsErasureRequestRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict))
 }
 
-/** Reads only the current aggregate snapshot written by the analytics batch. */
-final class MongoAnalyticsReportRepository(database: MongoDatabase) extends AnalyticsReportRepository {
+/** Publishes complete analytics snapshots atomically and exposes the newest valid one to the API. */
+final class MongoAnalyticsReportRepository(database: MongoDatabase) extends AnalyticsReportRepository, AnalyticsReportSnapshotPublisher {
   private val collection = database.getCollection("analytics_report_snapshots")
 
   override def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]] =
-    PublisherBridge.first(collection.find(Filters.eq("state", "Published")).sort(Sorts.descending("asOf")))
-      .map(_.flatMap(read).asRight[RepositoryError])
+    PublisherBridge.first(collection.find(Filters.and(
+      Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId),
+      Filters.eq("state", "Published"),
+      Filters.gt("expiresAt", new Date())
+    )))
+      .map(_.flatMap(AnalyticsReportSnapshotDocument.read).asRight[RepositoryError])
       .handleError(_ => Left(RepositoryError.Unavailable))
 
-  private def read(document: Document): Option[AnalyticsReportSnapshot] =
+  override def publish(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): IO[Either[RepositoryError, Unit]] =
+    if (!expiresAt.isAfter(snapshot.asOf)) IO.pure(Left(RepositoryError.Conflict))
+    else
+      PublisherBridge.first(collection.replaceOne(
+        Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId),
+        AnalyticsReportSnapshotDocument.write(snapshot, expiresAt),
+        new ReplaceOptions().upsert(true)
+      )).map {
+        case Some(_) => Right(())
+        case None => Left(RepositoryError.Unavailable)
+      }.handleError(_ => Left(RepositoryError.Unavailable))
+}
+
+private[mongo] object AnalyticsReportSnapshotDocument {
+  val CurrentId = "current"
+
+  def write(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): Document = {
+    val document = new Document("_id", CurrentId)
+      .append("state", "Published")
+      .append("asOf", Date.from(snapshot.asOf))
+      .append("expiresAt", Date.from(expiresAt))
+      .append("funnel", snapshot.funnel.map(writeFunnel).asJava)
+      .append("skillPostingActivity", snapshot.skillPostingActivity.map(writeSkill).asJava)
+    snapshot.timeToHire.fold(document)(value => document.append("timeToHire", writeTimeToHire(value)))
+  }
+
+  def read(document: Document): Option[AnalyticsReportSnapshot] =
     for {
       asOf <- Option(document.getDate("asOf")).map(_.toInstant)
       funnel <- documents(document, "funnel").flatMap(_.traverse(readFunnel))
       skills <- documents(document, "skillPostingActivity").flatMap(_.traverse(readSkill))
     } yield AnalyticsReportSnapshot(asOf, funnel, Option(document.get("timeToHire", classOf[Document])).flatMap(readTimeToHire), skills)
+
+  private def writeFunnel(value: AnalyticsFunnelDay): Document =
+    new Document("day", Date.from(value.day))
+      .append("created", value.created)
+      .append("accepted", value.accepted)
+      .append("declined", value.declined)
+      .append("interview", value.interview)
+      .append("hired", value.hired)
+      .append("rejected", value.rejected)
+
+  private def writeTimeToHire(value: AnalyticsTimeToHire): Document =
+    new Document("p50Hours", value.p50Hours)
+      .append("p75Hours", value.p75Hours)
+      .append("p90Hours", value.p90Hours)
+      .append("p95Hours", value.p95Hours)
+      .append("eligibleCount", value.eligibleCount)
+      .append("excludedCount", value.excludedCount)
+
+  private def writeSkill(value: AnalyticsSkillPostingDay): Document =
+    new Document("day", Date.from(value.day)).append("skill", value.skill).append("postings", value.postings)
 
   private def readFunnel(document: Document): Option[AnalyticsFunnelDay] =
     for {

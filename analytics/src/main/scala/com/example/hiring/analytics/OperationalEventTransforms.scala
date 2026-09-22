@@ -62,20 +62,38 @@ object OperationalEventTransforms {
       .filter(col("distinctPayloads") > lit(1))
       .select("eventId")
 
-  def silver(valid: DataFrame): DataFrame = {
+  /**
+    * Creates the privacy-safe Silver shape. Callers must supply active deletion marker tokens;
+    * marker filtering occurs before this frame reaches a Delta merge.
+    */
+  def silver(
+      valid: DataFrame,
+      pseudonymizer: SubjectPseudonymizer,
+      activeMarkerTokens: DataFrame
+  ): DataFrame = {
     val conflicts = conflictingEventIds(valid)
-    valid.join(conflicts, Seq("eventId"), "left_anti")
+    val privacySafe = AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(
+      AnalyticsSubjectPrivacy.withSubjectToken(valid.join(conflicts, Seq("eventId"), "left_anti"), pseudonymizer),
+      activeMarkerTokens
+    )
+    privacySafe
       .dropDuplicates("eventId")
       .withColumn("applicationId", get_json_object(col("rawValue"), "$.payload.applicationId"))
-      .withColumn("candidateId", get_json_object(col("rawValue"), "$.payload.candidateId"))
       .withColumn("jobId", get_json_object(col("rawValue"), "$.payload.jobId"))
       .withColumn("newStatus", get_json_object(col("rawValue"), "$.payload.newStatus"))
+      .withColumn("jobSkills", from_json(get_json_object(col("rawValue"), "$.payload.job.skills"), ArrayType(StringType)))
+      .withColumn("eventFingerprint", sha2(col("rawValue"), 256))
+      // Silver is a derived, 30-day analytics dataset: it does not retain raw envelopes,
+      // candidate identifiers, or actor identifiers.
+      .select("eventId", "eventType", "occurredAt", "aggregateType", "aggregateId", "applicationId", "jobId", "newStatus", "jobSkills", "subjectToken", "eventFingerprint")
   }
 
   private def requiredEnvelopeFields: Column =
     Seq("eventId", "eventType", "occurredAt", "aggregateType", "aggregateId", "actorId")
       .map(name => col(name).isNotNull)
-      .reduce(_ && _) && get_json_object(col("rawValue"), "$.payload").isNotNull
+      .reduce(_ && _) &&
+      length(trim(col("actorId"))) > lit(0) &&
+      get_json_object(col("rawValue"), "$.payload").isNotNull
 }
 
 object HiringGoldTransforms {
@@ -89,10 +107,9 @@ object HiringGoldTransforms {
 
   /** Only JOB_CREATED snapshots contribute; updates and close events never alter this metric. */
   def skillPostingActivity(silver: DataFrame): DataFrame = {
-    val skills = from_json(get_json_object(col("rawValue"), "$.payload.job.skills"), ArrayType(StringType))
     silver.filter(col("eventType") === lit("JOB_CREATED"))
       .withColumn("day", date_trunc("day", col("occurredAt")))
-      .withColumn("rawSkill", explode(skills))
+      .withColumn("rawSkill", explode(col("jobSkills")))
       .withColumn("skill", lower(trim(col("rawSkill"))))
       .filter(length(col("skill")) > lit(0))
       .dropDuplicates("eventId", "aggregateId", "skill")
@@ -103,4 +120,45 @@ object HiringGoldTransforms {
 
   def suppressSmallGroups(dataset: DataFrame, contributorColumn: String): DataFrame =
     dataset.filter(col(contributorColumn) >= lit(AnalyticsRetention.MinimumContributors))
+
+  /** Wide daily shape consumed by the operational AnalyticsFunnelDay projection. */
+  def wideFunnelDay(silver: DataFrame): DataFrame = {
+    import org.apache.spark.sql.functions.{countDistinct, when}
+    silver.filter(col("eventType").isin("APPLICATION_CREATED", "APPLICATION_STATUS_CHANGED"))
+      .withColumn("day", date_trunc("day", col("occurredAt")))
+      .groupBy("day")
+      .agg(
+        countDistinct(col("applicationId")).as("contributingApplications"),
+        countDistinct(when(col("eventType") === "APPLICATION_CREATED", col("applicationId"))).as("created"),
+        countDistinct(when(col("newStatus") === "Accepted", col("applicationId"))).as("accepted"),
+        countDistinct(when(col("newStatus") === "Declined", col("applicationId"))).as("declined"),
+        countDistinct(when(col("newStatus") === "Interview", col("applicationId"))).as("interview"),
+        countDistinct(when(col("newStatus") === "Hired", col("applicationId"))).as("hired"),
+        countDistinct(when(col("newStatus") === "Rejected", col("applicationId"))).as("rejected")
+      ).filter(col("contributingApplications") >= lit(AnalyticsRetention.MinimumContributors))
+        .drop("contributingApplications")
+  }
+
+  /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
+  def timeToHire(silver: DataFrame): DataFrame = {
+    import org.apache.spark.sql.functions.{count, min, percentile_approx, unix_timestamp, when}
+    val lifecycle = silver.filter(col("eventType").isin("APPLICATION_CREATED", "APPLICATION_STATUS_CHANGED"))
+      .groupBy("applicationId")
+      .agg(
+        min(when(col("eventType") === "APPLICATION_CREATED", col("occurredAt"))).as("createdAt"),
+        min(when(col("newStatus") === "Hired", col("occurredAt"))).as("hiredAt")
+      )
+    val eligible = lifecycle.filter(col("createdAt").isNotNull && col("hiredAt").isNotNull)
+      .withColumn("hours", (unix_timestamp(col("hiredAt")) - unix_timestamp(col("createdAt"))) / lit(3600.0))
+      .filter(col("hours") >= lit(0.0))
+    val excluded = lifecycle.count() - eligible.count()
+    eligible.agg(
+      percentile_approx(col("hours"), lit(0.5), lit(10000)).as("p50Hours"),
+      percentile_approx(col("hours"), lit(0.75), lit(10000)).as("p75Hours"),
+      percentile_approx(col("hours"), lit(0.9), lit(10000)).as("p90Hours"),
+      percentile_approx(col("hours"), lit(0.95), lit(10000)).as("p95Hours"),
+      count(lit(1)).as("eligibleCount")
+    ).withColumn("excludedCount", lit(excluded))
+      .filter(col("eligibleCount") >= lit(AnalyticsRetention.MinimumContributors))
+  }
 }

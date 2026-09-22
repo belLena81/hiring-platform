@@ -122,6 +122,21 @@ trait AnalyticsReportRepository {
   def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]]
 }
 
+/**
+  * Publishes a complete, immutable analytical snapshot. The analytics batch owns
+  * expiry calculation; the operational API only owns the read model contract.
+  */
+trait AnalyticsReportSnapshotPublisher {
+  def publish(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): IO[Either[RepositoryError, Unit]]
+}
+
+object AnalyticsReportSnapshotPublisher {
+  val unavailable: AnalyticsReportSnapshotPublisher = new AnalyticsReportSnapshotPublisher {
+    override def publish(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+  }
+}
+
 final case class AnalyticsReportSnapshot(
     asOf: Instant,
     funnel: List[AnalyticsFunnelDay],

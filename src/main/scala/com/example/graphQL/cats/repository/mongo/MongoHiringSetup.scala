@@ -20,7 +20,7 @@ object MongoHiringSetup {
   private val CollectionLimit = 128
   private val ownedCollections = Set(
     "users", "jobs", "applications", "application_events", "account_registry", "embedding_work",
-    "event_outbox", "search_sessions", "search_session_work", "consumer_receipts", "mutation_receipts", "event_quarantine", "analytics_erasure_requests", "hiring_migration_ledger"
+    "event_outbox", "search_sessions", "search_session_work", "consumer_receipts", "mutation_receipts", "event_quarantine", "analytics_erasure_requests", "analytics_report_snapshots", "hiring_migration_ledger"
   )
 
   val EmbeddingWorkAvailableIndex = "embedding_work_available_lease"
@@ -55,6 +55,8 @@ object MongoHiringSetup {
   val EventQuarantineOffsetIndex = "event_quarantine_offset"
   val EventQuarantineExpiryIndex = "event_quarantine_expiry"
   val AnalyticsErasureRequestStateIndex = "analytics_erasure_requests_state_requested"
+  val AnalyticsReportPublishedIndex = "analytics_report_snapshots_published_as_of"
+  val AnalyticsReportExpiryIndex = "analytics_report_snapshots_expiry"
 
   def initialize(database: MongoDatabase): IO[Unit] = initialize(database, None, resetOnStart = false)
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig]): IO[Unit] = initialize(database, atlas, resetOnStart = false)
@@ -107,7 +109,9 @@ object MongoHiringSetup {
     index(database.getCollection("mutation_receipts"), Indexes.ascending("expiresAt"), new IndexOptions().name(MutationReceiptsExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
     index(database.getCollection("event_quarantine"), Indexes.ascending("topic", "partition", "offset"), new IndexOptions().name(EventQuarantineOffsetIndex).unique(true)),
     index(database.getCollection("event_quarantine"), Indexes.ascending("expiresAt"), new IndexOptions().name(EventQuarantineExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)),
-    index(database.getCollection("analytics_erasure_requests"), Indexes.ascending("state", "requestedAt"), new IndexOptions().name(AnalyticsErasureRequestStateIndex))
+    index(database.getCollection("analytics_erasure_requests"), Indexes.ascending("state", "requestedAt"), new IndexOptions().name(AnalyticsErasureRequestStateIndex)),
+    index(database.getCollection("analytics_report_snapshots"), Indexes.compoundIndex(Indexes.ascending("state"), Indexes.descending("asOf")), new IndexOptions().name(AnalyticsReportPublishedIndex)),
+    index(database.getCollection("analytics_report_snapshots"), Indexes.ascending("expiresAt"), new IndexOptions().name(AnalyticsReportExpiryIndex).expireAfter(0L, TimeUnit.SECONDS))
   ).sequence_.void
 
   private def createUserValidator(database: MongoDatabase): IO[Unit] = {

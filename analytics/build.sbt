@@ -12,9 +12,11 @@ lazy val analytics = (project in file("."))
     Compile / run / fork := true,
     Test / fork := true,
     Test / parallelExecution := false,
+    Test / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Werror"),
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-sql" % sparkVersion,
+      "org.apache.spark" %% "spark-sql-kafka-0-10" % sparkVersion,
       "io.delta" %% "delta-spark" % deltaVersion,
       "org.scalameta" %% "munit" % munitVersion % Test
     )
