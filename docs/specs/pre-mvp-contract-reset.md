@@ -13,7 +13,7 @@
 - API, document, cursor, event, entity, embedding, and search-model version fields are removed. Scala/JDK/dependency versions and required third-party protocol paths remain.
 - Concurrent writes use transactions and conditional identity/ownership/status predicates, never stored revisions.
 - Events use the unversioned topic and envelope; timestamp plus event ID is their only ordering key.
-- The existing uncommitted GraphQL restructuring is the target API and must be reconciled, not discarded. Historical docs/specs are removed; this is the sole active spec.
+- The existing uncommitted GraphQL restructuring is the target API and must be reconciled, not discarded. The operational contract remains the active compatibility boundary; the [Hiring Analytics Lakehouse](hiring-analytics-lakehouse.md) spec owns derived analytics behavior and evidence.
 - Authentication rate limits are enforced by the `login`, `signUp`, and `bootstrapAdmin` field resolvers for each executed field, including aliases and fragments. Exhaustion is a sanitized HTTP 200 GraphQL error with `RATE_LIMITED` and positive `retryAfter` seconds extensions.
 - Authenticated GraphQL execution resolves the stored viewer once per request and reuses that verified snapshot for service authorization and nested email visibility. There is no cross-request actor cache; a successful account deletion invalidates the request snapshot.
 - Parsed GraphQL documents use a process-local cache of at most 256 raw query texts for 60 seconds. A cache hit skips repeated static validation only; variables, authentication, rate limits, depth/complexity reducers, and field execution remain per request.

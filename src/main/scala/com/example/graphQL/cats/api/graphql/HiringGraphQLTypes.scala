@@ -136,6 +136,34 @@ private[graphql] object HiringGraphQLTypes {
   lazy val rankedCandidateResultsType: ObjectType[RequestContext, RankedCandidateResults] =
     ObjectType("RankedCandidateResults", fields[RequestContext, RankedCandidateResults](
       Field("results", ListType(rankedCandidateType), resolve = _.value.results)))
+  lazy val analyticsFunnelDayType: ObjectType[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsFunnelDay] =
+    ObjectType("AnalyticsFunnelDay", fields[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsFunnelDay](
+      instantField("day", _.day),
+      Field("created", LongType, resolve = _.value.created),
+      Field("accepted", LongType, resolve = _.value.accepted),
+      Field("declined", LongType, resolve = _.value.declined),
+      Field("interview", LongType, resolve = _.value.interview),
+      Field("hired", LongType, resolve = _.value.hired),
+      Field("rejected", LongType, resolve = _.value.rejected)))
+  lazy val analyticsTimeToHireType: ObjectType[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsTimeToHire] =
+    ObjectType("AnalyticsTimeToHire", fields[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsTimeToHire](
+      Field("p50Hours", FloatType, resolve = _.value.p50Hours),
+      Field("p75Hours", FloatType, resolve = _.value.p75Hours),
+      Field("p90Hours", FloatType, resolve = _.value.p90Hours),
+      Field("p95Hours", FloatType, resolve = _.value.p95Hours),
+      Field("eligibleCount", LongType, resolve = _.value.eligibleCount),
+      Field("excludedCount", LongType, resolve = _.value.excludedCount)))
+  lazy val analyticsSkillPostingDayType: ObjectType[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsSkillPostingDay] =
+    ObjectType("AnalyticsSkillPostingDay", fields[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsSkillPostingDay](
+      instantField("day", _.day),
+      Field("skill", StringType, resolve = _.value.skill),
+      Field("postings", LongType, resolve = _.value.postings)))
+  lazy val analyticsReportType: ObjectType[RequestContext, AnalyticsReportPayload] =
+    ObjectType("AnalyticsReport", fields[RequestContext, AnalyticsReportPayload](
+      instantField("asOf", _.snapshot.asOf),
+      Field("funnel", ListType(analyticsFunnelDayType), resolve = _.value.snapshot.funnel),
+      Field("timeToHire", OptionType(analyticsTimeToHireType), resolve = _.value.snapshot.timeToHire),
+      Field("skillPostingActivity", ListType(analyticsSkillPostingDayType), resolve = _.value.snapshot.skillPostingActivity)))
 
   lazy val createJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("CreateJobResult", jobType)
   lazy val updateJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("UpdateJobResult", jobType)

@@ -4,7 +4,7 @@ import cats.data.NonEmptyList
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.{AccountError, AuthenticationError, AvailabilityError, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{AccountError, AnalyticsError, AuthenticationError, AvailabilityError, SearchError, UseCaseError}
 
 private[graphql] object GraphQLFailureCatalog {
   private enum FailureMetadata(val code: String, val exceptional: Boolean) {
@@ -42,6 +42,9 @@ private[graphql] object GraphQLFailureCatalog {
     case ProviderUnavailable extends FailureMetadata("PROVIDER_UNAVAILABLE", exceptional = true)
     case VectorSearchUnavailable extends FailureMetadata("VECTOR_SEARCH_UNAVAILABLE", exceptional = true)
     case ValidationFailed extends FailureMetadata("VALIDATION_FAILED", exceptional = false)
+    case AnalyticsUnavailable extends FailureMetadata("ANALYTICS_UNAVAILABLE", exceptional = true)
+    case AnalyticsInvalidPeriod extends FailureMetadata("INVALID_ANALYTICS_PERIOD", exceptional = false)
+    case AnalyticsContextRequired extends FailureMetadata("ANALYTICS_CONTEXT_REQUIRED", exceptional = true)
   }
 
   def classify(error: UseCaseError): GraphQLFailure =
@@ -49,6 +52,7 @@ private[graphql] object GraphQLFailureCatalog {
       case UseCaseError.Authentication(value) => classifyAuthentication(value)
       case UseCaseError.Account(value) => classifyAccount(value)
       case UseCaseError.Availability(value) => classifyAvailability(value)
+      case UseCaseError.Analytics(value) => classifyAnalytics(value)
       case UseCaseError.Domain(value) => classifyDomain(value)
       case UseCaseError.Repository(value) => classifyRepository(value)
       case UseCaseError.Search(value) => classifySearch(value)
@@ -78,6 +82,13 @@ private[graphql] object GraphQLFailureCatalog {
   private def classifyAvailability(error: AvailabilityError): GraphQLFailure =
     error match {
       case AvailabilityError.ServiceNotReady => failure(FailureMetadata.ServiceNotReady, "Service not ready")
+    }
+
+  private def classifyAnalytics(error: AnalyticsError): GraphQLFailure =
+    error match {
+      case AnalyticsError.ReportsUnavailable => failure(FailureMetadata.AnalyticsUnavailable, "Analytics reports are unavailable")
+      case AnalyticsError.InvalidPeriod => failure(FailureMetadata.AnalyticsInvalidPeriod, "Analytics period must be ordered and at most 30 days")
+      case AnalyticsError.ErasureContextRequired => failure(FailureMetadata.AnalyticsContextRequired, "Account deletion is unavailable")
     }
 
   private def classifyDomain(error: DomainError): GraphQLFailure =

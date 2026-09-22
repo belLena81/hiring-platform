@@ -1,5 +1,37 @@
 union AcceptApplicationResult = Application | ValidationError | DomainError
 
+type AnalyticsFunnelDay {
+  day: Instant!
+  created: Long!
+  accepted: Long!
+  declined: Long!
+  interview: Long!
+  hired: Long!
+  rejected: Long!
+}
+
+type AnalyticsReport {
+  asOf: Instant!
+  funnel: [AnalyticsFunnelDay!]!
+  timeToHire: AnalyticsTimeToHire
+  skillPostingActivity: [AnalyticsSkillPostingDay!]!
+}
+
+type AnalyticsSkillPostingDay {
+  day: Instant!
+  skill: String!
+  postings: Long!
+}
+
+type AnalyticsTimeToHire {
+  p50Hours: Float!
+  p75Hours: Float!
+  p90Hours: Float!
+  p95Hours: Float!
+  eligibleCount: Long!
+  excludedCount: Long!
+}
+
 type Application {
   id: ApplicationID!
   status: ApplicationStatus!
@@ -242,6 +274,7 @@ type Query {
   health: Health!
   readiness: Readiness!
   me: User
+  analyticsReport(from: Instant!, to: Instant!): AnalyticsReport!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!

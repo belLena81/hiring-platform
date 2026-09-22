@@ -5,7 +5,7 @@ import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
 import com.example.graphQL.cats.repository.protocol.EmbeddingService
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{AnalyticsReportingService, DatabaseProbe, Diagnostics, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
@@ -19,7 +19,7 @@ import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository, MongoConsumerReceiptRepository, MongoDatabaseProbe, MongoEventQuarantineRepository, MongoHiringSetup, MongoJobRepository,
-  MongoMutationReceiptRepository, MongoOperationalEventOutboxRepository, MongoSearchSessionRepository, MongoSearchSessionWorkRepository, MongoSemanticSearchRepository,
+  MongoAnalyticsErasureRequestRepository, MongoAnalyticsReportRepository, MongoMutationReceiptRepository, MongoOperationalEventOutboxRepository, MongoSearchSessionRepository, MongoSearchSessionWorkRepository, MongoSemanticSearchRepository,
   MongoUserRepository, MongoEmbeddingWorkRepository, AtlasSearchIndexConfig
 }
 import com.mongodb.reactivestreams.client.MongoDatabase
@@ -79,8 +79,10 @@ object MongoHiringRuntime {
       val outbox = new MongoOperationalEventOutboxRepository(database)
       val receipts = new MongoConsumerReceiptRepository(database)
       val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
+      val erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
+      val analyticsReports = new MongoAnalyticsReportRepository(database)
       val quarantine = new MongoEventQuarantineRepository(database)
-      hiringServices(database, users, jobs, applications, searchSessions, searchSessionWork, mutationReceipts, config.vectorSearch, config.embeddingService, config.jwtAuth, config.passwordHash, passwordHashPermits, config.diagnostics).flatMap { services =>
+      hiringServices(database, users, jobs, applications, searchSessions, searchSessionWork, mutationReceipts, erasureRequests, analyticsReports, config.vectorSearch, config.embeddingService, config.jwtAuth, config.passwordHash, passwordHashPermits, config.diagnostics).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, config.vectorSearch, config.resetOnStart), config.diagnostics).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
@@ -104,6 +106,8 @@ object MongoHiringRuntime {
       searchSessions: MongoSearchSessionRepository,
       searchSessionWork: MongoSearchSessionWorkRepository,
       mutationReceipts: MongoMutationReceiptRepository,
+      erasureRequests: MongoAnalyticsErasureRequestRepository,
+      analyticsReports: MongoAnalyticsReportRepository,
       vectorSearch: VectorSearchConfig,
       embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService],
       jwtAuth: JwtAuthConfig,
@@ -139,12 +143,13 @@ object MongoHiringRuntime {
         interactionService,
         searchSessions,
         searchSessionHandoff,
-        mutationReceipts
+        mutationReceipts,
+        AnalyticsReportingService(users, analyticsReports)
       )
 
     SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).flatMap { searchSessionHandoff =>
     if (!vectorSearch.enabled) {
-      val account = UserAccountService(users, users, hasher, tokenIssuer)
+      val account = UserAccountService(users, users, hasher, tokenIssuer, erasureRequests)
       val jobService = JobService(users, jobs)
       Resource.pure(assemble(jobService, account, searchSessionHandoff = searchSessionHandoff))
     } else {
@@ -175,7 +180,7 @@ object MongoHiringRuntime {
             embeddingLease
           ).map { embeddingWork =>
             val jobService = JobService(users, jobs, embeddingWork)
-            val accountService = UserAccountService(users, users, hasher, tokenIssuer, embeddingWork)
+            val accountService = UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, embeddingWork)
             val semanticSearch = SemanticSearchService(
               users,
               jobs,

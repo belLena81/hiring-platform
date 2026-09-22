@@ -35,6 +35,12 @@ enum AvailabilityError {
   case ServiceNotReady
 }
 
+enum AnalyticsError {
+  case ErasureContextRequired
+  case ReportsUnavailable
+  case InvalidPeriod
+}
+
 sealed trait UseCaseError
 
 object UseCaseError {
@@ -44,6 +50,7 @@ object UseCaseError {
   final case class Account(error: AccountError) extends UseCaseError
   final case class Search(error: SearchError) extends UseCaseError
   final case class Availability(error: AvailabilityError) extends UseCaseError
+  final case class Analytics(error: AnalyticsError) extends UseCaseError
   final case class ValidationFailed(errors: NonEmptyList[DomainValidationError]) extends UseCaseError
 
   trait Widen[-E] {
@@ -76,6 +83,10 @@ object UseCaseError {
 
   given Widen[AvailabilityError] with {
     def apply(error: AvailabilityError): UseCaseError = Availability(error)
+  }
+
+  given Widen[AnalyticsError] with {
+    def apply(error: AnalyticsError): UseCaseError = Analytics(error)
   }
 
   given Widen[NonEmptyList[DomainValidationError]] with {

@@ -6,6 +6,7 @@ import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
 import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, Diagnostics, LogEvent, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.AnalyticsReportingUseCases
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
@@ -26,7 +27,8 @@ final case class HiringGraphQLServices(
     interactionService: InteractionUseCases = InteractionUseCases.noop,
     searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
     searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
-    mutationReceipts: MutationReceiptRepository = MutationReceiptRepository.noop
+    mutationReceipts: MutationReceiptRepository = MutationReceiptRepository.noop,
+    analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
 )
 
 final case class EmailVisibility(userId: UserId)

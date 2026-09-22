@@ -100,6 +100,39 @@ trait UserAccountRepository {
   def deleteAccount(userId: UserId, now: Instant, tombstone: String, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Unit]]
 }
 
+/** A durable request for removing a deleted subject from analytical projections. */
+final case class AnalyticsErasureRequest(userId: UserId, requestedAt: Instant)
+
+trait AnalyticsErasureRequestRepository {
+  /**
+    * Records the request in the caller's mutation transaction. Repeating the same
+    * request is intentionally idempotent so receipt replay cannot create work twice.
+    */
+  def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]]
+}
+
+object AnalyticsErasureRequestRepository {
+  val unavailable: AnalyticsErasureRequestRepository = new AnalyticsErasureRequestRepository {
+    override def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+  }
+}
+
+trait AnalyticsReportRepository {
+  def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]]
+}
+
+final case class AnalyticsReportSnapshot(
+    asOf: Instant,
+    funnel: List[AnalyticsFunnelDay],
+    timeToHire: Option[AnalyticsTimeToHire],
+    skillPostingActivity: List[AnalyticsSkillPostingDay]
+)
+
+final case class AnalyticsFunnelDay(day: Instant, created: Long, accepted: Long, declined: Long, interview: Long, hired: Long, rejected: Long)
+final case class AnalyticsTimeToHire(p50Hours: Double, p75Hours: Double, p90Hours: Double, p95Hours: Double, eligibleCount: Long, excludedCount: Long)
+final case class AnalyticsSkillPostingDay(day: Instant, skill: String, postings: Long)
+
 trait JobRepository {
   def find(id: JobId): IO[Either[RepositoryError, Option[Job]]]
   def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]]

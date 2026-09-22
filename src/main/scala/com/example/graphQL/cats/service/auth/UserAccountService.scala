@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{MutationWriteContext, RepositoryError, UserAccountRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepository, MutationWriteContext, RepositoryError, UserAccountRepository, UserRepository}
 import com.example.graphQL.cats.service.*
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.protocol.*
@@ -19,6 +19,7 @@ final class UserAccountService(
     accounts: UserAccountRepository,
     hasher: PasswordHasher,
     tokenIssuer: AccessTokenIssuer,
+    erasureRequests: AnalyticsErasureRequestRepository = AnalyticsErasureRequestRepository.unavailable,
     embeddingWork: EmbeddingWorkPublisher = EmbeddingWorkPublisher.noop
 ) extends AccountUseCases {
   private val authorization = ActorAuthorization(users)
@@ -101,12 +102,16 @@ final class UserAccountService(
     }
 
   override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
-    authorization.resolve(actor, allowDeleted = true).flatMap {
+    if (context eq MutationWriteContext.noop) IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired)))
+    else authorization.resolve(actor, allowDeleted = true).flatMap {
       case Left(error) => IO.pure(Left(error))
       case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
       case Right(user) if user.accountStatus == AccountStatus.Deleted => IO.pure(Right(()))
       case Right(user) =>
-        accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}", context).map(_.leftMap(UseCaseError.Repository.apply))
+        erasureRequests.enqueue(user.id, now, context).flatMap {
+          case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
+          case Right(()) => accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}", context).map(_.leftMap(UseCaseError.Repository.apply))
+        }
     }
 
   override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =

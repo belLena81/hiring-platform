@@ -4,9 +4,9 @@ import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{MutationWriteContext, UserAccountRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepository, MutationWriteContext, UserAccountRepository, UserRepository}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.{AccountError, ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.{AccountError, ActorContext, AnalyticsError, UseCaseError}
 import com.example.graphQL.cats.service.protocol.*
 import munit.CatsEffectSuite
 
@@ -200,9 +200,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("deleting an already deleted account is idempotent") {
     for {
       accounts <- TestAccounts.create(initialized = true)
-      service = new UserAccountService(new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)), accounts, TestHasher, TestTokenIssuer)
-      result <- service.deleteMyAccount(ActorContext(deletedRecruiter.id, UserRole.Recruiter), now)
+      service = new UserAccountService(new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)), accounts, TestHasher, TestTokenIssuer, TestErasureRequests)
+      result <- service.deleteMyAccount(ActorContext(deletedRecruiter.id, UserRole.Recruiter), now, new MutationWriteContext {})
     } yield assertEquals(result, Right(()))
+  }
+
+  test("analytics-aware account deletion rejects a non-transactional context") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = new UserAccountService(new TestUsers(Map(recruiter.id -> recruiter)), accounts, TestHasher, TestTokenIssuer, TestErasureRequests)
+      result <- service.deleteMyAccount(ActorContext(recruiter.id, UserRole.Recruiter), now)
+    } yield assertEquals(result, Left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired)))
   }
 
   private object TestHasher extends PasswordHasher {
@@ -214,6 +222,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   private object TestTokenIssuer extends AccessTokenIssuer {
     override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
       IO.pure(Right(AccountToken(s"token-${user.id.value}", now.plusSeconds(900))))
+  }
+
+  private object TestErasureRequests extends AnalyticsErasureRequestRepository {
+    override def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends UserRepository {

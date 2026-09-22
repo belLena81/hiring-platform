@@ -42,6 +42,7 @@ private[graphql] object HiringGraphQLModel {
   final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, searchId: String)
   final case class RankedJobResults(results: List[RankedJobPayload])
   final case class RankedCandidateResults(results: List[RankedCandidatePayload])
+  final case class AnalyticsReportPayload(snapshot: com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot)
 
   final case class SubmitApplicationGraphQLInput(jobId: JobId, idempotencyKey: UUID) derives Decoder
   final case class CreateJobGraphQLInput(

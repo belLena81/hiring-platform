@@ -157,7 +157,7 @@ Search Evaluation & Scale
 **Phase 2 — Domain + MongoDB:** core domain models (User, Job, Application, ApplicationStatus, ApplicationEvent) and first use cases (job/application CRUD & lifecycle).
 
 ## Future: Big Data & Analytics
-Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept separate — historical domain events will feed an independent event-driven analytical pipeline (Kafka, Spark, Databricks / Delta Lake, and structured streaming) for large-scale hiring data analysis. The [big data design](docs/big-data-architecture.md) covers Bronze/Silver/Gold datasets, recovery, data quality, synthetic workloads, and reproducible search evaluation.
+Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept separate. The local batch [analytics design](docs/big-data-architecture.md) and [implementation specification](docs/specs/hiring-analytics-lakehouse.md) describe the current Kafka-to-Delta path, retained data limits, recovery, and data-quality boundaries. Structured Streaming, cloud deployment, and search evaluation remain later work.
 
 ## Engineering Focus
 

@@ -4,6 +4,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLFetchers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLAccountResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLApplicationResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLAnalyticsResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInteractionResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLJobResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
@@ -35,6 +36,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     Field("health", healthType, resolve = _ => ()),
     ioField("readiness", readinessType)(context => context.ctx.readiness),
     ioField("me", OptionType(userType))(accountMe),
+    ioField("analyticsReport", analyticsReportType, analyticsFromArgument :: analyticsToArgument :: Nil)(analyticsReport),
     ioField("users", userConnectionType, firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil,
       complexity = Some(connectionComplexity))(users),
     ioField("jobs", jobConnectionType, firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil,
