@@ -30,12 +30,13 @@ private[graphql] object HiringGraphQLAccountResolvers {
             Json.fromString(input.toString),
             result => MutationEntityReference("user", result._1.id.value.toString),
             reference => replayAuth(hiring, reference)
-          ) { _ =>
+          ) { context =>
             timestamped { (now, id) =>
               hiring.accountService.signUp(
                 SignUpInput(input.name, input.role, input.password, profile),
                 now,
-                Identifiers.UserId(id)
+                Identifiers.UserId(id),
+                context
               )
             }
           }.map(_.map(authSuccess)).flatMap(mutationResult)
@@ -55,12 +56,13 @@ private[graphql] object HiringGraphQLAccountResolvers {
           Json.fromString(input.toString),
           result => MutationEntityReference("user", result._1.id.value.toString),
           reference => replayAuth(hiring, reference)
-        ) { _ =>
+        ) { context =>
           timestamped { (now, id) =>
             hiring.accountService.bootstrapAdmin(
               BootstrapAdminInput(input.name, input.password),
               now,
-              Identifiers.UserId(id)
+              Identifiers.UserId(id),
+              context
             )
           }
         }.map(_.map(authSuccess)).flatMap(mutationResult)
@@ -98,8 +100,8 @@ private[graphql] object HiringGraphQLAccountResolvers {
           Json.fromString(input.toString),
           user => MutationEntityReference("user", user.id.value.toString),
           _ => hiring.accountService.me(actor)
-        ) { _ =>
-          IO.realTimeInstant.flatMap(now => hiring.accountService.updateMyProfile(actor, profile, now))
+        ) { context =>
+          IO.realTimeInstant.flatMap(now => hiring.accountService.updateMyProfile(actor, profile, now, context))
         }.flatMap(mutationResult)
       )
     }
@@ -115,8 +117,8 @@ private[graphql] object HiringGraphQLAccountResolvers {
         Json.fromString(input.toString),
         _ => MutationEntityReference("user", actor.userId.value.toString),
         _ => IO.pure(Right(()))
-      ) { _ =>
-        IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now))
+      ) { context =>
+        IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now, context))
       }.flatTap {
         case Right(_) => context.ctx.invalidateViewer
         case Left(_) => IO.unit

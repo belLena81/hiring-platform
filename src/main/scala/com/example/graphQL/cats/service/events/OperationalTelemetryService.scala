@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.shared.events.OperationalEvents
-import com.example.graphQL.cats.repository.protocol.{JobRepository, SearchSessionLookup, SearchSessionRepository, SearchSessionWorkRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{JobRepository, MutationWriteContext, SearchSessionLookup, SearchSessionRepository, SearchSessionWorkRepository, UserRepository}
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
@@ -29,6 +29,16 @@ final class OperationalTelemetryService(
       searchId: Option[UUID],
       now: Instant
   ): IO[Either[UseCaseError, Unit]] =
+    recordJobView(actor, eventId, jobId, searchId, now, MutationWriteContext.noop)
+
+  override def recordJobView(
+      actor: ActorContext,
+      eventId: UUID,
+      jobId: JobId,
+      searchId: Option[UUID],
+      now: Instant,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Unit]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
       job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
@@ -38,7 +48,7 @@ final class OperationalTelemetryService(
         case None => IO.pure(Right(None))
       })
       event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
-      _ <- EitherT(searchSessions.recordInteraction(event).map(_.widenUseCase.void))
+      _ <- EitherT(searchSessions.recordInteraction(event, context).map(_.widenUseCase.void))
     } yield ()).value
 
   override def recordSearchResultClick(
@@ -48,10 +58,20 @@ final class OperationalTelemetryService(
       resultId: String,
       now: Instant
   ): IO[Either[UseCaseError, Unit]] =
+    recordSearchResultClick(actor, eventId, searchId, resultId, now, MutationWriteContext.noop)
+
+  override def recordSearchResultClick(
+      actor: ActorContext,
+      eventId: UUID,
+      searchId: UUID,
+      resultId: String,
+      now: Instant,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Unit]] =
     (for {
       rank <- EitherT(verifiedSearchResult(actor, searchId, resultId))
       event = OperationalEvents.searchResultClicked(eventId, searchId, resultId, actor.userId, rank, now)
-      _ <- EitherT(searchSessions.recordInteraction(event).map(_.widenUseCase.void))
+      _ <- EitherT(searchSessions.recordInteraction(event, context).map(_.widenUseCase.void))
     } yield ()).value
 
   private def verifiedSearchResult(

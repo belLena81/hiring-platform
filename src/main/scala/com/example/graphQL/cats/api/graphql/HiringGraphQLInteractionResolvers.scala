@@ -20,8 +20,8 @@ private[graphql] object HiringGraphQLInteractionResolvers {
         Json.fromString(input.toString),
         _ => MutationEntityReference("interaction", input.eventId.toString),
         _ => IO.pure(Right(()))
-      ) { _ =>
-        IO.realTimeInstant.flatMap(now => hiring.interactionService.recordJobView(actor, input.eventId, input.jobId, input.searchId, now))
+      ) { context =>
+        IO.realTimeInstant.flatMap(now => hiring.interactionService.recordJobView(actor, input.eventId, input.jobId, input.searchId, now, context))
       }.map(_.map(_ => InteractionSuccess(true))).flatMap(mutationResult)
     }
 
@@ -36,8 +36,8 @@ private[graphql] object HiringGraphQLInteractionResolvers {
         Json.fromString(input.toString),
         _ => MutationEntityReference("interaction", input.eventId.toString),
         _ => IO.pure(Right(()))
-      ) { _ =>
-        IO.realTimeInstant.flatMap(now => hiring.interactionService.recordSearchResultClick(actor, input.eventId, input.searchId, input.resultId.toString, now))
+      ) { context =>
+        IO.realTimeInstant.flatMap(now => hiring.interactionService.recordSearchResultClick(actor, input.eventId, input.searchId, input.resultId.toString, now, context))
       }.map(_.map(_ => InteractionSuccess(true))).flatMap(mutationResult)
     }
 }

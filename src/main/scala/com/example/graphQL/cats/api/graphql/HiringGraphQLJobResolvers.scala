@@ -10,6 +10,7 @@ import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.JobUseCases
 import com.example.graphQL.cats.repository.protocol.{MutationEntityReference, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.MutationWriteContext
 import io.circe.Json
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import com.example.graphQL.cats.shared.pagination.JobCursor
@@ -61,9 +62,9 @@ private[graphql] object HiringGraphQLJobResolvers {
         Json.fromString(context.arg(createJobInputArgument).toString),
         job => MutationEntityReference("job", job.id.value.toString),
         reference => replayJob(hiring, actor, reference)
-      ) { _ =>
+      ) { context =>
         timestamped { (now, jobId) =>
-          hiring.jobService.createJob(actor, input, now, JobId(jobId))
+          hiring.jobService.createJob(actor, input, now, JobId(jobId), context)
         }
       }.flatMap(mutationResult)
     }
@@ -80,15 +81,15 @@ private[graphql] object HiringGraphQLJobResolvers {
         Json.fromString(input.toString),
         job => MutationEntityReference("job", job.id.value.toString),
         reference => replayJob(hiring, actor, reference)
-      ) { _ =>
-        IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, input.id, patch, now))
+      ) { context =>
+        IO.realTimeInstant.flatMap(now => hiring.jobService.updateJob(actor, input.id, patch, now, context))
       }.flatMap(mutationResult)
     }
 
   def changeJob(
       context: Context[RequestContext, Unit],
       operation: String,
-      method: JobUseCases => (ActorContext, JobId, Instant) => IO[Either[UseCaseError, Job]]
+      method: JobUseCases => (ActorContext, JobId, Instant, MutationWriteContext) => IO[Either[UseCaseError, Job]]
   ): IO[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val jobId = context.arg(jobActionInputArgument).jobId
@@ -100,8 +101,8 @@ private[graphql] object HiringGraphQLJobResolvers {
         Json.fromString(context.arg(jobActionInputArgument).toString),
         job => MutationEntityReference("job", job.id.value.toString),
         reference => replayJob(hiring, actor, reference)
-      ) { _ =>
-        IO.realTimeInstant.flatMap(now => method(hiring.jobService)(actor, jobId, now))
+      ) { writeContext =>
+        IO.realTimeInstant.flatMap(now => method(hiring.jobService)(actor, jobId, now, writeContext))
       }.flatMap(mutationResult)
     }
 

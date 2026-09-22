@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.repository.protocol.{
   ClaimedOperationalEvent, ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository,
-  OperationalEventOutboxRepository, SearchSessionRepository
+  MutationWriteContext, OperationalEventOutboxRepository, SearchSessionRepository
 }
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.mongodb.MongoWriteException
@@ -51,9 +51,22 @@ final class MongoSearchSessionRepository(
       .handleError(_ => Left(RepositoryError.Unavailable))
 
   override def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
-    PublisherBridge.first(outbox.insertOne(MongoHiringCodecs.outboxRecord(event, event.occurredAt))).as(Right(true)).handleErrorWith {
+    recordInteractionWithSession(event, None)
+
+  override def recordInteraction(event: OperationalEventEnvelope, context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
+    recordInteractionWithSession(event, MongoMutationWriteContext.session(context))
+
+  private def recordInteractionWithSession(
+      event: OperationalEventEnvelope,
+      session: Option[com.mongodb.reactivestreams.client.ClientSession]
+  ): IO[Either[RepositoryError, Boolean]] =
+    session.fold(
+      PublisherBridge.first(outbox.insertOne(MongoHiringCodecs.outboxRecord(event, event.occurredAt)))
+    )(active => PublisherBridge.first(outbox.insertOne(active, MongoHiringCodecs.outboxRecord(event, event.occurredAt)))).as(Right(true)).handleErrorWith {
       case write: MongoWriteException if write.getError.getCode == 11000 =>
-        PublisherBridge.first(outbox.find(Filters.eq("_id", event.eventId.toString))).map {
+        session.fold(
+          PublisherBridge.first(outbox.find(Filters.eq("_id", event.eventId.toString)))
+        )(active => PublisherBridge.first(outbox.find(active, Filters.eq("_id", event.eventId.toString)))).map {
           case Some(existing) if sameEvent(existing, event) => Right(false)
           case Some(_) => Left(RepositoryError.Conflict)
           case None => Left(RepositoryError.Conflict)

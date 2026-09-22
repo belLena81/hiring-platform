@@ -7,6 +7,7 @@ import org.bson.Document
 
 import java.time.Instant
 import java.util.Date
+import scala.jdk.CollectionConverters.*
 
 /** BSON representation for durable, query-free search-session materialization work. */
 private[mongo] object MongoSearchSessionWorkCodecs {
@@ -14,16 +15,17 @@ private[mongo] object MongoSearchSessionWorkCodecs {
 
   def work(value: PendingSearchSessionWork, now: Instant): Document = {
     val session = MongoHiringCodecs.searchSession(value.session.copy(query = None))
-    session.remove("query")
-    new Document("_id", value.session.id.toString)
-      .append("actorId", value.session.actorId.value.toString)
-      .append("session", session)
-      .append("event", MongoHiringCodecs.operationalEvent(sanitize(value.event)))
-      .append("state", SearchSessionWorkState.Ready.toString)
-      .append("attempts", java.lang.Integer.valueOf(0))
-      .append("availableAt", Date.from(now))
-      .append("createdAt", Date.from(now))
-      .append("updatedAt", Date.from(now))
+    new Document(Map[String, AnyRef](
+      "_id" -> value.session.id.toString,
+      "actorId" -> value.session.actorId.value.toString,
+      "session" -> session,
+      "event" -> MongoHiringCodecs.operationalEvent(sanitize(value.event)),
+      "state" -> SearchSessionWorkState.Ready.toString,
+      "attempts" -> java.lang.Integer.valueOf(0),
+      "availableAt" -> Date.from(now),
+      "createdAt" -> Date.from(now),
+      "updatedAt" -> Date.from(now)
+    ).asJava)
   }
 
   def readWork(document: Document): Either[StoredDocumentError, PendingSearchSessionWork] =

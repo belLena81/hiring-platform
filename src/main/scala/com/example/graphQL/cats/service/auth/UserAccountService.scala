@@ -6,7 +6,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{RepositoryError, UserAccountRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{MutationWriteContext, RepositoryError, UserAccountRepository, UserRepository}
 import com.example.graphQL.cats.service.*
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.protocol.*
@@ -24,6 +24,9 @@ final class UserAccountService(
   private val authorization = ActorAuthorization(users)
 
   override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    signUp(input, now, userId, MutationWriteContext.noop)
+
+  override def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
     if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.Account(AccountError.AdminSignupForbidden)))
     else if (!UserProfile.matchesRole(input.role, input.profile))
       IO.pure(Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
@@ -36,7 +39,7 @@ final class UserAccountService(
           val user = toUser(userId, input.name, input.role, input.profile, now)
           token(user, now).flatMap {
             case Left(error) => IO.pure(Left(error))
-            case Right((_, accountToken)) => accounts.createAccount(user, hash, now).map {
+            case Right((_, accountToken)) => accounts.createAccount(user, hash, now, context).map {
               case Left(RepositoryError.Conflict) => Left(UseCaseError.Account(AccountError.NameTaken))
               case Left(error) => Left(UseCaseError.Repository(error))
               case Right(()) => Right(user -> accountToken)
@@ -47,13 +50,16 @@ final class UserAccountService(
     )
 
   override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    bootstrapAdmin(input, now, userId, MutationWriteContext.noop)
+
+  override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
     validateCredentials(input.name, input.password).fold(
       errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
       _ => hasher.hash(input.password).flatMap { hash =>
         val user = toUser(userId, input.name, UserRole.Admin, None, now).copy(adminSingleton = true)
         token(user, now).flatMap {
           case Left(error) => IO.pure(Left(error))
-          case Right((_, accountToken)) => accounts.bootstrap(user, hash).map {
+          case Right((_, accountToken)) => accounts.bootstrap(user, hash, context).map {
             case Left(RepositoryError.Conflict) => Left(UseCaseError.Account(AccountError.AlreadyBootstrapped))
             case Left(error) => Left(UseCaseError.Repository(error))
             case Right(()) => Right(user -> accountToken)
@@ -89,6 +95,9 @@ final class UserAccountService(
     authorization.resolve(actor)
 
   override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
+    updateMyProfile(actor, input, now, MutationWriteContext.noop)
+
+  override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] =
     authorization.resolve(actor).flatMap {
       case Left(error) => IO.pure(Left(error))
       case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole)))
@@ -96,17 +105,20 @@ final class UserAccountService(
         if (!UserProfile.matchesRole(user.role, Some(input.profile))) IO.pure(Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
         else UserProfile.validateFor(user.role, Some(input.profile)).fold(
           errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
-          _ => accounts.updateProfile(user.id, input.profile, now).map(_.leftMap(UseCaseError.Repository.apply)).flatTap(wakeCandidateAfterCommit)
+          _ => accounts.updateProfile(user.id, input.profile, now, context).map(_.leftMap(UseCaseError.Repository.apply)).flatTap(wakeCandidateAfterCommit)
         )
     }
 
   override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
+    deleteMyAccount(actor, now, MutationWriteContext.noop)
+
+  override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
     authorization.resolve(actor, allowDeleted = true).flatMap {
       case Left(error) => IO.pure(Left(error))
       case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
       case Right(user) if user.accountStatus == AccountStatus.Deleted => IO.pure(Right(()))
       case Right(user) =>
-        accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}").map(_.leftMap(UseCaseError.Repository.apply))
+        accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}", context).map(_.leftMap(UseCaseError.Repository.apply))
     }
 
   override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =

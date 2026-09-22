@@ -1,8 +1,11 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId}
+import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventType, SearchSession, SearchSessionResult}
+import io.circe.Json
 import cats.data.NonEmptyList
 import java.time.Instant
 import java.util.{Date, UUID}
@@ -174,5 +177,49 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     assertEquals(MongoHiringCodecs.readUser(candidateWithRecruiterProfile).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
     assertEquals(MongoHiringCodecs.readUser(adminWithoutSingleton).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
+  }
+
+  test("codec builders do not share mutable document state") {
+    val user = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+    val first = MongoHiringCodecs.user(user)
+    val second = MongoHiringCodecs.user(user)
+
+    first.put("name", "Changed")
+
+    assertEquals(first.getString("name"), "Changed")
+    assertEquals(second.getString("name"), "Candidate")
+  }
+
+  test("generated codecs preserve event, outbox, and search-session shapes") {
+    val applicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000205"))
+    val applicationEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000206"))
+    val application = Application.create(applicationId, candidateId, jobId, now)
+    val event = ApplicationEvent(applicationEventId, applicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
+    val operational = OperationalEventEnvelope(
+      UUID.fromString("00000000-0000-0000-0000-000000000207"),
+      OperationalEventType.SEARCH_PERFORMED,
+      now,
+      OperationalAggregateType.Search,
+      "search-205",
+      candidateId,
+      Json.obj("query" -> Json.fromString("Scala"))
+    )
+    val search = SearchSession(
+      UUID.fromString("00000000-0000-0000-0000-000000000208"),
+      candidateId,
+      "semanticJobSearch",
+      Some("Scala"),
+      Json.obj("city" -> Json.fromString("Nicosia")),
+      Some("test-model"),
+      List(SearchSessionResult("job-203", 1, 0.95d)),
+      now,
+      later
+    )
+
+    assertEquals(MongoHiringCodecs.readApplication(MongoHiringCodecs.application(application)).toEither, Right(application))
+    assertEquals(MongoHiringCodecs.readEvent(MongoHiringCodecs.event(event)).toEither, Right(event))
+    assertEquals(MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.operationalEvent(operational)).toEither, Right(operational))
+    assertEquals(MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.outboxRecord(operational, now)).toEither, Right(operational))
+    assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
   }
 }

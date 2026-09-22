@@ -144,7 +144,7 @@ object OperationalEventKafkaRuntime {
       OperationalEventJson.decode(bytes) match {
         case Left(_) =>
           quarantineRecord(config, quarantine, topic, partition, offset, OperationalEventFailureCategory.MalformedEnvelope,
-            "malformed event envelope", bytes, now).as(false)
+            "malformed event envelope", bytes, now).map(_.isRight)
         case Right(event) =>
           receipts.exists(config.consumerGroup, event.eventId).flatMap {
             case Right(true) => IO.pure(true)
@@ -169,7 +169,7 @@ object OperationalEventKafkaRuntime {
       reason: String,
       bytes: Array[Byte],
       now: Instant
-  ): IO[Unit] =
+  ): IO[Either[RepositoryError, Unit]] =
     quarantine.save(EventQuarantineRecord(
       topic,
       partition,
@@ -179,7 +179,7 @@ object OperationalEventKafkaRuntime {
       bytes,
       now,
       now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
-    )).void
+    ))
 
   private[kafka] def resilientStream(
       diagnostics: Diagnostics,

@@ -4,7 +4,7 @@ import cats.data.EitherT
 import cats.effect.IO
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
-import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, MutationWriteContext, UserRepository}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, UserRole}
@@ -34,6 +34,16 @@ final class ApplicationService(
       eventId: ApplicationEventId,
       now: Instant
   ): IO[Either[UseCaseError, Application]] =
+    submitApplication(actor, jobId, applicationId, eventId, now, MutationWriteContext.noop)
+
+  override def submitApplication(
+      actor: ActorContext,
+      jobId: JobId,
+      applicationId: ApplicationId,
+      eventId: ApplicationEventId,
+      now: Instant,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Application]] =
     (for {
       candidate <- EitherT(authorization.resolve(actor))
       _ <- EitherT.cond[IO](candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
@@ -41,7 +51,7 @@ final class ApplicationService(
       application <- EitherT.fromEither[IO](ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase)
       initialEvent = ApplicationEvent(eventId, application.id, None, application.status, candidate.id, now, None, None)
       event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
-      _ <- EitherT(applications.createForOpenJobWithEvents(job, application, initialEvent, List(event)).map(_.widenUseCase))
+      _ <- EitherT(applications.createForOpenJobWithEvents(job, application, initialEvent, List(event), context).map(_.widenUseCase))
     } yield application).value
 
   def myApplications(
@@ -72,6 +82,18 @@ final class ApplicationService(
       eventId: ApplicationEventId,
       now: Instant
   ): IO[Either[UseCaseError, Application]] =
+    changeStatus(actor, applicationId, target, feedback, reason, eventId, now, MutationWriteContext.noop)
+
+  override def changeStatus(
+      actor: ActorContext,
+      applicationId: ApplicationId,
+      target: ApplicationStatus,
+      feedback: Option[String],
+      reason: Option[String],
+      eventId: ApplicationEventId,
+      now: Instant,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Application]] =
     (for {
       actorUser <- EitherT(authorization.resolve(actor))
       application <- EitherT(applications.find(applicationId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
@@ -88,7 +110,7 @@ final class ApplicationService(
           .widenUseCase
       )
       events = applicationEvents(persistedApplication, event)
-      _ <- EitherT(applications.updateStatusWithEvents(persistedApplication, event, events).map(_.widenUseCase))
+      _ <- EitherT(applications.updateStatusWithEvents(persistedApplication, event, events, context).map(_.widenUseCase))
     } yield persistedApplication).value
 
   private def applicationEvents(application: Application, event: ApplicationEvent): List[OperationalEventEnvelope] = {

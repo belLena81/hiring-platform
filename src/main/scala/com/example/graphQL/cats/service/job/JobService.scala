@@ -5,7 +5,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
-import com.example.graphQL.cats.repository.protocol.{JobRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{JobRepository, MutationWriteContext, UserRepository}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
@@ -52,11 +52,20 @@ final class JobService(
       now: Instant,
       jobId: JobId
   ): IO[Either[UseCaseError, Job]] =
+    createJob(actor, input, now, jobId, MutationWriteContext.noop)
+
+  override def createJob(
+      actor: ActorContext,
+      input: CreateJobInput,
+      now: Instant,
+      jobId: JobId,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Job]] =
     (for {
       user <- EitherT(authorization.resolve(actor))
       _ <- EitherT.cond[IO](authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
       job <- EitherT.fromEither[IO](validateNewJob(user.id, input, now, jobId))
-      created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id))
+      created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context))
     } yield created).value
 
   def updateJob(
@@ -65,21 +74,36 @@ final class JobService(
       input: UpdateJobInput,
       now: Instant
   ): IO[Either[UseCaseError, Job]] =
+    updateJob(actor, jobId, input, now, MutationWriteContext.noop)
+
+  override def updateJob(
+      actor: ActorContext,
+      jobId: JobId,
+      input: UpdateJobInput,
+      now: Instant,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
       (for {
         update <- EitherT.fromEither[IO](validateUpdatedJob(job, input, now))
-        updated <- EitherT(persistUpdatedJob(Right[UseCaseError, Job](JobLifecycle.update(job, update)), actor.userId))
+        updated <- EitherT(persistUpdatedJob(Right[UseCaseError, Job](JobLifecycle.update(job, update)), actor.userId, context))
       } yield updated).value
     }
 
   def publishJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]] =
+    publishJob(actor, jobId, now, MutationWriteContext.noop)
+
+  override def publishJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED)
+      persistJob(JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED, context)
     }
 
   def closeJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]] =
+    closeJob(actor, jobId, now, MutationWriteContext.noop)
+
+  override def closeJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED)
+      persistJob(JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED, context)
     }
 
   def viewJob(actor: ActorContext, jobId: JobId): IO[Either[UseCaseError, Job]] =
@@ -157,7 +181,7 @@ final class JobService(
         )
       )
 
-  private def persistCreatedJob(result: Either[UseCaseError, Job], actorId: UserId): IO[Either[UseCaseError, Job]] =
+  private def persistCreatedJob(result: Either[UseCaseError, Job], actorId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     result.fold(
       error => IO.pure(error.asLeft[Job]),
       job => {
@@ -168,19 +192,19 @@ final class JobService(
           actorId,
           job.createdAt
         )
-        notifyAfterCommit(jobs.createWithEvents(job, job.createdAt, List(event)).map(_.widenUseCase.as(job)))
+        notifyAfterCommit(jobs.createWithEvents(job, job.createdAt, List(event), context).map(_.widenUseCase.as(job)))
       }
     )
 
-  private def persistUpdatedJob(result: Either[UseCaseError, Job], actorId: UserId): IO[Either[UseCaseError, Job]] =
-    persistJob(result, actorId, OperationalEventType.JOB_UPDATED)
+  private def persistUpdatedJob(result: Either[UseCaseError, Job], actorId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
+    persistJob(result, actorId, OperationalEventType.JOB_UPDATED, context)
 
-  private def persistJob(result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType): IO[Either[UseCaseError, Job]] =
+  private def persistJob(result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     result.fold(
       error => IO.pure(error.asLeft[Job]),
       job => {
         val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
-        notifyAfterCommit(jobs.updateWithEvents(job, job.updatedAt, List(event)).map(_.widenUseCase))
+        notifyAfterCommit(jobs.updateWithEvents(job, job.updatedAt, List(event), context).map(_.widenUseCase))
       }
     )
 

@@ -90,12 +90,20 @@ trait UserRepository {
 
 trait UserAccountRepository {
   def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]]
+  def bootstrap(user: User, passwordHash: String, _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
+    { val _ = _context; bootstrap(user, passwordHash) }
   def initialized: IO[Either[RepositoryError, Boolean]]
   def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]]
+  def createAccount(user: User, passwordHash: String, now: Instant, _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
+    { val _ = _context; createAccount(user, passwordHash, now) }
   def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]]
   def updateProfile(userId: UserId, profile: UserProfile, now: Instant): IO[Either[RepositoryError, User]]
+  def updateProfile(userId: UserId, profile: UserProfile, now: Instant, _context: MutationWriteContext): IO[Either[RepositoryError, User]] =
+    { val _ = _context; updateProfile(userId, profile, now) }
   def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]]
   def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]]
+  def deleteAccount(userId: UserId, now: Instant, tombstone: String, _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
+    { val _ = _context; deleteAccount(userId, now, tombstone) }
 }
 
 trait JobRepository {
@@ -106,8 +114,12 @@ trait JobRepository {
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
   def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]]
   def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]]
+  def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
+    { val _ = _context; createWithEvents(job, now, events) }
   def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]]
   def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]]
+  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], _context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
+    { val _ = _context; updateWithEvents(job, now, events) }
   def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
 }
 
@@ -164,6 +176,8 @@ trait SearchSessionRepository {
   def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]]
   def find(id: java.util.UUID): IO[Either[RepositoryError, Option[SearchSession]]]
   def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]]
+  def recordInteraction(event: OperationalEventEnvelope, _context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
+    { val _ = _context; recordInteraction(event) }
 }
 
 final case class ClaimedOperationalEvent(
@@ -232,10 +246,25 @@ trait ApplicationRepository {
       initialEvent: ApplicationEvent,
       events: List[OperationalEventEnvelope]
   ): IO[Either[RepositoryError, Unit]]
+  def createForOpenJobWithEvents(
+      observedJob: Job,
+      application: Application,
+      initialEvent: ApplicationEvent,
+      events: List[OperationalEventEnvelope],
+      context: MutationWriteContext
+  ): IO[Either[RepositoryError, Unit]] =
+    { val _ = context; createForOpenJobWithEvents(observedJob, application, initialEvent, events) }
   def updateStatus(application: Application, event: ApplicationEvent): IO[Either[RepositoryError, Unit]]
   def updateStatusWithEvents(
       application: Application,
       event: ApplicationEvent,
       events: List[OperationalEventEnvelope]
   ): IO[Either[RepositoryError, Unit]]
+  def updateStatusWithEvents(
+      application: Application,
+      event: ApplicationEvent,
+      events: List[OperationalEventEnvelope],
+      context: MutationWriteContext
+  ): IO[Either[RepositoryError, Unit]] =
+    { val _ = context; updateStatusWithEvents(application, event, events) }
 }

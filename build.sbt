@@ -17,6 +17,7 @@ lazy val catsRetryVersion      = "4.0.0"
 lazy val caffeineVersion       = "3.3.0"
 lazy val logbackVersion        = "1.6.3"
 lazy val mongoVersion          = "5.12.0"
+lazy val mongoScalaBsonVersion = "5.11.1"
 lazy val munitVersion          = "1.3.6"
 lazy val munitCatsEffectVersion = "2.2.1"
 lazy val pureConfigVersion     = "0.17.10"
@@ -73,6 +74,7 @@ lazy val root = (project in file("."))
       "com.github.jwt-scala" %% "jwt-circe"             % jwtScalaVersion,
       "de.mkammerer"         % "argon2-jvm"              % argon2Version,
       "org.mongodb"         % "mongodb-driver-reactivestreams" % mongoVersion,
+      "org.mongodb.scala"   %% "mongo-scala-bson"              % mongoScalaBsonVersion,
       "com.github.pureconfig" %% "pureconfig-core"       % pureConfigVersion,
       "io.github.iltotore"    %% "iron"                  % ironVersion,
       "io.github.iltotore"    %% "iron-pureconfig"        % ironVersion,

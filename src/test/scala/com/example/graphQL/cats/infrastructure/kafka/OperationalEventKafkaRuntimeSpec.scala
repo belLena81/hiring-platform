@@ -69,15 +69,33 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       Fakes(receipts, quarantines, quarantineState)
     }
 
-  test("malformed records quarantine without commit") {
+  test("malformed records commit after durable quarantine") {
     fakes.flatMap { values =>
       for {
         malformedCommit <- OperationalEventKafkaRuntime.handleRecord(config, values.receipts, values.quarantines, config.topic, 0, 1L, "not-json".getBytes)
         records <- values.quarantined.get
       } yield {
-        assert(!malformedCommit)
+        assert(malformedCommit)
         assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.MalformedEnvelope))
       }
+    }
+  }
+
+  test("malformed records remain uncommitted when quarantine persistence fails") {
+    val failedQuarantine = new EventQuarantineRepository {
+      override def save(record: EventQuarantineRecord): IO[Either[RepositoryError, Unit]] =
+        IO.pure(Left(RepositoryError.Unavailable))
+    }
+    fakes.flatMap { values =>
+      OperationalEventKafkaRuntime.handleRecord(
+        config,
+        values.receipts,
+        failedQuarantine,
+        config.topic,
+        0,
+        2L,
+        "not-json".getBytes
+      ).map(commit => assert(!commit))
     }
   }
 

@@ -54,7 +54,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
         Json.fromString(input.toString),
         application => MutationEntityReference("application", application.id.value.toString),
         reference => replayApplication(hiring, actor, reference)
-      ) { _ =>
+      ) { context =>
         timestamped { (now, applicationId) =>
           IO.randomUUID.flatMap { eventId =>
             hiring.applicationService.submitApplication(
@@ -62,7 +62,8 @@ private[graphql] object HiringGraphQLApplicationResolvers {
               input.jobId,
               ApplicationId(applicationId),
               ApplicationEventId(eventId),
-              now
+              now,
+              context
             )
           }
         }
@@ -102,9 +103,9 @@ private[graphql] object HiringGraphQLApplicationResolvers {
         Json.fromString(s"$applicationId:$status:$feedback:$reason"),
         application => MutationEntityReference("application", application.id.value.toString),
         reference => replayApplication(hiring, actor, reference)
-      ) { _ =>
+      ) { context =>
         timestamped { (now, eventId) =>
-          hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
+          hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now, context)
         }
       }.flatMap(mutationResult)
     }
