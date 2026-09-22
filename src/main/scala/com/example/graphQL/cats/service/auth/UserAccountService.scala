@@ -10,9 +10,11 @@ import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepo
 import com.example.graphQL.cats.service.*
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.protocol.*
+import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import java.text.Normalizer
 import java.time.Instant
+import java.util.UUID
 
 final class UserAccountService(
     users: UserRepository,
@@ -20,11 +22,23 @@ final class UserAccountService(
     hasher: PasswordHasher,
     tokenIssuer: AccessTokenIssuer,
     erasureRequests: AnalyticsErasureRequestRepository = AnalyticsErasureRequestRepository.unavailable,
-    embeddingWork: EmbeddingWorkPublisher = EmbeddingWorkPublisher.noop
+    embeddingWork: EmbeddingWorkPublisher = EmbeddingWorkPublisher.noop,
+    idempotent: Idempotent = Idempotent.noop,
+    currentTime: IO[Instant] = IO.realTimeInstant,
+    randomId: IO[UUID] = IO.randomUUID
 ) extends AccountUseCases {
   private val authorization = ActorAuthorization(users)
 
-  override def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
+  override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
+    idempotent.execute("signUp", Idempotent.publicActorScope(input.name), request, accountReference, replayAccount) { context =>
+      for {
+        now <- UseCaseIO.liftIO(currentTime)
+        userId <- UseCaseIO.liftIO(randomId.map(UserId.apply))
+        result <- UseCaseIO.fromIO(signUpOnce(input, now, userId, context))
+      } yield result
+    }
+
+  private def signUpOnce(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
     if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.Account(AccountError.AdminSignupForbidden)))
     else if (!UserProfile.matchesRole(input.role, input.profile))
       IO.pure(Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
@@ -47,7 +61,16 @@ final class UserAccountService(
       }.flatTap(wakeCandidateAfterCommit)
     )
 
-  override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
+  override def bootstrapAdmin(request: IdempotencyRequest, input: BootstrapAdminInput): UseCaseIO[(User, AccountToken)] =
+    idempotent.execute("bootstrapAdmin", Idempotent.publicActorScope(input.name), request, accountReference, replayAccount) { context =>
+      for {
+        now <- UseCaseIO.liftIO(currentTime)
+        userId <- UseCaseIO.liftIO(randomId.map(UserId.apply))
+        result <- UseCaseIO.fromIO(bootstrapAdminOnce(input, now, userId, context))
+      } yield result
+    }
+
+  private def bootstrapAdminOnce(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
     validateCredentials(input.name, input.password).fold(
       errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
       _ => hasher.hash(input.password).flatMap { hash =>
@@ -63,7 +86,12 @@ final class UserAccountService(
       }
     )
 
-  override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] = {
+  override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
+    idempotent.execute("login", Idempotent.publicActorScope(input.name), request, accountReference, replayAccount) { _ =>
+      UseCaseIO.liftIO(currentTime).flatMap(now => UseCaseIO.fromIO(loginOnce(input, now)))
+    }
+
+  private def loginOnce(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] = {
     val canonical = canonicalName(input.name)
     accounts.findByCanonicalName(canonical).flatMap {
       case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
@@ -77,20 +105,27 @@ final class UserAccountService(
     }
   }
 
-  override def issueToken(userId: UserId, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
-    users.find(userId).flatMap {
-      case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
-      case Right(None) => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
-      case Right(Some(user)) if user.accountStatus != AccountStatus.Active =>
-        IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
-      case Right(Some(user)) => token(user, now)
-    }
+  override def issueToken(userId: UserId, now: Instant): UseCaseIO[(User, AccountToken)] =
+    UseCaseIO.repository(users.find(userId))
+      .subflatMap {
+        case Some(user) if user.accountStatus == AccountStatus.Active => Right(user)
+        case _ => Left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
+      }
+      .flatMap(user => UseCaseIO.fromIO(token(user, now)))
 
-  override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
+  override def me(actor: ActorContext): UseCaseIO[User] =
     authorization.resolve(actor)
 
-  override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] =
-    authorization.resolve(actor).flatMap {
+  override def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput): UseCaseIO[User] =
+    idempotent.execute[User]("updateMyProfile", Idempotent.actorScope(actor), request, user => userReference(user), reference => replayUser(actor, reference)) { context =>
+      for {
+        now <- UseCaseIO.liftIO(currentTime)
+        user <- UseCaseIO.fromIO(updateMyProfileOnce(actor, input, now, context))
+      } yield user
+    }
+
+  private def updateMyProfileOnce(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] =
+    authorization.resolve(actor).value.flatMap {
       case Left(error) => IO.pure(Left(error))
       case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole)))
       case Right(user) =>
@@ -101,9 +136,14 @@ final class UserAccountService(
         )
     }
 
-  override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
+  override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[Unit] =
+    idempotent.execute[Unit]("deleteMyAccount", Idempotent.actorScope(actor), request, _ => userReference(actor.userId), replayDeletion(actor)) { context =>
+      UseCaseIO.liftIO(currentTime).flatMap(now => UseCaseIO.fromIO(deleteMyAccountOnce(actor, now, context)))
+    }
+
+  private def deleteMyAccountOnce(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
     if (context eq MutationWriteContext.noop) IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired)))
-    else authorization.resolve(actor, allowDeleted = true).flatMap {
+    else authorization.resolve(actor, allowDeleted = true).value.flatMap {
       case Left(error) => IO.pure(Left(error))
       case Right(user) if user.role == UserRole.Admin => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
       case Right(user) if user.accountStatus == AccountStatus.Deleted => IO.pure(Right(()))
@@ -114,12 +154,43 @@ final class UserAccountService(
         }
     }
 
-  override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =
-    authorization.resolve(actor).flatMap {
+  override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
+    UseCaseIO.fromIO(authorization.resolve(actor).value.flatMap {
       case Right(user) if user.role == UserRole.Admin =>
         accounts.listAccounts(page).map(_.widenUseCase)
       case _ => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+    })
+
+  private def replayAccount(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[(User, AccountToken)] =
+    parseUserId(reference).flatMap(userId => UseCaseIO.liftIO(currentTime).flatMap(issueToken(userId, _)))
+
+  private def replayUser(actor: ActorContext, reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[User] =
+    parseUserId(reference).flatMap { userId =>
+      if (userId == actor.userId) me(actor)
+      else UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
     }
+
+  private def replayDeletion(actor: ActorContext)(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Unit] =
+    parseUserId(reference).flatMap { userId =>
+      if (reference.entityType == "user" && userId == actor.userId)
+        authorization.resolve(actor, allowDeleted = true).void
+      else UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
+    }
+
+  private def parseUserId(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[UserId] =
+    scala.util.Try(UserId(UUID.fromString(reference.entityId))).toEither.fold(
+      _ => UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable)),
+      UseCaseIO.pure
+    )
+
+  private def accountReference(value: (User, AccountToken)): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
+    userReference(value._1)
+
+  private def userReference(user: User): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
+    userReference(user.id)
+
+  private def userReference(userId: UserId): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
+    com.example.graphQL.cats.repository.protocol.MutationEntityReference("user", userId.value.toString)
 
   private def token(user: User, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
     tokenIssuer.issue(user, now)

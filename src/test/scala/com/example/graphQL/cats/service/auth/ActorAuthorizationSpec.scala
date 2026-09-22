@@ -14,7 +14,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
   test("resolve rejects a deleted user even when the actor role matches") {
     val authorization = ActorAuthorization(repository(Map(deletedUser.id -> deletedUser)))
 
-    authorization.resolve(ActorContext(deletedUser.id, UserRole.Recruiter)).map { result =>
+    authorization.resolve(ActorContext(deletedUser.id, UserRole.Recruiter)).value.map { result =>
       assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
     }
   }
@@ -22,7 +22,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
   test("resolve accepts an active user with a matching actor role") {
     val authorization = ActorAuthorization(repository(Map(activeUser.id -> activeUser)))
 
-    authorization.resolve(ActorContext(activeUser.id, UserRole.Recruiter)).map { result =>
+    authorization.resolve(ActorContext(activeUser.id, UserRole.Recruiter)).value.map { result =>
       assertEquals(result, Right(activeUser))
     }
   }

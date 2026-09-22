@@ -1,21 +1,20 @@
 package com.example.graphQL.cats.service.auth
 
 import cats.syntax.all.*
-import cats.effect.IO
 import com.example.graphQL.cats.repository.protocol.UserRepository
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, AuthenticationError, UseCaseError}
+import com.example.graphQL.cats.service.protocol.{UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, User, UserRole}
 
 final class ActorAuthorization(users: UserRepository) {
-  def resolve(actor: ActorContext, allowDeleted: Boolean = false): IO[Either[UseCaseError, User]] =
+  def resolve(actor: ActorContext, allowDeleted: Boolean = false): UseCaseIO[User] =
     actor match {
-      case authenticated: AuthenticatedActor => IO.pure(validate(authenticated.claims, authenticated.viewer, allowDeleted))
-      case _ => users.find(actor.userId).map(
-        _.leftMap(UseCaseError.Repository.apply)
-          .flatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
-          .flatMap(validate(actor, _, allowDeleted))
-      )
+      case authenticated: AuthenticatedActor => UseCase.fromEither(validate(authenticated.claims, authenticated.viewer, allowDeleted))
+      case _ =>
+        UseCase.repository(users.find(actor.userId))
+          .subflatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+          .subflatMap(validate(actor, _, allowDeleted))
     }
 
   def validate(actor: ActorContext, user: User, allowDeleted: Boolean = false): Either[UseCaseError, User] =

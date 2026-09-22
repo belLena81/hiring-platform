@@ -8,28 +8,27 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, ProbeResult, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import io.circe.Json
 import sangria.schema.Context
 
-import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import scala.concurrent.duration.*
 
 private[graphql] object HiringGraphQLResolverSupport {
-  def raiseOnUseCaseError[A](value: IO[Either[UseCaseError, A]]): IO[A] =
-    value.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
+  def raiseOnUseCaseError[A](value: UseCaseIO[A]): IO[A] =
+    value.value.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
 
   def inputResult[A](value: Either[GraphQLFailure, A]): IO[A] =
     IO.fromEither(value.leftMap(error => RequestContext.FieldFailure(error.code, error.message)))
 
-  def mutationResult[A](value: IO[Either[UseCaseError, A]]): IO[MutationOutcome[A]] =
-    value.flatMap {
+  def mutationResult[A](value: UseCaseIO[A]): IO[MutationOutcome[A]] =
+    value.value.flatMap {
       case Right(result) => IO.pure(result)
       case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(validationError(errors))
       case Left(error) =>
@@ -38,42 +37,8 @@ private[graphql] object HiringGraphQLResolverSupport {
         else IO.pure(DomainError(failure.code, failure.message))
     }
 
-  def mutationResult[A](value: Either[UseCaseError, A]): IO[MutationOutcome[A]] =
-    mutationResult(IO.pure(value))
-
-  def executeMutation[A](
-      hiring: HiringGraphQLServices,
-      operation: String,
-      actorScope: String,
-      idempotencyKey: UUID,
-      canonicalInput: Json,
-      entity: A => MutationEntityReference,
-      replay: MutationEntityReference => IO[Either[UseCaseError, A]]
-  )(write: MutationWriteContext => IO[Either[UseCaseError, A]]): IO[Either[UseCaseError, A]] =
-    (IO.realTimeInstant, IO.realTimeInstant).flatMapN { (now, expiresBase) =>
-      val key = MutationReceiptKey(operation, actorScope, idempotencyKey)
-      val fingerprint = MutationReceiptFingerprint.fromCanonicalInput(canonicalInput.noSpaces)
-      hiring.mutationReceipts.execute(key, fingerprint, now, expiresBase.plusSeconds(7.days.toSeconds)) { context =>
-        write(context).map {
-          case Left(error) => Right(Left(error))
-          case Right(value) => Right(Right(MutationReceiptWrite(value, entity(value))))
-        }
-      }.flatMap {
-        case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
-        case Right(MutationReceiptExecution.Applied(value, _)) => IO.pure(Right(value))
-        case Right(MutationReceiptExecution.Replay(reference)) => replay(reference)
-        case Right(MutationReceiptExecution.Rejected(error)) => IO.pure(Left(error))
-        case Right(MutationReceiptExecution.FingerprintMismatch) => IO.pure(Left(UseCaseError.Repository(RepositoryError.Conflict)))
-        case Right(MutationReceiptExecution.InProgress) => IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable)))
-      }
-    }
-
-  def actorScope(actor: ActorContext): String = actor.userId.value.toString
-
-  def publicActorScope(name: String): String = s"public:${name.trim.toLowerCase(java.util.Locale.ROOT)}"
-
-  def timestamped[A](f: (Instant, UUID) => IO[A]): IO[A] =
-    (IO.realTimeInstant, IO.randomUUID).flatMapN(f)
+  def idempotencyRequest(idempotencyKey: UUID, canonicalInput: Json): IdempotencyRequest =
+    IdempotencyRequest.fromCanonicalInput(idempotencyKey, canonicalInput.noSpaces)
 
   def searchEventId(searchId: UUID): UUID =
     UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))

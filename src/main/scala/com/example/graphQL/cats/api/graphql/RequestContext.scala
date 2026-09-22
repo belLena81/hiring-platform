@@ -10,8 +10,8 @@ import com.example.graphQL.cats.service.AnalyticsReportingUseCases
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
-import com.example.graphQL.cats.repository.protocol.{MutationReceiptRepository, SearchSessionRepository}
-import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, InteractionUseCases, JobUseCases, SearchUseCases}
+import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
+import com.example.graphQL.cats.service.protocol.{AccountUseCases, ApplicationUseCases, HiringReadModel, InteractionUseCases, JobUseCases, SearchUseCases, UseCaseIO}
 import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.service.events.SearchSessionHandoff
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
@@ -27,7 +27,6 @@ final case class HiringGraphQLServices(
     interactionService: InteractionUseCases = InteractionUseCases.noop,
     searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
     searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
-    mutationReceipts: MutationReceiptRepository = MutationReceiptRepository.noop,
     analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
 )
 
@@ -52,7 +51,7 @@ final class RequestContext private (
     spanContext: Option[SpanContext],
     readinessProbe: IO[ProbeResult],
     hiringReadinessProbe: IO[ProbeResult],
-    viewer: Option[IO[Either[UseCaseError, AuthenticatedActor]]],
+    viewer: Option[UseCaseIO[AuthenticatedActor]],
     viewerInvalidated: Ref[IO, Boolean]
 ) {
   def hiring: HiringGraphQLServices = parameters.hiring
@@ -108,8 +107,8 @@ final class RequestContext private (
         read(parameters.hiring.readModel.canViewUserEmails(current, ids.distinct)).map(_.toList.map(EmailVisibility(_))))
     }
 
-  private def read[A](result: IO[Either[UseCaseError, A]]): IO[A] =
-    result.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
+  private def read[A](result: UseCaseIO[A]): IO[A] =
+    result.value.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
 
 }
 
@@ -140,7 +139,9 @@ object RequestContext {
       closed <- Resource.eval(Deferred[IO, Unit])
       memoized <- Resource.eval(parameters.probe.memoize)
       memoizedHiringReady <- Resource.eval(parameters.ensureHiringReady.memoize)
-      memoizedViewer <- Resource.eval(parameters.actor.traverse(actor => parameters.hiring.readModel.viewer(actor).memoize))
+      memoizedViewer <- Resource.eval(
+        parameters.actor.traverse(actor => parameters.hiring.readModel.viewer(actor).value.memoize).map(_.map(UseCaseIO.fromIO))
+      )
       viewerInvalidated <- Resource.eval(Ref.of[IO, Boolean](false))
       context = new RequestContext(parameters, dispatcher, closed, spanContext, memoized, memoizedHiringReady, memoizedViewer, viewerInvalidated)
       _ <- Resource.onFinalize(closed.complete(()).void)

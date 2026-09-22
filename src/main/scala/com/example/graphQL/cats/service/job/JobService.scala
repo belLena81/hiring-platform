@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.service.job
 
-import cats.data.EitherT
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
@@ -13,7 +12,8 @@ import com.example.graphQL.cats.shared.events.OperationalEvents
 import com.example.graphQL.cats.shared.events.OperationalEventType
 import com.example.graphQL.cats.domain.policy.JobLifecycle
 import com.example.graphQL.cats.service.auth.ActorAuthorization
-import com.example.graphQL.cats.service.protocol.JobUseCases
+import com.example.graphQL.cats.service.mutation.Idempotent
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.shared.pagination.JobPageRequest
 import com.example.graphQL.cats.shared.search.JobSearchFilter
@@ -41,73 +41,94 @@ final case class UpdateJobInput(
 final class JobService(
     users: UserRepository,
     jobs: JobRepository,
-    embeddingWork: EmbeddingWorkPublisher
+    embeddingWork: EmbeddingWorkPublisher,
+    idempotent: Idempotent = Idempotent.noop,
+    currentTime: IO[Instant] = IO.realTimeInstant,
+    randomId: IO[UUID] = IO.randomUUID
 ) extends JobUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
   override def createJob(
+      request: IdempotencyRequest,
       actor: ActorContext,
-      input: CreateJobInput,
-      now: Instant,
-      jobId: JobId,
-      context: MutationWriteContext
-  ): IO[Either[UseCaseError, Job]] =
-    (for {
-      user <- EitherT(authorization.resolve(actor))
-      _ <- EitherT.cond[IO](authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
-      job <- EitherT.fromEither[IO](validateNewJob(user.id, input, now, jobId))
-      created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context))
-    } yield created).value
+      input: CreateJobInput
+  ): UseCaseIO[Job] =
+    idempotent.execute("createJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
+      for {
+        user <- authorization.resolve(actor)
+        _ <- UseCase.fromEither(Either.cond(authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden)))
+        now <- UseCase.liftIO(currentTime)
+        jobId <- UseCase.liftIO(randomId.map(JobId.apply))
+        job <- UseCase.fromEither(validateNewJob(user.id, input, now, jobId))
+        created <- UseCase.fromIO(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context))
+      } yield created
+    }
 
   override def updateJob(
+      request: IdempotencyRequest,
       actor: ActorContext,
       jobId: JobId,
-      input: UpdateJobInput,
-      now: Instant,
-      context: MutationWriteContext
-  ): IO[Either[UseCaseError, Job]] =
-    authorizedJobs.manage(actor, jobId) { job =>
-      (for {
-        update <- EitherT.fromEither[IO](validateUpdatedJob(job, input, now))
-        updated <- EitherT(persistUpdatedJob(job, Right[UseCaseError, Job](JobLifecycle.update(job, update)), actor.userId, context))
-      } yield updated).value
+      input: UpdateJobInput
+  ): UseCaseIO[Job] =
+    idempotent.execute("updateJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
+      authorizedJobs.manage(actor, jobId) { job =>
+        for {
+          now <- UseCase.liftIO(currentTime)
+          update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
+          updated <- UseCase.fromIO(persistUpdatedJob(job, Right(JobLifecycle.update(job, update)), actor.userId, context))
+        } yield updated
+      }
     }
 
-  override def publishJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(job, JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED, context)
+  override def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
+    idempotent.execute("publishJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
+      authorizedJobs.manage(actor, jobId) { job =>
+        UseCase.liftIO(currentTime).flatMap(now =>
+          UseCase.fromIO(persistJob(job, JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED, context))
+        )
+      }
     }
 
-  override def closeJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(job, JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED, context)
+  override def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
+    idempotent.execute("closeJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
+      authorizedJobs.manage(actor, jobId) { job =>
+        UseCase.liftIO(currentTime).flatMap(now =>
+          UseCase.fromIO(persistJob(job, JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED, context))
+        )
+      }
     }
 
-  def viewJob(actor: ActorContext, jobId: JobId): IO[Either[UseCaseError, Job]] =
-    (for {
-      user <- EitherT(authorization.resolve(actor))
-      job <- EitherT(jobs.find(jobId).map(_.widenUseCase)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- EitherT.cond[IO](authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
-    } yield job).value
+  def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
+    for {
+      user <- authorization.resolve(actor)
+      job <- UseCase.repository(jobs.find(jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- UseCase.fromEither(Either.cond(authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden)))
+    } yield job
 
-  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): IO[Either[UseCaseError, List[Job]]] =
-    (for {
-      _ <- EitherT(authorization.resolve(actor))
-      openJobs <- EitherT(jobs.findOpen(filter, page).map(_.widenUseCase))
-    } yield openJobs).value
+  def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseIO[List[Job]] =
+    authorization.resolve(actor) *> UseCase.repository(jobs.findOpen(filter, page))
 
-  def myJobs(actor: ActorContext, page: JobPageRequest): IO[Either[UseCaseError, List[Job]]] =
-    (for {
-      user <- EitherT(authorization.resolve(actor))
+  def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseIO[List[Job]] =
+    for {
+      user <- authorization.resolve(actor)
       manageableJobs <- {
         user.role match {
-          case UserRole.Admin => EitherT(jobs.findAll(page).map(_.widenUseCase))
-          case UserRole.Recruiter => EitherT(jobs.findByRecruiter(user.id, page).map(_.widenUseCase))
-          case UserRole.Candidate => EitherT.leftT[IO, List[Job]](UseCaseError.Domain(DomainError.Forbidden))
+          case UserRole.Admin => UseCase.repository(jobs.findAll(page))
+          case UserRole.Recruiter => UseCase.repository(jobs.findByRecruiter(user.id, page))
+          case UserRole.Candidate => UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
         }
       }
-    } yield manageableJobs).value
+    } yield manageableJobs
+
+  private def replayJob(actor: ActorContext)(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Job] =
+    scala.util.Try(JobId(UUID.fromString(reference.entityId))).toEither.fold(
+      _ => UseCase.left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
+      viewJob(actor, _)
+    )
+
+  private def jobReference(job: Job): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
+    com.example.graphQL.cats.repository.protocol.MutationEntityReference("job", job.id.value.toString)
 
   private def validateNewJob(
       recruiterId: UserId,
@@ -203,4 +224,12 @@ object JobService {
       embeddingWork: EmbeddingWorkPublisher
   ): JobService =
     new JobService(users, jobs, embeddingWork)
+
+  def live(
+      users: UserRepository,
+      jobs: JobRepository,
+      embeddingWork: EmbeddingWorkPublisher,
+      idempotent: Idempotent
+  ): JobService =
+    new JobService(users, jobs, embeddingWork, idempotent)
 }

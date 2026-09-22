@@ -7,31 +7,29 @@ import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.repository.protocol.MutationWriteContext
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
-import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, JobUseCases, LoginInput, SignUpInput}
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, IdempotencyRequest, JobUseCases, LoginInput, SignUpInput, UseCaseIO}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import io.circe.Json
 import org.http4s.Request
-import java.time.Instant
-
 
 object TestGraphQLSupport {
-  private def unsupported[A]: IO[A] = IO.raiseError(new IllegalStateException("Request context services are not configured"))
+  private def unsupported[A]: UseCaseIO[A] =
+    UseCaseIO.liftIO(IO.raiseError(new IllegalStateException("Request context services are not configured")))
 
   val cursorKey: CursorCodec.CursorKey =
     CursorCodec.keyFromSecret("test-cursor-secret-01234567890123456789")
 
   val accountService: AccountUseCases = new AccountUseCases {
-    def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext) = unsupported
-    def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext) = unsupported
-    def login(input: LoginInput, now: Instant) = unsupported
+    def signUp(request: IdempotencyRequest, input: SignUpInput) = unsupported
+    def bootstrapAdmin(request: IdempotencyRequest, input: BootstrapAdminInput) = unsupported
+    def login(request: IdempotencyRequest, input: LoginInput) = unsupported
     def me(actor: ActorContext) = unsupported
-    def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext) = unsupported
-    def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext) = unsupported
+    def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput) = unsupported
+    def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext) = unsupported
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }
 
@@ -49,19 +47,19 @@ object TestGraphQLSupport {
       def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest) = unsupported
     },
     new JobUseCases {
-      def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId, context: MutationWriteContext) = unsupported
-      def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant, context: MutationWriteContext) = unsupported
-      def publishJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext) = unsupported
-      def closeJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext) = unsupported
+      def createJob(request: IdempotencyRequest, actor: ActorContext, input: CreateJobInput) = unsupported
+      def updateJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId, input: UpdateJobInput) = unsupported
+      def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
+      def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
       def viewJob(actor: ActorContext, jobId: JobId) = unsupported
       def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest) = unsupported
       def myJobs(actor: ActorContext, page: JobPageRequest) = unsupported
     },
     new ApplicationUseCases {
-      def submitApplication(actor: ActorContext, jobId: JobId, applicationId: ApplicationId, eventId: ApplicationEventId, now: Instant, context: MutationWriteContext) = unsupported
+      def submitApplication(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
       def myApplications(actor: ActorContext, page: ApplicationPageRequest) = unsupported
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
-      def changeStatus(actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String], eventId: ApplicationEventId, now: Instant, context: MutationWriteContext) = unsupported
+      def changeStatus(request: IdempotencyRequest, actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String]) = unsupported
     },
     cursorKey,
     accountService

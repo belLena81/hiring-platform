@@ -9,9 +9,10 @@ import com.example.graphQL.cats.service.{AnalyticsReportingService, DatabaseProb
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
+import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, JobUseCases, SearchUseCases, UserAuthenticator}
 import com.example.graphQL.cats.service.events.{OperationalTelemetryService, SearchSessionHandoff, SearchSessionHandoffConfig}
-import com.example.graphQL.cats.service.search.{EmbeddingPipeline, SemanticSearchService}
+import com.example.graphQL.cats.service.search.{EmbeddingPipeline, EmbeddingWorkPublisher, SemanticSearchService}
 import com.example.graphQL.cats.config.{JwtAuthConfig, KafkaConfig, PasswordHashConfig, VectorSearchConfig}
 import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
@@ -70,19 +71,18 @@ object MongoHiringRuntime {
     Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong)).flatMap { passwordHashPermits =>
       MongoDatabaseProbe.clientResource(config.uri).flatMap { client =>
       val database = client.getDatabase(config.databaseName)
-      val embeddingWork = Option.when(config.vectorSearch.enabled)(new MongoEmbeddingWorkRepository(database))
-      val users = MongoUserRepository.transactional(database, client, embeddingWork)
-      val jobs = MongoJobRepository.transactional(database, client, embeddingWork)
-      val applications = MongoApplicationRepository.transactional(database, client)
-      val searchSessions = MongoSearchSessionRepository.transactional(database, client)
-      val searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
-      val outbox = new MongoOperationalEventOutboxRepository(database)
-      val receipts = new MongoConsumerReceiptRepository(database)
-      val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
-      val erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-      val analyticsReports = new MongoAnalyticsReportRepository(database)
-      val quarantine = new MongoEventQuarantineRepository(database)
-      hiringServices(database, users, jobs, applications, searchSessions, searchSessionWork, mutationReceipts, erasureRequests, analyticsReports, config.vectorSearch, config.embeddingService, config.jwtAuth, config.passwordHash, passwordHashPermits, config.diagnostics).flatMap { services =>
+      embeddingCapability(database, client, config).flatMap { capability =>
+        val users = capability.users
+        val applications = MongoApplicationRepository.transactional(database, client)
+        val searchSessions = MongoSearchSessionRepository.transactional(database, client)
+        val searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
+        val outbox = new MongoOperationalEventOutboxRepository(database)
+        val receipts = new MongoConsumerReceiptRepository(database)
+        val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
+        val erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
+        val analyticsReports = new MongoAnalyticsReportRepository(database)
+        val quarantine = new MongoEventQuarantineRepository(database)
+        hiringServices(capability, applications, searchSessions, searchSessionWork, mutationReceipts, erasureRequests, analyticsReports, config.jwtAuth, config.passwordHash, passwordHashPermits, config.diagnostics).flatMap { services =>
         SetupLifecycle.resource(setupEffect(database, config.vectorSearch, config.resetOnStart), config.diagnostics).flatMap { setup =>
           OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics).as {
           val metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
@@ -96,25 +96,68 @@ object MongoHiringRuntime {
         }
       }
       }
+      }
     }
 
-  private def hiringServices(
+  private type RuntimeEmbeddingCapability = EmbeddingCapability[
+    MongoEmbeddingWorkRepository,
+    MongoUserRepository,
+    MongoJobRepository,
+    MongoSemanticSearchRepository
+  ]
+
+  private def embeddingCapability(
       database: MongoDatabase,
-      users: MongoUserRepository,
-      jobs: MongoJobRepository,
+      client: com.mongodb.reactivestreams.client.MongoClient,
+      config: RuntimeConfig
+  ): Resource[IO, RuntimeEmbeddingCapability] =
+    EmbeddingCapability.resource(
+      config.vectorSearch,
+      IO(new MongoEmbeddingWorkRepository(database)),
+      embeddingWork => IO(MongoUserRepository.transactional(database, client, embeddingWork)),
+      embeddingWork => IO(MongoJobRepository.transactional(database, client, embeddingWork)),
+      IO(new MongoSemanticSearchRepository(
+        database,
+        config.vectorSearch.jobVectorIndex,
+        config.vectorSearch.candidateVectorIndex,
+        config.vectorSearch.jobLexicalIndex,
+        config.vectorSearch.numCandidates
+      )),
+      config.embeddingService,
+      (work, users, jobs, embeddings) => {
+        val embeddingLease =
+          (config.vectorSearch.retryAttempts.toLong *
+            (config.vectorSearch.timeoutMillis.toLong + config.vectorSearch.retryDelayMillis.toLong)).millis
+        EmbeddingPipeline.resource(
+          work,
+          users,
+          jobs,
+          embeddings,
+          config.vectorSearch.voyageModel,
+          config.vectorSearch.queueSize,
+          config.vectorSearch.parallelism,
+          config.vectorSearch.retryAttempts,
+          config.vectorSearch.retryDelayMillis.millis,
+          embeddingLease
+        ).map(publisher => publisher: EmbeddingWorkPublisher)
+      }
+    )
+
+  private def hiringServices(
+      capability: RuntimeEmbeddingCapability,
       applications: MongoApplicationRepository,
       searchSessions: MongoSearchSessionRepository,
       searchSessionWork: MongoSearchSessionWorkRepository,
       mutationReceipts: MongoMutationReceiptRepository,
       erasureRequests: MongoAnalyticsErasureRequestRepository,
       analyticsReports: MongoAnalyticsReportRepository,
-      vectorSearch: VectorSearchConfig,
-      embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService],
       jwtAuth: JwtAuthConfig,
       passwordHash: PasswordHashConfig,
       passwordHashPermits: Semaphore[IO],
       diagnostics: Diagnostics
   ): Resource[IO, HiringGraphQLServices] =
+    val users = capability.users
+    val jobs = capability.jobs
     val hasher = new Argon2PasswordHasher(
       passwordHash.iterations,
       passwordHash.memoryKilobytes,
@@ -122,9 +165,10 @@ object MongoHiringRuntime {
       passwordHashPermits
     )
     val tokenIssuer = new JwtAccessTokenIssuer(jwtAuth)
+    val idempotent = Idempotent(mutationReceipts)
     val readModel = HiringReadService(users, jobs, applications)
-    val applicationService = ApplicationService(users, jobs, applications)
-    val interactionService = OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork)
+    val applicationService = ApplicationService.live(users, jobs, applications, idempotent)
+    val interactionService = OperationalTelemetryService.live(users, jobs, searchSessions, searchSessionWork, idempotent)
     val cursorKey = CursorCodec.keyFromSecret(jwtAuth.hmacSecret, jwtAuth.cursorTtlSeconds)
 
     def assemble(
@@ -143,56 +187,27 @@ object MongoHiringRuntime {
         interactionService,
         searchSessions,
         searchSessionHandoff,
-        mutationReceipts,
         AnalyticsReportingService(users, analyticsReports)
       )
 
-    SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).flatMap { searchSessionHandoff =>
-    if (!vectorSearch.enabled) {
-      val account = UserAccountService(users, users, hasher, tokenIssuer, erasureRequests)
-      val jobService = JobService(users, jobs)
-      Resource.pure(assemble(jobService, account, searchSessionHandoff = searchSessionHandoff))
-    } else {
-      Resource.eval(IO.fromOption(vectorSearch.voyageApiKey)(
-        new IllegalArgumentException("VOYAGE_API_KEY is required when vector search is enabled")
-      )).flatMap { apiKey =>
-        val search = new MongoSemanticSearchRepository(
-          database,
-          vectorSearch.jobVectorIndex,
-          vectorSearch.candidateVectorIndex,
-          vectorSearch.jobLexicalIndex,
-          vectorSearch.numCandidates
-        )
-        embeddingService(vectorSearch, apiKey).flatMap { embeddings =>
-          val embeddingLease =
-            (vectorSearch.retryAttempts.toLong *
-              (vectorSearch.timeoutMillis.toLong + vectorSearch.retryDelayMillis.toLong)).millis
-          EmbeddingPipeline.resource(
-            new MongoEmbeddingWorkRepository(database),
+    SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).map { searchSessionHandoff =>
+      capability match {
+        case EmbeddingCapability.Disabled(_, _) =>
+          val account = UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, idempotent = idempotent)
+          val jobService = JobService.live(users, jobs, EmbeddingWorkPublisher.noop, idempotent)
+          assemble(jobService, account, searchSessionHandoff = searchSessionHandoff)
+        case EmbeddingCapability.Enabled(_, _, _, search, embeddings, publisher, model) =>
+          val jobService = JobService.live(users, jobs, publisher, idempotent)
+          val accountService = UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, publisher, idempotent)
+          val semanticSearch = SemanticSearchService(
             users,
             jobs,
             embeddings,
-            vectorSearch.voyageModel,
-            vectorSearch.queueSize,
-            vectorSearch.parallelism,
-            vectorSearch.retryAttempts,
-            vectorSearch.retryDelayMillis.millis,
-            embeddingLease
-          ).map { embeddingWork =>
-            val jobService = JobService(users, jobs, embeddingWork)
-            val accountService = UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, embeddingWork)
-            val semanticSearch = SemanticSearchService(
-              users,
-              jobs,
-              embeddings,
-              search,
-              vectorSearch.voyageModel
-            )
-            assemble(jobService, accountService, Some(semanticSearch), searchSessionHandoff)
-          }
-        }
+            search,
+            model
+          )
+          assemble(jobService, accountService, Some(semanticSearch), searchSessionHandoff)
       }
-    }
     }
 
   private def voyageEmbeddingService(config: VectorSearchConfig, apiKey: String): Resource[IO, EmbeddingService] =

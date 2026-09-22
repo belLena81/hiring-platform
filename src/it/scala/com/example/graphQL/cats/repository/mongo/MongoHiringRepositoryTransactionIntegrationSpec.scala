@@ -5,6 +5,8 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
 import com.example.graphQL.cats.repository.protocol.*
+import com.example.graphQL.cats.service.mutation.Idempotent
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventType}
 import com.mongodb.client.model.Filters
 import io.circe.Json
@@ -99,9 +101,11 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
         val directJob = job(JobId(UUID.randomUUID()), recruiterId)
         val receiptJob = job(JobId(UUID.randomUUID()), recruiterId)
         val rolledBackJob = job(JobId(UUID.randomUUID()), recruiterId)
+        val receiptRolledBackJob = job(JobId(UUID.randomUUID()), recruiterId)
         val directEvent = event(directJob, recruiterId)
         val receiptEvent = event(receiptJob, recruiterId)
         val duplicateEvent = event(rolledBackJob, recruiterId).copy(eventId = directEvent.eventId)
+        val receiptDuplicateEvent = event(receiptRolledBackJob, recruiterId).copy(eventId = directEvent.eventId)
         val receiptKey = MutationReceiptKey("createJob", recruiterId.value.toString, UUID.randomUUID())
         val receiptFingerprint = MutationReceiptFingerprint.fromCanonicalInput(receiptJob.id.value.toString)
 
@@ -113,9 +117,20 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
               _.map(_ => Right(MutationReceiptWrite((), MutationEntityReference("Job", receiptJob.id.value.toString))))
             )
           }.flatMap(requireResult)
+          receiptRollback <- Idempotent(receipts).execute[Job](
+            "createJob",
+            recruiterId.value.toString,
+            IdempotencyRequest.fromCanonicalInput(UUID.randomUUID(), receiptRolledBackJob.id.value.toString),
+            value => MutationEntityReference("Job", value.id.value.toString),
+            _ => UseCaseIO.pure(receiptRolledBackJob)
+          ) { context =>
+            UseCaseIO.repository(jobs.createWithEvents(receiptRolledBackJob, now, List(receiptDuplicateEvent), context)).as(receiptRolledBackJob)
+          }.value
           storedJobs <- PublisherBridge.first(database.getCollection("jobs").countDocuments())
           storedEvents <- PublisherBridge.first(database.getCollection("event_outbox").countDocuments())
           storedEmbeddingWork <- PublisherBridge.first(database.getCollection("embedding_work").countDocuments())
+          storedMutationReceipts <- PublisherBridge.first(database.getCollection("mutation_receipts").countDocuments())
+          receiptRolledBackStored <- jobs.find(receiptRolledBackJob.id).flatMap(requireResult)
           rollbackResult <- jobs.createWithEvents(rolledBackJob, now, List(duplicateEvent))
           rolledBackStored <- jobs.find(rolledBackJob.id).flatMap(requireResult)
           jobsAfterRollback <- PublisherBridge.first(database.getCollection("jobs").countDocuments())
@@ -130,6 +145,9 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
             assertEquals(storedJobs.map(_.longValue), Some(2L))
             assertEquals(storedEvents.map(_.longValue), Some(2L))
             assertEquals(storedEmbeddingWork.map(_.longValue), Some(2L))
+            assertEquals(receiptRollback, Left(com.example.graphQL.cats.service.UseCaseError.Repository(RepositoryError.Conflict)))
+            assertEquals(storedMutationReceipts.map(_.longValue), Some(1L))
+            assertEquals(receiptRolledBackStored, None)
             assertEquals(rollbackResult, Left(RepositoryError.Conflict))
             assertEquals(rolledBackStored, None)
             assertEquals(jobsAfterRollback.map(_.longValue), Some(2L))

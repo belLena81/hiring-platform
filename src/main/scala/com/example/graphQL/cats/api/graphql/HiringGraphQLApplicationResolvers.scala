@@ -5,10 +5,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId}
-import com.example.graphQL.cats.service.UseCaseError
+import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor}
-import com.example.graphQL.cats.repository.protocol.MutationEntityReference
 import io.circe.Json
 import sangria.schema.Context
 import java.time.Instant
@@ -50,48 +48,30 @@ private[graphql] object HiringGraphQLApplicationResolvers {
   def submitApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(submitApplicationInputArgument)
-      executeMutation[Application](
-        hiring,
-        "submitApplication",
-        actorScope(actor),
-        input.idempotencyKey,
-        Json.fromString(input.toString),
-        application => MutationEntityReference("application", application.id.value.toString),
-        reference => replayApplication(hiring, actor, reference)
-      ) { context =>
-        timestamped { (now, applicationId) =>
-          IO.randomUUID.flatMap { eventId =>
-            hiring.applicationService.submitApplication(
-              actor,
-              input.jobId,
-              ApplicationId(applicationId),
-              ApplicationEventId(eventId),
-              now,
-              context
-            )
-          }
-        }
-      }.flatMap(mutationResult)
+      mutationResult(hiring.applicationService.submitApplication(
+        idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+        actor,
+        input.jobId
+      ))
     }
 
-  def applicationStatusAction(context: Context[RequestContext, Unit], operation: String, status: ApplicationStatus): IO[MutationOutcome[Application]] = {
+  def applicationStatusAction(context: Context[RequestContext, Unit], status: ApplicationStatus): IO[MutationOutcome[Application]] = {
     val input = context.arg(applicationActionInputArgument)
-    changeApplicationStatus(context, operation, input.idempotencyKey, input.applicationId, status, None, None)
+    changeApplicationStatus(context, input.idempotencyKey, input.applicationId, status, None, None)
   }
 
   def rejectApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] = {
     val input = context.arg(rejectApplicationInputArgument)
-    changeApplicationStatus(context, "rejectApplication", input.idempotencyKey, input.applicationId, ApplicationStatus.Rejected, input.feedback, None)
+    changeApplicationStatus(context, input.idempotencyKey, input.applicationId, ApplicationStatus.Rejected, input.feedback, None)
   }
 
   def declineApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] = {
     val input = context.arg(declineApplicationInputArgument)
-    changeApplicationStatus(context, "declineApplication", input.idempotencyKey, input.applicationId, ApplicationStatus.Declined, None, input.reason)
+    changeApplicationStatus(context, input.idempotencyKey, input.applicationId, ApplicationStatus.Declined, None, input.reason)
   }
 
   private def changeApplicationStatus(
       context: Context[RequestContext, Unit],
-      operation: String,
       idempotencyKey: java.util.UUID,
       applicationId: ApplicationId,
       status: ApplicationStatus,
@@ -99,33 +79,15 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       reason: Option[String]
   ): IO[MutationOutcome[Application]] =
     authenticated(context) { case (actor, hiring) =>
-      executeMutation[Application](
-        hiring,
-        operation,
-        actorScope(actor),
-        idempotencyKey,
-        Json.fromString(s"$applicationId:$status:$feedback:$reason"),
-        application => MutationEntityReference("application", application.id.value.toString),
-        reference => replayApplication(hiring, actor, reference)
-      ) { context =>
-        timestamped { (now, eventId) =>
-          hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now, context)
-        }
-      }.flatMap(mutationResult)
+      mutationResult(hiring.applicationService.changeStatus(
+        idempotencyRequest(idempotencyKey, Json.fromString(s"$applicationId:$status:$feedback:$reason")),
+        actor,
+        applicationId,
+        status,
+        feedback,
+        reason
+      ))
     }
-
-  private def replayApplication(
-      hiring: HiringGraphQLServices,
-      actor: com.example.graphQL.cats.service.ActorContext,
-      reference: MutationEntityReference
-  ): IO[Either[UseCaseError, Application]] =
-    scala.util.Try(ApplicationId(java.util.UUID.fromString(reference.entityId))).toEither.fold(
-      _ => IO.pure(Left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable))),
-      id => hiring.readModel.canViewApplication(actor, id).flatMap {
-        case Left(error) => IO.pure(Left(error))
-        case Right(_) => hiring.readModel.application(id).map(_.flatMap(_.toRight(UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.NotFound("application")))))
-      }
-    )
 
   private def applicationConnection(
       values: List[Application],

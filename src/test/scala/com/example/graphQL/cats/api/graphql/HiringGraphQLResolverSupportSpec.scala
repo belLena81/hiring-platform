@@ -5,13 +5,10 @@ import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.{DomainError, GraphQLFailure}
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus}
-import com.example.graphQL.cats.repository.protocol.{MutationEntityReference, MutationReceiptExecution, MutationReceiptFingerprint, MutationReceiptRepository, MutationReceiptWrite, MutationWriteContext, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{AccountError, AuthenticationError, AvailabilityError, SearchError, UseCaseError}
-import io.circe.Json
+import com.example.graphQL.cats.service.protocol.UseCaseIO
 import munit.CatsEffectSuite
-
-import java.time.Instant
-import java.util.UUID
 
 final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
   test("maps every use-case error through the failure catalog") {
@@ -126,9 +123,9 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
   test("turns expected mutation failures into typed domain errors") {
     for {
       account <- HiringGraphQLResolverSupport.mutationResult(
-        Left(UseCaseError.Account(AccountError.NameTaken)): Either[UseCaseError, String])
+        UseCaseIO.left[String](UseCaseError.Account(AccountError.NameTaken)))
       repository <- HiringGraphQLResolverSupport.mutationResult(
-        Left(UseCaseError.Repository(RepositoryError.Conflict)): Either[UseCaseError, String])
+        UseCaseIO.left[String](UseCaseError.Repository(RepositoryError.Conflict)))
     } yield {
       assertEquals(account, DomainError("REGISTRATION_FAILED", "Registration failed"))
       assertEquals(repository, DomainError("CONFLICT", "Conflict"))
@@ -137,36 +134,9 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
 
   test("raises exceptional mutation failures as read failures") {
     val error = UseCaseError.Repository(RepositoryError.Unavailable)
-    HiringGraphQLResolverSupport.mutationResult(Left(error): Either[UseCaseError, String]).attempt.map {
+    HiringGraphQLResolverSupport.mutationResult(UseCaseIO.left[String](error)).attempt.map {
       case Left(RequestContext.ReadFailure(actual)) => assertEquals(actual, error)
       case result => fail(s"Expected a read failure, received $result")
-    }
-  }
-
-  test("passes the receipt write context to the mutation callback") {
-    val expected = new MutationWriteContext {}
-    val receipts = new MutationReceiptRepository {
-      override def execute[A, E](
-          key: com.example.graphQL.cats.repository.protocol.MutationReceiptKey,
-          fingerprint: MutationReceiptFingerprint,
-          now: Instant,
-          expiresAt: Instant
-      )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]):
-          IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
-        val _ = (key, fingerprint, now, expiresAt)
-        write(expected).map(_.map(_.fold(MutationReceiptExecution.Rejected(_), value => MutationReceiptExecution.Applied(value.value, value.entity))))
-    }
-    val services = TestGraphQLSupport.emptyServices.copy(mutationReceipts = receipts)
-    HiringGraphQLResolverSupport.executeMutation[String](
-      services,
-      "createJob",
-      "actor-1",
-      UUID.fromString("00000000-0000-0000-0000-000000000010"),
-      Json.fromString("input"),
-      value => MutationEntityReference("job", value),
-      reference => IO.pure(Right(reference.entityId))
-    )(context => IO.pure(Right(if (context eq expected) "same-context" else "different-context"))).map { result =>
-      assertEquals(result, Right("same-context"))
     }
   }
 }
