@@ -102,7 +102,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
   private final class InMemorySearchSessions(
       sessions: Ref[IO, Map[UUID, SearchSession]],
       storedEvents: Ref[IO, Vector[OperationalEventEnvelope]]
-  ) extends SearchSessionRepository[IO] {
+  ) extends SearchSessionRepository {
     override def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]] = {
       val _ = event
       sessions.update(_ + (session.id -> session)).as(Right(()))

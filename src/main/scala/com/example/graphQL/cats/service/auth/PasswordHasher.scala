@@ -4,10 +4,10 @@ import cats.effect.IO
 import cats.effect.std.Semaphore
 import de.mkammerer.argon2.{Argon2, Argon2Factory}
 
-trait PasswordHasher[F[_]] {
-  def hash(password: String): F[String]
-  def verify(encoded: String, password: String): F[Boolean]
-  def verifyUnknown(password: String): F[Unit]
+trait PasswordHasher {
+  def hash(password: String): IO[String]
+  def verify(encoded: String, password: String): IO[Boolean]
+  def verifyUnknown(password: String): IO[Unit]
 }
 
 final class Argon2PasswordHasher(
@@ -15,7 +15,7 @@ final class Argon2PasswordHasher(
     memoryKilobytes: Int,
     parallelism: Int,
     permits: Semaphore[IO]
-) extends PasswordHasher[IO] {
+) extends PasswordHasher {
   private val DummyPassword = "hiring-platform-invalid-password"
   private val argon2: Argon2 = Argon2Factory.create()
   private lazy val unknownUserHash: String = {

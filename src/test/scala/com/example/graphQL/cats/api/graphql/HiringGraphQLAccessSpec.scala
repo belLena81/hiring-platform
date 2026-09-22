@@ -751,13 +751,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       .leftMap(error => new IllegalArgumentException("Invalid GraphQL test request", error)))
 
   private def executeWithSemanticSearch(query: String, actor: Option[ActorContext]): IO[Json] = {
-    executeWithSemanticSearch(query, actor, SearchSessionRepository.noop[IO])
+    executeWithSemanticSearch(query, actor, SearchSessionRepository.noop)
   }
 
   private def executeWithSemanticSearch(
       query: String,
       actor: Option[ActorContext],
-      searchSessions: SearchSessionRepository[IO]
+      searchSessions: SearchSessionRepository
   ): IO[Json] = {
     val meta = EmbeddingMeta("voyage-4-lite", "hash", now)
     val embeddedJob = openJob.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), meta)))
@@ -800,7 +800,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService: AccountUseCases = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO]
+      searchSessions: SearchSessionRepository = SearchSessionRepository.noop
   ): IO[Json] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
@@ -823,7 +823,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private final class RecordingUsers(
       ref: Ref[IO, Map[UserId, User]],
       batches: Ref[IO, Vector[List[UserId]]]
-  ) extends UserRepository[IO] {
+  ) extends UserRepository {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
       ref.get.map(_.get(id)).map(Right(_))
 
@@ -842,12 +842,12 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       }
   }
 
-  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService[IO] {
+  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       IO.pure(result)
   }
 
-  private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository[IO] {
+  private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository {
     override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
       IO.pure(Right(jobs))
 
@@ -858,7 +858,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       IO.pure(Right(Nil))
   }
 
-  private object FailingSearchSessions extends SearchSessionRepository[IO] {
+  private object FailingSearchSessions extends SearchSessionRepository {
     override def save(session: SearchSession, event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope): IO[Either[RepositoryError, Unit]] =
       IO.pure(Left(RepositoryError.Unavailable))
     override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =

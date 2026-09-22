@@ -39,9 +39,9 @@ final case class UpdateJobInput(
 )
 
 final class JobService(
-    users: UserRepository[IO],
-    jobs: JobRepository[IO],
-    embeddingWork: EmbeddingWorkPublisher[IO]
+    users: UserRepository,
+    jobs: JobRepository,
+    embeddingWork: EmbeddingWorkPublisher
 ) extends JobUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
@@ -192,13 +192,13 @@ final class JobService(
 }
 
 object JobService {
-  def apply(users: UserRepository[IO], jobs: JobRepository[IO]): JobService =
-    new JobService(users, jobs, EmbeddingWorkPublisher.noop[IO])
+  def apply(users: UserRepository, jobs: JobRepository): JobService =
+    new JobService(users, jobs, EmbeddingWorkPublisher.noop)
 
   def apply(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      embeddingWork: EmbeddingWorkPublisher[IO]
+      users: UserRepository,
+      jobs: JobRepository,
+      embeddingWork: EmbeddingWorkPublisher
   ): JobService =
     new JobService(users, jobs, embeddingWork)
 }

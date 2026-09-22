@@ -38,7 +38,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
       users(Map(candidateId -> recruiter)),
       FixedTestClock.at(now)
     )
-    authenticator.authenticateDetailed(request(Some(token))).map { actor =>
+    authenticator.authenticate(request(Some(token))).map { actor =>
       assertEquals(actor, Right(Some(ActorContext(candidateId, UserRole.Recruiter))))
     }
   }
@@ -64,7 +64,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
       FixedTestClock.at(now)
     )
     invalidTokens.traverse { token =>
-      authenticator.authenticateDetailed(request(token)).map { result =>
+      authenticator.authenticate(request(token)).map { result =>
         token match {
           case None => assertEquals(result, Right(None))
           case Some(_) => assert(result.isLeft, clues(result))
@@ -84,28 +84,28 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
       Header.Raw(CIString("Authorization"), s"Bearer $token"),
       Header.Raw(CIString("Authorization"), s"Bearer $token")
     )
-    authenticator.authenticateDetailed(duplicated).map(assertEquals(_, Left(AuthFailure.MalformedCredentials)))
+    authenticator.authenticate(duplicated).map(assertEquals(_, Left(AuthFailure.MalformedCredentials)))
   }
 
   test("unknown users remain unauthenticated") {
     val token = signedToken(candidateId)
     val enabled = new JwtActorAuthenticator(JwtAuthConfig(secret, issuer, audience), users(Map.empty), FixedTestClock.at(now))
-    enabled.authenticateDetailed(request(Some(token))).map(assertEquals(_, Left(AuthFailure.UnknownActor)))
+    enabled.authenticate(request(Some(token))).map(assertEquals(_, Left(AuthFailure.UnknownActor)))
   }
 
   test("repository failures remain unavailable rather than becoming an unknown actor") {
-    val unavailableUsers = new UserRepository[IO] {
+    val unavailableUsers = new UserRepository {
       override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Left(RepositoryError.Unavailable))
       override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
       override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
     }
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
-      UserAuthenticationService[IO](unavailableUsers),
+      UserAuthenticationService(unavailableUsers),
       FixedTestClock.at(now)
     )
 
-    authenticator.authenticateDetailed(request(Some(signedToken(candidateId)))).map(
+    authenticator.authenticate(request(Some(signedToken(candidateId)))).map(
       assertEquals(_, Left(AuthFailure.Unavailable))
     )
   }
@@ -137,10 +137,10 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     overrideClaims.asObject.fold(baseClaims)(fields => baseClaims.deepMerge(Json.fromJsonObject(fields)))
   }
 
-  private def users(values: Map[UserId, User]): UserAuthenticator[IO] =
-    UserAuthenticationService[IO](userRepository(values))
+  private def users(values: Map[UserId, User]): UserAuthenticator =
+    UserAuthenticationService(userRepository(values))
 
-  private def userRepository(values: Map[UserId, User]): UserRepository[IO] = new UserRepository[IO] {
+  private def userRepository(values: Map[UserId, User]): UserRepository = new UserRepository {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(ids.flatMap(values.get)))
     override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =

@@ -2,8 +2,9 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.data.Kleisli
 import cats.effect.{IO, Resource}
+import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.auth.AuthFailure
-import com.example.graphQL.cats.api.http.{AuthRateLimiter, ClientAddressResolver, HiringApiRoutes}
+import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}

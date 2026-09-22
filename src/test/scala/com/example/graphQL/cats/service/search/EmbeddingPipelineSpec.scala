@@ -227,7 +227,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
       calls <- Ref.of[IO, Int](0)
       work <- InMemoryEmbeddingWorkRepository.create
-      embeddings = new EmbeddingService[IO] {
+      embeddings = new EmbeddingService {
         override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
           calls.updateAndGet(_ + 1).map { count =>
             if (count == 1) Left(EmbeddingError.ProviderUnavailable)
@@ -268,9 +268,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
   }
 
   private def pipelineResource(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      embeddings: EmbeddingService[IO],
+      users: UserRepository,
+      jobs: JobRepository,
+      embeddings: EmbeddingService,
       model: String,
       queueSize: Int,
       parallelism: Int,
@@ -294,22 +294,22 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       else IO.raiseError(new AssertionError("condition was not met"))
     }
 
-  private def successfulFind(jobs: JobRepository[IO], id: Identifiers.JobId): IO[Option[Job]] =
+  private def successfulFind(jobs: JobRepository, id: Identifiers.JobId): IO[Option[Job]] =
     jobs.find(id).map(_.toOption.flatten)
 
-  private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
+  private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.update(_ + 1).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
   }
 
   private object CountingEmbeddingService {
-    val uncounted: EmbeddingService[IO] = new EmbeddingService[IO] {
+    val uncounted: EmbeddingService = new EmbeddingService {
       override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
         IO.raiseError(new AssertionError("malformed work must not reach the embedding provider"))
     }
   }
 
-  private final case class FailOnceEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
+  private final case class FailOnceEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.modify {
         case 0 => 1 -> Left(EmbeddingError.ProviderUnavailable)
@@ -321,7 +321,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       calls: Ref[IO, Int],
       started: Deferred[IO, Unit],
       release: Deferred[IO, Unit]
-  ) extends EmbeddingService[IO] {
+  ) extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.update(_ + 1) *> started.complete(()).void *> release.get.as(
         Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))
@@ -331,7 +331,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
   private final case class RecordingEmbeddingWrites(
       delegate: InMemoryJobs,
       writeResult: Deferred[IO, Either[RepositoryError, Unit]]
-  ) extends JobRepository[IO] {
+  ) extends JobRepository {
     override def find(id: Identifiers.JobId): IO[Either[RepositoryError, Option[Job]]] =
       delegate.find(id)
 
@@ -377,7 +377,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       failure: Option[EmbeddingWorkFailure]
   )
 
-  private final class InMemoryEmbeddingWorkRepository(ref: Ref[IO, Map[String, StoredWork]]) extends EmbeddingWorkRepository[IO] {
+  private final class InMemoryEmbeddingWorkRepository(ref: Ref[IO, Map[String, StoredWork]]) extends EmbeddingWorkRepository {
     def snapshot: IO[Map[String, StoredWork]] = ref.get
 
     override def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =

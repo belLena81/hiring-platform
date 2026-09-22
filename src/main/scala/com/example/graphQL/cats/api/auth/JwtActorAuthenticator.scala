@@ -7,7 +7,6 @@ import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
 import com.example.graphQL.cats.shared.Parsing.parseUuid
 import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import org.http4s.Request
@@ -19,11 +18,8 @@ enum AuthFailure {
   case MalformedCredentials, InvalidToken, UnknownActor, Unavailable
 }
 
-final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]) {
+final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticator, clock: EffectClock[IO]) {
   def authenticate(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
-    authenticateDetailed(request)
-
-  def authenticateDetailed(request: Request[IO]): IO[Either[AuthFailure, Option[ActorContext]]] =
     (for {
       token <- EitherT.fromEither[IO](bearerToken(request))
       actor <- token.traverse { value =>
@@ -52,14 +48,6 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
 object JwtActorAuthenticator {
   private val Algorithms = Seq(JwtAlgorithm.HS256)
   private val Options = JwtOptions(signature = true, expiration = true, notBefore = true, leeway = 0)
-
-  def apply(config: JwtAuthConfig, users: UserAuthenticator[IO], clock: EffectClock[IO]): JwtActorAuthenticator =
-    new JwtActorAuthenticator(config, users, clock)
-
-  def issue(config: JwtAuthConfig, userId: UserId, now: Instant): (String, Instant) = {
-    val accountToken = JwtAccessTokenIssuer.issue(config, userId, now)
-    accountToken.value -> accountToken.expiresAt
-  }
 
   def verify(token: String, secret: String, issuer: String, audience: String, clock: EffectClock[IO]): IO[Option[UserId]] =
     clock.realTimeInstant.map(instant => verifyAt(token, secret, issuer, audience, instant))

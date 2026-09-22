@@ -21,7 +21,7 @@ import java.util.UUID
 final class MongoSearchSessionRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction
-) extends SearchSessionRepository[IO] with MongoOperationalEventInsertion with MongoConflictWriteMapping {
+) extends SearchSessionRepository with MongoOperationalEventInsertion with MongoConflictWriteMapping {
   private val sessions = database.getCollection("search_sessions")
   private val outbox = database.getCollection("event_outbox")
 
@@ -73,7 +73,7 @@ final class MongoSearchSessionRepository(
 }
 
 final class MongoOperationalEventOutboxRepository(database: MongoDatabase)
-    extends OperationalEventOutboxRepository[IO] {
+    extends OperationalEventOutboxRepository {
   private val outbox = database.getCollection("event_outbox")
 
   override def claim(
@@ -221,7 +221,7 @@ final class MongoOperationalEventOutboxRepository(database: MongoDatabase)
     }
 }
 
-final class MongoConsumerReceiptRepository(database: MongoDatabase) extends ConsumerReceiptRepository[IO] {
+final class MongoConsumerReceiptRepository(database: MongoDatabase) extends ConsumerReceiptRepository {
   private val receipts = database.getCollection("consumer_receipts")
 
   override def exists(consumerGroup: String, eventId: UUID): IO[Either[RepositoryError, Boolean]] =
@@ -242,7 +242,7 @@ final class MongoConsumerReceiptRepository(database: MongoDatabase) extends Cons
     }
 }
 
-final class MongoEventQuarantineRepository(database: MongoDatabase) extends EventQuarantineRepository[IO] {
+final class MongoEventQuarantineRepository(database: MongoDatabase) extends EventQuarantineRepository {
   private val quarantine = database.getCollection("event_quarantine")
 
   override def save(record: EventQuarantineRecord): IO[Either[RepositoryError, Unit]] =

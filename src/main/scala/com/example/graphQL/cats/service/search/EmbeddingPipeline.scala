@@ -16,23 +16,23 @@ enum EmbeddingWork {
   case CandidateProfileChanged(id: UserId)
 }
 
-trait EmbeddingWorkPublisher[F[_]] {
+trait EmbeddingWorkPublisher {
   /** Signals work that was atomically persisted by the mutation transaction. */
-  def wake: F[Unit]
+  def wake: IO[Unit]
 }
 
 object EmbeddingWorkPublisher {
-  def noop[F[_]: cats.Applicative]: EmbeddingWorkPublisher[F] =
-    new EmbeddingWorkPublisher[F] {
-      override def wake: F[Unit] = cats.Applicative[F].unit
+  def noop: EmbeddingWorkPublisher =
+    new EmbeddingWorkPublisher {
+      override def wake: IO[Unit] = IO.unit
     }
 }
 
 final class DurableEmbeddingWorkPublisher private[search] (
-    repository: EmbeddingWorkRepository[IO],
+    repository: EmbeddingWorkRepository,
     wakeups: Queue[IO, Unit],
     now: IO[Instant]
-) extends EmbeddingWorkPublisher[IO] {
+) extends EmbeddingWorkPublisher {
   private[search] def offer(work: EmbeddingWork): IO[Unit] =
     now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _)).flatMap {
       case Right(()) => wake
@@ -51,10 +51,10 @@ object DurableEmbeddingWorkPublisher {
 
 final class EmbeddingPipeline(
     wakeups: Queue[IO, Unit],
-    work: EmbeddingWorkRepository[IO],
-    users: UserRepository[IO],
-    jobs: JobRepository[IO],
-    embeddings: EmbeddingService[IO],
+    work: EmbeddingWorkRepository,
+    users: UserRepository,
+    jobs: JobRepository,
+    embeddings: EmbeddingService,
     model: String,
     parallelism: Int,
     retryAttempts: Int,
@@ -165,10 +165,10 @@ final class EmbeddingPipeline(
 
 object EmbeddingPipeline {
   def resource(
-      work: EmbeddingWorkRepository[IO],
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      embeddings: EmbeddingService[IO],
+      work: EmbeddingWorkRepository,
+      users: UserRepository,
+      jobs: JobRepository,
+      embeddings: EmbeddingService,
       model: String,
       queueSize: Int,
       parallelism: Int,

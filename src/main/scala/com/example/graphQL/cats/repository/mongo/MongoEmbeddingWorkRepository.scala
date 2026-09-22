@@ -10,7 +10,7 @@ import java.time.Instant
 import java.util.Date
 
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
-final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends EmbeddingWorkRepository[IO] {
+final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends EmbeddingWorkRepository {
   private enum StoredWorkError {
     case InvalidDocument
   }

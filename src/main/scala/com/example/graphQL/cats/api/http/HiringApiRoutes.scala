@@ -2,6 +2,7 @@ package com.example.graphQL.cats.api.http
 
 import cats.data.{Kleisli, OptionT}
 import cats.effect.IO
+import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, HiringGraphQLServices, RequestContextFactory}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, HealthService, LogFields, ProbeResult}

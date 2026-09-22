@@ -3,15 +3,17 @@ package com.example.graphQL.cats
 import cats.data.NonEmptyList
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.data.Kleisli
+import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.api.graphql.{GraphQLDocumentCache, RequestContextFactory}
-import com.example.graphQL.cats.api.http.{AuthRateLimiter, ClientAddressResolver, HiringApiRoutes}
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
+import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
+import com.example.graphQL.cats.service.{Diagnostics, HealthService, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.config.{AppConfig, ConfigError}
 import com.example.graphQL.cats.infrastructure.logging.SafeDiagnostics
 import com.example.graphQL.cats.infrastructure.telemetry.TelemetryRuntime
 import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntime}
+
 import scala.util.control.NoStackTrace
 
 object Main extends IOApp {
@@ -31,15 +33,23 @@ object Main extends IOApp {
       IO.pure
     )))
     diagnostics <- Resource.eval(SafeDiagnostics.configure(mask && config.maskSensitive))
-    runtime <- MongoHiringRuntime.resource(config.mongoUri, config.mongoDatabase, diagnostics, config.vectorSearch,
-      config.jwtAuth, config.passwordHash, config.kafka, config.resetOnStart)
+    runtime <- MongoHiringRuntime.resource(MongoHiringRuntime.RuntimeConfig(
+      config.mongoUri,
+      config.mongoDatabase,
+      diagnostics,
+      config.vectorSearch,
+      config.jwtAuth,
+      config.passwordHash,
+      config.kafka,
+      config.resetOnStart
+    ))
     contextFactory <- RequestContextFactory.resource
     documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
     authenticator = new JwtActorAuthenticator(config.jwtAuth, runtime.userAuthenticator, cats.effect.Clock[IO])
     authenticate = Kleisli(authenticator.authenticate)
     routeBuilder = new HiringApiRoutes(
-      new com.example.graphQL.cats.service.HealthService(runtime.probe, diagnostics),
+      new HealthService(runtime.probe, diagnostics),
       diagnostics,
       HiringApiRoutes.Dependencies(
         runtime.services,

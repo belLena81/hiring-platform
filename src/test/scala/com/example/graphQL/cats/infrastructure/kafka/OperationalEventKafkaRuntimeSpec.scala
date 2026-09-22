@@ -42,8 +42,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   }
 
   private final case class Fakes(
-      receipts: ConsumerReceiptRepository[IO],
-      quarantines: EventQuarantineRepository[IO],
+      receipts: ConsumerReceiptRepository,
+      quarantines: EventQuarantineRepository,
       quarantined: Ref[IO, Vector[EventQuarantineRecord]]
   )
 
@@ -52,7 +52,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       receiptState <- Ref.of[IO, Map[(String, UUID), OperationalEventEnvelope]](Map.empty)
       quarantineState <- Ref.of[IO, Vector[EventQuarantineRecord]](Vector.empty)
     } yield {
-      val receipts = new ConsumerReceiptRepository[IO] {
+      val receipts = new ConsumerReceiptRepository {
         override def exists(group: String, id: UUID): IO[Either[RepositoryError, Boolean]] =
           receiptState.get.map(values => Right(values.contains(group -> id)))
         override def record(group: String, value: OperationalEventEnvelope, createdAt: Instant, expiresAt: Instant): IO[Either[RepositoryError, Boolean]] =
@@ -62,7 +62,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
             else (values.updated(key, value), Right(true))
           }
       }
-      val quarantines = new EventQuarantineRepository[IO] {
+      val quarantines = new EventQuarantineRepository {
         override def save(record: EventQuarantineRecord): IO[Either[RepositoryError, Unit]] =
           quarantineState.update(_ :+ record).as(Right(()))
       }

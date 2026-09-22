@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
-import com.example.graphQL.cats.api.http.AuthRateLimiter.Operation
+import com.example.graphQL.cats.api.admission.AuthRateLimiter.Operation
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
@@ -12,7 +12,7 @@ import sangria.schema.Context
 
 private[graphql] object HiringGraphQLAccountResolvers {
   def accountMe(context: Context[RequestContext, Unit]): IO[User] =
-    authenticatedMutation(context) { case (actor, hiring) => liftUseCase(hiring.accountService.me(actor)) }
+    authenticated(context) { case (actor, hiring) => raiseOnUseCaseError(hiring.accountService.me(actor)) }
 
   def signUp(context: Context[RequestContext, Unit]): IO[Any] =
     rateLimited(context, Operation.SignUp).flatMap { _ =>
@@ -55,7 +55,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
     }
 
   def updateMyProfile(context: Context[RequestContext, Unit]): IO[Any] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
         error => mutationResult(IO.pure(Left(error): Either[UseCaseError, User]))(identity),
@@ -65,7 +65,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
     }
 
   def deleteMyAccount(context: Context[RequestContext, Unit]): IO[Any] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       IO.realTimeInstant.flatMap(now => hiring.accountService.deleteMyAccount(actor, now)).flatTap {
         case Right(_) => context.ctx.invalidateViewer
         case Left(_) => IO.unit
@@ -74,14 +74,14 @@ private[graphql] object HiringGraphQLAccountResolvers {
     }
 
   def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val requested = context.arg(firstArgument)
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
       inputResult(userPage(requested, context.arg(afterArgument), status, role, CursorCodec.decode[UserCursor])).flatMap {
         case (request, pageSize) =>
-          liftUseCase(hiring.accountService.listUsers(actor, request))
+          raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
             .map(values => userConnection(values, pageSize))
       }
     }

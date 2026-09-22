@@ -10,6 +10,7 @@ import io.circe.Json
 import munit.CatsEffectSuite
 import org.bson.Document
 import org.http4s.{Method, Request, Status, Uri}
+import org.typelevel.ci.CIString
 import org.http4s.circe.*
 import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
@@ -142,14 +143,14 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               body <- response.as[Json]
               correlated <- records.get
             } yield {
-              val id = Some("unknown")
+              val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
               assertEquals(response.status, Status.Ok)
               assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
               val domainEvents = correlated.map(_._1).filterNot(event =>
                 Set(LogEvent.SpanSucceeded).contains(event))
               assertEquals(domainEvents, Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed,
                 LogEvent.GraphQLCompleted))
-              assert(id.nonEmpty)
+              assert(id.exists(value => scala.util.Try(UUID.fromString(value)).isSuccess))
               assert(correlated.forall(_._2 == id))
               assert(correlated.filter(_._1 == LogEvent.MongoProbeFailed).forall(_._3.get(LogField.ErrorType)
                 .contains("com.mongodb.MongoSecurityException")))

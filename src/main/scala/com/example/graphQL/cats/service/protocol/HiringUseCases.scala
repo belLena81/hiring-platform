@@ -25,8 +25,8 @@ trait HiringReadModel {
   def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): IO[Either[UseCaseError, List[ApplicationEvent]]]
 }
 
-trait UserAuthenticator[F[_]] {
-  def actorFor(userId: UserId): F[Either[RepositoryError, Option[ActorContext]]]
+trait UserAuthenticator {
+  def actorFor(userId: UserId): IO[Either[RepositoryError, Option[ActorContext]]]
 }
 
 trait JobUseCases {

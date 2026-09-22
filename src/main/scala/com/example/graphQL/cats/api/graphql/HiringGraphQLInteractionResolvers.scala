@@ -8,7 +8,7 @@ import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInteractionResolvers {
   def recordJobView(context: Context[RequestContext, Unit]): IO[Any] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       val input = context.arg(recordJobViewInputArgument)
       hiring.interactionService.fold(IO.pure(InteractionSuccess(true): Any)) { interaction =>
         IO.realTimeInstant.flatMap(now =>
@@ -19,7 +19,7 @@ private[graphql] object HiringGraphQLInteractionResolvers {
     }
 
   def recordSearchResultClick(context: Context[RequestContext, Unit]): IO[Any] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       val input = context.arg(recordSearchResultClickInputArgument)
       hiring.interactionService.fold(IO.pure(InteractionSuccess(true): Any)) { interaction =>
         IO.realTimeInstant.flatMap(now =>

@@ -15,10 +15,10 @@ import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate,
 import java.util.UUID
 
 final class SemanticSearchService(
-    users: UserRepository[IO],
-    jobs: JobRepository[IO],
-    embeddings: EmbeddingService[IO],
-    search: SemanticSearchRepository[IO],
+    users: UserRepository,
+    jobs: JobRepository,
+    embeddings: EmbeddingService,
+    search: SemanticSearchRepository,
     embeddingModel: String
 ) extends SearchUseCases {
   private val authorization = ActorAuthorization(users)
@@ -122,10 +122,10 @@ final class SemanticSearchService(
 
 object SemanticSearchService {
   def apply(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      embeddings: EmbeddingService[IO],
-      search: SemanticSearchRepository[IO],
+      users: UserRepository,
+      jobs: JobRepository,
+      embeddings: EmbeddingService,
+      search: SemanticSearchRepository,
       embeddingModel: String
   ): SemanticSearchService =
     new SemanticSearchService(users, jobs, embeddings, search, embeddingModel)

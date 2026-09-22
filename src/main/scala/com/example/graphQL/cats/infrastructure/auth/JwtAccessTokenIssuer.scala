@@ -8,7 +8,7 @@ import com.example.graphQL.cats.service.auth.{AccessTokenIssuanceError, AccessTo
 import java.time.Instant
 import pdi.jwt.{JwtAlgorithm, JwtCirce, JwtClaim}
 
-final class JwtAccessTokenIssuer(config: JwtAuthConfig) extends AccessTokenIssuer[IO] {
+final class JwtAccessTokenIssuer(config: JwtAuthConfig) extends AccessTokenIssuer {
   override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
     IO.delay(JwtAccessTokenIssuer.issue(config, user.id, now)).attempt.map(_.left.map(_ => AccessTokenIssuanceError.Unavailable))
 }

@@ -15,7 +15,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       for {
         size     <- inputResult(pageSize(context.arg(firstArgument)))
         searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        results  <- liftUseCase(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
+        results  <- raiseOnUseCaseError(service.semanticJobSearch(actor, context.arg(queryArgument), filter, size, searchId))
         _        <- saveSearchSession(hiring, actor.userId, "semanticJobSearch", searchId, filterJson(filter),
                       results.headOption.map(_.meta.model))(results)(
                       _.job.id.value.toString, _.score)
@@ -27,7 +27,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       for {
         size     <- inputResult(pageSize(context.arg(firstArgument)))
         searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        results  <- liftUseCase(service.recommendedJobs(actor, size, searchId))
+        results  <- raiseOnUseCaseError(service.recommendedJobs(actor, size, searchId))
         _        <- saveSearchSession(hiring, actor.userId, "recommendedJobs", searchId, Json.obj(),
                       results.headOption.map(_.meta.model))(results)(
                       _.job.id.value.toString, _.score)
@@ -40,7 +40,7 @@ private[graphql] object HiringGraphQLSearchResolvers {
       for {
         size     <- inputResult(pageSize(context.arg(firstArgument)))
         searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        results  <- liftUseCase(service.candidateMatches(actor, jobId, size, searchId))
+        results  <- raiseOnUseCaseError(service.candidateMatches(actor, jobId, size, searchId))
         _        <- saveSearchSession(hiring, actor.userId, "candidateMatches", searchId,
                       Json.obj("jobId" -> Json.fromString(jobId.value.toString)),
                       results.headOption.map(_.meta.model))(results)(

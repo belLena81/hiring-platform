@@ -168,14 +168,14 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   }
 
   private def semanticService(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      embeddings: EmbeddingService[IO],
-      search: SemanticSearchRepository[IO]
+      users: UserRepository,
+      jobs: JobRepository,
+      embeddings: EmbeddingService,
+      search: SemanticSearchRepository
   ): SemanticSearchService =
     SemanticSearchService(users, jobs, embeddings, search, embeddingModel = configuredModel)
 
-  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService[IO] {
+  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       IO.pure(result)
   }
@@ -184,7 +184,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     val unused: FakeEmbeddingService = FakeEmbeddingService(Left(EmbeddingError.ProviderUnavailable))
   }
 
-  private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService[IO] {
+  private final case class CountingEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       calls.update(_ + 1).as(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
   }
@@ -192,7 +192,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   private final case class FakeSearchRepository(
       jobs: List[RankedJob] = Nil,
       candidates: List[RankedCandidate] = Nil
-  ) extends SemanticSearchRepository[IO] {
+  ) extends SemanticSearchRepository {
     override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
       IO.pure(Right(jobs))
 
@@ -205,7 +205,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   private final case class RecordingSearchRepository(
       queries: Ref[IO, Vector[VectorSearchQuery]]
-  ) extends SemanticSearchRepository[IO] {
+  ) extends SemanticSearchRepository {
     override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
       queries.update(_ :+ query).as(Right(Nil))
 

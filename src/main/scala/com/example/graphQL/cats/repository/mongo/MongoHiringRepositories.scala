@@ -244,7 +244,7 @@ final class MongoUserRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
     embeddingWork: Option[MongoEmbeddingWorkRepository] = None
-) extends UserRepository[IO] with UserAccountRepository[IO] with MongoConflictWriteMapping with MongoOperationalEventInsertion {
+) extends UserRepository with UserAccountRepository with MongoConflictWriteMapping with MongoOperationalEventInsertion {
   private val collection = database.getCollection("users")
   private val registry = database.getCollection("account_registry")
   private val outbox = database.getCollection("event_outbox")
@@ -532,7 +532,7 @@ final class MongoJobRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
     embeddingWork: Option[MongoEmbeddingWorkRepository] = None
-) extends JobRepository[IO] with MongoConflictWriteMapping with MongoOperationalEventInsertion {
+) extends JobRepository with MongoConflictWriteMapping with MongoOperationalEventInsertion {
   private val collection = database.getCollection("jobs")
   private val outbox = database.getCollection("event_outbox")
 
@@ -702,7 +702,7 @@ final class MongoSemanticSearchRepository(
     candidateVectorIndex: String,
     jobLexicalIndex: String,
     numCandidates: Int
-) extends SemanticSearchRepository[IO] {
+) extends SemanticSearchRepository {
   private val jobs = database.getCollection("jobs")
   private val users = database.getCollection("users")
 
@@ -827,7 +827,7 @@ private[mongo] object MongoSemanticSearchResult {
 final class MongoApplicationRepository private (
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner
-) extends ApplicationRepository[IO] with MongoApplicationEventInsertion with MongoOperationalEventInsertion {
+) extends ApplicationRepository with MongoApplicationEventInsertion with MongoOperationalEventInsertion {
   private val collection = database.getCollection("applications")
   private val events = database.getCollection("application_events")
   private val jobs = database.getCollection("jobs")

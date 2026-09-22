@@ -158,9 +158,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
-      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
+      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService(users), FixedTestClock.at(ServiceFixtures.now))
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
-        authenticate = authenticator.authenticateDetailed).flatMap(defaultApp)
+        authenticate = authenticator.authenticate).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Admin)
       submitted <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
       listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
@@ -198,9 +198,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
-      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
+      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService(users), FixedTestClock.at(ServiceFixtures.now))
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
-        authenticate = authenticator.authenticateDetailed, hiringReady = IO.pure(ProbeResult.Unavailable)).flatMap(defaultApp)
+        authenticate = authenticator.authenticate, hiringReady = IO.pure(ProbeResult.Unavailable)).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       response <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       body <- response.as[Json]
@@ -230,9 +230,9 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
-      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService[IO](users), FixedTestClock.at(ServiceFixtures.now))
+      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService(users), FixedTestClock.at(ServiceFixtures.now))
       http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
-        authenticate = authenticator.authenticateDetailed,
+        authenticate = authenticator.authenticate,
         hiringReady = setupChecks.update(_ + 1).as(ProbeResult.Unavailable)).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       authenticatedHealth <- http(health.putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))

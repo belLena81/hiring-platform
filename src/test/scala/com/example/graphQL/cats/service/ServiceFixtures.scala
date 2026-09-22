@@ -54,7 +54,7 @@ private[cats] object ServiceFixtures {
   }
 
   final class InMemoryUsers(protected val ref: Ref[IO, Map[UserId, User]])
-      extends UserRepository[IO]
+      extends UserRepository
       with RefBackedLookup[UserId, User] {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
       findOne(id).map(Right(_))
@@ -76,7 +76,7 @@ private[cats] object ServiceFixtures {
       protected val ref: Ref[IO, Map[JobId, Job]],
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None
   )
-      extends JobRepository[IO]
+      extends JobRepository
       with RefBackedLookup[JobId, Job] {
     override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
       findOne(id).map(Right(_))
@@ -151,7 +151,7 @@ private[cats] object ServiceFixtures {
       nextCreateError: Ref[IO, Option[RepositoryError]],
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
       nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None
-  ) extends ApplicationRepository[IO] {
+  ) extends ApplicationRepository {
     override def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]] =
       applications.get.map(_.get(id)).map(Right(_))
 

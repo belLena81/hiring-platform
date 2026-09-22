@@ -24,7 +24,7 @@ final class VoyageEmbeddingService(
     dimension: Int,
     timeout: FiniteDuration,
     tracer: Tracer[IO] = Tracer.noop[IO]
-) extends EmbeddingService[IO] {
+) extends EmbeddingService {
   private given TextMapUpdater[Headers] with
     def updated(headers: Headers, key: String, value: String): Headers =
       headers.put(org.http4s.Header.Raw(CIString(key), value))
@@ -119,7 +119,7 @@ object VoyageEmbeddingService {
       dimension: Int,
       timeout: FiniteDuration,
       tracer: Tracer[IO] = Tracer.noop[IO]
-  ): Resource[IO, EmbeddingService[IO]] =
+  ): Resource[IO, EmbeddingService] =
     Resource.eval(IO.fromEither(
       Uri.fromString(endpoint).leftMap(_ => new IllegalArgumentException("Invalid Voyage embedding endpoint"))
     )).flatMap { uri =>

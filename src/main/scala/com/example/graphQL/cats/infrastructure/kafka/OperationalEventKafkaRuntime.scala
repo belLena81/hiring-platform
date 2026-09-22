@@ -23,9 +23,9 @@ import scala.concurrent.duration.*
 object OperationalEventKafkaRuntime {
   def resource(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository[IO],
-      receipts: ConsumerReceiptRepository[IO],
-      quarantine: EventQuarantineRepository[IO],
+      outbox: OperationalEventOutboxRepository,
+      receipts: ConsumerReceiptRepository,
+      quarantine: EventQuarantineRepository,
       diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, Unit] =
     if (!config.enabled) Resource.unit
@@ -39,7 +39,7 @@ object OperationalEventKafkaRuntime {
 
   private def publisherResource(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository[IO],
+      outbox: OperationalEventOutboxRepository,
       diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
     val settings =
@@ -65,7 +65,7 @@ object OperationalEventKafkaRuntime {
 
   private def publishBatch(
       config: KafkaConfig,
-      outbox: OperationalEventOutboxRepository[IO],
+      outbox: OperationalEventOutboxRepository,
       producer: KafkaProducer[IO, String, Array[Byte]]
   ): IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
@@ -100,8 +100,8 @@ object OperationalEventKafkaRuntime {
 
   private def consumerResource(
       config: KafkaConfig,
-      receipts: ConsumerReceiptRepository[IO],
-      quarantine: EventQuarantineRepository[IO],
+      receipts: ConsumerReceiptRepository,
+      quarantine: EventQuarantineRepository,
       diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
     val settings =
@@ -133,8 +133,8 @@ object OperationalEventKafkaRuntime {
 
   private[kafka] def handleRecord(
       config: KafkaConfig,
-      receipts: ConsumerReceiptRepository[IO],
-      quarantine: EventQuarantineRepository[IO],
+      receipts: ConsumerReceiptRepository,
+      quarantine: EventQuarantineRepository,
       topic: String,
       partition: Int,
       offset: Long,
@@ -161,7 +161,7 @@ object OperationalEventKafkaRuntime {
 
   private def quarantineRecord(
       config: KafkaConfig,
-      quarantine: EventQuarantineRepository[IO],
+      quarantine: EventQuarantineRepository,
       topic: String,
       partition: Int,
       offset: Long,

@@ -12,7 +12,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
   private val deletedUser = activeUser.copy(accountStatus = AccountStatus.Deleted, profile = None)
 
   test("resolve rejects a deleted user even when the actor role matches") {
-    val authorization = ActorAuthorization[IO](repository(Map(deletedUser.id -> deletedUser)))
+    val authorization = ActorAuthorization(repository(Map(deletedUser.id -> deletedUser)))
 
     authorization.resolve(ActorContext(deletedUser.id, UserRole.Recruiter)).map { result =>
       assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
@@ -20,7 +20,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
   }
 
   test("resolve accepts an active user with a matching actor role") {
-    val authorization = ActorAuthorization[IO](repository(Map(activeUser.id -> activeUser)))
+    val authorization = ActorAuthorization(repository(Map(activeUser.id -> activeUser)))
 
     authorization.resolve(ActorContext(activeUser.id, UserRole.Recruiter)).map { result =>
       assertEquals(result, Right(activeUser))
@@ -28,8 +28,8 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
   }
 
 
-  private def repository(values: Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]): UserRepository[IO] =
-    new UserRepository[IO] {
+  private def repository(values: Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]): UserRepository =
+    new UserRepository {
       override def find(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): IO[Either[RepositoryError, Option[User]]] =
         IO.pure(Right(values.get(id)))
 

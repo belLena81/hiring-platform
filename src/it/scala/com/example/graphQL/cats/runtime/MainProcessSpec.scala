@@ -18,6 +18,14 @@ class MainProcessSpec extends CatsEffectSuite {
 
   private val secret = "synthetic-secret"
   private val mainClass = "com.example.graphQL.cats.Main"
+  private val childClasspath = {
+    val integrationClasses = Path.of(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
+    val outputDirectory = integrationClasses.getParent
+    val projectOutputs = List(integrationClasses, outputDirectory.resolve("classes"), outputDirectory.resolve("test-classes"))
+      .filter(Files.isDirectory(_))
+      .map(_.toString)
+    (projectOutputs :+ System.getProperty("java.class.path")).mkString(java.io.File.pathSeparator)
+  }
 
   private def listeningSocket(host: String = "127.0.0.1"): Resource[IO, ServerSocket] =
     Resource.make(IO.blocking(new ServerSocket(0, 1, InetAddress.getByName(host)))) { socket =>
@@ -56,7 +64,7 @@ class MainProcessSpec extends CatsEffectSuite {
           "-Dfile.encoding=UTF-8",
           s"-Dconfig.file=${configFile.toAbsolutePath}",
           "-Djdk.httpclient.allowRestrictedHeaders=connection",
-          "-cp", System.getProperty("java.class.path"), entryPoint
+          "-cp", childClasspath, entryPoint
         ) ++ arguments)*).directory(directory.toFile).redirectOutput(stdout.toFile).redirectError(stderr.toFile)
         val childEnvironment = builder.environment()
         childEnvironment.clear()

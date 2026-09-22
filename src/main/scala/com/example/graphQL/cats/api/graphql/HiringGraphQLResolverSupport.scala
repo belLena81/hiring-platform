@@ -3,7 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.data.NonEmptyList
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.api.http.AuthRateLimiter
+import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
 import com.example.graphQL.cats.domain.model.*
@@ -22,7 +22,7 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 private[graphql] object HiringGraphQLResolverSupport {
-  def liftUseCase[A](value: IO[Either[UseCaseError, A]]): IO[A] =
+  def raiseOnUseCaseError[A](value: IO[Either[UseCaseError, A]]): IO[A] =
     value.flatMap(_.fold(error => IO.raiseError(RequestContext.ReadFailure(error)), IO.pure))
 
   def inputResult[A](value: Either[GraphQLFailure, A]): IO[A] =
@@ -82,7 +82,7 @@ private[graphql] object HiringGraphQLResolverSupport {
       hiring.searchSessions.save(session, OperationalEvents.searchPerformed(searchEventId(searchId), session)).void
     }.handleError(_ => ())
 
-  def authenticatedMutation[A](context: Context[RequestContext, Unit])(
+  def authenticated[A](context: Context[RequestContext, Unit])(
       action: (ActorContext, HiringGraphQLServices) => IO[A]
   ): IO[A] = authenticated(context).flatMap(action.tupled)
 

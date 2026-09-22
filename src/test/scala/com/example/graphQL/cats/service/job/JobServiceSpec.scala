@@ -92,7 +92,7 @@ class JobServiceSpec extends CatsEffectSuite {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       wakes <- Ref.of[IO, Int](0)
-      publisher = new EmbeddingWorkPublisher[IO] {
+      publisher = new EmbeddingWorkPublisher {
         override def wake: IO[Unit] = wakes.update(_ + 1)
       }
       service = JobService(InMemoryUsers(users), InMemoryJobs(jobs), publisher)

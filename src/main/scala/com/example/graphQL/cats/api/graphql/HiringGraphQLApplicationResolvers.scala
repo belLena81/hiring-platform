@@ -11,37 +11,37 @@ import sangria.schema.Context
 
 private[graphql] object HiringGraphQLApplicationResolvers {
   def myApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       for {
         (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), CursorCodec.decode[ApplicationCursor]))
-        values                   <- liftUseCase(hiring.applicationService.myApplications(actor, pageRequest))
+        values                   <- raiseOnUseCaseError(hiring.applicationService.myApplications(actor, pageRequest))
       } yield applicationConnection(values, requested)
     }
 
   def jobApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val jobId = context.arg(jobIdArgument)
       for {
         (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), CursorCodec.decode[ApplicationCursor]))
-        values                   <- liftUseCase(hiring.applicationService.jobApplications(actor, jobId, pageRequest))
+        values                   <- raiseOnUseCaseError(hiring.applicationService.jobApplications(actor, jobId, pageRequest))
       } yield applicationConnection(values, requested)
     }
 
   def applicationHistory(context: Context[RequestContext, Unit]): IO[Connection[ApplicationEvent]] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val applicationId = context.arg(applicationIdArgument)
       for {
         (pageRequest, requested) <- inputResult(pageEvent(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decode[ApplicationEventCursor]))
-        _                        <- liftUseCase(hiring.readModel.canViewApplication(actor, applicationId))
-        values                   <- liftUseCase(hiring.readModel.applicationHistory(applicationId, pageRequest))
+        _                        <- raiseOnUseCaseError(hiring.readModel.canViewApplication(actor, applicationId))
+        values                   <- raiseOnUseCaseError(hiring.readModel.applicationHistory(applicationId, pageRequest))
       } yield eventConnection(values, requested)
     }
 
   def submitApplication(context: Context[RequestContext, Unit]): IO[Any] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       val jobId = context.arg(submitApplicationInputArgument).jobId
       timestamped { (now, applicationId) =>
         IO.randomUUID.flatMap { eventId =>
@@ -78,7 +78,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       feedback: Option[String],
       reason: Option[String]
   ): IO[Any] =
-    authenticatedMutation(context) { case (actor, hiring) =>
+    authenticated(context) { case (actor, hiring) =>
       timestamped { (now, eventId) =>
         hiring.applicationService.changeStatus(actor, applicationId, status, feedback, reason, ApplicationEventId(eventId), now)
       }.flatMap(result => mutationResult(IO.pure(result))(identity))

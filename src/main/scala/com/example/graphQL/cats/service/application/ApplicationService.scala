@@ -20,9 +20,9 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 final class ApplicationService(
-    users: UserRepository[IO],
-    jobs: JobRepository[IO],
-    applications: ApplicationRepository[IO]
+    users: UserRepository,
+    jobs: JobRepository,
+    applications: ApplicationRepository
 ) extends ApplicationUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
@@ -104,9 +104,9 @@ final class ApplicationService(
 
 object ApplicationService {
   def apply(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      applications: ApplicationRepository[IO]
+      users: UserRepository,
+      jobs: JobRepository,
+      applications: ApplicationRepository
   ): ApplicationService =
     new ApplicationService(users, jobs, applications)
 }

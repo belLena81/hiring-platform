@@ -15,11 +15,11 @@ import java.text.Normalizer
 import java.time.Instant
 
 final class UserAccountService(
-    users: UserRepository[IO],
-    accounts: UserAccountRepository[IO],
-    hasher: PasswordHasher[IO],
-    tokenIssuer: AccessTokenIssuer[IO],
-    embeddingWork: EmbeddingWorkPublisher[IO] = EmbeddingWorkPublisher.noop[IO]
+    users: UserRepository,
+    accounts: UserAccountRepository,
+    hasher: PasswordHasher,
+    tokenIssuer: AccessTokenIssuer,
+    embeddingWork: EmbeddingWorkPublisher = EmbeddingWorkPublisher.noop
 ) extends AccountUseCases {
   private val authorization = ActorAuthorization(users)
 

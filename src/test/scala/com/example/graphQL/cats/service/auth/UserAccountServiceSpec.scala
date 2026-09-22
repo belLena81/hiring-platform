@@ -96,7 +96,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   }
 
   test("token issuance failure does not persist an account and is not a repository failure") {
-    val unavailableIssuer = new AccessTokenIssuer[IO] {
+    val unavailableIssuer = new AccessTokenIssuer {
       override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
         IO.pure(Left(AccessTokenIssuanceError.Unavailable))
     }
@@ -176,7 +176,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       unknownVerifications <- Ref.of[IO, Int](0)
       accounts <- TestAccounts.create(initialized = true)
-      hasher = new PasswordHasher[IO] {
+      hasher = new PasswordHasher {
         override def hash(password: String): IO[String] = IO.pure(s"hash:$password")
         override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(false)
         override def verifyUnknown(password: String): IO[Unit] = unknownVerifications.update(_ + 1)
@@ -205,18 +205,18 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     } yield assertEquals(result, Right(()))
   }
 
-  private object TestHasher extends PasswordHasher[IO] {
+  private object TestHasher extends PasswordHasher {
     override def hash(password: String): IO[String] = IO.pure(s"hash:$password")
     override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(encoded == s"hash:$password")
     override def verifyUnknown(password: String): IO[Unit] = IO.unit
   }
 
-  private object TestTokenIssuer extends AccessTokenIssuer[IO] {
+  private object TestTokenIssuer extends AccessTokenIssuer {
     override def issue(user: User, now: Instant): IO[Either[AccessTokenIssuanceError, AccountToken]] =
       IO.pure(Right(AccountToken(s"token-${user.id.value}", now.plusSeconds(900))))
   }
 
-  private final class TestUsers(values: Map[UserId, User]) extends UserRepository[IO] {
+  private final class TestUsers(values: Map[UserId, User]) extends UserRepository {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(ids.flatMap(values.get)))
@@ -226,7 +226,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   private final class TestAccounts(
       initializedState: Boolean,
       val values: Ref[IO, Map[String, AccountCredentials]]
-  ) extends UserAccountRepository[IO] {
+  ) extends UserAccountRepository {
     override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
     override def initialized: IO[Either[RepositoryError, Boolean]] = IO.pure(Right(initializedState))
     override def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =

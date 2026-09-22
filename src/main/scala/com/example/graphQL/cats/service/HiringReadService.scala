@@ -11,9 +11,9 @@ import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.shared.pagination.ApplicationEventPageRequest
 
 final class HiringReadService(
-    users: UserRepository[IO],
-    jobs: JobRepository[IO],
-    applications: ApplicationRepository[IO]
+    users: UserRepository,
+    jobs: JobRepository,
+    applications: ApplicationRepository
 ) extends HiringReadModel {
   private val authorization = ActorAuthorization(users)
 
@@ -79,9 +79,9 @@ final class HiringReadService(
 
 object HiringReadService {
   def apply(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      applications: ApplicationRepository[IO]
+      users: UserRepository,
+      jobs: JobRepository,
+      applications: ApplicationRepository
   ): HiringReadService =
     new HiringReadService(users, jobs, applications)
 }

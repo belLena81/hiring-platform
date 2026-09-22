@@ -15,9 +15,9 @@ import java.time.Instant
 import java.util.UUID
 
 final class OperationalTelemetryService(
-    users: UserRepository[IO],
-    jobs: JobRepository[IO],
-    searchSessions: SearchSessionRepository[IO]
+    users: UserRepository,
+    jobs: JobRepository,
+    searchSessions: SearchSessionRepository
 ) extends InteractionUseCases {
   private val authorization = ActorAuthorization(users)
 
@@ -70,9 +70,9 @@ final class OperationalTelemetryService(
 
 object OperationalTelemetryService {
   def apply(
-      users: UserRepository[IO],
-      jobs: JobRepository[IO],
-      searchSessions: SearchSessionRepository[IO]
+      users: UserRepository,
+      jobs: JobRepository,
+      searchSessions: SearchSessionRepository
   ): OperationalTelemetryService =
     new OperationalTelemetryService(users, jobs, searchSessions)
 }

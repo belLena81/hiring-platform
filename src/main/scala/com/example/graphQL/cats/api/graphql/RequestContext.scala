@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
-import com.example.graphQL.cats.api.http.AuthRateLimiter
+import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, Diagnostics, LogEvent, LogFields, ProbeResult}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
@@ -23,7 +23,7 @@ final case class HiringGraphQLServices(
     accountService: AccountUseCases,
     semanticSearchService: Option[SearchUseCases] = None,
     interactionService: Option[InteractionUseCases] = None,
-    searchSessions: SearchSessionRepository[IO] = SearchSessionRepository.noop[IO]
+    searchSessions: SearchSessionRepository = SearchSessionRepository.noop
 )
 
 final case class EmailVisibility(userId: UserId)
@@ -41,27 +41,23 @@ final case class RequestContextParameters(
 )
 
 final class RequestContext private (
+    parameters: RequestContextParameters,
     dispatcher: Dispatcher[IO],
     closed: Deferred[IO, Unit],
-    probe: IO[ProbeResult],
-    hiringReady: IO[ProbeResult],
-    val actor: Option[ActorContext],
-    viewer: Option[IO[Either[UseCaseError, AuthenticatedActor]]],
-    viewerInvalidated: Ref[IO, Boolean],
-    val hiring: HiringGraphQLServices,
-    tracer: Tracer[IO],
     spanContext: Option[SpanContext],
-    diagnostics: Diagnostics,
-    requestId: Option[String],
-    clientAddress: Option[IpAddress],
-    rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]]
+    readinessProbe: IO[ProbeResult],
+    hiringReadinessProbe: IO[ProbeResult],
+    viewer: Option[IO[Either[UseCaseError, AuthenticatedActor]]],
+    viewerInvalidated: Ref[IO, Boolean]
 ) {
-  def readiness: IO[ProbeResult] = probe
+  def hiring: HiringGraphQLServices = parameters.hiring
 
-  def hiringAvailable: IO[ProbeResult] = hiringReady
+  def readiness: IO[ProbeResult] = readinessProbe
+
+  def hiringAvailable: IO[ProbeResult] = hiringReadinessProbe
 
   private[graphql] def authenticatedActor: IO[AuthenticatedActor] =
-    (actor, viewer) match {
+    (parameters.actor, viewer) match {
       case (Some(_), Some(resolveViewer)) =>
         viewerInvalidated.get.flatMap {
           case true => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)))
@@ -73,7 +69,7 @@ final class RequestContext private (
   private[graphql] def invalidateViewer: IO[Unit] = viewerInvalidated.set(true)
 
   private[graphql] def rateLimited(operation: AuthRateLimiter.Operation): IO[Unit] =
-    rateLimit(AuthRateLimiter.Key(clientAddress, operation)).flatMap {
+    parameters.rateLimit(AuthRateLimiter.Key(parameters.clientAddress, operation)).flatMap {
       case Right(()) => IO.unit
       case Left(rejection) => IO.raiseError(RequestContext.RateLimited(rejection.retryAfterSeconds))
     }
@@ -83,29 +79,29 @@ final class RequestContext private (
 
   private[graphql] def unsafeFieldToFuture[A](name: String, action: IO[A]) =
     dispatcher.unsafeToFuture(requestScoped(
-      Diagnostics.spanWith(diagnostics, s"graphql.field.$name", requestId = requestId)(action)(using tracer)))
+      Diagnostics.spanWith(parameters.diagnostics, s"graphql.field.$name", requestId = parameters.requestId)(action)(using parameters.tracer)))
 
   private def requestScoped[A](action: IO[A]): IO[A] =
-    IO.race(closed.get, spanContext.fold(action)(tracer.childScope(_)(action))).flatMap {
+    IO.race(closed.get, spanContext.fold(action)(parameters.tracer.childScope(_)(action))).flatMap {
       case Left(_) => IO.raiseError(RequestContext.RequestClosed)
       case Right(value) => IO.pure(value)
     }
 
   private[graphql] def reportExecutionFailure(error: Throwable): Unit =
-    try dispatcher.unsafeRunAndForget(diagnostics.emit(LogEvent.RuntimeFailed, requestId, fields = LogFields.failure(error)))
+    try dispatcher.unsafeRunAndForget(parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error)))
     catch case _: Throwable => ()
 
   def users(ids: List[UserId]): IO[List[User]] =
-    read(hiring.readModel.users(ids.distinct))
+    read(parameters.hiring.readModel.users(ids.distinct))
 
   def jobs(ids: List[JobId]): IO[List[Job]] =
-    read(hiring.readModel.jobs(ids.distinct))
+    read(parameters.hiring.readModel.jobs(ids.distinct))
 
   def visibleEmailUsers(ids: List[UserId]): IO[List[EmailVisibility]] =
-    actor match {
+    parameters.actor match {
       case None => IO.pure(Nil)
       case Some(_) => authenticatedActor.flatMap(current =>
-        read(hiring.readModel.canViewUserEmails(current, ids.distinct)).map(_.toList.map(EmailVisibility(_))))
+        read(parameters.hiring.readModel.canViewUserEmails(current, ids.distinct)).map(_.toList.map(EmailVisibility(_))))
     }
 
   private def read[A](result: IO[Either[UseCaseError, A]]): IO[A] =
@@ -142,8 +138,7 @@ object RequestContext {
       memoizedHiringReady <- Resource.eval(parameters.ensureHiringReady.memoize)
       memoizedViewer <- Resource.eval(parameters.actor.traverse(actor => parameters.hiring.readModel.viewer(actor).memoize))
       viewerInvalidated <- Resource.eval(Ref.of[IO, Boolean](false))
-      context = new RequestContext(dispatcher, closed, memoized, memoizedHiringReady, parameters.actor, memoizedViewer, viewerInvalidated, parameters.hiring,
-        parameters.tracer, spanContext, parameters.diagnostics, parameters.requestId, parameters.clientAddress, parameters.rateLimit)
+      context = new RequestContext(parameters, dispatcher, closed, spanContext, memoized, memoizedHiringReady, memoizedViewer, viewerInvalidated)
       _ <- Resource.onFinalize(closed.complete(()).void)
     } yield context
 }

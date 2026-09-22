@@ -1,16 +1,16 @@
 package com.example.graphQL.cats.service.auth
 
-import cats.Monad
 import cats.syntax.all.*
+import cats.effect.IO
 import com.example.graphQL.cats.repository.protocol.UserRepository
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, User, UserRole}
 
-final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
-  def resolve(actor: ActorContext, allowDeleted: Boolean = false): F[Either[UseCaseError, User]] =
+final class ActorAuthorization(users: UserRepository) {
+  def resolve(actor: ActorContext, allowDeleted: Boolean = false): IO[Either[UseCaseError, User]] =
     actor match {
-      case authenticated: AuthenticatedActor => Monad[F].pure(validate(authenticated.claims, authenticated.viewer, allowDeleted))
+      case authenticated: AuthenticatedActor => IO.pure(validate(authenticated.claims, authenticated.viewer, allowDeleted))
       case _ => users.find(actor.userId).map(
         _.leftMap(UseCaseError.Repository.apply)
           .flatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
@@ -37,6 +37,6 @@ final class ActorAuthorization[F[_]: Monad](users: UserRepository[F]) {
 }
 
 object ActorAuthorization {
-  def apply[F[_]: Monad](users: UserRepository[F]): ActorAuthorization[F] =
+  def apply(users: UserRepository): ActorAuthorization =
     new ActorAuthorization(users)
 }

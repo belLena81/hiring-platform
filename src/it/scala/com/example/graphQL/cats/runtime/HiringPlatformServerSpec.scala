@@ -89,7 +89,9 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
     parse(response.body()).toOption.getOrElse(fail("Expected a JSON response"))
 
   private def assertCorrelation(response: HttpResponse[String]): Unit = {
-    assert(!response.headers().firstValue("X-Request-ID").isPresent)
+    val header = response.headers().firstValue("X-Request-ID")
+    assert(header.isPresent)
+    assert(scala.util.Try(java.util.UUID.fromString(header.get())).isSuccess)
   }
 
   test("P1-AC02/04 live health, readiness and GraphQL use the served contract") {
