@@ -60,9 +60,9 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
     else {
       request.attemptAs[GraphQLRequest](using jsonOf[IO, GraphQLRequest]).foldF(
         _ => rejected(HttpRejection.InvalidRequest, requestId, mediaType = mediaType),
-        parsed => dependencies.documentCache.document(parsed.query).fold(
-          _ => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType),
-          document => {
+        parsed => dependencies.documentCache.document(parsed.query).flatMap {
+          case Left(_) => rejected(HttpRejection.InvalidQuery, requestId, mediaType = mediaType)
+          case Right(document) => {
             val context = dependencies.contextFactory.resource(RequestContextParameters(
               service.readiness(Some(requestId)), actor, dependencies.hiring, dependencies.ensureHiringReady,
               tracer, diagnostics, Some(requestId), dependencies.clientAddressResolver.resolve(request),
@@ -76,7 +76,7 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
               case Left(HiringGraphQLSchema.Failure.Internal) => rejected(HttpRejection.Internal, requestId, mediaType = mediaType)
             }
           }
-        )
+        }
       )
     }
   }
@@ -112,8 +112,8 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
 
   private val authenticatedGraphQL: HttpRoutes[IO] = {
     val graphqlRoutes: AuthedRoutes[Option[ActorContext], IO] = AuthedRoutes.of {
-      case authedRequest @ POST -> Root / "graphql" as actor =>
-        val request = authedRequest.req
+      // Method and path are already enforced by the outer Kleisli guard below.
+      case request as actor =>
         HttpMiddleware.requestId(request).flatMap { requestId =>
           MediaTypeNegotiation.selectResponseMediaType(request.headers.get[Accept]) match {
             case Some(mediaType) => graphql(request, requestId, mediaType, actor)
@@ -124,6 +124,8 @@ private[http] final class GraphQLHttpRoutes(service: HealthService, diagnostics:
     val middleware: AuthMiddleware[IO, Option[ActorContext]] =
       AuthMiddleware(dependencies.authenticate, authenticationFailures)
     Kleisli { request =>
+      // AuthMiddleware authenticates every request passed to it. Keep this guard before
+      // the middleware so unrelated requests fall through instead of returning 401.
       if (request.method == Method.POST && request.uri.path == HiringHttpPaths.GraphQLPath) middleware(graphqlRoutes)(request)
       else OptionT.none[IO, Response[IO]]
     }

@@ -1,0 +1,51 @@
+package com.example.graphQL.cats.api.graphql
+
+import cats.effect.IO
+import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.DomainError
+import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure}
+import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.{AccountError, AuthenticationError, AvailabilityError, SearchError, UseCaseError}
+import munit.CatsEffectSuite
+
+final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
+  test("uses one failure mapping to classify expected and exceptional errors") {
+    val expected = List(
+      UseCaseError.Account(AccountError.NameTaken),
+      UseCaseError.Domain(DomainFailure.NotFound("job")),
+      UseCaseError.Repository(RepositoryError.Conflict),
+      UseCaseError.ValidationFailed(cats.data.NonEmptyList.one(com.example.graphQL.cats.domain.error.DomainValidationError.BlankField("name")))
+    )
+    val exceptional = List(
+      UseCaseError.Authentication(AuthenticationError.Unauthorized),
+      UseCaseError.Availability(AvailabilityError.ServiceNotReady),
+      UseCaseError.Domain(DomainFailure.Forbidden),
+      UseCaseError.Repository(RepositoryError.Unavailable),
+      UseCaseError.Search(SearchError.ProviderUnavailable)
+    )
+
+    IO {
+      assert(expected.forall(error => !HiringGraphQLResolverSupport.toGraphQLFailure(error).exceptional))
+      assert(exceptional.forall(error => HiringGraphQLResolverSupport.toGraphQLFailure(error).exceptional))
+    }
+  }
+
+  test("turns expected mutation failures into typed domain errors") {
+    for {
+      account <- HiringGraphQLResolverSupport.mutationResult(
+        Left(UseCaseError.Account(AccountError.NameTaken)): Either[UseCaseError, String])
+      repository <- HiringGraphQLResolverSupport.mutationResult(
+        Left(UseCaseError.Repository(RepositoryError.Conflict)): Either[UseCaseError, String])
+    } yield {
+      assertEquals(account, DomainError("REGISTRATION_FAILED", "Registration failed"))
+      assertEquals(repository, DomainError("CONFLICT", "Conflict"))
+    }
+  }
+
+  test("raises exceptional mutation failures as read failures") {
+    val error = UseCaseError.Repository(RepositoryError.Unavailable)
+    HiringGraphQLResolverSupport.mutationResult(Left(error): Either[UseCaseError, String]).attempt.map {
+      case Left(RequestContext.ReadFailure(actual)) => assertEquals(actual, error)
+      case result => fail(s"Expected a read failure, received $result")
+    }
+  }
+}

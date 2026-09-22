@@ -691,6 +691,24 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     }
   }
 
+  test("unrelated protected paths bypass GraphQL authentication and use fallback") {
+    for {
+      authenticationCalls <- Ref.of[IO, Int](0)
+      http <- buildRoutes(
+        new HealthService(new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }, Diagnostics.noop),
+        Diagnostics.noop,
+        authenticate = _ => authenticationCalls.update(_ + 1).as(
+          Left(com.example.graphQL.cats.api.auth.AuthFailure.MalformedCredentials))
+      ).flatMap(defaultApp)
+      response <- http(Request[IO](Method.GET, Uri.unsafeFromString("/unrelated"))
+        .putHeaders(Header.Raw(CIString("Authorization"), "malformed")))
+      calls <- authenticationCalls.get
+    } yield {
+      assertEquals(response.status, Status.NotFound)
+      assertEquals(calls, 0)
+    }
+  }
+
   test("GraphQL completion shares the HTTP and readiness diagnostic request ID") {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)

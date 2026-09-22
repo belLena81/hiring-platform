@@ -1,15 +1,17 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.UserCursor
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor, JobCursor}
-import munit.FunSuite
+import munit.CatsEffectSuite
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 import java.util.{Base64, UUID}
 
-final class CursorCodecSpec extends FunSuite {
+final class CursorCodecSpec extends CatsEffectSuite {
   private val secret = "test-cursor-secret-01234567890123456789"
   private given CursorCodec.CursorKey = CursorCodec.keyFromSecret(secret)
   private val instant = Instant.parse("2026-09-17T08:00:00Z")
@@ -20,6 +22,20 @@ final class CursorCodecSpec extends FunSuite {
     assertEquals(CursorCodec.decode[ApplicationCursor](CursorCodec.encode(ApplicationCursor(instant, ApplicationId(id)))), Right(ApplicationCursor(instant, ApplicationId(id))))
     assertEquals(CursorCodec.decode[ApplicationEventCursor](CursorCodec.encode(ApplicationEventCursor(instant, ApplicationEventId(id)))), Right(ApplicationEventCursor(instant, ApplicationEventId(id))))
     assertEquals(CursorCodec.decode[UserCursor](CursorCodec.encode(UserCursor(instant, UserId(id)))), Right(UserCursor(instant, UserId(id))))
+  }
+
+  test("a cursor key remains safe for concurrent signing and verification") {
+    val cursor = JobCursor(instant, JobId(id))
+    val expected = CursorCodec.encode(cursor)
+
+    List.fill(256)(()).parTraverse { _ =>
+      IO.cede *> IO {
+        val encoded = CursorCodec.encode(cursor)
+        (encoded, CursorCodec.decode[JobCursor](encoded))
+      }
+    }.map { results =>
+      assert(results.forall { case (encoded, decoded) => encoded == expected && decoded == Right(cursor) })
+    }
   }
 
   test("cursors are one compact base64url envelope rather than JWTs") {

@@ -51,7 +51,7 @@ object SearchSessionHandoff {
         case Right(Some(claim)) =>
           repository.complete(claim, now).flatMap {
             case Right(()) => IO.unit
-            case Left(_) if claim.attempts + 1 >= config.maxAttempts =>
+            case Left(_) if claim.attempts >= config.maxAttempts =>
               repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now).void
             case Left(_) => repository.retry(claim, now.plusMillis(config.retryDelay.toMillis)).void
           }

@@ -11,14 +11,21 @@ object MediaTypeNegotiation {
 
   def selectResponseMediaType(accept: Option[Accept]): Option[MediaType] =
     accept.fold(Option(supported.head)) { header =>
-      supported.zipWithIndex.flatMap { case (mediaType, declarationIndex) =>
-        header.values.toList.zipWithIndex
+      val entries = header.values.toList.zipWithIndex
+
+      def qualityFor(mediaType: MediaType): Option[QValue] =
+        entries
           .filter { case (entry, _) => entry.mediaRange.satisfiedBy(mediaType) }
           .maxByOption { case (entry, headerIndex) => (specificity(entry.mediaRange), -headerIndex) }
-          .collect { case (entry, _) if entry.qValue > QValue.Zero =>
-            (mediaType, entry.qValue, declarationIndex)
-          }
-      }.maxByOption { case (_, quality, declarationIndex) => (quality, -declarationIndex) }.map(_._1)
+          .collect { case (entry, _) if entry.qValue > QValue.Zero => entry.qValue }
+
+      (qualityFor(graphqlResponse), qualityFor(application.json)) match {
+        case (Some(graphqlQuality), Some(jsonQuality)) if graphqlQuality >= jsonQuality => Some(graphqlResponse)
+        case (Some(_), Some(_)) => Some(application.json)
+        case (Some(_), None) => Some(graphqlResponse)
+        case (None, Some(_)) => Some(application.json)
+        case _ => None
+      }
     }
 
   private def specificity(mediaRange: MediaRange): Int = mediaRange match {

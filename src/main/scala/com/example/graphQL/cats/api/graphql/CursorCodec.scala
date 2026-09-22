@@ -22,9 +22,10 @@ private[cats] object CursorCodec {
 
   final class CursorKey private[graphql] (private val bytes: Array[Byte]) {
     private val keySpec = new SecretKeySpec(bytes, HmacAlgorithm)
+    private val macs: ThreadLocal[Mac] = ThreadLocal.withInitial(() => Mac.getInstance(HmacAlgorithm))
 
     private[graphql] def sign(payload: String): Array[Byte] = {
-      val mac = Mac.getInstance(HmacAlgorithm)
+      val mac = macs.get()
       mac.init(keySpec)
       mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
     }

@@ -78,9 +78,10 @@ object TestGraphQLSupport {
       diagnostics = diagnostics, requestId = requestId)))
 
   def parseAndExecute(request: GraphQLRequest, context: RequestContext): IO[Either[HiringGraphQLSchema.Failure, Json]] =
-    GraphQLDocumentCache.resource.use(_.document(request.query).fold(
-      failure => IO.pure(Left(failure)),
-      document => HiringGraphQLSchema.executeInContext(request, document, context)))
+    GraphQLDocumentCache.resource.use(_.document(request.query).flatMap {
+      case Left(failure) => IO.pure(Left(failure))
+      case Right(document) => HiringGraphQLSchema.executeInContext(request, document, context)
+    })
 
   def dependencies(
       hiring: HiringGraphQLServices = emptyServices,

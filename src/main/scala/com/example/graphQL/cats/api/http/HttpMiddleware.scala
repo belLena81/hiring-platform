@@ -31,10 +31,9 @@ object HttpMiddleware {
           LogField.Reason -> failure.reason,
           LogField.Status -> response.status.code.toString)))
       }.map { response =>
-        val cleared = response.removeHeader(CIString("X-Request-ID"))
-        cleared.withHeaders(
-          cleared.headers ++
-          SecurityHeaders.put(Header.Raw(ci"X-Request-ID", correlationId)))
+        response
+          .removeHeader(CIString("X-Request-ID"))
+          .putHeaders(SecurityHeaders, Header.Raw(ci"X-Request-ID", correlationId))
       }
     }
   }

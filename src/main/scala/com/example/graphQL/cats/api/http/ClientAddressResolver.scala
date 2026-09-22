@@ -17,7 +17,7 @@ final class ClientAddressResolver private (trustedProxyCidrs: List[Cidr[IpAddres
 
   private def forwardedAddress[F[_]](request: Request[F]): Option[IpAddress] =
     request.headers.get[Forwarded].flatMap { header =>
-      firstClientAddress(header.values.toList.reverse.iterator.map(concreteAddress))
+      firstClientAddress(header.values.toList.reverseIterator.map(concreteAddress))
     }
 
   private def xForwardedForAddress[F[_]](request: Request[F]): Option[IpAddress] =
@@ -26,7 +26,7 @@ final class ClientAddressResolver private (trustedProxyCidrs: List[Cidr[IpAddres
     }
 
   private def firstClientAddress(addresses: Iterator[Option[IpAddress]]): Option[IpAddress] =
-    addresses.collectFirst { case Some(address) if !isTrusted(address) => address }
+    addresses.flatten.find(address => !isTrusted(address))
 
   private def concreteAddress(element: Forwarded.Element): Option[IpAddress] =
     element.maybeFor.flatMap { node =>

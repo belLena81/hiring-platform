@@ -27,10 +27,10 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
       documentCache: GraphQLDocumentCache,
       context: Resource[IO, RequestContext]
   ): IO[Either[HiringGraphQLSchema.Failure, Json]] =
-    documentCache.document(request.query).fold(
-      failure => IO.pure(Left(failure)),
-      document => context.use(HiringGraphQLSchema.executeInContext(request, document, _))
-    )
+    documentCache.document(request.query).flatMap {
+      case Left(failure) => IO.pure(Left(failure))
+      case Right(document) => context.use(HiringGraphQLSchema.executeInContext(request, document, _))
+    }
 
   test("served SDL matches the deterministic contract fixture") {
     fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))

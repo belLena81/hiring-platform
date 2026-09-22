@@ -14,7 +14,7 @@ private[graphql] object HiringGraphQLModel {
     UserRole.values.find(_.toString.equalsIgnoreCase(value)).toRight(s"Unknown user role: $value")
   }
 
-  final case class GraphQLFailure(code: String, message: String)
+  final case class GraphQLFailure(code: String, message: String, exceptional: Boolean)
   sealed trait UserError {
     def code: String
     def message: String

@@ -108,7 +108,7 @@ final class RequestContext private (
     }
 
   private def read[A](result: IO[Either[UseCaseError, A]]): IO[A] =
-    result.flatMap(_.fold(error => IO.raiseError(RequestContext.ReadFailure(error)), IO.pure))
+    result.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
 
 }
 

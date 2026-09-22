@@ -11,8 +11,8 @@ import java.util.concurrent.TimeUnit
 final case class GraphQLDocument(document: Document, queryValidator: QueryValidator, cached: Boolean)
 
 final class GraphQLDocumentCache private (cache: Cache[String, Document]) {
-  def document(query: String): Either[HiringGraphQLSchema.Failure, GraphQLDocument] =
-    Option(cache.getIfPresent(query)) match {
+  def document(query: String): IO[Either[HiringGraphQLSchema.Failure, GraphQLDocument]] =
+    IO.delay(Option(cache.getIfPresent(query))).map {
       case Some(value) => Right(GraphQLDocument(value, QueryValidator.empty, cached = true))
       case None => QueryParser.parse(query).toEither.left.map(_ => HiringGraphQLSchema.Failure.InvalidQuery)
         .map(value => GraphQLDocument(value, QueryValidator.default, cached = false))

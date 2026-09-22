@@ -8,9 +8,11 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
     val query = "{ health { status } }"
     GraphQLDocumentCache.resource.use { cache =>
       for {
-        first <- IO.fromEither(cache.document(query).left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        firstResult <- cache.document(query)
+        first <- IO.fromEither(firstResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
         _ <- cache.store(query, first.document)
-        second <- IO.fromEither(cache.document(query).left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        secondResult <- cache.document(query)
+        second <- IO.fromEither(secondResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
       } yield {
         assert(!first.cached)
         assert(second.cached)
@@ -18,11 +20,23 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
     }
   }
 
+  test("defers cache reads until the returned IO runs") {
+    val query = "{ health { status } }"
+    GraphQLDocumentCache.resource.use { cache =>
+      val lookup = cache.document(query)
+      for {
+        firstResult <- lookup
+        first <- IO.fromEither(firstResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        _ <- cache.store(query, first.document)
+        secondResult <- lookup
+        second <- IO.fromEither(secondResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+      } yield assert(second.cached)
+    }
+  }
+
   test("does not parse or cache malformed documents") {
     GraphQLDocumentCache.resource.use { cache =>
-      IO {
-        assertEquals(cache.document("{ health"), Left(HiringGraphQLSchema.Failure.InvalidQuery))
-      }
+      cache.document("{ health").map(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery)))
     }
   }
 }

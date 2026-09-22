@@ -28,4 +28,15 @@ final class MediaTypeNegotiationSpec extends FunSuite {
     assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(specific)), Some(MediaType.application.json))
     assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(allZero)), None)
   }
+
+  test("quality chooses between the two supported representations with declaration-order ties") {
+    val graphqlPreferred = Accept.parse("application/graphql-response+json;q=0.8, application/json;q=0.4").toOption.get
+    val jsonPreferred = Accept.parse("application/graphql-response+json;q=0.4, application/json;q=0.8").toOption.get
+    val tied = Accept.parse("application/json;q=0.5, application/graphql-response+json;q=0.5").toOption.get
+
+    assertEquals(MediaTypeNegotiation.selectResponseMediaType(None), Some(MediaTypeNegotiation.graphqlResponse))
+    assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(graphqlPreferred)), Some(MediaTypeNegotiation.graphqlResponse))
+    assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(jsonPreferred)), Some(MediaType.application.json))
+    assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(tied)), Some(MediaTypeNegotiation.graphqlResponse))
+  }
 }
