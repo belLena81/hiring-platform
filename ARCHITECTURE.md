@@ -140,9 +140,11 @@ final case class Job(
 Use domain-specific IDs:
 
 ```scala
-opaque type JobId = UUID
-opaque type UserId = UUID
-opaque type ApplicationId = UUID
+opaque type Id[Tag] = UUID
+type JobId = Id[JobTag]
+type UserId = Id[UserTag]
+type ApplicationId = Id[ApplicationTag]
+type ApplicationEventId = Id[ApplicationEventTag]
 ```
 
 Prefer enums and ADTs over raw strings:

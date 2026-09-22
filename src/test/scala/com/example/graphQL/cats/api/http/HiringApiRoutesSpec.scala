@@ -102,11 +102,6 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
-  private def spanEvent(event: LogEvent): Boolean = event match {
-    case LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
-    case _ => false
-  }
-
   private def capture(records: Ref[IO, Vector[DiagnosticRecord]]): Diagnostics = new Diagnostics {
     def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
       records.update(_ :+ ((event, id, fields)))
@@ -682,7 +677,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(response.status, Status.NotFound)
       assert(id.exists(isUuid))
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Not found")))))
-      assert(captured.filterNot(record => spanEvent(record._1)).forall(_._2 == id))
+      assert(captured.forall(_._2 == id))
       assert(captured.exists(record => record._1 == LogEvent.RequestRejected &&
         record._3.get(LogField.Reason).contains("NOT_FOUND")))
       assert(!captured.exists(record => record._1.toString == "REQUEST_COMPLETED" || record._1.toString == "REQUEST_CANCELLED"))
@@ -718,8 +713,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       val id = requestId(response)
       assertEquals(response.status, Status.Ok)
-      assertEquals(captured.filterNot(record => spanEvent(record._1)).map(_._1), Vector(LogEvent.MongoUnavailable, LogEvent.GraphQLCompleted))
-      assert(captured.filterNot(record => spanEvent(record._1)).forall(_._2 == id))
+      assertEquals(captured.map(_._1), Vector(LogEvent.MongoUnavailable, LogEvent.GraphQLCompleted))
+      assert(captured.forall(_._2 == id))
       assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall { case (_, _, fields) =>
         fields.get(LogField.OperationName).contains("LocalCheck") && fields.get(LogField.Outcome).contains("COMPLETED")
       })
@@ -1076,7 +1071,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       val correlationId = requestId(response)
       assertEquals(response.status, Status.BadRequest)
       assert(correlationId.exists(isUuid))
-      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(LogEvent.RequestRejected -> correlationId))
+      assertEquals(captured, List(LogEvent.RequestRejected -> correlationId))
       assert(!body.contains(secret))
       assert(!response.headers.toString.contains(secret))
       assert(!captured.toString.contains(secret))
@@ -1098,7 +1093,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(response.status, Status.InternalServerError)
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Request failed")))))
       val correlationId = requestId(response)
-      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(LogEvent.RequestRejected -> correlationId))
+      assertEquals(captured, List(LogEvent.RequestRejected -> correlationId))
       assert(!body.noSpaces.contains(secret))
       assert(!response.headers.toString.contains(secret))
       assert(!captured.toString.contains(secret))
@@ -1126,7 +1121,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
       assert(!body.hcursor.downField("errors").succeeded)
       val correlationId = requestId(response)
-      assertEquals(captured.filterNot(record => spanEvent(record._1)), List(
+      assertEquals(captured, List(
         LogEvent.MongoUnavailable -> correlationId,
         LogEvent.GraphQLCompleted -> correlationId
       ))
@@ -1155,7 +1150,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         "message" -> Json.fromString("Request deadline exceeded")))))
       assertEquals(successful.status, Status.Ok)
       val id = requestId(response)
-      val deadline = captured.filter(record => !spanEvent(record._1) && record._2 == id)
+      val deadline = captured.filter(_._2 == id)
       assertEquals(deadline.map(_._1), Vector(LogEvent.RequestRejected))
       assert(deadline.filter(_._1 == LogEvent.RequestRejected).forall(record =>
         record._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED") &&

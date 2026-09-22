@@ -118,6 +118,38 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("embedding pipeline keeps durable attempts unchanged during in-lease retries") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      work <- InMemoryEmbeddingWorkRepository.create
+      _ <- EmbeddingPipeline.resource(
+        work,
+        InMemoryUsers(usersRef),
+        InMemoryJobs(jobsRef),
+        AlwaysFailEmbeddingService(calls),
+        "voyage-4-lite",
+        8,
+        1,
+        retryAttempts = 3,
+        retryDelay = 10.millis,
+        leaseDuration = 1.second
+      ).use { publisher =>
+        val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+        publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+          eventually(work.snapshot)(_.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.RetryExhausted))).void
+      }
+      snapshot <- work.snapshot
+      attempts <- calls.get
+    } yield {
+      val stored = snapshot(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId)).value)
+      assertEquals(attempts, 3)
+      assertEquals(stored.attempts, 0)
+      assertEquals(stored.state, "Failed")
+    }
+  }
+
   test("VHS-AC05 embedding pipeline ignores stale in-flight job writes after version changes") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
@@ -315,6 +347,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         case 0 => 1 -> Left(EmbeddingError.ProviderUnavailable)
         case count => (count + 1) -> Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))
       }
+  }
+
+  private final case class AlwaysFailEmbeddingService(calls: Ref[IO, Int]) extends EmbeddingService {
+    override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+      calls.update(_ + 1).as(Left(EmbeddingError.ProviderUnavailable))
   }
 
   private final case class BlockingEmbeddingService(

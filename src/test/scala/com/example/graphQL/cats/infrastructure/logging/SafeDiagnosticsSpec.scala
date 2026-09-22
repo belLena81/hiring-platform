@@ -16,10 +16,17 @@ import scala.jdk.CollectionConverters.*
 class SafeDiagnosticsSpec extends CatsEffectSuite {
   test("LOG-01 disabled levels do not evaluate structured field thunks") {
     val evaluated = new AtomicBoolean(false)
-    SafeDiagnostics().event(LogEvent.SpanSucceeded, fields = {
-      evaluated.set(true)
-      Map(LogField.SpanName -> "startup")
-    }).as(assert(!evaluated.get()))
+    val logger = LoggerFactory.getLogger("hiring.foundation").asInstanceOf[ch.qos.logback.classic.Logger]
+    Resource.make(IO {
+      val previous = logger.getLevel
+      logger.setLevel(ch.qos.logback.classic.Level.OFF)
+      previous
+    })(previous => IO(logger.setLevel(previous))).use { _ =>
+      SafeDiagnostics().event(LogEvent.Started, fields = {
+        evaluated.set(true)
+        Map(LogField.Environment -> "local")
+      }).as(assert(!evaluated.get()))
+    }
   }
 
   test("LOG-01 actual SLF4J events carry the matching severity and structured context") {
@@ -113,7 +120,7 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     }
   }
 
-  test("ETR-01 renderer preserves every declared level for Logback to filter") {
+  test("ETR-01 renderer preserves declared event severities for Logback to filter") {
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line))
@@ -122,7 +129,6 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     } yield {
       assertEquals(lines.size, LogEvent.values.length)
       val levels = lines.map(line => parse(line).toOption.flatMap(_.hcursor.get[String]("severity").toOption))
-      assert(levels.contains(Some("TRACE")))
       assert(levels.contains(Some("INFO")))
       assert(levels.contains(Some("WARN")))
       assert(levels.contains(Some("ERROR")))

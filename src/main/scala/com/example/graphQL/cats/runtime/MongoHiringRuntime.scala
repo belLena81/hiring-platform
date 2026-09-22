@@ -121,7 +121,7 @@ object MongoHiringRuntime {
     val readModel = HiringReadService(users, jobs, applications)
     val applicationService = ApplicationService(users, jobs, applications)
     val interactionService = OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork)
-    val cursorKey = CursorCodec.keyFromSecret(jwtAuth.hmacSecret)
+    val cursorKey = CursorCodec.keyFromSecret(jwtAuth.hmacSecret, jwtAuth.cursorTtlSeconds)
 
     def assemble(
         jobService: JobUseCases,
@@ -159,6 +159,9 @@ object MongoHiringRuntime {
           vectorSearch.numCandidates
         )
         embeddingService(vectorSearch, apiKey).flatMap { embeddings =>
+          val embeddingLease =
+            (vectorSearch.retryAttempts.toLong *
+              (vectorSearch.timeoutMillis.toLong + vectorSearch.retryDelayMillis.toLong)).millis
           EmbeddingPipeline.resource(
             new MongoEmbeddingWorkRepository(database),
             users,
@@ -169,7 +172,7 @@ object MongoHiringRuntime {
             vectorSearch.parallelism,
             vectorSearch.retryAttempts,
             vectorSearch.retryDelayMillis.millis,
-            (vectorSearch.timeoutMillis + vectorSearch.retryDelayMillis).millis
+            embeddingLease
           ).map { embeddingWork =>
             val jobService = JobService(users, jobs, embeddingWork)
             val accountService = UserAccountService(users, users, hasher, tokenIssuer, embeddingWork)

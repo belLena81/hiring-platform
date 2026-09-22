@@ -1,31 +1,38 @@
 package com.example.graphQL.cats.domain.model
 
 import java.util.UUID
-import scala.annotation.targetName
 
 object Identifiers {
-  opaque type UserId = UUID
+  sealed trait UserTag
+  sealed trait JobTag
+  sealed trait ApplicationTag
+  sealed trait ApplicationEventTag
+
+  opaque type Id[Tag] = UUID
+
+  object Id {
+    def apply[Tag](value: UUID): Id[Tag] = value
+  }
+
+  type UserId = Id[UserTag]
   object UserId {
-    def apply(value: UUID): UserId = value
+    def apply(value: UUID): UserId = Id[UserTag](value)
   }
 
-  opaque type JobId = UUID
+  type JobId = Id[JobTag]
   object JobId {
-    def apply(value: UUID): JobId = value
+    def apply(value: UUID): JobId = Id[JobTag](value)
   }
 
-  opaque type ApplicationId = UUID
+  type ApplicationId = Id[ApplicationTag]
   object ApplicationId {
-    def apply(value: UUID): ApplicationId = value
+    def apply(value: UUID): ApplicationId = Id[ApplicationTag](value)
   }
 
-  opaque type ApplicationEventId = UUID
+  type ApplicationEventId = Id[ApplicationEventTag]
   object ApplicationEventId {
-    def apply(value: UUID): ApplicationEventId = value
+    def apply(value: UUID): ApplicationEventId = Id[ApplicationEventTag](value)
   }
 
-  extension (id: UserId) @targetName("userIdValue") def value: UUID = id
-  extension (id: JobId) @targetName("jobIdValue") def value: UUID = id
-  extension (id: ApplicationId) @targetName("applicationIdValue") def value: UUID = id
-  extension (id: ApplicationEventId) @targetName("applicationEventIdValue") def value: UUID = id
+  extension [Tag](id: Id[Tag]) def value: UUID = id
 }

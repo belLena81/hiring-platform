@@ -11,15 +11,17 @@ import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, Applicatio
 import com.example.graphQL.cats.repository.protocol.MutationEntityReference
 import io.circe.Json
 import sangria.schema.Context
+import java.time.Instant
 
 private[graphql] object HiringGraphQLApplicationResolvers {
   def myApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       for {
-        (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), CursorCodec.decode[ApplicationCursor]))
+        now                      <- IO.realTimeInstant
+        (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursor => CursorCodec.decode[ApplicationCursor](cursor, now)))
         values                   <- raiseOnUseCaseError(hiring.applicationService.myApplications(actor, pageRequest))
-      } yield applicationConnection(values, requested)
+      } yield applicationConnection(values, requested, now)
     }
 
   def jobApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
@@ -27,9 +29,10 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       given CursorCodec.CursorKey = hiring.cursorKey
       val jobId = context.arg(jobIdArgument)
       for {
-        (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), CursorCodec.decode[ApplicationCursor]))
+        now                      <- IO.realTimeInstant
+        (pageRequest, requested) <- inputResult(applicationPage(context.arg(firstArgument), context.arg(afterArgument), context.arg(applicationStatusArgument), cursor => CursorCodec.decode[ApplicationCursor](cursor, now)))
         values                   <- raiseOnUseCaseError(hiring.applicationService.jobApplications(actor, jobId, pageRequest))
-      } yield applicationConnection(values, requested)
+      } yield applicationConnection(values, requested, now)
     }
 
   def applicationHistory(context: Context[RequestContext, Unit]): IO[Connection[ApplicationEvent]] =
@@ -37,10 +40,11 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       given CursorCodec.CursorKey = hiring.cursorKey
       val applicationId = context.arg(applicationIdArgument)
       for {
-        (pageRequest, requested) <- inputResult(pageEvent(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decode[ApplicationEventCursor]))
+        now                      <- IO.realTimeInstant
+        (pageRequest, requested) <- inputResult(pageEvent(context.arg(firstArgument), context.arg(afterArgument), cursor => CursorCodec.decode[ApplicationEventCursor](cursor, now)))
         _                        <- raiseOnUseCaseError(hiring.readModel.canViewApplication(actor, applicationId))
         values                   <- raiseOnUseCaseError(hiring.readModel.applicationHistory(applicationId, pageRequest))
-      } yield eventConnection(values, requested)
+      } yield eventConnection(values, requested, now)
     }
 
   def submitApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] =
@@ -125,16 +129,18 @@ private[graphql] object HiringGraphQLApplicationResolvers {
 
   private def applicationConnection(
       values: List[Application],
-      requested: Int
+      requested: Int,
+      now: Instant
   )(using CursorCodec.CursorKey
   ): Connection[Application] =
-    connection(values, requested)(application => CursorCodec.encode(ApplicationCursor(application.createdAt, application.id)))
+    connection(values, requested)(application => CursorCodec.encode(ApplicationCursor(application.createdAt, application.id), now))
 
   private def eventConnection(
       values: List[ApplicationEvent],
-      requested: Int
+      requested: Int,
+      now: Instant
   )(using CursorCodec.CursorKey
   ): Connection[ApplicationEvent] =
-    connection(values, requested)(event => CursorCodec.encode(ApplicationEventCursor(event.occurredAt, event.id)))
+    connection(values, requested)(event => CursorCodec.encode(ApplicationEventCursor(event.occurredAt, event.id), now))
 
 }

@@ -31,6 +31,7 @@ enum ConfigError(val key: String) {
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
+  case InvalidCursorTtl extends ConfigError("AUTH_JWT_CURSOR_TTL_SECONDS")
   case InvalidPasswordHashIterations extends ConfigError("AUTH_PASSWORD_HASH_ITERATIONS")
   case InvalidPasswordHashMemory extends ConfigError("AUTH_PASSWORD_HASH_MEMORY_KIB")
   case InvalidPasswordHashParallelism extends ConfigError("AUTH_PASSWORD_HASH_PARALLELISM")
@@ -71,7 +72,7 @@ object ConfigError {
   val publicKeys: Set[String] = List[ConfigError](
     InvalidConfigFile(""), InvalidHost, InvalidPort, InvalidAdmissionPermits, InvalidRequestTimeout,
     InvalidMongoUri, InvalidMongoDatabase, InvalidMaskSensitive, InvalidJwtSecret,
-    InvalidJwtIssuer, InvalidJwtAudience, InvalidPasswordHashIterations, InvalidPasswordHashMemory,
+    InvalidJwtIssuer, InvalidJwtAudience, InvalidCursorTtl, InvalidPasswordHashIterations, InvalidPasswordHashMemory,
     InvalidPasswordHashParallelism, InvalidAuthRateLimitWindow, InvalidAuthRateLimitAttempts,
     InvalidAuthRateLimitBuckets, InvalidTrustedProxyCidrs, InvalidVectorSearchEnabled, InvalidVoyageApiKey,
     InvalidVoyageEndpoint, InvalidVoyageModel, InvalidVoyageDimension,
@@ -89,7 +90,8 @@ final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[Strin
     timeoutMillis: Int, retryAttempts: Int, retryDelayMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
     indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
 
-final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: String, accessTokenSeconds: Long = 900L)
+final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: String, accessTokenSeconds: Long = 900L,
+    cursorTtlSeconds: Long = 900L)
 final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
@@ -156,11 +158,12 @@ object AppConfig {
 
     val authConfig =
       (validJwtSecret(jwt.hs256Secret),
+        validCursorTtl(jwt.cursorTtlSeconds),
         validPasswordHashIterations(passwordHash.iterations), validPasswordHashMemory(passwordHash.memoryKib),
         validPasswordHashParallelism(passwordHash.parallelism), validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds),
         validAuthRateLimitAttempts(raw.auth.rateLimit.attempts), validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets)).mapN {
-        (secret, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets) =>
-          (JwtAuthConfig(secret, jwt.issuer, jwt.audience), PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
+        (secret, cursorTtl, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets) =>
+          (JwtAuthConfig(secret, jwt.issuer, jwt.audience, cursorTtlSeconds = cursorTtl.toLong), PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
             AuthRateLimitConfig(windowSeconds, attempts, maxBuckets))
       }
 
@@ -218,6 +221,8 @@ object AppConfig {
     value.filter(_ != "disabled").filter(_.trim.nonEmpty).fold(ConfigError.InvalidJwtSecret.invalidNel[String]) { secret =>
       Either.cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, secret, ConfigError.InvalidJwtSecret).toValidatedNel
     }
+  private def validCursorTtl(value: Int): ValidatedNel[ConfigError, Int] =
+    bounded(60, 86400, ConfigError.InvalidCursorTtl)(value)
   private def validAuthRateLimitWindow(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(1, 3600, ConfigError.InvalidAuthRateLimitWindow)(value)
   private def validAuthRateLimitAttempts(value: Int): ValidatedNel[ConfigError, Int] =
@@ -295,6 +300,7 @@ object AppConfig {
     case "auth.jwt.hs256-secret" => Some(ConfigError.InvalidJwtSecret)
     case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
     case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
+    case "auth.jwt.cursor-ttl-seconds" => Some(ConfigError.InvalidCursorTtl)
     case "auth.password-hash.iterations" => Some(ConfigError.InvalidPasswordHashIterations)
     case "auth.password-hash.memory-kib" => Some(ConfigError.InvalidPasswordHashMemory)
     case "auth.password-hash.parallelism" => Some(ConfigError.InvalidPasswordHashParallelism)
@@ -341,7 +347,8 @@ object AppConfig {
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
   private final case class RawAuthConfig(jwt: RawJwtAuthConfig, passwordHash: Option[RawPasswordHashConfig],
       rateLimit: RawAuthRateLimitConfig) derives ConfigReader
-  private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: NonBlank128, audience: NonBlank128)
+  private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: NonBlank128, audience: NonBlank128,
+      cursorTtlSeconds: Int)
   private final case class RawAuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int) derives ConfigReader
   private final case class RawPasswordHashConfig(iterations: Int, memoryKib: Int, parallelism: Int) derives ConfigReader
   private val defaultPasswordHash = RawPasswordHashConfig(iterations = 2, memoryKib = 19456, parallelism = 1)
@@ -361,5 +368,5 @@ object AppConfig {
 
   // Derived naming does not preserve the hs256-secret acronym, so keep this key explicit.
   private given ConfigReader[RawJwtAuthConfig] =
-    ConfigReader.forProduct3("hs256-secret", "issuer", "audience")(RawJwtAuthConfig.apply)
+    ConfigReader.forProduct4("hs256-secret", "issuer", "audience", "cursor-ttl-seconds")(RawJwtAuthConfig.apply)
 }

@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.admission
 
-import cats.effect.IO
+import cats.effect.{Clock, IO, Ref}
 import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
 import com.example.graphQL.cats.config.AuthRateLimitConfig
@@ -8,6 +8,16 @@ import scala.concurrent.duration.*
 import munit.CatsEffectSuite
 
 final class AuthRateLimiterSpec extends CatsEffectSuite {
+  private def testClock: IO[(Clock[IO], FiniteDuration => IO[Unit])] =
+    Ref.of[IO, FiniteDuration](Duration.Zero).map { now =>
+      val clock = new Clock[IO] {
+        override val applicative: cats.Applicative[IO] = IO.asyncForIO
+        override def realTime: IO[FiniteDuration] = now.get
+        override def monotonic: IO[FiniteDuration] = now.get
+      }
+      (clock, delta => now.update(_ + delta))
+    }
+
   private def key(address: String, operation: AuthRateLimiter.Operation = AuthRateLimiter.Operation.Login): AuthRateLimiter.Key =
     AuthRateLimiter.Key(Some(IpAddress.fromString(address).get), operation)
   test("retry-after seconds round up and never return zero") {
@@ -32,8 +42,32 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
   }
   test("expired windows admit a new attempt") {
     val config = AuthRateLimitConfig(windowSeconds = 1, attempts = 1, maxBuckets = 1)
-    for { limiter <- AuthRateLimiter.create(config); first <- limiter.permit(key("203.0.113.1")); blocked <- limiter.permit(key("203.0.113.1")); _ <- IO.sleep(1100.millis); afterExpiry <- limiter.permit(key("203.0.113.1")) } yield {
+    for {
+      (clock, advance) <- testClock
+      limiter <- AuthRateLimiter.create(config, clock)
+      first <- limiter.permit(key("203.0.113.1"))
+      blocked <- limiter.permit(key("203.0.113.1"))
+      _ <- advance(1.second)
+      afterExpiry <- limiter.permit(key("203.0.113.1"))
+    } yield {
       assertEquals(first, Right(())); assertEquals(blocked, Left(AuthRateLimiter.RateLimited(1.second))); assertEquals(afterExpiry, Right(()))
+    }
+  }
+  test("frequently used buckets survive bounded eviction") {
+    val config = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 2)
+    val hot = key("203.0.113.1")
+    val cold = key("203.0.113.2")
+    val replacement = key("203.0.113.3")
+    for {
+      limiter <- AuthRateLimiter.create(config)
+      _ <- limiter.permit(hot)
+      _ <- limiter.permit(cold)
+      limitedHot <- limiter.permit(hot)
+      _ <- limiter.permit(replacement)
+      stillLimitedHot <- limiter.permit(hot)
+    } yield {
+      assertEquals(limitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
+      assertEquals(stillLimitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
     }
   }
   test("frequent buckets resist one-hit IPv6 flooding") {

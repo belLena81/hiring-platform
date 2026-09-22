@@ -11,6 +11,7 @@ import com.example.graphQL.cats.service.protocol.{AccountProfileInput, Bootstrap
 import com.example.graphQL.cats.repository.protocol.MutationEntityReference
 import io.circe.Json
 import sangria.schema.Context
+import java.time.Instant
 
 private[graphql] object HiringGraphQLAccountResolvers {
   def accountMe(context: Context[RequestContext, Unit]): IO[User] =
@@ -132,10 +133,12 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val requested = context.arg(firstArgument)
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
-      inputResult(userPage(requested, context.arg(afterArgument), status, role, CursorCodec.decode[UserCursor])).flatMap {
+      IO.realTimeInstant.flatMap { now =>
+      inputResult(userPage(requested, context.arg(afterArgument), status, role, cursor => CursorCodec.decode[UserCursor](cursor, now))).flatMap {
         case (request, pageSize) =>
           raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
-            .map(values => userConnection(values, pageSize))
+            .map(values => userConnection(values, pageSize, now))
+      }
       }
     }
 
@@ -179,6 +182,6 @@ private[graphql] object HiringGraphQLAccountResolvers {
       id => IO.realTimeInstant.flatMap(now => hiring.accountService.issueToken(id, now))
     )
 
-  private def userConnection(values: List[User], requested: Int)(using CursorCodec.CursorKey): Connection[User] =
-    connection(values, requested)(user => CursorCodec.encode(UserCursor(user.createdAt, user.id)))
+  private def userConnection(values: List[User], requested: Int, now: Instant)(using CursorCodec.CursorKey): Connection[User] =
+    connection(values, requested)(user => CursorCodec.encode(UserCursor(user.createdAt, user.id), now))
 }

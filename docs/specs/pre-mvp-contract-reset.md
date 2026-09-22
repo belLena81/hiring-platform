@@ -17,7 +17,7 @@
 - Authentication rate limits are enforced by the `login`, `signUp`, and `bootstrapAdmin` field resolvers for each executed field, including aliases and fragments. Exhaustion is a sanitized HTTP 200 GraphQL error with `RATE_LIMITED` and positive `retryAfter` seconds extensions.
 - Authenticated GraphQL execution resolves the stored viewer once per request and reuses that verified snapshot for service authorization and nested email visibility. There is no cross-request actor cache; a successful account deletion invalidates the request snapshot.
 - Parsed GraphQL documents use a process-local cache of at most 256 raw query texts for 60 seconds. A cache hit skips repeated static validation only; variables, authentication, rate limits, depth/complexity reducers, and field execution remain per request.
-- Cursor HMAC work is thread-confined, and Argon2id work is process-bulkheaded to the JVM-visible processor count. JWT expiry is represented by the public `Instant` scalar.
+- Cursor signing uses the project JWT library with a cursor-specific derived key and explicit request time; it is safe across Cats Effect fibers, expires after the configured cursor TTL, and rejects legacy compact cursors. Argon2id work remains process-bulkheaded to the JVM-visible processor count. JWT expiry is represented by the public `Instant` scalar.
 
 ## Acceptance and evidence
 
@@ -31,7 +31,7 @@
 | PCR-06 | A client executes multiple public account fields or uses aliases/fragments | Each field consumes the address/operation bucket independently and limited fields return GraphQL retry metadata | Implemented; HTTP route and rate-limiter unit tests pass |
 | PCR-07 | An authenticated operation contains multiple roots or nested user emails | The viewer is loaded once, service authorization remains enforced, and deletion prevents later authenticated fields in that request | In progress; focused unit and GraphQL checks pending |
 | PCR-08 | Repeated valid GraphQL documents execute within the cache window | The second execution reuses the document with static validation skipped, while invalid documents are not cached and complexity/authentication still run | In progress; focused cache and HTTP checks pending |
-| PCR-09 | Password, cursor, and token operations execute under load | Argon2 work is permit-bounded, cursor signatures are thread-confined and opaque, and JWT claims/Instant expiry remain contract-compatible | In progress; focused auth/cursor checks pending |
+| PCR-09 | Password, cursor, and token operations execute under load | Argon2 work is permit-bounded, cursor JWT signing is fiber-safe and expiring, legacy/tampered cursors are rejected, and JWT claims/Instant expiry remain contract-compatible | Implemented; focused cursor/config/GraphQL unit checks pass; integration runtime gate remains blocked by unrelated classpath failures |
 
 ## Review
 

@@ -9,6 +9,8 @@ import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant
+import retry.*
+import retry.RetryPolicies.*
 import scala.concurrent.duration.*
 
 enum EmbeddingWork {
@@ -88,14 +90,25 @@ final class EmbeddingPipeline(
     case Discarded
   }
 
+  private val retryPolicy: RetryPolicy[IO, ProcessingOutcome] =
+    limitRetries[IO](math.max(retryAttempts - 1, 0)) join constantDelay[IO](retryDelay)
+
   private def processClaim(claim: ClaimedEmbeddingWork): IO[Unit] =
-    process(claim).handleError(_ => ProcessingOutcome.Retry).flatMap {
-      case ProcessingOutcome.Completed => work.complete(claim).void
-      case ProcessingOutcome.Terminal(failure) => now.flatMap(work.fail(claim, failure, _)).void
-      case ProcessingOutcome.Retry if claim.attempts + 1 >= retryAttempts =>
-        now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _)).void
-      case ProcessingOutcome.Retry =>
-        now.map(_.plusMillis(retryDelay.toMillis)).flatMap(work.retry(claim, _)).void
+    retryingOnFailures(process(claim).handleError(_ => ProcessingOutcome.Retry))(
+      policy = retryPolicy,
+      valueHandler = (outcome, _) => IO.pure(outcome match {
+        case ProcessingOutcome.Retry => HandlerDecision.Continue
+        case _ => HandlerDecision.Stop
+      })
+    ).flatMap { result =>
+      result.fold(identity, identity) match {
+        case ProcessingOutcome.Retry =>
+          now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _)).void
+        case ProcessingOutcome.Completed =>
+          work.complete(claim).void
+        case ProcessingOutcome.Terminal(failure) =>
+          now.flatMap(work.fail(claim, failure, _)).void
+      }
     }
 
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =

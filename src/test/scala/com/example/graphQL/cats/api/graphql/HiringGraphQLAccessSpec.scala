@@ -99,17 +99,37 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   test("application connection rejects a job cursor") {
     given CursorCodec.CursorKey = TestGraphQLSupport.cursorKey
-    val cursor = CursorCodec.encode(com.example.graphQL.cats.shared.pagination.JobCursor(now, jobId))
-    val query =
-      s"""query {
-         |  myApplications(first: 10, after: "$cursor") {
-         |    edges { node { id } }
-         | __typename
-         |  }
-         |}""".stripMargin
+    IO.realTimeInstant.flatMap { cursorNow =>
+      val cursor = CursorCodec.encode(com.example.graphQL.cats.shared.pagination.JobCursor(cursorNow, jobId), cursorNow)
+      val query =
+        s"""query {
+           |  myApplications(first: 10, after: "$cursor") {
+           |    edges { node { id } }
+           | __typename
+           |  }
+           |}""".stripMargin
 
-    execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
-      assertEquals(errorCode(json), Right("WRONG_CURSOR_KIND"))
+      execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
+        assertEquals(errorCode(json), Right("WRONG_CURSOR_KIND"))
+      }
+    }
+  }
+
+  test("application connection rejects an expired cursor") {
+    given CursorCodec.CursorKey = TestGraphQLSupport.cursorKey
+    IO.realTimeInstant.flatMap { current =>
+      val issuedAt = current.minusSeconds(TestGraphQLSupport.cursorKey.ttlSeconds + 1)
+      val cursor = CursorCodec.encode(com.example.graphQL.cats.shared.pagination.JobCursor(current, jobId), issuedAt)
+      val query =
+        s"""query {
+           |  myApplications(first: 10, after: "$cursor") {
+           |    edges { node { id } }
+           |  }
+           |}""".stripMargin
+
+      execute(query, Some(ActorContext(candidateId, UserRole.Candidate))).map { json =>
+        assertEquals(errorCode(json), Right("INVALID_CURSOR"))
+      }
     }
   }
 

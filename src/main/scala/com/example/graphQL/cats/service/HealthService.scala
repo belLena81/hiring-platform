@@ -13,7 +13,6 @@ final class HealthService(probe: DatabaseProbe, diagnostics: Diagnostics) {
         LogFields.failure(new java.util.concurrent.TimeoutException()) + (LogField.Reason -> FailureReason.ProbeTimeout.reason), 2.seconds)))
       .handleError(error => ProbeOutcome(ProbeResult.Unavailable,
         LogFields.failure(error) + (LogField.Reason -> FailureReason.DatabaseError.reason), Duration.Zero))
-      .timed.map { case (elapsed, outcome) => outcome.copy(elapsed = elapsed) }
       .flatMap { outcome =>
         val result = outcome.result
         val failure = outcome.failure

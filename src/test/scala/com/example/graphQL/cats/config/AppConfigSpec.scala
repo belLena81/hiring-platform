@@ -39,6 +39,7 @@ class AppConfigSpec extends FunSuite {
       |  hs256-secret = "01234567890123456789012345678901"
       |  issuer = "hiring-platform-local"
       |  audience = "hiring-graphql-api"
+      |  cursor-ttl-seconds = 900
       |}
       |auth.rate-limit {
       |  window-seconds = 60
@@ -153,6 +154,7 @@ class AppConfigSpec extends FunSuite {
         |  hs256-secret = ${AUTH_JWT_HS256_SECRET}
         |  issuer = "hiring-platform-local"
         |  audience = "hiring-graphql-api"
+        |  cursor-ttl-seconds = 900
         |}
         |auth.rate-limit {
         |  window-seconds = 30
@@ -326,6 +328,7 @@ class AppConfigSpec extends FunSuite {
         |  hs256-secret = ${?AUTH_JWT_HS256_SECRET}
         |  issuer = "hiring-platform-local"
         |  audience = "hiring-graphql-api"
+        |  cursor-ttl-seconds = 900
         |}
         |auth.rate-limit {
         |  window-seconds = 60
@@ -482,6 +485,12 @@ class AppConfigSpec extends FunSuite {
     val loaded = AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = ${AUTH_JWT_HS256_SECRET}\n",
       Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456"))
     assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right("abcdefghijklmnopqrstuvwxyz123456"))
+  }
+
+  test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(900L))
+    assertContainsError(AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty), ConfigError.InvalidCursorTtl)
+    assertContainsError(AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 86401"), Map.empty), ConfigError.InvalidCursorTtl)
   }
 
   test("HGQL-AC02 auth limiter config is bounded and explicit") {

@@ -29,14 +29,15 @@ private[graphql] object HiringGraphQLJobResolvers {
         context.arg(createdAfterArgument)
       )
       for {
-        (pageRequest, requested) <- inputResult(page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decode[JobCursor]))
+        now                      <- IO.realTimeInstant
+        (pageRequest, requested) <- inputResult(page(context.arg(firstArgument), context.arg(afterArgument), cursor => CursorCodec.decode[JobCursor](cursor, now)))
         searchId                 <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
         values                   <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
         _                        <- saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
                                       _.id.value.toString,
                                       _ => 0d
                                     )
-      } yield jobConnection(values, requested).copy(searchId = Some(searchId.toString))
+      } yield jobConnection(values, requested, now).copy(searchId = Some(searchId.toString))
     }
 
   def job(context: Context[RequestContext, Unit]): IO[Job] =
@@ -46,9 +47,10 @@ private[graphql] object HiringGraphQLJobResolvers {
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       for {
-        (pageRequest, requested) <- inputResult(page(context.arg(firstArgument), context.arg(afterArgument), CursorCodec.decode[JobCursor]))
+        now                      <- IO.realTimeInstant
+        (pageRequest, requested) <- inputResult(page(context.arg(firstArgument), context.arg(afterArgument), cursor => CursorCodec.decode[JobCursor](cursor, now)))
         values                   <- raiseOnUseCaseError(hiring.jobService.myJobs(actor, pageRequest.copy(status = context.arg(jobStatusArgument))))
-      } yield jobConnection(values, requested)
+      } yield jobConnection(values, requested, now)
     }
 
   def createJob(context: Context[RequestContext, Unit]): IO[MutationOutcome[Job]] =
@@ -135,7 +137,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       Location(input.country, input.city.getOrElse(""), input.remote)
     )
 
-  private def jobConnection(values: List[Job], requested: Int)(using CursorCodec.CursorKey): Connection[Job] =
-    connection(values, requested)(job => CursorCodec.encode(JobCursor(job.createdAt, job.id)))
+  private def jobConnection(values: List[Job], requested: Int, now: Instant)(using CursorCodec.CursorKey): Connection[Job] =
+    connection(values, requested)(job => CursorCodec.encode(JobCursor(job.createdAt, job.id), now))
 
 }

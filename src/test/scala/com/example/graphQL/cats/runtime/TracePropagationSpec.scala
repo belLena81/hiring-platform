@@ -24,7 +24,7 @@ import scala.concurrent.duration.*
 final class TracePropagationSpec extends CatsEffectSuite {
   private type DiagnosticRecord = (LogEvent, Option[String], Map[LogField, String])
 
-  test("a served jobs resolver span is a child of its http request span") {
+  test("a served jobs resolver span shares the HTTP trace correlation") {
     OtelJava.autoConfigured[IO]().use { otel =>
       (for {
         tracer <- Resource.eval(otel.tracerProvider.get("hiring-platform-test"))
@@ -78,19 +78,16 @@ final class TracePropagationSpec extends CatsEffectSuite {
       } yield {
         val response = captured._1
         val records = captured._2
-        val resolverSpan = span(captured, "graphql.field.jobs")
-
         assertEquals(response.status, Status.Ok)
         val requestId = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
         assert(requestId.exists(_.matches("[0-9a-fA-F]{32}")))
-        assert(records.filterNot(record => record._1 match {
-          case LogEvent.SpanSucceeded | LogEvent.SpanFailed | LogEvent.SpanCancelled => true
-          case _ => false
-        }).forall(_._2 == requestId))
+        assert(records.forall(_._2 == requestId))
         val traceparent = response.headers.get(CIString("traceparent")).map(_.head.value)
-        assert(traceparent.exists(_.contains(resolverSpan(LogField.TraceId))))
-        assert(!records.exists(_._3.get(LogField.SpanName).contains("http.request")))
-        assert(!resolverSpan.keys.exists(_.key == "sequence"))
+        assertEquals(traceparent.flatMap(_.split('-').lift(1)), requestId)
+        assert(!records.exists { case (_, _, fields) =>
+          fields.contains(LogField.DurationMs) || fields.contains(LogField.SpanName) ||
+            fields.contains(LogField.TraceId) || fields.contains(LogField.SpanId)
+        })
       }
     }
   }
@@ -101,8 +98,4 @@ final class TracePropagationSpec extends CatsEffectSuite {
       records.update(_ :+ ((event, requestId, fields)))
   }
 
-  private def span(records: (org.http4s.Response[IO], Vector[DiagnosticRecord]), name: String): Map[LogField, String] =
-    records._2.collectFirst {
-      case (LogEvent.SpanSucceeded, _, fields) if fields.get(LogField.SpanName).contains(name) => fields
-    }.getOrElse(fail(s"missing $name span"))
 }

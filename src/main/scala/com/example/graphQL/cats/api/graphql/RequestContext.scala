@@ -81,8 +81,7 @@ final class RequestContext private (
     dispatcher.unsafeToFuture(requestScoped(action))
 
   private[graphql] def unsafeFieldToFuture[A](name: String, action: IO[A]) =
-    dispatcher.unsafeToFuture(requestScoped(
-      Diagnostics.spanWith(parameters.diagnostics, s"graphql.field.$name", requestId = parameters.requestId)(action)(using parameters.tracer)))
+    dispatcher.unsafeToFuture(requestScoped(parameters.tracer.span(s"graphql.field.$name").surround(action)))
 
   private def requestScoped[A](action: IO[A]): IO[A] =
     IO.race(closed.get, spanContext.fold(action)(parameters.tracer.childScope(_)(action))).flatMap {

@@ -2,7 +2,6 @@ package com.example.graphQL.cats.service
 
 import cats.effect.IO
 import com.example.graphQL.cats.shared.HiringHttpPaths
-import org.typelevel.otel4s.trace.Tracer
 
 enum LogLevel {
   case Trace, Debug, Info, Warn, Error
@@ -23,9 +22,6 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", LogLevel.Warn)
   case MongoSetupFailed extends LogEvent("MONGO_SETUP_FAILED", "MONGO", "MongoDB setup failed", LogLevel.Error)
   case LocalUnmasked extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
-  case SpanSucceeded extends LogEvent("SPAN_SUCCEEDED", "TRACE", "Execution span succeeded", LogLevel.Trace)
-  case SpanFailed extends LogEvent("SPAN_FAILED", "TRACE", "Execution span failed", LogLevel.Trace)
-  case SpanCancelled extends LogEvent("SPAN_CANCELLED", "TRACE", "Execution span cancelled", LogLevel.Trace)
 
   def marker: String = s"HP.$component.$category"
   def severity: String = level.label
@@ -121,37 +117,4 @@ object Diagnostics {
     def emit(event: LogEvent, requestId: Option[String] = None,
         fields: => Map[LogField, String] = Map.empty): IO[Unit] =
       IO.defer(diagnostics.event(event, requestId, fields)).handleError(_ => ())
-
-  /** Emits a complete lifecycle for an effect without changing its cancellation semantics. */
-  def spanWith[A](diagnostics: Diagnostics, name: String, fields: => Map[LogField, String] = Map.empty,
-      requestId: Option[String] = None)(
-      action: IO[A]
-  )(using tracer: Tracer[IO]): IO[A] =
-    tracer.span(name).surround {
-      tracer.currentSpanContext.map(_.fold(fields + (LogField.SpanName -> name)) { context =>
-        fields ++ Map(
-          LogField.SpanName -> name,
-          LogField.TraceId -> context.traceIdHex,
-          LogField.SpanId -> context.spanIdHex
-        )
-      }).flatMap { base =>
-        IO.monotonic.flatMap { started =>
-          def terminal(event: LogEvent): IO[Unit] = IO.monotonic.flatMap { now =>
-            diagnostics.emit(event, requestId,
-              fields = base + (LogField.DurationMs -> (now - started).toMillis.toString))
-          }
-          action.guaranteeCase {
-            case cats.effect.kernel.Outcome.Succeeded(_) => terminal(LogEvent.SpanSucceeded)
-            case cats.effect.kernel.Outcome.Errored(_) => terminal(LogEvent.SpanFailed)
-            case cats.effect.kernel.Outcome.Canceled() => terminal(LogEvent.SpanCancelled)
-          }
-        }
-      }
-    }
-
-  /** A boundary without an inbound request context (for example a repository adapter). */
-  def operation[A](diagnostics: Diagnostics, name: String, fields: Map[LogField, String] = Map.empty)(
-      action: IO[A]
-  )(using tracer: Tracer[IO]): IO[A] =
-    spanWith(diagnostics, name, fields)(action)
 }

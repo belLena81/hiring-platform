@@ -18,7 +18,7 @@ class HealthServiceSpec extends CatsEffectSuite {
     def check: IO[ProbeResult] = result
   }
 
-  test("readiness forwards correlation and records safe failure classification and elapsed time") {
+  test("readiness forwards correlation and records safe failure classification") {
     for {
       forwarded <- Ref.of[IO, Option[String]](None)
       recorded <- Ref.of[IO, Map[LogField, String]](Map.empty)
@@ -38,7 +38,7 @@ class HealthServiceSpec extends CatsEffectSuite {
       assertEquals(id, requestId)
       assertEquals(fields.get(LogField.Reason), Some("DATABASE_ERROR"))
       assertEquals(fields.get(LogField.ErrorType), Some("java.lang.IllegalStateException"))
-      assert(fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0))
+      assertEquals(fields.get(LogField.DurationMs), Some("0"))
       assert(fields.forall { case (field, value) => LogFields.validPublic(field, value) })
       assert(!fields.toString.contains("synthetic-service-secret"))
     }
@@ -73,7 +73,7 @@ class HealthServiceSpec extends CatsEffectSuite {
       assertEquals(fields.get(LogField.Reason), Some("PROBE_TIMEOUT"))
       assertEquals(fields.get(LogField.ErrorType), Some("java.util.concurrent.TimeoutException"))
       assert(fields.get(LogField.ErrorLocation).exists(_.matches("HealthService\\.scala:[1-9][0-9]*")))
-      assert(fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 2000))
+      assertEquals(fields.get(LogField.DurationMs), Some("2000"))
     }
   }
 
