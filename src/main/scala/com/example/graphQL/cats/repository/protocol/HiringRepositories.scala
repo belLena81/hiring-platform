@@ -108,17 +108,14 @@ trait JobRepository {
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
   def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]]
   def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Unit]]
-  def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]]
-  def update(_expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
-    val _ = _expected
-    update(replacement, now)
-  }
-  def updateWithEvents(_expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] = {
-    val _ = _expected
-    updateWithEvents(replacement, now, events)
-  }
-  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Job]]
-  def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]]
+  def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]]
+  def updateWithEvents(
+      expected: Job,
+      replacement: Job,
+      now: Instant,
+      events: List[OperationalEventEnvelope],
+      context: MutationWriteContext = MutationWriteContext.noop
+  ): IO[Either[RepositoryError, Job]]
   def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
   def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
     updateEmbedding(observed.id, embedding)

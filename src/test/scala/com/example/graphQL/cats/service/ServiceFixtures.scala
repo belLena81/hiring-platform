@@ -126,23 +126,12 @@ private[cats] object ServiceFixtures {
         case Left(_) => IO.unit
       }
 
-    override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
-      val persisted = job
-      ref.update(_ + (job.id -> persisted)).as(Right(persisted))
-    }
-
     override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
       ref.modify { jobs =>
         jobs.get(expected.id) match {
           case Some(current) if current == expected => (jobs.updated(replacement.id, replacement), Right(replacement))
           case _ => (jobs, Left(RepositoryError.Conflict))
         }
-      }
-
-    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
-      update(job, now).flatTap {
-        case Right(_) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
-        case Left(_) => IO.unit
       }
 
     override def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =

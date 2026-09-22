@@ -5,11 +5,11 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
-import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
+import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.service.{AccountError, ActorContext, AuthenticationError, AvailabilityError, ProbeResult, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, ProbeResult, SearchError, UseCaseError}
 import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.JobSearchFilter
@@ -179,45 +179,7 @@ private[graphql] object HiringGraphQLResolverSupport {
   }
 
   def toGraphQLFailure(error: UseCaseError): GraphQLFailure =
-    error match {
-      case UseCaseError.Authentication(AuthenticationError.Unauthorized) => GraphQLFailure("UNAUTHORIZED", "Authentication required", exceptional = true)
-      case UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation) => GraphQLFailure("FORBIDDEN", "Forbidden", exceptional = true)
-      case UseCaseError.Account(AccountError.BootstrapRequired) => GraphQLFailure("ADMIN_BOOTSTRAP_REQUIRED", "The first Admin must be bootstrapped", exceptional = false)
-      case UseCaseError.Account(AccountError.AlreadyBootstrapped) => GraphQLFailure("ADMIN_ALREADY_BOOTSTRAPPED", "Admin bootstrap is already complete", exceptional = false)
-      case UseCaseError.Account(AccountError.NameTaken) => GraphQLFailure("REGISTRATION_FAILED", "Registration failed", exceptional = false)
-      case UseCaseError.Account(AccountError.InvalidCredentials) => GraphQLFailure("INVALID_CREDENTIALS", "Invalid credentials", exceptional = false)
-      case UseCaseError.Account(AccountError.DeletedAccount) => GraphQLFailure("UNAUTHORIZED", "Authentication required", exceptional = false)
-      case UseCaseError.Account(AccountError.ProfileRoleMismatch) => GraphQLFailure("PROFILE_ROLE_MISMATCH", "Profile does not match the selected role", exceptional = false)
-      case UseCaseError.Account(AccountError.ProfileUnsupportedForRole) => GraphQLFailure("PROFILE_UNSUPPORTED_FOR_ROLE", "This role does not support a profile", exceptional = false)
-      case UseCaseError.Account(AccountError.PasswordPolicyViolation) => GraphQLFailure("INVALID_PASSWORD", "Password does not meet policy", exceptional = false)
-      case UseCaseError.Account(AccountError.AccountAlreadyDeleted) => GraphQLFailure("ACCOUNT_ALREADY_DELETED", "Account is already deleted", exceptional = false)
-      case UseCaseError.Account(AccountError.AdminSignupForbidden) => GraphQLFailure("ADMIN_BOOTSTRAP_ONLY", "Admin accounts can only be created through bootstrap", exceptional = false)
-      case UseCaseError.Availability(AvailabilityError.ServiceNotReady) => GraphQLFailure("SERVICE_NOT_READY", "Service not ready", exceptional = true)
-      case UseCaseError.Domain(DomainFailure.Forbidden) => GraphQLFailure("FORBIDDEN", "Forbidden", exceptional = true)
-      case UseCaseError.Domain(DomainFailure.NotFound(entity)) => GraphQLFailure("NOT_FOUND", s"$entity not found", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.DuplicateApplication) => GraphQLFailure("DUPLICATE_APPLICATION", "Application already exists", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.SearchSessionPending) => GraphQLFailure("SEARCH_SESSION_PENDING", "Search session is being prepared; retry shortly", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.SearchSessionUnavailable) => GraphQLFailure("SEARCH_SESSION_UNAVAILABLE", "Search session is unavailable", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.JobMustBeOpen) => GraphQLFailure("JOB_MUST_BE_OPEN", "Job must be open", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.CandidateRequired) => GraphQLFailure("CANDIDATE_REQUIRED", "Candidate role required", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.RecruiterRequired) => GraphQLFailure("RECRUITER_REQUIRED", "Recruiter role required", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.InvalidJobTransition(_, _)) => GraphQLFailure("INVALID_JOB_TRANSITION", "Invalid job transition", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.InvalidInitialJobStatus(_)) => GraphQLFailure("INVALID_INITIAL_JOB_STATUS", "New jobs must be open", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.InvalidStatusTransition(_, _)) => GraphQLFailure("INVALID_STATUS_TRANSITION", "Invalid application status transition", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.RejectionFeedbackRequired) => GraphQLFailure("REJECTION_FEEDBACK_REQUIRED", "Rejection feedback is required", exceptional = false)
-      case UseCaseError.Domain(DomainFailure.DeclineReasonRequired) => GraphQLFailure("DECLINE_REASON_REQUIRED", "Decline reason is required", exceptional = false)
-      case UseCaseError.Repository(RepositoryError.DuplicateApplication) => GraphQLFailure("DUPLICATE_APPLICATION", "Application already exists", exceptional = false)
-      case UseCaseError.Repository(RepositoryError.Conflict) => GraphQLFailure("CONFLICT", "Conflict", exceptional = false)
-      case UseCaseError.Repository(RepositoryError.Unavailable) => GraphQLFailure("UNAVAILABLE", "Repository unavailable", exceptional = true)
-      case UseCaseError.Search(SearchError.MissingEmbedding(entity)) => GraphQLFailure("MISSING_EMBEDDING", s"$entity embedding is missing", exceptional = true)
-      case UseCaseError.Search(SearchError.StaleEmbedding(entity)) => GraphQLFailure("STALE_EMBEDDING", s"$entity embedding is stale", exceptional = true)
-      case UseCaseError.Search(SearchError.InputTooLarge(field, maximum)) => GraphQLFailure("INPUT_TOO_LARGE", s"$field must be at most $maximum characters", exceptional = true)
-      case UseCaseError.Search(SearchError.ProviderUnavailable) => GraphQLFailure("PROVIDER_UNAVAILABLE", "Embedding provider unavailable", exceptional = true)
-      case UseCaseError.Search(SearchError.VectorSearchUnavailable) => GraphQLFailure("VECTOR_SEARCH_UNAVAILABLE", "Vector search unavailable", exceptional = true)
-      case UseCaseError.ValidationFailed(errors) =>
-        val fields = errors.toList.map(validationErrorMessage).mkString(", ")
-        GraphQLFailure("VALIDATION_FAILED", if (fields.isEmpty) "Validation failed" else fields, exceptional = false)
-    }
+    GraphQLFailureCatalog.classify(error)
 
   private def validationError(errors: NonEmptyList[DomainValidationError]): ValidationError = {
     val failure = toGraphQLFailure(UseCaseError.ValidationFailed(errors))
@@ -250,13 +212,4 @@ private[graphql] object HiringGraphQLResolverSupport {
   def pageSize(first: Int): Either[GraphQLFailure, PageSize] =
     PageSize.fromInt(first).toEither.leftMap(errors => toGraphQLFailure(UseCaseError.ValidationFailed(errors)))
 
-  private def validationErrorMessage(error: DomainValidationError): String =
-    error match {
-      case DomainValidationError.BlankField(field) => s"$field is required"
-      case DomainValidationError.EmptyCollection(field) => s"$field must not be empty"
-      case DomainValidationError.InvalidNumber(field, minimum, maximum, _) => s"$field must be between $minimum and $maximum"
-      case DomainValidationError.TextTooLong(field, maximum, _) => s"$field must be at most $maximum characters"
-      case DomainValidationError.ByteLengthExceeded(field, maximum, _) => s"$field must be at most $maximum bytes"
-      case DomainValidationError.TooManyValues(field, maximum, _) => s"$field must contain at most $maximum values"
-    }
 }

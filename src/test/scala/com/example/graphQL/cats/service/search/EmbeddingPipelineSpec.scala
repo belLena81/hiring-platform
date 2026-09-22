@@ -175,7 +175,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- started.get
-          updated <- jobs.update(openJob.copy(title = "Staff Scala Developer"), now)
+          updated <- jobs.update(openJob, openJob.copy(title = "Staff Scala Developer"), now)
           _ = assert(updated.isRight)
           _ <- release.complete(()).void
           staleResult <- writeResult.get
@@ -421,11 +421,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
       delegate.createWithEvents(job, now, events)
 
-    override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
-      delegate.update(job, now)
-
-    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
-      delegate.updateWithEvents(job, now, events)
+    override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+      delegate.update(expected, replacement, now)
 
     override def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
       delegate.updateWithEvents(expected, replacement, now, events, context)

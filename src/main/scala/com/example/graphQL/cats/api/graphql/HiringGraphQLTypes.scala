@@ -54,6 +54,7 @@ private[graphql] object HiringGraphQLTypes {
     Field("id", userIdType, resolve = _.value.id),
     Field("email", OptionType(StringType), resolve = context =>
       emailVisibilityFetcher.deferOpt(context.value.id)
+        // Sangria's deferred Future projection requires an EC; parasitic avoids a thread hop.
         .map(_.flatMap(_ => context.value.email))(using ExecutionContext.parasitic)),
     Field("name", StringType, resolve = _.value.name),
     Field("role", userRole, resolve = _.value.role),

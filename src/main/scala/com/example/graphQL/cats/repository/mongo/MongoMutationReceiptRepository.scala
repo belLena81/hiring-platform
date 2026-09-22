@@ -18,6 +18,18 @@ private[mongo] object MongoMutationWriteContext {
     case MongoMutationWriteContext(value) => value
     case _ => throw new IllegalArgumentException("Mutation write context belongs to another repository adapter")
   }
+
+  def run[A](
+      context: MutationWriteContext,
+      transactionRunner: MongoTransactionRunner,
+      transactionRequired: Boolean
+  )(operation: Option[ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]] =
+    context match {
+      case MongoMutationWriteContext(value) => operation(value)
+      case value if value eq MutationWriteContext.noop =>
+        if (transactionRequired) transactionRunner.run(operation) else operation(None)
+      case _ => IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
+    }
 }
 
 /**

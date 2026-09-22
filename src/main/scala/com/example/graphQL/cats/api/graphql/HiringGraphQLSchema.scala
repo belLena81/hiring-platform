@@ -30,8 +30,6 @@ object HiringGraphQLSchema {
         operationName = request.operationName,
         queryValidator = document.queryValidator,
         exceptionHandler = ExceptionHandler {
-          case (_, error: QueryAnalysisError) => throw error
-          case (_, error: QueryComplexityExceeded) => throw error
           case (marshaller, RequestContext.ReadFailure(error)) =>
             val failure = HiringGraphQLResolverSupport.toGraphQLFailure(error)
             HandledException(failure.message, Map("code" -> marshaller.scalarNode(failure.code, "String", Set.empty)))
