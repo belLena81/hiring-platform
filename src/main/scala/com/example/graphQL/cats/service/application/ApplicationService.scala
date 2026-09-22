@@ -27,15 +27,6 @@ final class ApplicationService(
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
-  def submitApplication(
-      actor: ActorContext,
-      jobId: JobId,
-      applicationId: ApplicationId,
-      eventId: ApplicationEventId,
-      now: Instant
-  ): IO[Either[UseCaseError, Application]] =
-    submitApplication(actor, jobId, applicationId, eventId, now, MutationWriteContext.noop)
-
   override def submitApplication(
       actor: ActorContext,
       jobId: JobId,
@@ -72,17 +63,6 @@ final class ApplicationService(
     authorizedJobs.manage(actor, jobId) { job =>
       applications.findByJob(job.id, page).map(_.widenUseCase)
     }
-
-  def changeStatus(
-      actor: ActorContext,
-      applicationId: ApplicationId,
-      target: ApplicationStatus,
-      feedback: Option[String],
-      reason: Option[String],
-      eventId: ApplicationEventId,
-      now: Instant
-  ): IO[Either[UseCaseError, Application]] =
-    changeStatus(actor, applicationId, target, feedback, reason, eventId, now, MutationWriteContext.noop)
 
   override def changeStatus(
       actor: ActorContext,

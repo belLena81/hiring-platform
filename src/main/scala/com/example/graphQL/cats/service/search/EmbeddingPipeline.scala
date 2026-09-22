@@ -132,7 +132,7 @@ final class EmbeddingPipeline(
         val hash = SourceHash.sha256(text)
         if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
         else embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(id, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(job, embedding).map(writeOutcome)
           case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
           case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
         }
@@ -148,7 +148,7 @@ final class EmbeddingPipeline(
           val hash = SourceHash.sha256(text)
           if (user.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
           else embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(id, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(user, embedding).map(writeOutcome)
             case EmbeddingOutcome.Retry => IO.pure(ProcessingOutcome.Retry)
             case EmbeddingOutcome.Discarded => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
           }

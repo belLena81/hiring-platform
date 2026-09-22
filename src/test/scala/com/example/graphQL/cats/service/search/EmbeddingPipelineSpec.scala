@@ -188,6 +188,37 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("VHS-AC05 embedding pipeline ignores stale in-flight candidate writes after profile changes") {
+    val changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated profile"), None)
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+      started <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      calls <- Ref.of[IO, Int](0)
+      users = InMemoryUsers(usersRef)
+      embeddings = BlockingEmbeddingService(calls, started, release)
+      _ <- pipelineResource(
+        users,
+        InMemoryJobs(jobsRef),
+        embeddings,
+        model = "voyage-4-lite",
+        queueSize = 8,
+        parallelism = 1,
+        retryAttempts = 3,
+        retryDelay = 10.millis
+      ).use { queue =>
+        for {
+          _ <- queue.offer(EmbeddingWork.CandidateProfileChanged(candidateId))
+          _ <- started.get
+          _ <- usersRef.update(_.updated(candidateId, candidate.copy(profile = Some(UserProfile.Candidate(changedProfile)))))
+          _ <- release.complete(()).void
+          finalUser <- eventually(users.find(candidateId))(_.toOption.flatten.exists(_.candidateProfile.contains(changedProfile)))
+        } yield assertEquals(finalUser.toOption.flatten.flatMap(_.embedding), None)
+      }
+    } yield ()
+  }
+
   test("VHS-AC05 embedding work publishing stays non-blocking when the scheduler is full") {
     val otherJobId = Identifiers.JobId(UUID.fromString("00000000-0000-0000-0000-000000000008"))
     val otherJob = openJob.copy(id = otherJobId, title = "Principal Scala Developer")
@@ -387,20 +418,29 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
       delegate.create(job, now)
 
-    override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
+    override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
       delegate.createWithEvents(job, now, events)
 
     override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
       delegate.update(job, now)
 
-    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
       delegate.updateWithEvents(job, now, events)
+
+    override def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
+      delegate.updateWithEvents(expected, replacement, now, events, context)
 
     override def updateEmbedding(
         id: Identifiers.JobId,
         embedding: EntityEmbedding
     ): IO[Either[RepositoryError, Unit]] =
       delegate.updateEmbedding(id, embedding).flatTap(result => writeResult.complete(result).void)
+
+    override def updateEmbedding(
+        observed: Job,
+        embedding: EntityEmbedding
+    ): IO[Either[RepositoryError, Unit]] =
+      delegate.updateEmbedding(observed, embedding).flatTap(result => writeResult.complete(result).void)
   }
 
   private final case class StoredWork(

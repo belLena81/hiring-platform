@@ -23,9 +23,6 @@ final class UserAccountService(
 ) extends AccountUseCases {
   private val authorization = ActorAuthorization(users)
 
-  override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
-    signUp(input, now, userId, MutationWriteContext.noop)
-
   override def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
     if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.Account(AccountError.AdminSignupForbidden)))
     else if (!UserProfile.matchesRole(input.role, input.profile))
@@ -48,9 +45,6 @@ final class UserAccountService(
         }
       }.flatTap(wakeCandidateAfterCommit)
     )
-
-  override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
-    bootstrapAdmin(input, now, userId, MutationWriteContext.noop)
 
   override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
     validateCredentials(input.name, input.password).fold(
@@ -94,9 +88,6 @@ final class UserAccountService(
   override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
     authorization.resolve(actor)
 
-  override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
-    updateMyProfile(actor, input, now, MutationWriteContext.noop)
-
   override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] =
     authorization.resolve(actor).flatMap {
       case Left(error) => IO.pure(Left(error))
@@ -108,9 +99,6 @@ final class UserAccountService(
           _ => accounts.updateProfile(user.id, input.profile, now, context).map(_.leftMap(UseCaseError.Repository.apply)).flatTap(wakeCandidateAfterCommit)
         )
     }
-
-  override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
-    deleteMyAccount(actor, now, MutationWriteContext.noop)
 
   override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
     authorization.resolve(actor, allowDeleted = true).flatMap {

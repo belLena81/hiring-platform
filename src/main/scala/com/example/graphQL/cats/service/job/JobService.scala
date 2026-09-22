@@ -46,14 +46,6 @@ final class JobService(
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
 
-  def createJob(
-      actor: ActorContext,
-      input: CreateJobInput,
-      now: Instant,
-      jobId: JobId
-  ): IO[Either[UseCaseError, Job]] =
-    createJob(actor, input, now, jobId, MutationWriteContext.noop)
-
   override def createJob(
       actor: ActorContext,
       input: CreateJobInput,
@@ -68,14 +60,6 @@ final class JobService(
       created <- EitherT(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context))
     } yield created).value
 
-  def updateJob(
-      actor: ActorContext,
-      jobId: JobId,
-      input: UpdateJobInput,
-      now: Instant
-  ): IO[Either[UseCaseError, Job]] =
-    updateJob(actor, jobId, input, now, MutationWriteContext.noop)
-
   override def updateJob(
       actor: ActorContext,
       jobId: JobId,
@@ -86,24 +70,18 @@ final class JobService(
     authorizedJobs.manage(actor, jobId) { job =>
       (for {
         update <- EitherT.fromEither[IO](validateUpdatedJob(job, input, now))
-        updated <- EitherT(persistUpdatedJob(Right[UseCaseError, Job](JobLifecycle.update(job, update)), actor.userId, context))
+        updated <- EitherT(persistUpdatedJob(job, Right[UseCaseError, Job](JobLifecycle.update(job, update)), actor.userId, context))
       } yield updated).value
     }
 
-  def publishJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]] =
-    publishJob(actor, jobId, now, MutationWriteContext.noop)
-
   override def publishJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED, context)
+      persistJob(job, JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED, context)
     }
-
-  def closeJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]] =
-    closeJob(actor, jobId, now, MutationWriteContext.noop)
 
   override def closeJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      persistJob(JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED, context)
+      persistJob(job, JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED, context)
     }
 
   def viewJob(actor: ActorContext, jobId: JobId): IO[Either[UseCaseError, Job]] =
@@ -196,15 +174,15 @@ final class JobService(
       }
     )
 
-  private def persistUpdatedJob(result: Either[UseCaseError, Job], actorId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    persistJob(result, actorId, OperationalEventType.JOB_UPDATED, context)
+  private def persistUpdatedJob(expected: Job, result: Either[UseCaseError, Job], actorId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
+    persistJob(expected, result, actorId, OperationalEventType.JOB_UPDATED, context)
 
-  private def persistJob(result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
+  private def persistJob(expected: Job, result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
     result.fold(
       error => IO.pure(error.asLeft[Job]),
       job => {
         val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
-        notifyAfterCommit(jobs.updateWithEvents(job, job.updatedAt, List(event), context).map(_.widenUseCase))
+        notifyAfterCommit(jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).map(_.widenUseCase))
       }
     )
 

@@ -86,24 +86,18 @@ trait UserRepository {
   def find(id: UserId): IO[Either[RepositoryError, Option[User]]]
   def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]]
   def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
+  def updateEmbedding(observed: User, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    updateEmbedding(observed.id, embedding)
 }
 
 trait UserAccountRepository {
-  def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]]
-  def bootstrap(user: User, passwordHash: String, _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
-    { val _ = _context; bootstrap(user, passwordHash) }
+  def bootstrap(user: User, passwordHash: String, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Unit]]
   def initialized: IO[Either[RepositoryError, Boolean]]
-  def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]]
-  def createAccount(user: User, passwordHash: String, now: Instant, _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
-    { val _ = _context; createAccount(user, passwordHash, now) }
+  def createAccount(user: User, passwordHash: String, now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Unit]]
   def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]]
-  def updateProfile(userId: UserId, profile: UserProfile, now: Instant): IO[Either[RepositoryError, User]]
-  def updateProfile(userId: UserId, profile: UserProfile, now: Instant, _context: MutationWriteContext): IO[Either[RepositoryError, User]] =
-    { val _ = _context; updateProfile(userId, profile, now) }
+  def updateProfile(userId: UserId, profile: UserProfile, now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, User]]
   def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]]
-  def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]]
-  def deleteAccount(userId: UserId, now: Instant, tombstone: String, _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
-    { val _ = _context; deleteAccount(userId, now, tombstone) }
+  def deleteAccount(userId: UserId, now: Instant, tombstone: String, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Unit]]
 }
 
 trait JobRepository {
@@ -113,14 +107,21 @@ trait JobRepository {
   def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
   def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]]
-  def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]]
-  def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], _context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
-    { val _ = _context; createWithEvents(job, now, events) }
+  def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Unit]]
   def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]]
-  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]]
-  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], _context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
-    { val _ = _context; updateWithEvents(job, now, events) }
+  def update(_expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
+    val _ = _expected
+    update(replacement, now)
+  }
+  def updateWithEvents(_expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] = {
+    val _ = _expected
+    updateWithEvents(replacement, now, events)
+  }
+  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Job]]
+  def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]]
   def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
+  def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    updateEmbedding(observed.id, embedding)
 }
 
 trait EmbeddingService {
@@ -175,9 +176,7 @@ trait SemanticSearchRepository {
 trait SearchSessionRepository {
   def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]]
   def find(id: java.util.UUID): IO[Either[RepositoryError, Option[SearchSession]]]
-  def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]]
-  def recordInteraction(event: OperationalEventEnvelope, _context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
-    { val _ = _context; recordInteraction(event) }
+  def recordInteraction(event: OperationalEventEnvelope, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[RepositoryError, Boolean]]
 }
 
 final case class ClaimedOperationalEvent(
@@ -225,7 +224,7 @@ object SearchSessionRepository {
       IO.pure(Right(()))
     override def find(id: java.util.UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
       IO.pure(Right(None))
-    override def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
+    override def recordInteraction(event: OperationalEventEnvelope, context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
       IO.pure(Right(true))
   }
 }
@@ -244,27 +243,14 @@ trait ApplicationRepository {
       observedJob: Job,
       application: Application,
       initialEvent: ApplicationEvent,
-      events: List[OperationalEventEnvelope]
-  ): IO[Either[RepositoryError, Unit]]
-  def createForOpenJobWithEvents(
-      observedJob: Job,
-      application: Application,
-      initialEvent: ApplicationEvent,
       events: List[OperationalEventEnvelope],
-      context: MutationWriteContext
-  ): IO[Either[RepositoryError, Unit]] =
-    { val _ = context; createForOpenJobWithEvents(observedJob, application, initialEvent, events) }
+      context: MutationWriteContext = MutationWriteContext.noop
+  ): IO[Either[RepositoryError, Unit]]
   def updateStatus(application: Application, event: ApplicationEvent): IO[Either[RepositoryError, Unit]]
   def updateStatusWithEvents(
       application: Application,
       event: ApplicationEvent,
-      events: List[OperationalEventEnvelope]
-  ): IO[Either[RepositoryError, Unit]]
-  def updateStatusWithEvents(
-      application: Application,
-      event: ApplicationEvent,
       events: List[OperationalEventEnvelope],
-      context: MutationWriteContext
-  ): IO[Either[RepositoryError, Unit]] =
-    { val _ = context; updateStatusWithEvents(application, event, events) }
+      context: MutationWriteContext = MutationWriteContext.noop
+  ): IO[Either[RepositoryError, Unit]]
 }

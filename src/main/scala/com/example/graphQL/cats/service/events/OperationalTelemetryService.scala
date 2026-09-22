@@ -27,15 +27,6 @@ final class OperationalTelemetryService(
       eventId: UUID,
       jobId: JobId,
       searchId: Option[UUID],
-      now: Instant
-  ): IO[Either[UseCaseError, Unit]] =
-    recordJobView(actor, eventId, jobId, searchId, now, MutationWriteContext.noop)
-
-  override def recordJobView(
-      actor: ActorContext,
-      eventId: UUID,
-      jobId: JobId,
-      searchId: Option[UUID],
       now: Instant,
       context: MutationWriteContext
   ): IO[Either[UseCaseError, Unit]] =
@@ -50,15 +41,6 @@ final class OperationalTelemetryService(
       event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
       _ <- EitherT(searchSessions.recordInteraction(event, context).map(_.widenUseCase.void))
     } yield ()).value
-
-  override def recordSearchResultClick(
-      actor: ActorContext,
-      eventId: UUID,
-      searchId: UUID,
-      resultId: String,
-      now: Instant
-  ): IO[Either[UseCaseError, Unit]] =
-    recordSearchResultClick(actor, eventId, searchId, resultId, now, MutationWriteContext.noop)
 
   override def recordSearchResultClick(
       actor: ActorContext,

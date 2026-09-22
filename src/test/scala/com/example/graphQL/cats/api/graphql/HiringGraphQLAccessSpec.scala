@@ -5,7 +5,7 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices}
 import com.example.graphQL.cats.service.{ActorContext, HiringReadService, ProbeResult, UseCaseError}
-import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector, SearchSessionRepository, SemanticSearchRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector, MutationWriteContext, SearchSessionRepository, SemanticSearchRepository, UserRepository}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
 import com.example.graphQL.cats.service.application.ApplicationService
@@ -888,17 +888,17 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       IO.pure(Left(RepositoryError.Unavailable))
     override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
       IO.pure(Right(None))
-    override def recordInteraction(event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
+    override def recordInteraction(event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope, context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
       IO.pure(Right(true))
   }
 
   private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases {
     private val unsupported: UseCaseError = UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
-    override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    override def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
       IO.pure(Left(unsupported))
 
-    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
       IO.pure(Left(unsupported))
 
     override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
@@ -907,14 +907,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
       IO.pure(Left(unsupported))
 
-    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] =
       updateCalls.update(_ + 1) *> IO.pure(
         UserProfile.validateFor(actor.role, Some(input.profile)).toEither
           .leftMap(UseCaseError.ValidationFailed.apply)
           .map(_ => recruiter)
       )
 
-    override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
+    override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
       IO.pure(Left(unsupported))
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =
@@ -924,28 +924,28 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private final class PublicAccountService(calls: Ref[IO, Int]) extends AccountUseCases {
     private val unavailable = Left(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady))
 
-    override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    override def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
       calls.update(_ + 1).as(unavailable)
 
-    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
       calls.update(_ + 1).as(unavailable)
 
     override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
       calls.update(_ + 1).as(unavailable)
 
     override def me(actor: ActorContext): IO[Either[UseCaseError, User]] = IO.pure(unavailable)
-    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] = IO.pure(unavailable)
-    override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] = IO.pure(unavailable)
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] = IO.pure(unavailable)
+    override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] = IO.pure(unavailable)
     override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] = IO.pure(unavailable)
   }
 
   private object NameTakenAccountService extends AccountUseCases {
     private val unsupported: UseCaseError = UseCaseError.Account(com.example.graphQL.cats.service.AccountError.ProfileUnsupportedForRole)
 
-    override def signUp(input: SignUpInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    override def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
       IO.pure(Left(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.NameTaken)))
 
-    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId): IO[Either[UseCaseError, (User, AccountToken)]] =
+    override def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, (User, AccountToken)]] =
       IO.pure(Left(unsupported))
 
     override def login(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
@@ -954,10 +954,10 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def me(actor: ActorContext): IO[Either[UseCaseError, User]] =
       IO.pure(Left(unsupported))
 
-    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant): IO[Either[UseCaseError, User]] =
+    override def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, User]] =
       IO.pure(Left(unsupported))
 
-    override def deleteMyAccount(actor: ActorContext, now: Instant): IO[Either[UseCaseError, Unit]] =
+    override def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
       IO.pure(Left(unsupported))
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): IO[Either[UseCaseError, List[User]]] =

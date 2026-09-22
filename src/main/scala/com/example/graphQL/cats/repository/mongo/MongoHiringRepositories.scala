@@ -68,6 +68,35 @@ private[mongo] trait MongoOperationalEventInsertion {
     }
 }
 
+private[mongo] object MongoObservedStateFilters {
+  private val JobFields = List(
+    "_id", "recruiterId", "title", "description", "requirements", "skills", "location", "status",
+    "createdAt", "updatedAt", "closedAt", "embedding", "embeddingMeta"
+  )
+
+  private val JobSearchFields = List("_id", "title", "description", "requirements", "skills")
+
+  private def exactField(document: Document, field: String): Bson =
+    Option(document.get(field)).fold[Bson](Filters.exists(field, false))(value => Filters.eq(field, value))
+
+  private def exactDocument(document: Document, fields: List[String]): Bson =
+    Filters.and(fields.map(field => exactField(document, field))*)
+
+  def jobReplacement(job: Job): Bson =
+    exactDocument(MongoHiringCodecs.job(job), JobFields)
+
+  def jobEmbedding(job: Job): Bson =
+    exactDocument(MongoHiringCodecs.job(job), JobSearchFields)
+
+  def candidateEmbedding(user: User): Bson =
+    Filters.and(
+      Filters.eq("_id", user.id.value.toString),
+      Filters.eq("role", user.role.toString),
+      Filters.eq("accountStatus", user.accountStatus.toString),
+      exactField(MongoHiringCodecs.user(user), "profile")
+    )
+}
+
 private[mongo] object MongoTransactionRunner {
   final case class RetryPolicy(
       maxTransactionAttempts: Int = 3,
@@ -274,10 +303,17 @@ final class MongoUserRepository(
   override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
 
-  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    find(id).flatMap {
+      case Right(Some(user)) => updateEmbedding(user, embedding)
+      case Right(None) => IO.pure(Left(RepositoryError.Conflict))
+      case Left(error) => IO.pure(Left(error))
+    }
+
+  override def updateEmbedding(observed: User, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge.first(collection.updateOne(
-      Filters.eq("_id", id.value.toString),
+      MongoObservedStateFilters.candidateEmbedding(observed),
       Updates.combine(
         Updates.set("embedding", encoded.get("embedding")),
         Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
@@ -295,7 +331,7 @@ final class MongoUserRepository(
       .map(document => Right(document.exists(_.getString("state", "") == "Initialized")))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
+  def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton) IO.pure(Left(RepositoryError.Conflict))
     else transactionRunner.run { session => bootstrapWithSession(user, passwordHash, session) }.handleError(mapWrite)
 
@@ -338,7 +374,7 @@ final class MongoUserRepository(
       }
     }
 
-  override def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =
+  def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =
     if (embeddingWork.nonEmpty && user.role == UserRole.Candidate) createAccountWithEmbeddingWork(user, passwordHash, now)
     else createAccountDirect(user, passwordHash)
 
@@ -388,7 +424,7 @@ final class MongoUserRepository(
       MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readCredentials)).map(_.flatten)
     }.handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def updateProfile(
+  def updateProfile(
       userId: UserId,
       profile: UserProfile,
       now: Instant
@@ -504,7 +540,7 @@ final class MongoUserRepository(
       .handleError(_ => Left(RepositoryError.Unavailable))
   }
 
-  override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] =
+  def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] =
     transactionRunner.run(session => deleteAccountWithSession(userId, now, tombstone, session)).handleError(mapWrite)
 
   override def deleteAccount(userId: UserId, now: Instant, tombstone: String, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
@@ -552,10 +588,7 @@ final class MongoUserRepository(
                 case Right(openJobs) =>
                   val closedJobs = openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
                   openJobs.zip(closedJobs).traverse_ { case (job, closed) =>
-                    val filter = Filters.and(
-                      Filters.eq("_id", job.id.value.toString),
-                      Filters.eq("status", JobStatus.Open.toString)
-                    )
+                    val filter = MongoObservedStateFilters.jobReplacement(job)
                     session.fold(
                       PublisherBridge.first(jobs.replaceOne(filter, MongoHiringCodecs.job(closed)))
                     )(active => PublisherBridge.first(jobs.replaceOne(active, filter, MongoHiringCodecs.job(closed)))).flatMap {
@@ -655,7 +688,7 @@ final class MongoJobRepository(
   override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
     if (embeddingWork.nonEmpty) createWithEmbeddingWork(job, now) else createDirect(job)
 
-  override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
+  def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
     if (events.isEmpty) create(job, now)
     else transactionRunner.run(session => createWithEventsSession(job, now, events, session)).handleError(mapWrite)
 
@@ -699,24 +732,29 @@ final class MongoJobRepository(
       }
     }
 
-  private def updateDirect(job: Job): IO[Either[RepositoryError, Job]] = {
-    val persisted = job
+  private def updateDirect(expected: Job, replacement: Job): IO[Either[RepositoryError, Job]] = {
     PublisherBridge.first(collection.replaceOne(
-      Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
-      MongoHiringCodecs.job(persisted)
+      MongoObservedStateFilters.jobReplacement(expected),
+      MongoHiringCodecs.job(replacement)
     )).map {
-      case Some(result) if result.getMatchedCount == 1L => Right(persisted)
+      case Some(result) if result.getMatchedCount == 1L => Right(replacement)
       case Some(_) => Left(RepositoryError.Conflict)
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
   }
 
   override def update(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
-    if (embeddingWork.nonEmpty) updateWithEmbeddingWork(job, now) else updateDirect(job)
+    update(job, job, now)
 
-  override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
-    if (events.isEmpty) update(job, now)
-    else transactionRunner.run(session => updateWithEventsSession(job, now, events, session)).map(_.as(job)).handleError(mapWrite)
+  override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+    if (embeddingWork.nonEmpty) updateWithEmbeddingWork(expected, replacement, now) else updateDirect(expected, replacement)
+
+  def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+    updateWithEvents(job, job, now, events)
+
+  override def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+    if (events.isEmpty) update(expected, replacement, now)
+    else transactionRunner.run(session => updateWithEventsSession(expected, replacement, now, events, session)).map(_.as(replacement)).handleError(mapWrite)
 
   override def updateWithEvents(
       job: Job,
@@ -724,23 +762,33 @@ final class MongoJobRepository(
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Job]] =
-    if (events.isEmpty) updateWithSession(job, now, MongoMutationWriteContext.session(context))
-    else updateWithEventsSession(job, now, events, MongoMutationWriteContext.session(context)).map(_.as(job)).handleError(mapWrite)
+    updateWithEvents(job, job, now, events, context)
+
+  override def updateWithEvents(
+      expected: Job,
+      replacement: Job,
+      now: Instant,
+      events: List[OperationalEventEnvelope],
+      context: MutationWriteContext
+  ): IO[Either[RepositoryError, Job]] =
+    if (events.isEmpty) updateWithSession(expected, replacement, now, MongoMutationWriteContext.session(context))
+    else updateWithEventsSession(expected, replacement, now, events, MongoMutationWriteContext.session(context)).map(_.as(replacement)).handleError(mapWrite)
 
   private def updateWithEventsSession(
-      job: Job,
+      expected: Job,
+      replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       session: Option[ClientSession]
   ): IO[Either[RepositoryError, Unit]] =
         replaceOne(
           session,
-          Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
-          MongoHiringCodecs.job(job)
+          MongoObservedStateFilters.jobReplacement(expected),
+          MongoHiringCodecs.job(replacement)
         ).flatMap {
           case Some(result) if result.getMatchedCount == 1L =>
             embeddingWork.fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
-              _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+              _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
             ).flatMap {
               case Right(()) => insertOperationalEvents(outbox, session, events, now)
               case Left(error) => IO.pure(Left(error))
@@ -750,22 +798,24 @@ final class MongoJobRepository(
         }
 
   /** Job replacement and the coalesced reindex request commit together. */
-  def updateWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
-    val persisted = job
+  def updateWithEmbeddingWork(job: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+    updateWithEmbeddingWork(job, job, now)
+
+  private def updateWithEmbeddingWork(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] = {
     embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Job])) { _ =>
-      transactionRunner.run(session => updateWithEmbeddingWorkSession(job, now, session)).map(_.as(persisted)).handleError(mapWrite)
+      transactionRunner.run(session => updateWithEmbeddingWorkSession(expected, replacement, now, session)).map(_.as(replacement)).handleError(mapWrite)
     }
   }
 
-  private def updateWithEmbeddingWorkSession(job: Job, now: Instant, session: Option[ClientSession]): IO[Either[RepositoryError, Unit]] =
+  private def updateWithEmbeddingWorkSession(expected: Job, replacement: Job, now: Instant, session: Option[ClientSession]): IO[Either[RepositoryError, Unit]] =
     embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Unit])) { work =>
       replaceOne(
         session,
-        Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
-        MongoHiringCodecs.job(job)
+        MongoObservedStateFilters.jobReplacement(expected),
+        MongoHiringCodecs.job(replacement)
       ).flatMap {
         case Some(result) if result.getMatchedCount == 1L =>
-          work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+          work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
         case Some(_) => IO.pure(Left(RepositoryError.Conflict))
         case None => IO.pure(Left(RepositoryError.Unavailable))
       }
@@ -775,22 +825,29 @@ final class MongoJobRepository(
     if (embeddingWork.nonEmpty) createWithEmbeddingWorkSession(job, now, session)
     else insertOne(session, MongoHiringCodecs.job(job)).map(_.fold(Left(RepositoryError.Unavailable): Either[RepositoryError, Unit])(_ => Right(()))).handleError(mapWrite)
 
-  private def updateWithSession(job: Job, now: Instant, session: Option[ClientSession]): IO[Either[RepositoryError, Job]] =
-    if (embeddingWork.nonEmpty) updateWithEmbeddingWorkSession(job, now, session).map(_.as(job))
+  private def updateWithSession(expected: Job, replacement: Job, now: Instant, session: Option[ClientSession]): IO[Either[RepositoryError, Job]] =
+    if (embeddingWork.nonEmpty) updateWithEmbeddingWorkSession(expected, replacement, now, session).map(_.as(replacement))
     else replaceOne(
       session,
-      Filters.and(Filters.eq("_id", job.id.value.toString), Filters.eq("recruiterId", job.recruiterId.value.toString)),
-      MongoHiringCodecs.job(job)
+      MongoObservedStateFilters.jobReplacement(expected),
+      MongoHiringCodecs.job(replacement)
     ).map {
-      case Some(result) if result.getMatchedCount == 1L => Right(job)
+      case Some(result) if result.getMatchedCount == 1L => Right(replacement)
       case Some(_) => Left(RepositoryError.Conflict)
       case None => Left(RepositoryError.Unavailable)
     }.handleError(mapWrite)
 
-  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    find(id).flatMap {
+      case Right(Some(job)) => updateEmbedding(job, embedding)
+      case Right(None) => IO.pure(Left(RepositoryError.Conflict))
+      case Left(error) => IO.pure(Left(error))
+    }
+
+  override def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge.first(collection.updateOne(
-      Filters.eq("_id", id.value.toString),
+      MongoObservedStateFilters.jobEmbedding(observed),
       Updates.combine(
         Updates.set("embedding", encoded.get("embedding")),
         Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
@@ -1000,7 +1057,7 @@ final class MongoApplicationRepository private (
     if (!isConsistentSubmit(observedJob, application, initialEvent)) IO.pure(Left(RepositoryError.Conflict))
     else submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2)
 
-  override def createForOpenJobWithEvents(
+  def createForOpenJobWithEvents(
       observedJob: Job,
       application: Application,
       initialEvent: ApplicationEvent,
@@ -1022,7 +1079,7 @@ final class MongoApplicationRepository private (
   override def updateStatus(application: Application, event: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
     updateStatusWithEvents(application, event, Nil)
 
-  override def updateStatusWithEvents(
+  def updateStatusWithEvents(
       application: Application,
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]

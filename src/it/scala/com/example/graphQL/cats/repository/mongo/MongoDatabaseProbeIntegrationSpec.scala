@@ -3,7 +3,10 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.HiringApiRoutes
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
+import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, User, UserProfile, UserRole}
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
+import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.github.dockerjava.api.model.ExposedPort
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
 import io.circe.Json
@@ -16,7 +19,7 @@ import org.testcontainers.containers.GenericContainer
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
 
-import java.time.Duration
+import java.time.{Duration, Instant}
 import java.util.UUID
 import scala.concurrent.duration.*
 
@@ -58,6 +61,93 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
       case _ if remaining > 0 => IO.sleep(200.millis) *> ready(probe, remaining - 1)
       case other => IO.raiseError(new AssertionError(s"Expected ready, received $other"))
     }
+
+  private def requireResult[A](result: Either[RepositoryError, A]): IO[A] =
+    result.fold(error => IO.raiseError(new AssertionError(s"Mongo repository failure: $error")), IO.pure)
+
+  private def requireIO[A](result: IO[Either[RepositoryError, A]]): IO[A] =
+    result.flatMap(requireResult)
+
+  private val fixtureTime = Instant.parse("2026-09-22T10:00:00Z")
+
+  private def fixtureJob(id: JobId, recruiterId: UserId): Job =
+    Job(
+      id,
+      recruiterId,
+      "Scala Engineer",
+      "Build hiring infrastructure",
+      List("Cats Effect"),
+      Set("Scala", "MongoDB"),
+      Location("Cyprus", "Nicosia", remote = true),
+      JobStatus.Open,
+      fixtureTime,
+      fixtureTime
+    )
+
+  private def fixtureCandidate(id: UserId): User =
+    User(
+      id,
+      Some(s"$id@example.com"),
+      "Candidate",
+      UserRole.Candidate,
+      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Backend engineer"), None))),
+      fixtureTime
+    )
+
+  test("Mongo job replacement uses the observed snapshot as an atomic CAS guard") {
+    container(auth = false).use { case (instance, _) =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        val jobs = MongoJobRepository.standalone(client.getDatabase(s"job_cas_${UUID.randomUUID()}"))
+        val recruiterId = UserId(UUID.randomUUID())
+        val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
+        for {
+          _ <- requireIO(jobs.create(job, fixtureTime))
+          observed <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
+          first = observed.copy(title = "First concurrent update", updatedAt = fixtureTime.plusSeconds(1))
+          second = observed.copy(title = "Second concurrent update", updatedAt = fixtureTime.plusSeconds(2))
+          outcomes <- IO.both(jobs.update(observed, first, first.updatedAt), jobs.update(observed, second, second.updatedAt))
+          current <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
+        } yield {
+          assertEquals(List(outcomes._1, outcomes._2).count(_.isRight), 1)
+          assertEquals(List(outcomes._1, outcomes._2).count(_.isLeft), 1)
+          assert(Set(first.title, second.title).contains(current.title))
+        }
+      }
+    }
+  }
+
+  test("Mongo rejects stale job and candidate embedding writes after source changes") {
+    container(auth = false).use { case (instance, _) =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        val database = client.getDatabase(s"embedding_cas_${UUID.randomUUID()}")
+        val jobs = MongoJobRepository.standalone(database)
+        val users = MongoUserRepository.standalone(database)
+        val recruiterId = UserId(UUID.randomUUID())
+        val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
+        val candidate = fixtureCandidate(UserId(UUID.randomUUID()))
+        val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", "stale-source", fixtureTime))
+        for {
+          _ <- requireIO(jobs.create(job, fixtureTime))
+          observedJob <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
+          _ <- requireIO(jobs.update(observedJob, observedJob.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)), fixtureTime.plusSeconds(1)))
+          staleJobWrite <- jobs.updateEmbedding(observedJob, embedding)
+          _ <- requireIO(users.insert(candidate))
+          observedCandidate <- users.find(candidate.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("candidate was not created")))
+          changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated backend engineer"), None)
+          _ <- requireIO(users.updateProfile(candidate.id, UserProfile.Candidate(changedProfile), fixtureTime.plusSeconds(1)))
+          staleCandidateWrite <- users.updateEmbedding(observedCandidate, embedding)
+          currentJob <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
+          currentCandidate <- users.find(candidate.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("candidate disappeared")))
+        } yield {
+          assertEquals(staleJobWrite, Left(RepositoryError.Conflict))
+          assertEquals(staleCandidateWrite, Left(RepositoryError.Conflict))
+          assertEquals(currentJob.embedding, None)
+          assertEquals(currentCandidate.candidateProfile, Some(changedProfile))
+          assertEquals(currentCandidate.embedding, None)
+        }
+      }
+    }
+  }
 
   test("standalone readiness, outage/recovery, retained synthetic fixture and resource close") {
     container(auth = false).use { case (instance, _) =>

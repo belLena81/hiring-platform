@@ -53,6 +53,21 @@ class MongoHiringCodecsSpec extends FunSuite {
     assert(!document.containsKey("recruiterProfile"))
   }
 
+  test("user codec keeps legacy untagged profiles as candidate profiles") {
+    val user = User(
+      candidateId,
+      Some("candidate@example.com"),
+      "Candidate",
+      UserRole.Candidate,
+      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+      now
+    )
+    val legacy = MongoHiringCodecs.user(user)
+    legacy.get("profile", classOf[Document]).remove("kind")
+
+    assertEquals(MongoHiringCodecs.readUser(legacy).toEither, Right(user))
+  }
+
   test("user codec rejects removed schema fields") {
     val document = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
       Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)).append("schemaVersion", Int.box(1))
@@ -132,25 +147,23 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     assertEquals(MongoHiringCodecs.readUser(missingName).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.MissingField("name"))))
     assertEquals(MongoHiringCodecs.readUser(invalidRole).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("role"))))
-    assertEquals(MongoHiringCodecs.readJob(invalidEmbedding).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("embedding"))))
+    assertEquals(MongoHiringCodecs.readJob(invalidEmbedding).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("document"))))
     assertEquals(
       MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readUser(missingName)),
       Left(RepositoryError.Unavailable)
     )
   }
 
-  test("codec accumulates independent malformed user fields in document order") {
+  test("codec accumulates independent semantic user errors") {
     val malformed = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
-    malformed.remove("name")
     malformed.put("role", "NotARole")
-    malformed.put("createdAt", "not-a-date")
+    malformed.put("accountStatus", "NotAnAccountStatus")
 
     assertEquals(
       MongoHiringCodecs.readUser(malformed).toEither,
       Left(NonEmptyList.of(
-        MongoHiringCodecs.StoredDocumentError.MissingField("name"),
         MongoHiringCodecs.StoredDocumentError.InvalidField("role"),
-        MongoHiringCodecs.StoredDocumentError.InvalidField("createdAt")
+        MongoHiringCodecs.StoredDocumentError.InvalidField("accountStatus")
       ))
     )
   }

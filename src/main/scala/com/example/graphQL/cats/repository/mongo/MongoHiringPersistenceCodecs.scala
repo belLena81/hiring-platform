@@ -8,12 +8,13 @@ import org.mongodb.scala.bson.codecs.IterableCodecProvider
 import com.mongodb.MongoClientSettings
 
 import java.util.Date
+import scala.util.control.NonFatal
 
 /** Persistence-shaped records used by the generated BSON codecs. */
 private[mongo] object MongoHiringPersistenceCodecs {
   final case class StoredLocation(country: String, city: String, remote: Boolean)
   final case class StoredProfile(
-      kind: String,
+      kind: String = "",
       skills: Option[List[String]],
       experienceSummary: Option[String],
       resumeRef: Option[String],
@@ -166,9 +167,25 @@ private[mongo] object MongoHiringPersistenceCodecs {
   def outbox(value: StoredOutboxRecord): Document = encode(value, outboxCodec)
   def searchSession(value: StoredSearchSession): Document = encode(value, searchSessionCodec)
 
+  private[mongo] def decodeUser(document: Document): Either[Throwable, StoredUser] = decode(document, userCodec)
+  private[mongo] def decodeJob(document: Document): Either[Throwable, StoredJob] = decode(document, jobCodec)
+  private[mongo] def decodeApplication(document: Document): Either[Throwable, StoredApplication] = decode(document, applicationCodec)
+  private[mongo] def decodeApplicationEvent(document: Document): Either[Throwable, StoredApplicationEvent] = decode(document, applicationEventCodec)
+  private[mongo] def decodeOperationalEvent(document: Document): Either[Throwable, StoredOperationalEvent] = decode(document, operationalEventCodec)
+  private[mongo] def decodeSearchSession(document: Document): Either[Throwable, StoredSearchSession] = decode(document, searchSessionCodec)
+
   private def encode[A](value: A, codec: Codec[A]): Document = {
     val bson = new BsonDocument()
     codec.encode(new BsonDocumentWriter(bson), value, EncoderContext.builder().build())
     documentCodec.decode(new BsonDocumentReader(bson), DecoderContext.builder().build())
   }
+
+  private def decode[A](document: Document, codec: Codec[A]): Either[Throwable, A] =
+    try {
+      val bson = new BsonDocument()
+      documentCodec.encode(new BsonDocumentWriter(bson), document, EncoderContext.builder().build())
+      Right(codec.decode(new BsonDocumentReader(bson), DecoderContext.builder().build()))
+    } catch {
+      case NonFatal(error) => Left(error)
+    }
 }

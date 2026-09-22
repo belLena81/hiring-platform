@@ -8,6 +8,7 @@ import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.repository.protocol.MutationWriteContext
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, JobUseCases, LoginInput, SignUpInput}
@@ -25,12 +26,12 @@ object TestGraphQLSupport {
     CursorCodec.keyFromSecret("test-cursor-secret-01234567890123456789")
 
   val accountService: AccountUseCases = new AccountUseCases {
-    def signUp(input: SignUpInput, now: Instant, userId: UserId) = unsupported
-    def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId) = unsupported
+    def signUp(input: SignUpInput, now: Instant, userId: UserId, context: MutationWriteContext) = unsupported
+    def bootstrapAdmin(input: BootstrapAdminInput, now: Instant, userId: UserId, context: MutationWriteContext) = unsupported
     def login(input: LoginInput, now: Instant) = unsupported
     def me(actor: ActorContext) = unsupported
-    def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant) = unsupported
-    def deleteMyAccount(actor: ActorContext, now: Instant) = unsupported
+    def updateMyProfile(actor: ActorContext, input: AccountProfileInput, now: Instant, context: MutationWriteContext) = unsupported
+    def deleteMyAccount(actor: ActorContext, now: Instant, context: MutationWriteContext) = unsupported
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }
 
@@ -48,19 +49,19 @@ object TestGraphQLSupport {
       def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest) = unsupported
     },
     new JobUseCases {
-      def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId) = unsupported
-      def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant) = unsupported
-      def publishJob(actor: ActorContext, jobId: JobId, now: Instant) = unsupported
-      def closeJob(actor: ActorContext, jobId: JobId, now: Instant) = unsupported
+      def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId, context: MutationWriteContext) = unsupported
+      def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant, context: MutationWriteContext) = unsupported
+      def publishJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext) = unsupported
+      def closeJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext) = unsupported
       def viewJob(actor: ActorContext, jobId: JobId) = unsupported
       def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest) = unsupported
       def myJobs(actor: ActorContext, page: JobPageRequest) = unsupported
     },
     new ApplicationUseCases {
-      def submitApplication(actor: ActorContext, jobId: JobId, applicationId: ApplicationId, eventId: ApplicationEventId, now: Instant) = unsupported
+      def submitApplication(actor: ActorContext, jobId: JobId, applicationId: ApplicationId, eventId: ApplicationEventId, now: Instant, context: MutationWriteContext) = unsupported
       def myApplications(actor: ActorContext, page: ApplicationPageRequest) = unsupported
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
-      def changeStatus(actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String], eventId: ApplicationEventId, now: Instant) = unsupported
+      def changeStatus(actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String], eventId: ApplicationEventId, now: Instant, context: MutationWriteContext) = unsupported
     },
     cursorKey,
     accountService

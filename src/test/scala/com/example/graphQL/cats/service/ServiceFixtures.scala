@@ -2,7 +2,7 @@ package com.example.graphQL.cats.service
 
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, MutationWriteContext, UserRepository}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, CandidateProfile, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
@@ -70,6 +70,16 @@ private[cats] object ServiceFixtures {
         }
       }
 
+    override def updateEmbedding(observed: User, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+      ref.modify { users =>
+        users.get(observed.id) match {
+          case Some(current) if current.candidateProfile == observed.candidateProfile && current.role == observed.role &&
+              current.accountStatus == observed.accountStatus =>
+            (users.updated(observed.id, current.copy(embedding = Some(embedding))), Right(()))
+          case _ => (users, Left(RepositoryError.Conflict))
+        }
+      }
+
   }
 
   final class InMemoryJobs(
@@ -110,7 +120,7 @@ private[cats] object ServiceFixtures {
     override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
       ref.update(_ + (job.id -> job)).as(Right(()))
 
-    override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Unit]] =
+    override def createWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
       create(job, now).flatTap {
         case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
         case Left(_) => IO.unit
@@ -121,8 +131,22 @@ private[cats] object ServiceFixtures {
       ref.update(_ + (job.id -> persisted)).as(Right(persisted))
     }
 
-    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope]): IO[Either[RepositoryError, Job]] =
+    override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+      ref.modify { jobs =>
+        jobs.get(expected.id) match {
+          case Some(current) if current == expected => (jobs.updated(replacement.id, replacement), Right(replacement))
+          case _ => (jobs, Left(RepositoryError.Conflict))
+        }
+      }
+
+    override def updateWithEvents(job: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
       update(job, now).flatTap {
+        case Right(_) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
+        case Left(_) => IO.unit
+      }
+
+    override def updateWithEvents(expected: Job, replacement: Job, now: Instant, events: List[OperationalEventEnvelope], context: MutationWriteContext): IO[Either[RepositoryError, Job]] =
+      update(expected, replacement, now).flatTap {
         case Right(_) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
         case Left(_) => IO.unit
       }
@@ -135,6 +159,15 @@ private[cats] object ServiceFixtures {
         jobs.get(id) match {
           case Some(job) if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
+          case _ => (jobs, Left(RepositoryError.Conflict))
+        }
+      }
+
+    override def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+      ref.modify { jobs =>
+        jobs.get(observed.id) match {
+          case Some(current) if SearchableText.job(current) == SearchableText.job(observed) =>
+            (jobs.updated(observed.id, current.copy(embedding = Some(embedding))), Right(()))
           case _ => (jobs, Left(RepositoryError.Conflict))
         }
       }
@@ -204,7 +237,8 @@ private[cats] object ServiceFixtures {
         observedJob: Job,
         application: Application,
         initialEvent: ApplicationEvent,
-        outboxEvents: List[OperationalEventEnvelope]
+        outboxEvents: List[OperationalEventEnvelope],
+        context: MutationWriteContext
     ): IO[Either[RepositoryError, Unit]] =
       rejectNextOperationalEvent.flatMap {
         case Some(error) => IO.pure(Left(error))
@@ -233,7 +267,8 @@ private[cats] object ServiceFixtures {
     override def updateStatusWithEvents(
         application: Application,
         event: ApplicationEvent,
-        outboxEvents: List[OperationalEventEnvelope]
+        outboxEvents: List[OperationalEventEnvelope],
+        context: MutationWriteContext
     ): IO[Either[RepositoryError, Unit]] =
       rejectNextOperationalEvent.flatMap {
         case Some(error) => IO.pure(Left(error))

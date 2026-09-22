@@ -31,18 +31,10 @@ trait UserAuthenticator {
 }
 
 trait JobUseCases {
-  def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId): IO[Either[UseCaseError, Job]]
-  def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId, _context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    { val _ = _context; createJob(actor, input, now, jobId) }
-  def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant): IO[Either[UseCaseError, Job]]
-  def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant, _context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    { val _ = _context; updateJob(actor, jobId, input, now) }
-  def publishJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]]
-  def publishJob(actor: ActorContext, jobId: JobId, now: Instant, _context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    { val _ = _context; publishJob(actor, jobId, now) }
-  def closeJob(actor: ActorContext, jobId: JobId, now: Instant): IO[Either[UseCaseError, Job]]
-  def closeJob(actor: ActorContext, jobId: JobId, now: Instant, _context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
-    { val _ = _context; closeJob(actor, jobId, now) }
+  def createJob(actor: ActorContext, input: CreateJobInput, now: Instant, jobId: JobId, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[UseCaseError, Job]]
+  def updateJob(actor: ActorContext, jobId: JobId, input: UpdateJobInput, now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[UseCaseError, Job]]
+  def publishJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[UseCaseError, Job]]
+  def closeJob(actor: ActorContext, jobId: JobId, now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[UseCaseError, Job]]
   def viewJob(actor: ActorContext, jobId: JobId): IO[Either[UseCaseError, Job]]
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): IO[Either[UseCaseError, List[Job]]]
   def myJobs(actor: ActorContext, page: JobPageRequest): IO[Either[UseCaseError, List[Job]]]
@@ -54,17 +46,9 @@ trait ApplicationUseCases {
       jobId: JobId,
       applicationId: ApplicationId,
       eventId: ApplicationEventId,
-      now: Instant
-  ): IO[Either[UseCaseError, Application]]
-  def submitApplication(
-      actor: ActorContext,
-      jobId: JobId,
-      applicationId: ApplicationId,
-      eventId: ApplicationEventId,
       now: Instant,
-      _context: MutationWriteContext
-  ): IO[Either[UseCaseError, Application]] =
-    { val _ = _context; submitApplication(actor, jobId, applicationId, eventId, now) }
+      context: MutationWriteContext = MutationWriteContext.noop
+  ): IO[Either[UseCaseError, Application]]
 
   def myApplications(actor: ActorContext, page: ApplicationPageRequest): IO[Either[UseCaseError, List[Application]]]
   def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest): IO[Either[UseCaseError, List[Application]]]
@@ -76,19 +60,9 @@ trait ApplicationUseCases {
       feedback: Option[String],
       reason: Option[String],
       eventId: ApplicationEventId,
-      now: Instant
-  ): IO[Either[UseCaseError, Application]]
-  def changeStatus(
-      actor: ActorContext,
-      applicationId: ApplicationId,
-      target: ApplicationStatus,
-      feedback: Option[String],
-      reason: Option[String],
-      eventId: ApplicationEventId,
       now: Instant,
-      _context: MutationWriteContext
-  ): IO[Either[UseCaseError, Application]] =
-    { val _ = _context; changeStatus(actor, applicationId, target, feedback, reason, eventId, now) }
+      context: MutationWriteContext = MutationWriteContext.noop
+  ): IO[Either[UseCaseError, Application]]
 }
 
 trait SearchUseCases {
@@ -111,22 +85,18 @@ trait SearchUseCases {
 }
 
 trait InteractionUseCases {
-  def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant): IO[Either[UseCaseError, Unit]]
-  def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant, _context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
-    { val _ = _context; recordJobView(actor, eventId, jobId, searchId, now) }
-  def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant): IO[Either[UseCaseError, Unit]]
-  def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant, _context: MutationWriteContext): IO[Either[UseCaseError, Unit]] =
-    { val _ = _context; recordSearchResultClick(actor, eventId, searchId, resultId, now) }
+  def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[UseCaseError, Unit]]
+  def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant, context: MutationWriteContext = MutationWriteContext.noop): IO[Either[UseCaseError, Unit]]
 }
 
 object InteractionUseCases {
   def noop: InteractionUseCases = new InteractionUseCases {
-    override def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant): IO[Either[UseCaseError, Unit]] = {
-      val _ = (actor, eventId, jobId, searchId, now)
+    override def recordJobView(actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID], now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] = {
+      val _ = (actor, eventId, jobId, searchId, now, context)
       IO.pure(Right(()))
     }
-    override def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant): IO[Either[UseCaseError, Unit]] = {
-      val _ = (actor, eventId, searchId, resultId, now)
+    override def recordSearchResultClick(actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String, now: Instant, context: MutationWriteContext): IO[Either[UseCaseError, Unit]] = {
+      val _ = (actor, eventId, searchId, resultId, now, context)
       IO.pure(Right(()))
     }
   }

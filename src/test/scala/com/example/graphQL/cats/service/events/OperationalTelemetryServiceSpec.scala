@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service.events
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.UserRole
-import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
+import com.example.graphQL.cats.repository.protocol.{MutationWriteContext, SearchSessionRepository}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.ServiceFixtures.*
@@ -111,7 +111,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
     override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
       sessions.get.map(values => Right(values.get(id)))
 
-    override def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
+    override def recordInteraction(event: OperationalEventEnvelope, context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
       storedEvents.modify { events =>
         events.find(_.eventId == event.eventId) match {
           case Some(existing) if sameLogicalEvent(existing, event) => events -> Right(false)

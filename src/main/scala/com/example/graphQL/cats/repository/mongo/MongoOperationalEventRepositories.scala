@@ -50,7 +50,7 @@ final class MongoSearchSessionRepository(
       .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readSearchSession)))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
+  def recordInteraction(event: OperationalEventEnvelope): IO[Either[RepositoryError, Boolean]] =
     recordInteractionWithSession(event, None)
 
   override def recordInteraction(event: OperationalEventEnvelope, context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =

@@ -25,7 +25,7 @@
 |---|---|---|---|
 | PCR-01 | Startup runs against any existing hiring database | Owned collections are empty then recreated without a migration ledger | Implemented; integration source compiles |
 | PCR-02 | Clients use GraphQL, cursors, or events | Only one unversioned contract is emitted and accepted | Implemented; unit contract tests pass |
-| PCR-03 | Concurrent lifecycle writes occur | Conditional transactional writes preserve authorization, transitions, and duplicate/closed-job rules without revisions | Implemented; focused service/repository tests pass |
+| PCR-03 | Concurrent lifecycle writes occur | Conditional transactional writes preserve authorization, transitions, and duplicate/closed-job rules without revisions | Implemented; clean unit suite and targeted Mongo observed-state CAS integration tests pass |
 | PCR-04 | Repository docs and fixtures are inspected | No historic migration/version compatibility material remains | Implemented; retired specs, plans, and fixtures removed |
 | PCR-05 | Unit and disposable integration checks run | Compile, test, integration, and static checks pass | Unit suite and integration compilation pass; live Docker execution pending |
 | PCR-06 | A client executes multiple public account fields or uses aliases/fragments | Each field consumes the address/operation bucket independently and limited fields return GraphQL retry metadata | Implemented; HTTP route and rate-limiter unit tests pass |

@@ -4,7 +4,7 @@ import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{UserAccountRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{MutationWriteContext, UserAccountRepository, UserRepository}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{AccountError, ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.protocol.*
@@ -227,18 +227,18 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       initializedState: Boolean,
       val values: Ref[IO, Map[String, AccountCredentials]]
   ) extends UserAccountRepository {
-    override def bootstrap(user: User, passwordHash: String): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
+    override def bootstrap(user: User, passwordHash: String, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
     override def initialized: IO[Either[RepositoryError, Boolean]] = IO.pure(Right(initializedState))
-    override def createAccount(user: User, passwordHash: String, now: Instant): IO[Either[RepositoryError, Unit]] =
+    override def createAccount(user: User, passwordHash: String, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
       values.modify { current =>
         val key = AccountName.canonical(user.name)
         if (current.contains(key)) current -> Left(RepositoryError.Conflict)
         else (current.updated(key, AccountCredentials(user, passwordHash)), Right(()))
       }
     override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] = values.get.map(values => Right(values.get(nameCanonical)))
-    override def updateProfile(userId: UserId, profile: UserProfile, now: Instant): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
+    override def updateProfile(userId: UserId, profile: UserProfile, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
     override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
-    override def deleteAccount(userId: UserId, now: Instant, tombstone: String): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def deleteAccount(userId: UserId, now: Instant, tombstone: String, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private object TestAccounts {
