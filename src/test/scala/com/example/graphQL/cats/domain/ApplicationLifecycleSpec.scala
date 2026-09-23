@@ -48,14 +48,16 @@ class ApplicationLifecycleSpec extends FunSuite {
   }
 
   test("invalid status transition is a typed domain error") {
-    val result = ApplicationLifecycle.changeStatus(application.copy(status = Created), Hired, recruiterId, later, None, None)
+    val result =
+      ApplicationLifecycle.changeStatus(application.copy(status = Created), Hired, recruiterId, later, None, None)
 
     assertEquals(result, Left(DomainError.InvalidStatusTransition(Created, Hired)))
   }
 
   test("rejection requires feedback and trims accepted feedback") {
     val missing = ApplicationLifecycle.changeStatus(application, Rejected, recruiterId, later, Some(" "), None)
-    val accepted = ApplicationLifecycle.changeStatus(application, Rejected, recruiterId, later, Some(" Not enough Scala "), None)
+    val accepted =
+      ApplicationLifecycle.changeStatus(application, Rejected, recruiterId, later, Some(" Not enough Scala "), None)
 
     assertEquals(missing, Left(DomainError.RejectionFeedbackRequired))
     assertEquals(accepted.map(_.feedback), Right(Some("Not enough Scala")))
@@ -63,8 +65,10 @@ class ApplicationLifecycleSpec extends FunSuite {
 
   test("decline requires reason and terminal statuses cannot move again") {
     val missing = ApplicationLifecycle.changeStatus(application, Declined, recruiterId, later, None, Some(""))
-    val declined = ApplicationLifecycle.changeStatus(application, Declined, recruiterId, later, None, Some("Candidate withdrew"))
-    val terminal = ApplicationLifecycle.changeStatus(application.copy(status = Declined), Interview, recruiterId, later, None, None)
+    val declined =
+      ApplicationLifecycle.changeStatus(application, Declined, recruiterId, later, None, Some("Candidate withdrew"))
+    val terminal =
+      ApplicationLifecycle.changeStatus(application.copy(status = Declined), Interview, recruiterId, later, None, None)
 
     assertEquals(missing, Left(DomainError.DeclineReasonRequired))
     assertEquals(declined.map(_.reason), Right(Some("Candidate withdrew")))

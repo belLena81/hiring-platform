@@ -27,12 +27,18 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
       now.plusSeconds(3600)
     )
     val stored = MongoSearchSessionWorkCodecs.work(
-      PendingSearchSessionWork(session, OperationalEvents.searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)),
+      PendingSearchSessionWork(
+        session,
+        OperationalEvents.searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)
+      ),
       now
     )
 
     assert(!stored.toJson.contains("private candidate query"))
     assertEquals(MongoSearchSessionWorkCodecs.readWork(stored).map(_.session.query), Right(None))
-    assertEquals(MongoSearchSessionWorkCodecs.readWork(stored).map(_.event.payload.hcursor.get[Option[String]]("query")), Right(Right(None)))
+    assertEquals(
+      MongoSearchSessionWorkCodecs.readWork(stored).map(_.event.payload.hcursor.get[Option[String]]("query")),
+      Right(Right(None))
+    )
   }
 }

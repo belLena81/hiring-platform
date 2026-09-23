@@ -15,7 +15,12 @@ import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, Application
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.job.AuthorizedJobAccess
 import com.example.graphQL.cats.service.mutation.Idempotent
-import com.example.graphQL.cats.service.protocol.{ApplicationUseCases, IdempotencyRequest, UseCaseIO, UseCaseIO as UseCase}
+import com.example.graphQL.cats.service.protocol.{
+  ApplicationUseCases,
+  IdempotencyRequest,
+  UseCaseIO,
+  UseCaseIO as UseCase
+}
 import com.example.graphQL.cats.shared.pagination.ApplicationPageRequest
 import java.time.Instant
 import java.nio.charset.StandardCharsets
@@ -38,18 +43,39 @@ final class ApplicationService(
       actor: ActorContext,
       jobId: JobId
   ): UseCaseIO[Application] =
-    idempotent.execute("submitApplication", Idempotent.actorScope(actor), request, applicationReference, replayApplication(actor)) { context =>
+    idempotent.execute(
+      "submitApplication",
+      Idempotent.actorScope(actor),
+      request,
+      applicationReference,
+      replayApplication(actor)
+    ) { context =>
       for {
         candidate <- authorization.resolve(actor)
-        _ <- UseCase.fromEither(Either.cond(candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden)))
-        job <- UseCase.repository(jobs.find(jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+        _ <- UseCase.fromEither(
+          Either.cond(candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
+        )
+        job <- UseCase
+          .repository(jobs.find(jobId))
+          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
         now <- UseCase.liftIO(currentTime)
         applicationId <- UseCase.liftIO(randomId.map(uuid => ApplicationId(uuid)))
         eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
         application <- UseCase.fromEither(ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase)
-        initialEvent = ApplicationEvent(eventId, application.id, None, application.status, candidate.id, now, None, None)
+        initialEvent = ApplicationEvent(
+          eventId,
+          application.id,
+          None,
+          application.status,
+          candidate.id,
+          now,
+          None,
+          None
+        )
         event = OperationalEvents.applicationCreated(eventId.value, application, candidate.id, now)
-        _ <- UseCase.repository(applications.createForOpenJobWithEvents(job, application, initialEvent, List(event), context))
+        _ <- UseCase.repository(
+          applications.createForOpenJobWithEvents(job, application, initialEvent, List(event), context)
+        )
       } yield application
     }
 
@@ -59,7 +85,9 @@ final class ApplicationService(
   ): UseCaseIO[List[Application]] =
     for {
       user <- authorization.resolve(actor)
-      _ <- UseCase.fromEither(Either.cond(user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden)))
+      _ <- UseCase.fromEither(
+        Either.cond(user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
+      )
       applications <- UseCase.repository(this.applications.findByCandidate(user.id, page))
     } yield applications
 
@@ -80,19 +108,42 @@ final class ApplicationService(
       feedback: Option[String],
       reason: Option[String]
   ): UseCaseIO[Application] =
-    idempotent.execute(statusOperation(target), Idempotent.actorScope(actor), request, applicationReference, replayApplication(actor)) { context =>
+    idempotent.execute(
+      statusOperation(target),
+      Idempotent.actorScope(actor),
+      request,
+      applicationReference,
+      replayApplication(actor)
+    ) { context =>
       for {
         actorUser <- authorization.resolve(actor)
-        application <- UseCase.repository(applications.find(applicationId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
-        job <- UseCase.repository(jobs.find(application.jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-        _ <- UseCase.fromEither(Either.cond(authorization.canManage(actorUser, job), (), UseCaseError.Domain(DomainError.Forbidden)))
+        application <- UseCase
+          .repository(applications.find(applicationId))
+          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
+        job <- UseCase
+          .repository(jobs.find(application.jobId))
+          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+        _ <- UseCase.fromEither(
+          Either.cond(authorization.canManage(actorUser, job), (), UseCaseError.Domain(DomainError.Forbidden))
+        )
         now <- UseCase.liftIO(currentTime)
         eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
-        change <- UseCase.fromEither(ApplicationLifecycle.changeStatus(application, target, actorUser.id, now, feedback, reason).widenUseCase)
+        change <- UseCase.fromEither(
+          ApplicationLifecycle.changeStatus(application, target, actorUser.id, now, feedback, reason).widenUseCase
+        )
         persistedApplication = change.application
         event <- UseCase.fromEither(
           ApplicationEvent
-            .validate(eventId, application.id, Some(change.previousStatus), change.newStatus, actorUser.id, now, change.feedback, change.reason)
+            .validate(
+              eventId,
+              application.id,
+              Some(change.previousStatus),
+              change.newStatus,
+              actorUser.id,
+              now,
+              change.feedback,
+              change.reason
+            )
             .toEither
             .widenUseCase
         )
@@ -101,23 +152,35 @@ final class ApplicationService(
       } yield persistedApplication
     }
 
-  private def replayApplication(actor: ActorContext)(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Application] =
-    scala.util.Try(ApplicationId(UUID.fromString(reference.entityId))).toEither.fold(
-      _ => UseCase.left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
-      id => readModel.canViewApplication(actor, id) *> readModel.application(id).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
-    )
+  private def replayApplication(
+      actor: ActorContext
+  )(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Application] =
+    scala.util
+      .Try(ApplicationId(UUID.fromString(reference.entityId)))
+      .toEither
+      .fold(
+        _ =>
+          UseCase
+            .left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
+        id =>
+          readModel.canViewApplication(actor, id) *> readModel
+            .application(id)
+            .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
+      )
 
-  private def applicationReference(application: Application): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
+  private def applicationReference(
+      application: Application
+  ): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
     com.example.graphQL.cats.repository.protocol.MutationEntityReference("application", application.id.value.toString)
 
   private def statusOperation(status: ApplicationStatus): String =
     status match {
-      case ApplicationStatus.Accepted => "acceptApplication"
+      case ApplicationStatus.Accepted  => "acceptApplication"
       case ApplicationStatus.Interview => "moveApplicationToInterview"
-      case ApplicationStatus.Hired => "hireApplication"
-      case ApplicationStatus.Rejected => "rejectApplication"
-      case ApplicationStatus.Declined => "declineApplication"
-      case ApplicationStatus.Created => "changeApplicationStatus"
+      case ApplicationStatus.Hired     => "hireApplication"
+      case ApplicationStatus.Rejected  => "rejectApplication"
+      case ApplicationStatus.Declined  => "declineApplication"
+      case ApplicationStatus.Created   => "changeApplicationStatus"
     }
 
   private def applicationEvents(application: Application, event: ApplicationEvent): List[OperationalEventEnvelope] = {

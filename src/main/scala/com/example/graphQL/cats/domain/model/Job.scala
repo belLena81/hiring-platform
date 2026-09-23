@@ -22,18 +22,18 @@ object Location {
 }
 
 final case class Job(
-  id: JobId,
-  recruiterId: UserId,
-  title: String,
-  description: String,
-  requirements: List[String],
-  skills: Set[String],
-  location: Location,
-  status: JobStatus,
-  createdAt: Instant,
-  updatedAt: Instant,
-  closedAt: Option[Instant] = None,
-  embedding: Option[EntityEmbedding] = None
+    id: JobId,
+    recruiterId: UserId,
+    title: String,
+    description: String,
+    requirements: List[String],
+    skills: Set[String],
+    location: Location,
+    status: JobStatus,
+    createdAt: Instant,
+    updatedAt: Instant,
+    closedAt: Option[Instant] = None,
+    embedding: Option[EntityEmbedding] = None
 )
 
 object Job {
@@ -58,8 +58,20 @@ object Job {
       validateNonEmptyValues("skills", skills),
       Location.validate(location.country, location.city, location.remote)
     ).mapN { (validTitle, validDescription, validRequirements, validSkills, validLocation) =>
-      Job(id, recruiterId, validTitle, validDescription, validRequirements, validSkills, validLocation, status, createdAt,
-        updatedAt, closedAt, embedding)
+      Job(
+        id,
+        recruiterId,
+        validTitle,
+        validDescription,
+        validRequirements,
+        validSkills,
+        validLocation,
+        status,
+        createdAt,
+        updatedAt,
+        closedAt,
+        embedding
+      )
     }
 
   private def validateRequirements(requirements: List[String]): ValidatedNel[DomainValidationError, List[String]] = {

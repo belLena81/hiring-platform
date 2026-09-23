@@ -9,12 +9,18 @@ import java.time.{Duration, Instant}
 final case class AnalyticsPeriod(from: Instant, to: Instant)
 
 trait AnalyticsReportingUseCases {
-  def report(actor: ActorContext, period: AnalyticsPeriod): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot]
+  def report(
+      actor: ActorContext,
+      period: AnalyticsPeriod
+  ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot]
 }
 
 object AnalyticsReportingUseCases {
   val unavailable: AnalyticsReportingUseCases = new AnalyticsReportingUseCases {
-    override def report(actor: ActorContext, period: AnalyticsPeriod): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
+    override def report(
+        actor: ActorContext,
+        period: AnalyticsPeriod
+    ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
       UseCase.left(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
   }
 }
@@ -26,19 +32,28 @@ final class AnalyticsReportingService(
 ) extends AnalyticsReportingUseCases {
   private val maximumPeriodSeconds = 30L * 24L * 60L * 60L
 
-  override def report(actor: ActorContext, period: AnalyticsPeriod): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
+  override def report(
+      actor: ActorContext,
+      period: AnalyticsPeriod
+  ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
     for {
       _ <- UseCase.fromEither(validate(period))
       _ <- UseCase.repository(users.find(actor.userId)).subflatMap {
-        case Some(user) if user.role == UserRole.Admin && user.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active => Right(user)
+        case Some(user)
+            if user.role == UserRole.Admin && user.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active =>
+          Right(user)
         case _ => Left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
       }
-      snapshot <- UseCase.repository(reports.latest).subflatMap(_.toRight(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable)))
+      snapshot <- UseCase
+        .repository(reports.latest)
+        .subflatMap(_.toRight(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable)))
     } yield filter(snapshot, period)
 
   private def validate(period: AnalyticsPeriod): Either[UseCaseError, Unit] =
     Either.cond(
-      !period.to.isBefore(period.from) && Duration.between(period.from, period.to).compareTo(Duration.ofSeconds(maximumPeriodSeconds)) <= 0,
+      !period.to.isBefore(period.from) && Duration
+        .between(period.from, period.to)
+        .compareTo(Duration.ofSeconds(maximumPeriodSeconds)) <= 0,
       (),
       UseCaseError.Analytics(AnalyticsError.InvalidPeriod)
     )
@@ -49,6 +64,7 @@ final class AnalyticsReportingService(
   ): com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot =
     snapshot.copy(
       funnel = snapshot.funnel.filter(row => !row.day.isBefore(period.from) && !row.day.isAfter(period.to)),
-      skillPostingActivity = snapshot.skillPostingActivity.filter(row => !row.day.isBefore(period.from) && !row.day.isAfter(period.to))
+      skillPostingActivity =
+        snapshot.skillPostingActivity.filter(row => !row.day.isBefore(period.from) && !row.day.isAfter(period.to))
     )
 }

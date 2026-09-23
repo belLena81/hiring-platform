@@ -5,7 +5,15 @@ import com.comcast.ip4s.{Host, Port}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.config.AuthRateLimitConfig
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{
+  DatabaseProbe,
+  Diagnostics,
+  HealthService,
+  LogEvent,
+  LogField,
+  LogFields,
+  ProbeResult
+}
 import org.http4s.server.Server
 import io.circe.Json
 import io.circe.parser.parse
@@ -17,7 +25,8 @@ import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 class HiringPlatformServerSpec extends CatsEffectSuite {
-  private lazy val client = HttpClient.newBuilder()
+  private lazy val client = HttpClient
+    .newBuilder()
     .version(HttpClient.Version.HTTP_1_1)
     .connectTimeout(Duration.ofSeconds(2))
     .build()
@@ -37,13 +46,15 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
         TestGraphQLSupport.emptyServices,
         _ => IO.pure(Right(None)),
         IO.pure(ProbeResult.Ready),
-        authRateLimit,
+        authRateLimit
       )
-      app <- Resource.eval(new HiringApiRoutes(
-        new HealthService(database, Diagnostics.noop),
-        Diagnostics.noop,
-        dependencies
-      ).httpApp(HiringApiRoutes.HttpConfig(AdmissionPermits, 5.seconds)))
+      app <- Resource.eval(
+        new HiringApiRoutes(
+          new HealthService(database, Diagnostics.noop),
+          Diagnostics.noop,
+          dependencies
+        ).httpApp(HiringApiRoutes.HttpConfig(AdmissionPermits, 5.seconds))
+      )
       server <- HiringPlatformServer.resource(
         Host.fromString(host).getOrElse(fail(s"Invalid test host: $host")),
         Port.fromInt(port).getOrElse(fail(s"Invalid test port: $port")),
@@ -60,28 +71,33 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
           IO.defer(emitted.update(_ :+ (event, fields)))
       }
       failingApp = org.http4s.HttpApp[IO](_ => IO.raiseError[org.http4s.Response[IO]](failure))
-      _ <- HiringPlatformServer.resource(
-        Host.fromString("127.0.0.1").get,
-        Port.fromInt(0).get,
-        failingApp,
-        diagnostics
-      ).use { server =>
-        request(server.address.getPort, "/failure").map { response =>
-          assertEquals(response.statusCode(), 500)
-        } *> emitted.get.map { events =>
-          assertEquals(events, Vector(LogEvent.RuntimeFailed -> LogFields.failure(failure)))
+      _ <- HiringPlatformServer
+        .resource(
+          Host.fromString("127.0.0.1").get,
+          Port.fromInt(0).get,
+          failingApp,
+          diagnostics
+        )
+        .use { server =>
+          request(server.address.getPort, "/failure").map { response =>
+            assertEquals(response.statusCode(), 500)
+          } *> emitted.get.map { events =>
+            assertEquals(events, Vector(LogEvent.RuntimeFailed -> LogFields.failure(failure)))
+          }
         }
-      }
     } yield ()
   }
 
   private def request(port: Int, path: String, body: Option[String] = None): IO[HttpResponse[String]] =
     IO.fromCompletableFuture(IO {
-      val builder = HttpRequest.newBuilder(URI.create(s"http://127.0.0.1:$port$path"))
+      val builder = HttpRequest
+        .newBuilder(URI.create(s"http://127.0.0.1:$port$path"))
         .timeout(Duration.ofSeconds(8))
-      val httpRequest = body.fold(builder.GET()) { payload =>
-        builder.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(payload))
-      }.build()
+      val httpRequest = body
+        .fold(builder.GET()) { payload =>
+          builder.header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(payload))
+        }
+        .build()
       client.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString())
     })
 
@@ -104,20 +120,30 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
           graphqlHealth <- request(port, "/graphql", Some("""{"query":"{ health { status } }"}"""))
           healthChecks <- checks.get
           ready <- request(port, "/ready")
-          graphqlReady <- request(port, "/graphql", Some("""{"query":"{ first: readiness { status } second: readiness { status } }"}"""))
+          graphqlReady <- request(
+            port,
+            "/graphql",
+            Some("""{"query":"{ first: readiness { status } second: readiness { status } }"}""")
+          )
           totalChecks <- checks.get
           graphiql <- request(port, "/graphiql")
         } yield {
           assertEquals(health.statusCode(), 200)
           assertEquals(json(health).hcursor.get[String]("status"), Right("UP"))
           assertEquals(graphqlHealth.statusCode(), 200)
-          assertEquals(json(graphqlHealth).hcursor.downField("data").downField("health").get[String]("status"), Right("UP"))
+          assertEquals(
+            json(graphqlHealth).hcursor.downField("data").downField("health").get[String]("status"),
+            Right("UP")
+          )
           assertEquals(healthChecks, 0)
           assertEquals(ready.statusCode(), 200)
           assertEquals(json(ready).hcursor.get[String]("status"), Right("READY"))
           assertEquals(graphqlReady.statusCode(), 200)
           List("first", "second").foreach { alias =>
-            assertEquals(json(graphqlReady).hcursor.downField("data").downField(alias).get[String]("status"), Right("READY"))
+            assertEquals(
+              json(graphqlReady).hcursor.downField("data").downField(alias).get[String]("status"),
+              Right("READY")
+            )
           }
           assertEquals(totalChecks, 2)
           assertEquals(graphiql.statusCode(), 404)
@@ -143,7 +169,10 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
           assertEquals(ready.statusCode(), 503)
           assertEquals(json(ready).hcursor.get[String]("status"), Right("NOT_READY"))
           assertEquals(graphql.statusCode(), 200)
-          assertEquals(json(graphql).hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
+          assertEquals(
+            json(graphql).hcursor.downField("data").downField("readiness").get[String]("status"),
+            Right("NOT_READY")
+          )
           assertEquals(recovered.statusCode(), 200)
         }
       }
@@ -152,8 +181,10 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
 
   private def resetConnection(port: Int, path: String, entered: Deferred[IO, Unit]): IO[Unit] = {
     val body = """{"query":"{ readiness { status } }"}"""
-    val wire = if (path == "/ready") s"GET /ready HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n"
-      else s"POST /graphql HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nContent-Type: application/json\r\nContent-Length: ${body.getBytes(StandardCharsets.UTF_8).length}\r\n\r\n$body"
+    val wire =
+      if (path == "/ready") s"GET /ready HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n\r\n"
+      else
+        s"POST /graphql HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nContent-Type: application/json\r\nContent-Length: ${body.getBytes(StandardCharsets.UTF_8).length}\r\n\r\n$body"
     Resource.make(IO.blocking(new Socket()))(socket => IO.blocking(socket.close())).use { socket =>
       IO.blocking {
         socket.connect(new InetSocketAddress("127.0.0.1", port), 2000)
@@ -165,7 +196,9 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
   }
 
   List("/ready", "/graphql").foreach { path =>
-    test(s"P1-AC06 socket RST on $path: deadline-driven cleanup within two seconds plus four-second harness tolerance") {
+    test(
+      s"P1-AC06 socket RST on $path: deadline-driven cleanup within two seconds plus four-second harness tolerance"
+    ) {
       for {
         entered <- Deferred[IO, Unit]
         finalized <- Deferred[IO, Unit]
@@ -216,9 +249,13 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       dependency = Resource.make(acquired.update(_ + 1).as(ready))(_ => released.update(_ + 1))
       _ <- server("127.0.0.1", 0, ready).use { original =>
         for {
-          result <- dependency.flatMap { database =>
-            server("127.0.0.1", original.address.getPort, database)
-          }.use(_ => IO.unit).attempt.timeout(10.seconds)
+          result <- dependency
+            .flatMap { database =>
+              server("127.0.0.1", original.address.getPort, database)
+            }
+            .use(_ => IO.unit)
+            .attempt
+            .timeout(10.seconds)
           acquisitionCount <- acquired.get
           releaseCount <- released.get
           response <- request(original.address.getPort, "/health")
@@ -262,26 +299,30 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       boundPort <- Deferred[IO, Int]
       shutdown <- Deferred[IO, Unit]
       fake = probe((entered.complete(()).void *> IO.never[ProbeResult]).onCancel(finalized.complete(()).void))
-      _ <- server("127.0.0.1", 0, fake).use { server =>
-        boundPort.complete(server.address.getPort).void *> shutdown.get
-      }.background.use { completion =>
-        boundPort.get.timeout(cleanupBound).flatMap { port =>
-          request(port, "/ready").attempt.background.use { _ =>
-            for {
-              _ <- entered.get.timeout(cleanupBound)
-              _ <- shutdown.complete(())
-              _ <- IO.both(
-                finalized.get.timeout(cleanupBound),
-                completion.flatMap(_.embedNever).timeout(shutdownBound)
-              )
-              canceled <- finalized.tryGet
-              _ <- server("127.0.0.1", port, probe(IO.pure(ProbeResult.Ready))).use { restarted =>
-                request(restarted.address.getPort, "/health").map(response => assertEquals(response.statusCode(), 200))
-              }
-            } yield assertEquals(canceled, Some(()))
+      _ <- server("127.0.0.1", 0, fake)
+        .use { server =>
+          boundPort.complete(server.address.getPort).void *> shutdown.get
+        }
+        .background
+        .use { completion =>
+          boundPort.get.timeout(cleanupBound).flatMap { port =>
+            request(port, "/ready").attempt.background.use { _ =>
+              for {
+                _ <- entered.get.timeout(cleanupBound)
+                _ <- shutdown.complete(())
+                _ <- IO.both(
+                  finalized.get.timeout(cleanupBound),
+                  completion.flatMap(_.embedNever).timeout(shutdownBound)
+                )
+                canceled <- finalized.tryGet
+                _ <- server("127.0.0.1", port, probe(IO.pure(ProbeResult.Ready))).use { restarted =>
+                  request(restarted.address.getPort, "/health")
+                    .map(response => assertEquals(response.statusCode(), 200))
+                }
+              } yield assertEquals(canceled, Some(()))
+            }
           }
         }
-      }
     } yield ()
   }
 }

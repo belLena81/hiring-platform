@@ -17,43 +17,57 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
   test("LOG-01 disabled levels do not evaluate structured field thunks") {
     val evaluated = new AtomicBoolean(false)
     val logger = LoggerFactory.getLogger("hiring.foundation").asInstanceOf[ch.qos.logback.classic.Logger]
-    Resource.make(IO {
-      val previous = logger.getLevel
-      logger.setLevel(ch.qos.logback.classic.Level.OFF)
-      previous
-    })(previous => IO(logger.setLevel(previous))).use { _ =>
-      SafeDiagnostics().event(LogEvent.Started, fields = {
-        evaluated.set(true)
-        Map(LogField.Environment -> "local")
-      }).as(assert(!evaluated.get()))
-    }
+    Resource
+      .make(IO {
+        val previous = logger.getLevel
+        logger.setLevel(ch.qos.logback.classic.Level.OFF)
+        previous
+      })(previous => IO(logger.setLevel(previous)))
+      .use { _ =>
+        SafeDiagnostics()
+          .event(
+            LogEvent.Started,
+            fields = {
+              evaluated.set(true)
+              Map(LogField.Environment -> "local")
+            }
+          )
+          .as(assert(!evaluated.get()))
+      }
   }
 
   test("LOG-01 actual SLF4J events carry the matching severity and structured context") {
     val logger = LoggerFactory.getLogger("hiring.foundation").asInstanceOf[ch.qos.logback.classic.Logger]
     val requestId = "fe211944-7015-4e73-8dc1-000000000099"
-    Resource.make(IO {
-      val appender = new ch.qos.logback.core.read.ListAppender[ch.qos.logback.classic.spi.ILoggingEvent]()
-      appender.start()
-      logger.addAppender(appender)
-      appender
-    })(appender => IO {
-      val _ = logger.detachAppender(appender)
-      appender.stop()
-    }).use { appender =>
-      val events = List(LogEvent.Started, LogEvent.RequestRejected, LogEvent.RuntimeFailed)
-      events.traverse_(event => SafeDiagnostics().event(event, Some(requestId))) *> IO {
-        val captured = appender.list.asScala.toList.filter(_.getFormattedMessage.contains(requestId))
+    Resource
+      .make(IO {
+        val appender = new ch.qos.logback.core.read.ListAppender[ch.qos.logback.classic.spi.ILoggingEvent]()
+        appender.start()
+        logger.addAppender(appender)
+        appender
+      })(appender =>
+        IO {
+          val _ = logger.detachAppender(appender)
+          appender.stop()
+        }
+      )
+      .use { appender =>
+        val events = List(LogEvent.Started, LogEvent.RequestRejected, LogEvent.RuntimeFailed)
+        events.traverse_(event => SafeDiagnostics().event(event, Some(requestId))) *> IO {
+          val captured = appender.list.asScala.toList.filter(_.getFormattedMessage.contains(requestId))
           assertEquals(captured.size, events.size)
           captured.zip(events).foreach { case (record, event) =>
             assertEquals(record.getLevel.toString, event.severity)
             assertEquals(record.getMDCPropertyMap.get("category"), event.category)
             assertEquals(record.getMDCPropertyMap.get("marker"), event.marker)
-            assertEquals(parse(record.getFormattedMessage).flatMap(_.hcursor.get[String]("marker")), Right(event.marker))
+            assertEquals(
+              parse(record.getFormattedMessage).flatMap(_.hcursor.get[String]("marker")),
+              Right(event.marker)
+            )
             assert(record.getThrowableProxy == null)
           }
+        }
       }
-    }
   }
 
   test("P1-AC09 emitted logs are UTC JSON with safe categories and correlation") {
@@ -77,8 +91,22 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
         val timestamp = json.hcursor.get[String]("timestamp").toOption.getOrElse(fail("Missing timestamp"))
         assert(timestamp.endsWith("Z"))
         assert(Instant.parse(timestamp).isBefore(Instant.now().plusSeconds(1)))
-        assertEquals(json.asObject.map(_.keys.toSet), Some(Set("timestamp", "severity", "category", "requestId",
-          "marker", "component", "message", "masking", "details")))
+        assertEquals(
+          json.asObject.map(_.keys.toSet),
+          Some(
+            Set(
+              "timestamp",
+              "severity",
+              "category",
+              "requestId",
+              "marker",
+              "component",
+              "message",
+              "masking",
+              "details"
+            )
+          )
+        )
       }
     }
   }
@@ -88,8 +116,9 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
     for {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line))
-      invalid <- IO(AppConfig.fromConfig(
-        s"""http {
+      invalid <- IO(
+        AppConfig.fromConfig(
+          s"""http {
            |  host = "127.0.0.1"
            |  port = 8080
            |}
@@ -102,8 +131,9 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
            |  mask-sensitive = true
            |}
            |""".stripMargin,
-        Map.empty
-      ))
+          Map.empty
+        )
+      )
       _ <- diagnostics.event(LogEvent.ConfigInvalid, Some(secret))
       _ <- diagnostics.event(LogEvent.RequestRejected, Some("validation failed: " + secret))
       _ <- diagnostics.event(LogEvent.MongoAuthFailed)
@@ -140,9 +170,15 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       for {
         emitted <- Ref.of[IO, Vector[String]](Vector.empty)
         diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line), maskSensitive = masked)
-        _ <- diagnostics.event(LogEvent.MongoProbeFailed, fields = Map(
-          LogField.MongoHosts -> "local-db:27017", LogField.MongoDatabase -> "local-hiring",
-          LogField.Reason -> "DATABASE_TIMEOUT", LogField.DurationMs -> "2001"))
+        _ <- diagnostics.event(
+          LogEvent.MongoProbeFailed,
+          fields = Map(
+            LogField.MongoHosts -> "local-db:27017",
+            LogField.MongoDatabase -> "local-hiring",
+            LogField.Reason -> "DATABASE_TIMEOUT",
+            LogField.DurationMs -> "2001"
+          )
+        )
         lines <- emitted.get
       } yield {
         val details = parse(lines.head).toOption.getOrElse(fail("Invalid JSON")).hcursor.downField("details")
@@ -162,9 +198,17 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       emitted <- Ref.of[IO, Vector[String]](Vector.empty)
       diagnostics = SafeDiagnostics.withSink(line => emitted.update(_ :+ line), maskSensitive = false)
       _ <- diagnostics.event(LogEvent.RuntimeFailed, fields = LogFields.failure(failure))
-      _ <- diagnostics.event(LogEvent.RequestRejected, fields = Map(
-        LogField.Reason -> secret, LogField.Route -> s"/$secret", LogField.Method -> secret,
-        LogField.ErrorType -> secret, LogField.ErrorLocation -> s"/$secret.scala:25", LogField.ConfigKey -> secret))
+      _ <- diagnostics.event(
+        LogEvent.RequestRejected,
+        fields = Map(
+          LogField.Reason -> secret,
+          LogField.Route -> s"/$secret",
+          LogField.Method -> secret,
+          LogField.ErrorType -> secret,
+          LogField.ErrorLocation -> s"/$secret.scala:25",
+          LogField.ConfigKey -> secret
+        )
+      )
       lines <- emitted.get
     } yield {
       assert(lines.forall(!_.contains(secret)))
@@ -177,8 +221,16 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
 
   test("LOG-04 stack locations use the bounded Scala filename contract") {
     val failure = new IllegalStateException("synthetic-location-secret")
-    failure.setStackTrace(Array(new StackTraceElement(
-      "com.example.graphQL.cats.api.graphql.HiringGraphQLSchema", "execute", "ResolverFile.scala", 25)))
+    failure.setStackTrace(
+      Array(
+        new StackTraceElement(
+          "com.example.graphQL.cats.api.graphql.HiringGraphQLSchema",
+          "execute",
+          "ResolverFile.scala",
+          25
+        )
+      )
+    )
     val fields = LogFields.failure(failure)
     assertEquals(fields.get(LogField.ErrorLocation), Some("ResolverFile.scala:25"))
     assert(LogFields.validPublic(LogField.ErrorLocation, "ResolverFile.scala:25"))
@@ -198,12 +250,19 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       lines.foreach { line =>
         assert(line.getBytes(java.nio.charset.StandardCharsets.UTF_8).length <= 8192)
         assert(!line.contains('\n') && !line.contains('\r') && !line.contains('\u2028') && !line.contains('\u202e'))
-        val details = parse(line).toOption.getOrElse(fail("Invalid JSON")).hcursor.downField("details").focus
-          .flatMap(_.asObject).getOrElse(fail("Missing details"))
+        val details = parse(line).toOption
+          .getOrElse(fail("Invalid JSON"))
+          .hcursor
+          .downField("details")
+          .focus
+          .flatMap(_.asObject)
+          .getOrElse(fail("Missing details"))
         assert(details.size <= 12)
       }
-      assertEquals(parse(lines.last).flatMap(_.hcursor.downField("details").get[String]("operationName")),
-        Right("💡" * 127 + "…"))
+      assertEquals(
+        parse(lines.last).flatMap(_.hcursor.downField("details").get[String]("operationName")),
+        Right("💡" * 127 + "…")
+      )
     }
   }
 
@@ -218,25 +277,32 @@ class SafeDiagnosticsSpec extends CatsEffectSuite {
       _ <- SafeDiagnostics.withSink(_ => throw secret).event(LogEvent.Started)
       entered <- Deferred[IO, Unit]
       finalized <- Deferred[IO, Unit]
-      waiting = SafeDiagnostics.withSink(_ => (entered.complete(()) *> IO.never[Unit]).onCancel(finalized.complete(()).void))
-      _ <- waiting.emit(LogEvent.Started).start.bracket { fiber =>
-        for {
-          _ <- entered.get.timeout(1.second)
-          _ <- fiber.cancel
-          outcome <- fiber.join
-          _ <- finalized.get.timeout(1.second)
-        } yield assert(outcome.isCanceled)
-      }(_.cancel)
+      waiting = SafeDiagnostics.withSink(_ =>
+        (entered.complete(()) *> IO.never[Unit]).onCancel(finalized.complete(()).void)
+      )
+      _ <- waiting
+        .emit(LogEvent.Started)
+        .start
+        .bracket { fiber =>
+          for {
+            _ <- entered.get.timeout(1.second)
+            _ <- fiber.cancel
+            outcome <- fiber.join
+            _ <- finalized.get.timeout(1.second)
+          } yield assert(outcome.isCanceled)
+        }(_.cancel)
     } yield ()
   }
 
   test("P1-AC09 backend suppresses raw framework and driver emitters at every app level") {
-    SafeDiagnostics.configure().flatMap { _ => IO {
-        List("ROOT", "org.mongodb.driver", "org.http4s", "org.typelevel", "com.mongodb.ConnectionString").foreach { name =>
-          val logger = LoggerFactory.getLogger(name)
-          assert(!logger.isErrorEnabled, clues(name))
-          assert(!logger.isWarnEnabled, clues(name))
-          assert(!logger.isInfoEnabled, clues(name))
+    SafeDiagnostics.configure().flatMap { _ =>
+      IO {
+        List("ROOT", "org.mongodb.driver", "org.http4s", "org.typelevel", "com.mongodb.ConnectionString").foreach {
+          name =>
+            val logger = LoggerFactory.getLogger(name)
+            assert(!logger.isErrorEnabled, clues(name))
+            assert(!logger.isWarnEnabled, clues(name))
+            assert(!logger.isInfoEnabled, clues(name))
         }
         assert(LoggerFactory.getLogger("hiring.foundation").isInfoEnabled)
       }

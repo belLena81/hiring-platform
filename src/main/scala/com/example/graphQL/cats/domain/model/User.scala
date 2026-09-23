@@ -16,9 +16,9 @@ enum AccountStatus {
 }
 
 final case class CandidateProfile(
-  skills: Set[String],
-  experienceSummary: Option[String],
-  resumeRef: Option[String]
+    skills: Set[String],
+    experienceSummary: Option[String],
+    resumeRef: Option[String]
 )
 
 object CandidateProfile {
@@ -57,8 +57,8 @@ object UserProfile {
     (role, profile) match {
       case (UserRole.Candidate, Some(UserProfile.Candidate(_))) => true
       case (UserRole.Recruiter, Some(UserProfile.Recruiter(_))) => true
-      case (UserRole.Admin, None) => true
-      case _ => false
+      case (UserRole.Admin, None)                               => true
+      case _                                                    => false
     }
 
   def validateFor(role: UserRole, profile: Option[UserProfile]): ValidatedNel[DomainValidationError, Unit] =
@@ -72,16 +72,16 @@ object UserProfile {
 }
 
 final case class User(
-  id: UserId,
-  email: Option[String],
-  name: String,
-  role: UserRole,
-  profile: Option[UserProfile],
-  createdAt: Instant,
-  adminSingleton: Boolean = false,
-  embedding: Option[EntityEmbedding] = None,
-  accountStatus: AccountStatus = AccountStatus.Active,
-  deletedAt: Option[Instant] = None
+    id: UserId,
+    email: Option[String],
+    name: String,
+    role: UserRole,
+    profile: Option[UserProfile],
+    createdAt: Instant,
+    adminSingleton: Boolean = false,
+    embedding: Option[EntityEmbedding] = None,
+    accountStatus: AccountStatus = AccountStatus.Active,
+    deletedAt: Option[Instant] = None
 ) {
   def candidateProfile: Option[CandidateProfile] =
     profile.collect { case UserProfile.Candidate(value) => value }
@@ -89,9 +89,9 @@ final case class User(
   def roleProfileIsValid: Boolean =
     accountStatus match {
       case AccountStatus.Deleted => profile.isEmpty
-      case AccountStatus.Active =>
+      case AccountStatus.Active  =>
         role match {
-          case UserRole.Admin => adminSingleton && profile.isEmpty
+          case UserRole.Admin                          => adminSingleton && profile.isEmpty
           case UserRole.Candidate | UserRole.Recruiter => !adminSingleton && UserProfile.matchesRole(role, profile)
         }
     }
@@ -126,8 +126,9 @@ private[domain] def validateText(
     maximum: Int = FieldLimits.ShortTextMaxChars
 ): ValidatedNel[DomainValidationError, String] =
   value.trim match {
-    case "" => BlankField(field).invalidNel
-    case trimmed if trimmed.length > maximum => DomainValidationError.TextTooLong(field, maximum, trimmed.length).invalidNel
+    case ""                                  => BlankField(field).invalidNel
+    case trimmed if trimmed.length > maximum =>
+      DomainValidationError.TextTooLong(field, maximum, trimmed.length).invalidNel
     case trimmed => trimmed.validNel
   }
 
@@ -138,7 +139,7 @@ private[domain] def validateOptionalText(
 ): ValidatedNel[DomainValidationError, Option[String]] =
   value match {
     case Some(raw) => validateText(field, raw, maximum).map(Some(_))
-    case None => none[String].validNel
+    case None      => none[String].validNel
   }
 
 private[domain] def validateNonEmptyValues(

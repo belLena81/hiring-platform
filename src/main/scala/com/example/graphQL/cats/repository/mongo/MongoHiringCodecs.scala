@@ -79,14 +79,16 @@ private[mongo] object MongoHiringCodecs {
     ).mapN(Job.apply)
 
   def application(application: Application): Document =
-    MongoHiringPersistenceCodecs.application(StoredApplication(
-      application.id.value.toString,
-      application.candidateId.value.toString,
-      application.jobId.value.toString,
-      application.status.toString,
-      Date.from(application.createdAt),
-      Date.from(application.updatedAt)
-    ))
+    MongoHiringPersistenceCodecs.application(
+      StoredApplication(
+        application.id.value.toString,
+        application.candidateId.value.toString,
+        application.jobId.value.toString,
+        application.status.toString,
+        Date.from(application.createdAt),
+        Date.from(application.updatedAt)
+      )
+    )
 
   def readApplication(document: Document): ValidatedNel[StoredDocumentError, Application] =
     decode(document, ApplicationFields)(MongoHiringPersistenceCodecs.decodeApplication).andThen { value =>
@@ -101,16 +103,18 @@ private[mongo] object MongoHiringCodecs {
     }
 
   def event(event: ApplicationEvent): Document =
-    MongoHiringPersistenceCodecs.applicationEvent(StoredApplicationEvent(
-      event.id.value.toString,
-      event.applicationId.value.toString,
-      event.previousStatus.map(_.toString),
-      event.newStatus.toString,
-      event.actorId.value.toString,
-      Date.from(event.occurredAt),
-      event.feedback,
-      event.reason
-    ))
+    MongoHiringPersistenceCodecs.applicationEvent(
+      StoredApplicationEvent(
+        event.id.value.toString,
+        event.applicationId.value.toString,
+        event.previousStatus.map(_.toString),
+        event.newStatus.toString,
+        event.actorId.value.toString,
+        Date.from(event.occurredAt),
+        event.feedback,
+        event.reason
+      )
+    )
 
   def readEvent(document: Document): ValidatedNel[StoredDocumentError, ApplicationEvent] =
     decode(document, ApplicationEventFields)(MongoHiringPersistenceCodecs.decodeApplicationEvent).andThen { value =>
@@ -134,7 +138,9 @@ private[mongo] object MongoHiringCodecs {
     decode(document, fields)(MongoHiringPersistenceCodecs.decodeOperationalEvent).andThen(readOperationalEvent)
   }
 
-  private def readOperationalEvent(value: StoredOperationalEvent): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] =
+  private def readOperationalEvent(
+      value: StoredOperationalEvent
+  ): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] =
     (
       uuid("_id", value._id).toValidatedNel,
       enumValue("eventType", value.eventType, OperationalEventType.values).toValidatedNel,
@@ -147,25 +153,43 @@ private[mongo] object MongoHiringCodecs {
 
   def outboxRecord(value: OperationalEventEnvelope, now: Instant): Document = {
     val event = storedOperationalEvent(value)
-    MongoHiringPersistenceCodecs.outbox(StoredOutboxRecord(
-      event._id, event.topic, event.eventType, event.occurredAt, event.aggregateType, event.aggregateId,
-      event.actorId, event.payload, event.envelopeBytes, event.partitionKey, "Retryable", 0,
-      Date.from(now), None, None, Date.from(now), Date.from(now)
-    ))
+    MongoHiringPersistenceCodecs.outbox(
+      StoredOutboxRecord(
+        event._id,
+        event.topic,
+        event.eventType,
+        event.occurredAt,
+        event.aggregateType,
+        event.aggregateId,
+        event.actorId,
+        event.payload,
+        event.envelopeBytes,
+        event.partitionKey,
+        "Retryable",
+        0,
+        Date.from(now),
+        None,
+        None,
+        Date.from(now),
+        Date.from(now)
+      )
+    )
   }
 
   def searchSession(value: SearchSession): Document =
-    MongoHiringPersistenceCodecs.searchSession(StoredSearchSession(
-      value.id.toString,
-      value.actorId.value.toString,
-      value.searchKind,
-      value.query,
-      value.filter.noSpaces,
-      value.model,
-      value.results.map(result => StoredSearchSessionResult(result.resultId, result.rank, result.score)),
-      Date.from(value.occurredAt),
-      Date.from(value.expiresAt)
-    ))
+    MongoHiringPersistenceCodecs.searchSession(
+      StoredSearchSession(
+        value.id.toString,
+        value.actorId.value.toString,
+        value.searchKind,
+        value.query,
+        value.filter.noSpaces,
+        value.model,
+        value.results.map(result => StoredSearchSessionResult(result.resultId, result.rank, result.score)),
+        Date.from(value.occurredAt),
+        Date.from(value.expiresAt)
+      )
+    )
 
   def readSearchSession(document: Document): ValidatedNel[StoredDocumentError, SearchSession] =
     decode(document, SearchSessionFields)(MongoHiringPersistenceCodecs.decodeSearchSession).andThen { value =>
@@ -182,25 +206,78 @@ private[mongo] object MongoHiringCodecs {
       ).mapN(SearchSession.apply)
     }
 
-  private val UserFields = Set("_id", "email", "emailCanonical", "name", "nameCanonical", "role", "profile",
-    "createdAt", "updatedAt", "accountStatus", "deletedAt", "adminSingletonKey", "passwordHash", "embedding", "embeddingMeta")
-  private val JobFields = Set("_id", "recruiterId", "title", "description", "requirements", "skills", "location",
-    "status", "createdAt", "updatedAt", "closedAt", "embedding", "embeddingMeta")
+  private val UserFields = Set(
+    "_id",
+    "email",
+    "emailCanonical",
+    "name",
+    "nameCanonical",
+    "role",
+    "profile",
+    "createdAt",
+    "updatedAt",
+    "accountStatus",
+    "deletedAt",
+    "adminSingletonKey",
+    "passwordHash",
+    "embedding",
+    "embeddingMeta"
+  )
+  private val JobFields = Set(
+    "_id",
+    "recruiterId",
+    "title",
+    "description",
+    "requirements",
+    "skills",
+    "location",
+    "status",
+    "createdAt",
+    "updatedAt",
+    "closedAt",
+    "embedding",
+    "embeddingMeta"
+  )
   private val ApplicationFields = Set("_id", "candidateId", "jobId", "status", "createdAt", "updatedAt")
-  private val ApplicationEventFields = Set("_id", "applicationId", "previousStatus", "newStatus", "actorId", "occurredAt", "feedback", "reason")
-  private val OperationalEventFields = Set("_id", "topic", "eventType", "occurredAt", "aggregateType", "aggregateId", "actorId", "payload", "envelopeBytes", "partitionKey")
-  private val OutboxFields = OperationalEventFields ++ Set("state", "attempts", "availableAt", "leaseOwner", "leaseToken", "createdAt", "updatedAt")
-  private val SearchSessionFields = Set("_id", "actorId", "searchKind", "query", "filter", "model", "results", "occurredAt", "expiresAt")
+  private val ApplicationEventFields =
+    Set("_id", "applicationId", "previousStatus", "newStatus", "actorId", "occurredAt", "feedback", "reason")
+  private val OperationalEventFields = Set(
+    "_id",
+    "topic",
+    "eventType",
+    "occurredAt",
+    "aggregateType",
+    "aggregateId",
+    "actorId",
+    "payload",
+    "envelopeBytes",
+    "partitionKey"
+  )
+  private val OutboxFields = OperationalEventFields ++ Set(
+    "state",
+    "attempts",
+    "availableAt",
+    "leaseOwner",
+    "leaseToken",
+    "createdAt",
+    "updatedAt"
+  )
+  private val SearchSessionFields =
+    Set("_id", "actorId", "searchKind", "query", "filter", "model", "results", "occurredAt", "expiresAt")
 
-  private def decode[A](document: Document, fields: Set[String])(decoder: Document => Either[Throwable, A]): ValidatedNel[StoredDocumentError, A] =
+  private def decode[A](document: Document, fields: Set[String])(
+      decoder: Document => Either[Throwable, A]
+  ): ValidatedNel[StoredDocumentError, A] =
     noUnexpectedFields(document, fields).andThen(_ => decoder(document).leftMap(codecError).toValidatedNel)
 
   private def codecError(error: Throwable): StoredDocumentError = {
     def missingField(current: Throwable): Option[String] =
       Option(current).flatMap { value =>
-        Option(value.getMessage).collect {
-          case message if message.startsWith("Missing field: ") => message.stripPrefix("Missing field: ")
-        }.orElse(Option(value.getCause).flatMap(missingField))
+        Option(value.getMessage)
+          .collect {
+            case message if message.startsWith("Missing field: ") => message.stripPrefix("Missing field: ")
+          }
+          .orElse(Option(value.getCause).flatMap(missingField))
       }
 
     missingField(error).map(MissingField.apply).getOrElse(InvalidField("document"))
@@ -214,13 +291,27 @@ private[mongo] object MongoHiringCodecs {
 
   private[mongo] def profile(value: UserProfile): Document = value match {
     case UserProfile.Candidate(profile) =>
-      MongoHiringPersistenceCodecs.profile(StoredProfile(
-        "Candidate", Some(profile.skills.toList.sorted), profile.experienceSummary, profile.resumeRef, None, None
-      ))
+      MongoHiringPersistenceCodecs.profile(
+        StoredProfile(
+          "Candidate",
+          Some(profile.skills.toList.sorted),
+          profile.experienceSummary,
+          profile.resumeRef,
+          None,
+          None
+        )
+      )
     case UserProfile.Recruiter(profile) =>
-      MongoHiringPersistenceCodecs.profile(StoredProfile(
-        "Recruiter", None, None, None, Some(profile.organizationName), profile.jobTitle
-      ))
+      MongoHiringPersistenceCodecs.profile(
+        StoredProfile(
+          "Recruiter",
+          None,
+          None,
+          None,
+          Some(profile.organizationName),
+          profile.jobTitle
+        )
+      )
   }
 
   private def readProfile(profile: StoredProfile): ValidatedNel[StoredDocumentError, UserProfile] =
@@ -242,21 +333,29 @@ private[mongo] object MongoHiringCodecs {
   private def required[A](value: Option[A], field: String): ValidatedNel[StoredDocumentError, A] =
     value.fold(MissingField(field).invalidNel)(_.validNel)
 
-  private def readEmbedding(values: Option[List[Double]], meta: Option[StoredEmbeddingMeta]): ValidatedNel[StoredDocumentError, Option[EntityEmbedding]] =
+  private def readEmbedding(
+      values: Option[List[Double]],
+      meta: Option[StoredEmbeddingMeta]
+  ): ValidatedNel[StoredDocumentError, Option[EntityEmbedding]] =
     (values, meta) match {
-      case (None, None) => None.validNel
+      case (None, None)                 => None.validNel
       case (Some(numbers), Some(value)) =>
-        Some(EntityEmbedding(
-          numbers.map(_.toFloat),
-          EmbeddingMeta(value.model, value.sourceHash, value.updatedAt.toInstant)
-        )).validNel
+        Some(
+          EntityEmbedding(
+            numbers.map(_.toFloat),
+            EmbeddingMeta(value.model, value.sourceHash, value.updatedAt.toInstant)
+          )
+        ).validNel
       case _ => InconsistentDocument.invalidNel
     }
 
   def embeddingDocument(embedding: EntityEmbedding): Document =
-    MongoHiringPersistenceCodecs.embedding(StoredEmbeddingFields(
-      embedding.values.map(_.toDouble), StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, Date.from(embedding.meta.updatedAt))
-    ))
+    MongoHiringPersistenceCodecs.embedding(
+      StoredEmbeddingFields(
+        embedding.values.map(_.toDouble),
+        StoredEmbeddingMeta(embedding.meta.model, embedding.meta.sourceHash, Date.from(embedding.meta.updatedAt))
+      )
+    )
 
   private def isOutbox(document: Document): Boolean =
     document.keySet.asScala.exists(Set("state", "attempts", "availableAt", "leaseOwner", "leaseToken").contains)
@@ -267,21 +366,30 @@ private[mongo] object MongoHiringCodecs {
   private def enumValue[A](field: String, value: String, values: Array[A]): Either[StoredDocumentError, A] =
     values.find(_.toString == value).toRight(InvalidField(field))
 
-  private def optionalEnum[A](field: String, value: Option[String], values: Array[A]): Either[StoredDocumentError, Option[A]] =
+  private def optionalEnum[A](
+      field: String,
+      value: Option[String],
+      values: Array[A]
+  ): Either[StoredDocumentError, Option[A]] =
     value.traverse(enumValue(field, _, values))
 
   private def parseJson(field: String, value: String): Either[StoredDocumentError, Json] =
     parse(value).leftMap(_ => InvalidField(field))
 
   private def attempt[A](field: String)(value: => A): Either[StoredDocumentError, A] =
-    try Right(value) catch { case NonFatal(_) => Left(InvalidField(field)) }
+    try Right(value)
+    catch { case NonFatal(_) => Left(InvalidField(field)) }
 
   private def storedUser(value: User, passwordHash: Option[String]): StoredUser = {
     val emailCanonical = value.email.map(AccountName.canonical)
     val embedding = value.embedding.map(_.values.map(_.toDouble))
-    val embeddingMeta = value.embedding.map(embedding => StoredEmbeddingMeta(
-      embedding.meta.model, embedding.meta.sourceHash, Date.from(embedding.meta.updatedAt)
-    ))
+    val embeddingMeta = value.embedding.map(embedding =>
+      StoredEmbeddingMeta(
+        embedding.meta.model,
+        embedding.meta.sourceHash,
+        Date.from(embedding.meta.updatedAt)
+      )
+    )
     StoredUser(
       value.id.value.toString,
       value.email,
@@ -290,12 +398,24 @@ private[mongo] object MongoHiringCodecs {
       AccountName.canonical(value.name),
       value.role.toString,
       value.profile.map {
-        case UserProfile.Candidate(candidate) => StoredProfile(
-          "Candidate", Some(candidate.skills.toList.sorted), candidate.experienceSummary, candidate.resumeRef, None, None
-        )
-        case UserProfile.Recruiter(recruiter) => StoredProfile(
-          "Recruiter", None, None, None, Some(recruiter.organizationName), recruiter.jobTitle
-        )
+        case UserProfile.Candidate(candidate) =>
+          StoredProfile(
+            "Candidate",
+            Some(candidate.skills.toList.sorted),
+            candidate.experienceSummary,
+            candidate.resumeRef,
+            None,
+            None
+          )
+        case UserProfile.Recruiter(recruiter) =>
+          StoredProfile(
+            "Recruiter",
+            None,
+            None,
+            None,
+            Some(recruiter.organizationName),
+            recruiter.jobTitle
+          )
       },
       Date.from(value.createdAt),
       value.accountStatus.toString,
@@ -309,9 +429,13 @@ private[mongo] object MongoHiringCodecs {
 
   private def storedJob(value: Job): StoredJob = {
     val embedding = value.embedding.map(_.values.map(_.toDouble))
-    val embeddingMeta = value.embedding.map(embedding => StoredEmbeddingMeta(
-      embedding.meta.model, embedding.meta.sourceHash, Date.from(embedding.meta.updatedAt)
-    ))
+    val embeddingMeta = value.embedding.map(embedding =>
+      StoredEmbeddingMeta(
+        embedding.meta.model,
+        embedding.meta.sourceHash,
+        Date.from(embedding.meta.updatedAt)
+      )
+    )
     StoredJob(
       value.id.value.toString,
       value.recruiterId.value.toString,

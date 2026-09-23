@@ -33,11 +33,16 @@ class DomainValidationSpec extends FunSuite {
       now
     )
 
-    assertEquals(result.leftMap(_.toList).toEither, Left(List(
-      BlankField("description"),
-      EmptyCollection("requirements"),
-      EmptyCollection("skills")
-    )))
+    assertEquals(
+      result.leftMap(_.toList).toEither,
+      Left(
+        List(
+          BlankField("description"),
+          EmptyCollection("requirements"),
+          EmptyCollection("skills")
+        )
+      )
+    )
   }
 
   test("job validation rejects blank location fields before persistence") {
@@ -54,11 +59,16 @@ class DomainValidationSpec extends FunSuite {
       now
     )
 
-    assertEquals(result.leftMap(_.toList).toEither, Left(List(
-      BlankField("title"),
-      BlankField("country"),
-      BlankField("city")
-    )))
+    assertEquals(
+      result.leftMap(_.toList).toEither,
+      Left(
+        List(
+          BlankField("title"),
+          BlankField("country"),
+          BlankField("city")
+        )
+      )
+    )
   }
 
   test("valid job validation preserves ADT status and normalized text") {

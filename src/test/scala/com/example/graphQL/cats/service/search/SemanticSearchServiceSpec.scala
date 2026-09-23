@@ -27,15 +27,36 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   test("VHS-AC02 semantic job search requires a candidate actor and returns ranked open jobs") {
     for {
-      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile, recruiterId -> recruiter))
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> candidateWithProfile, recruiterId -> recruiter)
+      )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(jobEmbedding))))
-      service = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(jobsRef),
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
         FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))),
-        FakeSearchRepository(jobs = List(RankedJob(openJob.copy(embedding = Some(jobEmbedding)), 0.95, SearchMode.HYBRID, jobMeta, searchId))))
-      accepted <- service.semanticJobSearch(ActorContext(candidateId, UserRole.Candidate), "scala backend",
-        JobSearchFilter(None, Set.empty, None), pageSize, searchId).value
-      rejected <- service.semanticJobSearch(ActorContext(recruiterId, UserRole.Recruiter), "scala backend",
-        JobSearchFilter(None, Set.empty, None), pageSize, searchId).value
+        FakeSearchRepository(jobs =
+          List(RankedJob(openJob.copy(embedding = Some(jobEmbedding)), 0.95, SearchMode.HYBRID, jobMeta, searchId))
+        )
+      )
+      accepted <- service
+        .semanticJobSearch(
+          ActorContext(candidateId, UserRole.Candidate),
+          "scala backend",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
+      rejected <- service
+        .semanticJobSearch(
+          ActorContext(recruiterId, UserRole.Recruiter),
+          "scala backend",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
     } yield {
       assertEquals(accepted.map(_.map(_.job.id)), Right(List(jobId)))
       assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.CandidateRequired)))
@@ -53,8 +74,15 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite-2026-09", 2))),
         RecordingSearchRepository(queries)
       )
-      result <- service.semanticJobSearch(ActorContext(candidateId, UserRole.Candidate), "scala backend",
-        JobSearchFilter(None, Set.empty, None), pageSize, searchId).value
+      result <- service
+        .semanticJobSearch(
+          ActorContext(candidateId, UserRole.Candidate),
+          "scala backend",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
       recorded <- queries.get
     } yield {
       assertEquals(result, Right(Nil))
@@ -69,11 +97,21 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
       calls <- Ref.of[IO, Int](0)
-      service = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(jobsRef),
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
         CountingEmbeddingService(calls),
-        FakeSearchRepository())
-      result <- service.semanticJobSearch(ActorContext(recruiterId, UserRole.Candidate), "scala backend",
-        JobSearchFilter(None, Set.empty, None), pageSize, searchId).value
+        FakeSearchRepository()
+      )
+      result <- service
+        .semanticJobSearch(
+          ActorContext(recruiterId, UserRole.Candidate),
+          "scala backend",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
       callCount <- calls.get
     } yield {
       assertEquals(result.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
@@ -86,14 +124,27 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
       calls <- Ref.of[IO, Int](0)
-      service = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(jobsRef),
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
         CountingEmbeddingService(calls),
-        FakeSearchRepository())
-      result <- service.semanticJobSearch(ActorContext(candidateId, UserRole.Candidate), "x" * (SearchableText.QueryMaxChars + 1),
-        JobSearchFilter(None, Set.empty, None), pageSize, searchId).value
+        FakeSearchRepository()
+      )
+      result <- service
+        .semanticJobSearch(
+          ActorContext(candidateId, UserRole.Candidate),
+          "x" * (SearchableText.QueryMaxChars + 1),
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
       callCount <- calls.get
     } yield {
-      assertEquals(result.left.toOption, Some(UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))))
+      assertEquals(
+        result.left.toOption,
+        Some(UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars)))
+      )
       assertEquals(callCount, 0)
     }
   }
@@ -111,15 +162,38 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     val staleModel = embedding.copy(meta = meta.copy(model = "voyage-4-lite-2026-09"))
     for {
       missingUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
-      staleUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile.copy(embedding = Some(stale))))
-      staleModelUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile.copy(embedding = Some(staleModel))))
+      staleUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> candidateWithProfile.copy(embedding = Some(stale)))
+      )
+      staleModelUsers <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> candidateWithProfile.copy(embedding = Some(staleModel)))
+      )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
-      missingService = semanticService(new InMemoryUsers(missingUsers), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused, FakeSearchRepository())
-      staleService = semanticService(new InMemoryUsers(staleUsers), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused, FakeSearchRepository())
-      staleModelService = semanticService(new InMemoryUsers(staleModelUsers), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused, FakeSearchRepository())
+      missingService = semanticService(
+        new InMemoryUsers(missingUsers),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository()
+      )
+      staleService = semanticService(
+        new InMemoryUsers(staleUsers),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository()
+      )
+      staleModelService = semanticService(
+        new InMemoryUsers(staleModelUsers),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository()
+      )
       missing <- missingService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId).value
-      staleResult <- staleService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId).value
-      staleModelResult <- staleModelService.recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId).value
+      staleResult <- staleService
+        .recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
+        .value
+      staleModelResult <- staleModelService
+        .recommendedJobs(ActorContext(candidateId, UserRole.Candidate), pageSize, searchId)
+        .value
     } yield {
       assertEquals(missing.left.toOption, Some(UseCaseError.Search(SearchError.MissingEmbedding("candidate"))))
       assertEquals(staleResult.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("candidate"))))
@@ -132,16 +206,36 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     val otherRecruiter = Identifiers.UserId(UUID.fromString("00000000-0000-0000-0000-000000000088"))
     val otherRecruiterUser = recruiter.copy(id = otherRecruiter, email = Some("other-recruiter@example.com"))
     for {
-      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(
-        candidateId -> candidateWithProfile.copy(embedding = Some(embedding)),
-        recruiterId -> recruiter,
-        otherRecruiter -> otherRecruiterUser
-      ))
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(
+          candidateId -> candidateWithProfile.copy(embedding = Some(embedding)),
+          recruiterId -> recruiter,
+          otherRecruiter -> otherRecruiterUser
+        )
+      )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
-      service = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused,
-        FakeSearchRepository(candidates = List(RankedCandidate(candidateWithProfile.copy(embedding = Some(embedding)), 0.90, SearchMode.VECTOR, meta, searchId))))
-      accepted <- service.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId).value
-      rejected <- service.candidateMatches(ActorContext(otherRecruiter, UserRole.Recruiter), jobId, pageSize, searchId).value
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository(candidates =
+          List(
+            RankedCandidate(
+              candidateWithProfile.copy(embedding = Some(embedding)),
+              0.90,
+              SearchMode.VECTOR,
+              meta,
+              searchId
+            )
+          )
+        )
+      )
+      accepted <- service
+        .candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+        .value
+      rejected <- service
+        .candidateMatches(ActorContext(otherRecruiter, UserRole.Recruiter), jobId, pageSize, searchId)
+        .value
     } yield {
       assertEquals(accepted.map(_.map(_.candidate.id)), Right(List(candidateId)))
       assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.Forbidden)))
@@ -150,17 +244,28 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   test("VHS-AC06 candidate matching reports same-version stale job embeddings by source hash or model") {
     val staleJob = openJob.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(sourceHash = "stale-job-hash"))))
-    val staleModelJob = openJob.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(model = "voyage-4-lite-2026-09"))))
+    val staleModelJob =
+      openJob.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(model = "voyage-4-lite-2026-09"))))
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> staleJob))
       staleModelJobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> staleModelJob))
-      service = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(jobsRef), FakeEmbeddingService.unused,
-        FakeSearchRepository())
-      staleModelService = semanticService(new InMemoryUsers(usersRef), new InMemoryJobs(staleModelJobsRef), FakeEmbeddingService.unused,
-        FakeSearchRepository())
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository()
+      )
+      staleModelService = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(staleModelJobsRef),
+        FakeEmbeddingService.unused,
+        FakeSearchRepository()
+      )
       result <- service.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId).value
-      staleModelResult <- staleModelService.candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId).value
+      staleModelResult <- staleModelService
+        .candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+        .value
     } yield {
       assertEquals(result.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("job"))))
       assertEquals(staleModelResult.left.toOption, Some(UseCaseError.Search(SearchError.StaleEmbedding("job"))))
@@ -175,7 +280,8 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   ): SemanticSearchService =
     SemanticSearchService(users, jobs, embeddings, search, embeddingModel = configuredModel)
 
-  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector]) extends EmbeddingService {
+  private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])
+      extends EmbeddingService {
     override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
       IO.pure(result)
   }

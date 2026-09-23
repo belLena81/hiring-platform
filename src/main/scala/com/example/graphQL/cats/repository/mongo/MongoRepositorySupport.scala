@@ -20,7 +20,7 @@ private[mongo] trait MongoConflictWriteMapping {
   protected final def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
     error match {
       case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
+      case _                                                             => Left(RepositoryError.Unavailable)
     }
 }
 
@@ -44,21 +44,35 @@ private[mongo] trait MongoOperationalEventInsertion {
       events: List[OperationalEventEnvelope],
       now: Instant
   ): IO[Either[RepositoryError, Unit]] =
-    events.traverse_ { event =>
-      val document = MongoHiringCodecs.outboxRecord(event, now)
-      session.fold(PublisherBridge.first(outbox.insertOne(document)))(active =>
-        PublisherBridge.first(outbox.insertOne(active, document))
-      )
-    }.as(Right(())).handleError {
-      case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
-    }
+    events
+      .traverse_ { event =>
+        val document = MongoHiringCodecs.outboxRecord(event, now)
+        session.fold(PublisherBridge.first(outbox.insertOne(document)))(active =>
+          PublisherBridge.first(outbox.insertOne(active, document))
+        )
+      }
+      .as(Right(()))
+      .handleError {
+        case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
+        case _                                                             => Left(RepositoryError.Unavailable)
+      }
 }
 
 private[mongo] object MongoObservedStateFilters {
   private val JobFields = List(
-    "_id", "recruiterId", "title", "description", "requirements", "skills", "location", "status",
-    "createdAt", "updatedAt", "closedAt", "embedding", "embeddingMeta"
+    "_id",
+    "recruiterId",
+    "title",
+    "description",
+    "requirements",
+    "skills",
+    "location",
+    "status",
+    "createdAt",
+    "updatedAt",
+    "closedAt",
+    "embedding",
+    "embeddingMeta"
   )
 
   private val JobSearchFields = List("_id", "title", "description", "requirements", "skills")
@@ -84,34 +98,44 @@ private[mongo] object MongoObservedStateFilters {
     )
 }
 
-
 private[mongo] object MongoStoredDocumentDecoding {
   def repository[A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]): Either[RepositoryError, A] =
     decoded.toEither.leftMap(_ => RepositoryError.Unavailable)
 
-  def optional[A](decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, Option[A]]): Either[RepositoryError, Option[A]] =
+  def optional[A](
+      decoded: ValidatedNel[MongoHiringCodecs.StoredDocumentError, Option[A]]
+  ): Either[RepositoryError, Option[A]] =
     repository(decoded)
 
-  def values[A](decoded: List[ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]]): Either[RepositoryError, List[A]] =
+  def values[A](
+      decoded: List[ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]]
+  ): Either[RepositoryError, List[A]] =
     repository(decoded.sequence)
 }
 
 private[mongo] object MongoKeysetPaging {
-  def byId[A](collection: MongoCollection[Document], ids: List[String])(read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]): IO[Either[RepositoryError, List[A]]] =
+  def byId[A](collection: MongoCollection[Document], ids: List[String])(
+      read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
+  ): IO[Either[RepositoryError, List[A]]] =
     if (ids.isEmpty) IO.pure(Right(Nil))
-    else PublisherBridge.collectWithin(collection.find(Filters.in("_id", ids.distinct*)), ids.distinct.size)
-      .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    else
+      PublisherBridge
+        .collectWithin(collection.find(Filters.in("_id", ids.distinct*)), ids.distinct.size)
+        .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
+        .handleError(_ => Left(RepositoryError.Unavailable))
 
   def page[A](collection: MongoCollection[Document], filter: Bson, timestampField: String, pageSize: PageSize)(
       read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
   ): IO[Either[RepositoryError, List[A]]] =
-    PublisherBridge.collectWithin(
-      collection.find(filter)
-        .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending("_id")))
-        .limit(pageSize.value),
-      pageSize.value
-    ).map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
+    PublisherBridge
+      .collectWithin(
+        collection
+          .find(filter)
+          .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending("_id")))
+          .limit(pageSize.value),
+        pageSize.value
+      )
+      .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
   def filter(filters: List[Option[Bson]]): Bson =

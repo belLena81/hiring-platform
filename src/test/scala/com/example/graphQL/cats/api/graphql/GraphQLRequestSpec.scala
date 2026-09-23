@@ -8,24 +8,26 @@ final class GraphQLRequestSpec extends CatsEffectSuite {
 
   test("defaults absent and null optional envelope fields identically") {
     val absent = Json.obj("query" -> query).as[GraphQLRequest]
-    val explicitNull = Json.obj("query" -> query,
-      "variables" -> Json.Null, "operationName" -> Json.Null).as[GraphQLRequest]
+    val explicitNull =
+      Json.obj("query" -> query, "variables" -> Json.Null, "operationName" -> Json.Null).as[GraphQLRequest]
 
-    assertEquals(absent.map(request => (request.variables, request.operationName)),
-      Right((Json.obj(), None)))
-    assertEquals(explicitNull.map(request => (request.variables, request.operationName)),
-      Right((Json.obj(), None)))
+    assertEquals(absent.map(request => (request.variables, request.operationName)), Right((Json.obj(), None)))
+    assertEquals(explicitNull.map(request => (request.variables, request.operationName)), Right((Json.obj(), None)))
   }
 
   test("decodes variables and operation name through the typed envelope") {
-    val request = Json.obj(
-      "query" -> Json.fromString("query Health { health { status } }"),
-      "variables" -> Json.obj("include" -> Json.True),
-      "operationName" -> Json.fromString("Health")
-    ).as[GraphQLRequest]
+    val request = Json
+      .obj(
+        "query" -> Json.fromString("query Health { health { status } }"),
+        "variables" -> Json.obj("include" -> Json.True),
+        "operationName" -> Json.fromString("Health")
+      )
+      .as[GraphQLRequest]
 
-    assertEquals(request.map(parsed => (parsed.variables, parsed.operationName)),
-      Right((Json.obj("include" -> Json.True), Some("Health"))))
+    assertEquals(
+      request.map(parsed => (parsed.variables, parsed.operationName)),
+      Right((Json.obj("include" -> Json.True), Some("Health")))
+    )
   }
 
   test("uses Circe failures for missing and wrongly typed envelope fields") {

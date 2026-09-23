@@ -25,16 +25,16 @@ private[mongo] object MongoMutationWriteContext {
       transactionRequired: Boolean
   )(operation: Option[ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]] =
     context match {
-      case MongoMutationWriteContext(value) => operation(value)
+      case MongoMutationWriteContext(value)            => operation(value)
       case value if value eq MutationWriteContext.noop =>
         if (transactionRequired) transactionRunner.run(operation) else operation(None)
-      case _ => IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
+      case _ =>
+        IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
     }
 }
 
-/**
-  * Stores only a caller scope, operation, input fingerprint, and authoritative entity reference.
-  * It deliberately never stores GraphQL payloads, credentials, or access tokens.
+/** Stores only a caller scope, operation, input fingerprint, and authoritative entity reference. It deliberately never
+  * stores GraphQL payloads, credentials, or access tokens.
   */
 final class MongoMutationReceiptRepository(
     database: MongoDatabase,
@@ -47,7 +47,9 @@ final class MongoMutationReceiptRepository(
       fingerprint: MutationReceiptFingerprint,
       now: Instant,
       expiresAt: Instant
-  )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
+  )(
+      write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+  ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
     transactionRunner.run { session =>
       find(session, key).flatMap {
         case Some(receipt) if receipt.fingerprint != fingerprint =>
@@ -63,10 +65,10 @@ final class MongoMutationReceiptRepository(
         case None =>
           insert(session, inProgress(key, fingerprint, now, expiresAt)).flatMap {
             case Left(error) => IO.pure(Left(error))
-            case Right(()) =>
+            case Right(())   =>
               write(MongoMutationWriteContext(session)).flatMap {
-                case Left(error) => remove(session, key).as(Left(error))
-                case Right(Left(error)) => remove(session, key).as(Right(MutationReceiptExecution.Rejected(error)))
+                case Left(error)             => remove(session, key).as(Left(error))
+                case Right(Left(error))      => remove(session, key).as(Right(MutationReceiptExecution.Rejected(error)))
                 case Right(Right(completed)) =>
                   complete(session, key, fingerprint, completed.entity, now, expiresAt).map(_.map { _ =>
                     MutationReceiptExecution.Applied(completed.value, completed.entity)
@@ -77,14 +79,19 @@ final class MongoMutationReceiptRepository(
     }
 
   private def find(session: Option[ClientSession], key: MutationReceiptKey): IO[Option[MutationReceipt]] =
-    session.fold(
-      PublisherBridge.first(collection.find(keyFilter(key)))
-    )(active => PublisherBridge.first(collection.find(active, keyFilter(key)))).map(_.flatMap(read))
+    session
+      .fold(
+        PublisherBridge.first(collection.find(keyFilter(key)))
+      )(active => PublisherBridge.first(collection.find(active, keyFilter(key))))
+      .map(_.flatMap(read))
 
   private def insert(session: Option[ClientSession], receipt: Document): IO[Either[RepositoryError, Unit]] =
-    session.fold(
-      PublisherBridge.first(collection.insertOne(receipt))
-    )(active => PublisherBridge.first(collection.insertOne(active, receipt))).as(Right(())).handleError(mapWrite)
+    session
+      .fold(
+        PublisherBridge.first(collection.insertOne(receipt))
+      )(active => PublisherBridge.first(collection.insertOne(active, receipt)))
+      .as(Right(()))
+      .handleError(mapWrite)
 
   private def complete(
       session: Option[ClientSession],
@@ -94,25 +101,35 @@ final class MongoMutationReceiptRepository(
       now: Instant,
       expiresAt: Instant
   ): IO[Either[RepositoryError, Unit]] =
-    val filter = Filters.and(keyFilter(key), Filters.eq("fingerprint", fingerprint.value), Filters.eq("state", MutationReceiptState.InProgress.toString))
+    val filter = Filters.and(
+      keyFilter(key),
+      Filters.eq("fingerprint", fingerprint.value),
+      Filters.eq("state", MutationReceiptState.InProgress.toString)
+    )
     val update = Updates.combine(
       Updates.set("state", MutationReceiptState.Completed.toString),
       Updates.set("entity", entityDocument(entity)),
       Updates.set("completedAt", Date.from(now)),
       Updates.set("expiresAt", Date.from(expiresAt))
     )
-    session.fold(
-      PublisherBridge.first(collection.updateOne(filter, update))
-    )(active => PublisherBridge.first(collection.updateOne(active, filter, update))).map {
-      case Some(result) if result.getMatchedCount == 1L => Right(())
-      case Some(_) => Left(RepositoryError.Conflict)
-      case None => Left(RepositoryError.Unavailable)
-    }.handleError(mapWrite)
+    session
+      .fold(
+        PublisherBridge.first(collection.updateOne(filter, update))
+      )(active => PublisherBridge.first(collection.updateOne(active, filter, update)))
+      .map {
+        case Some(result) if result.getMatchedCount == 1L => Right(())
+        case Some(_)                                      => Left(RepositoryError.Conflict)
+        case None                                         => Left(RepositoryError.Unavailable)
+      }
+      .handleError(mapWrite)
 
   private def remove(session: Option[ClientSession], key: MutationReceiptKey): IO[Unit] =
-    session.fold(
-      PublisherBridge.first(collection.deleteOne(keyFilter(key)))
-    )(active => PublisherBridge.first(collection.deleteOne(active, keyFilter(key)))).void.handleError(_ => ())
+    session
+      .fold(
+        PublisherBridge.first(collection.deleteOne(keyFilter(key)))
+      )(active => PublisherBridge.first(collection.deleteOne(active, keyFilter(key))))
+      .void
+      .handleError(_ => ())
 
   private def keyFilter(key: MutationReceiptKey): Bson =
     Filters.and(

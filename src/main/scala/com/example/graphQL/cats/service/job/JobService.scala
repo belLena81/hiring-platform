@@ -57,7 +57,9 @@ final class JobService(
     idempotent.execute("createJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
       for {
         user <- authorization.resolve(actor)
-        _ <- UseCase.fromEither(Either.cond(authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden)))
+        _ <- UseCase.fromEither(
+          Either.cond(authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
+        )
         now <- UseCase.liftIO(currentTime)
         jobId <- UseCase.liftIO(randomId.map(JobId.apply))
         job <- UseCase.fromEither(validateNewJob(user.id, input, now, jobId))
@@ -76,7 +78,9 @@ final class JobService(
         for {
           now <- UseCase.liftIO(currentTime)
           update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
-          updated <- UseCase.fromIO(persistUpdatedJob(job, Right(JobLifecycle.update(job, update)), actor.userId, context))
+          updated <- UseCase.fromIO(
+            persistUpdatedJob(job, Right(JobLifecycle.update(job, update)), actor.userId, context)
+          )
         } yield updated
       }
     }
@@ -84,26 +88,50 @@ final class JobService(
   override def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
     idempotent.execute("publishJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
       authorizedJobs.manage(actor, jobId) { job =>
-        UseCase.liftIO(currentTime).flatMap(now =>
-          UseCase.fromIO(persistJob(job, JobLifecycle.publish(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_UPDATED, context))
-        )
+        UseCase
+          .liftIO(currentTime)
+          .flatMap(now =>
+            UseCase.fromIO(
+              persistJob(
+                job,
+                JobLifecycle.publish(job, now).widenUseCase,
+                actor.userId,
+                OperationalEventType.JOB_UPDATED,
+                context
+              )
+            )
+          )
       }
     }
 
   override def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
     idempotent.execute("closeJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
       authorizedJobs.manage(actor, jobId) { job =>
-        UseCase.liftIO(currentTime).flatMap(now =>
-          UseCase.fromIO(persistJob(job, JobLifecycle.close(job, now).widenUseCase, actor.userId, OperationalEventType.JOB_CLOSED, context))
-        )
+        UseCase
+          .liftIO(currentTime)
+          .flatMap(now =>
+            UseCase.fromIO(
+              persistJob(
+                job,
+                JobLifecycle.close(job, now).widenUseCase,
+                actor.userId,
+                OperationalEventType.JOB_CLOSED,
+                context
+              )
+            )
+          )
       }
     }
 
   def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
     for {
       user <- authorization.resolve(actor)
-      job <- UseCase.repository(jobs.find(jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(Either.cond(authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden)))
+      job <- UseCase
+        .repository(jobs.find(jobId))
+        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- UseCase.fromEither(
+        Either.cond(authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
+      )
     } yield job
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseIO[List[Job]] =
@@ -114,18 +142,25 @@ final class JobService(
       user <- authorization.resolve(actor)
       manageableJobs <- {
         user.role match {
-          case UserRole.Admin => UseCase.repository(jobs.findAll(page))
+          case UserRole.Admin     => UseCase.repository(jobs.findAll(page))
           case UserRole.Recruiter => UseCase.repository(jobs.findByRecruiter(user.id, page))
           case UserRole.Candidate => UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
         }
       }
     } yield manageableJobs
 
-  private def replayJob(actor: ActorContext)(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Job] =
-    scala.util.Try(JobId(UUID.fromString(reference.entityId))).toEither.fold(
-      _ => UseCase.left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
-      viewJob(actor, _)
-    )
+  private def replayJob(
+      actor: ActorContext
+  )(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Job] =
+    scala.util
+      .Try(JobId(UUID.fromString(reference.entityId)))
+      .toEither
+      .fold(
+        _ =>
+          UseCase
+            .left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
+        viewJob(actor, _)
+      )
 
   private def jobReference(job: Job): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
     com.example.graphQL.cats.repository.protocol.MutationEntityReference("job", job.id.value.toString)
@@ -152,7 +187,11 @@ final class JobService(
       .toEither
       .widenUseCase
 
-  private def validateUpdatedJob(job: Job, input: UpdateJobInput, now: Instant): Either[UseCaseError, JobLifecycle.Update] =
+  private def validateUpdatedJob(
+      job: Job,
+      input: UpdateJobInput,
+      now: Instant
+  ): Either[UseCaseError, JobLifecycle.Update] =
     Job
       .validate(
         job.id,
@@ -180,7 +219,11 @@ final class JobService(
         )
       )
 
-  private def persistCreatedJob(result: Either[UseCaseError, Job], actorId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
+  private def persistCreatedJob(
+      result: Either[UseCaseError, Job],
+      actorId: UserId,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Job]] =
     result.fold(
       error => IO.pure(error.asLeft[Job]),
       job => {
@@ -195,14 +238,26 @@ final class JobService(
       }
     )
 
-  private def persistUpdatedJob(expected: Job, result: Either[UseCaseError, Job], actorId: UserId, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
+  private def persistUpdatedJob(
+      expected: Job,
+      result: Either[UseCaseError, Job],
+      actorId: UserId,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Job]] =
     persistJob(expected, result, actorId, OperationalEventType.JOB_UPDATED, context)
 
-  private def persistJob(expected: Job, result: Either[UseCaseError, Job], actorId: UserId, eventType: OperationalEventType, context: MutationWriteContext): IO[Either[UseCaseError, Job]] =
+  private def persistJob(
+      expected: Job,
+      result: Either[UseCaseError, Job],
+      actorId: UserId,
+      eventType: OperationalEventType,
+      context: MutationWriteContext
+  ): IO[Either[UseCaseError, Job]] =
     result.fold(
       error => IO.pure(error.asLeft[Job]),
       job => {
-        val event = OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
+        val event =
+          OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
         notifyAfterCommit(jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).map(_.widenUseCase))
       }
     )

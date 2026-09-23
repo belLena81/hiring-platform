@@ -39,7 +39,13 @@ object OperationalEventEnvelope {
 
 object OperationalEventJson {
   private val EnvelopeFields = Set(
-    "eventId", "eventType", "occurredAt", "aggregateType", "aggregateId", "actorId", "payload"
+    "eventId",
+    "eventType",
+    "occurredAt",
+    "aggregateType",
+    "aggregateId",
+    "actorId",
+    "payload"
   )
   private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
 
@@ -128,7 +134,13 @@ object OperationalEvents {
       "closedAt" -> job.closedAt.fold(Json.Null)(instant => Json.fromString(instant.toString))
     )
 
-  def jobEvent(eventType: OperationalEventType, eventId: UUID, job: Job, actorId: UserId, occurredAt: Instant): OperationalEventEnvelope =
+  def jobEvent(
+      eventType: OperationalEventType,
+      eventId: UUID,
+      job: Job,
+      actorId: UserId,
+      occurredAt: Instant
+  ): OperationalEventEnvelope =
     OperationalEventEnvelope(
       eventId,
       eventType,
@@ -139,7 +151,12 @@ object OperationalEvents {
       Json.obj("job" -> jobSnapshot(job))
     )
 
-  def applicationCreated(eventId: UUID, application: Application, actorId: UserId, occurredAt: Instant): OperationalEventEnvelope =
+  def applicationCreated(
+      eventId: UUID,
+      application: Application,
+      actorId: UserId,
+      occurredAt: Instant
+  ): OperationalEventEnvelope =
     OperationalEventEnvelope(
       eventId,
       OperationalEventType.APPLICATION_CREATED,
@@ -199,21 +216,55 @@ object OperationalEvents {
         "query" -> session.query.fold(Json.Null)(Json.fromString),
         "filter" -> session.filter,
         "model" -> session.model.fold(Json.Null)(Json.fromString),
-        "results" -> Json.arr(session.results.map(result =>
-          Json.obj(
-            "resultId" -> Json.fromString(result.resultId),
-            "rank" -> Json.fromInt(result.rank),
-            "score" -> Json.fromDoubleOrNull(result.score)
-          )
-        )*)
+        "results" -> Json.arr(
+          session.results.map(result =>
+            Json.obj(
+              "resultId" -> Json.fromString(result.resultId),
+              "rank" -> Json.fromInt(result.rank),
+              "score" -> Json.fromDoubleOrNull(result.score)
+            )
+          )*
+        )
       )
     )
 
-  def jobViewed(eventId: UUID, jobId: JobId, actorId: UserId, searchId: Option[UUID], rank: Option[Int], occurredAt: Instant): OperationalEventEnvelope =
-    interaction(eventId, OperationalEventType.JOB_VIEWED, jobId.value.toString, actorId, searchId, jobId.value.toString, rank, occurredAt)
+  def jobViewed(
+      eventId: UUID,
+      jobId: JobId,
+      actorId: UserId,
+      searchId: Option[UUID],
+      rank: Option[Int],
+      occurredAt: Instant
+  ): OperationalEventEnvelope =
+    interaction(
+      eventId,
+      OperationalEventType.JOB_VIEWED,
+      jobId.value.toString,
+      actorId,
+      searchId,
+      jobId.value.toString,
+      rank,
+      occurredAt
+    )
 
-  def searchResultClicked(eventId: UUID, searchId: UUID, resultId: String, actorId: UserId, rank: Int, occurredAt: Instant): OperationalEventEnvelope =
-    interaction(eventId, OperationalEventType.SEARCH_RESULT_CLICKED, searchId.toString, actorId, Some(searchId), resultId, Some(rank), occurredAt)
+  def searchResultClicked(
+      eventId: UUID,
+      searchId: UUID,
+      resultId: String,
+      actorId: UserId,
+      rank: Int,
+      occurredAt: Instant
+  ): OperationalEventEnvelope =
+    interaction(
+      eventId,
+      OperationalEventType.SEARCH_RESULT_CLICKED,
+      searchId.toString,
+      actorId,
+      Some(searchId),
+      resultId,
+      Some(rank),
+      occurredAt
+    )
 
   private def interaction(
       eventId: UUID,

@@ -7,7 +7,13 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.{AccountError, UseCaseError}
-import com.example.graphQL.cats.service.protocol.{AccountProfileInput, BootstrapAdminInput, LoginInput, SignUpInput, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{
+  AccountProfileInput,
+  BootstrapAdminInput,
+  LoginInput,
+  SignUpInput,
+  UseCaseIO
+}
 import io.circe.Json
 import sangria.schema.Context
 import java.time.Instant
@@ -22,11 +28,15 @@ private[graphql] object HiringGraphQLAccountResolvers {
       publicMutation(context) { hiring =>
         signUpProfile(input).fold(
           error => mutationResult(UseCaseIO.left(error)),
-          profile => mutationResult(
-            hiring.accountService
-              .signUp(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), SignUpInput(input.name, input.role, input.password, profile))
-              .map(authSuccess)
-          )
+          profile =>
+            mutationResult(
+              hiring.accountService
+                .signUp(
+                  idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+                  SignUpInput(input.name, input.role, input.password, profile)
+                )
+                .map(authSuccess)
+            )
         )
       }
     }
@@ -37,7 +47,10 @@ private[graphql] object HiringGraphQLAccountResolvers {
       publicMutation(context) { hiring =>
         mutationResult(
           hiring.accountService
-            .bootstrapAdmin(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), BootstrapAdminInput(input.name, input.password))
+            .bootstrapAdmin(
+              idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+              BootstrapAdminInput(input.name, input.password)
+            )
             .map(authSuccess)
         )
       }
@@ -49,7 +62,10 @@ private[graphql] object HiringGraphQLAccountResolvers {
       publicMutation(context) { hiring =>
         mutationResult(
           hiring.accountService
-            .login(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), LoginInput(input.name, input.password))
+            .login(
+              idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+              LoginInput(input.name, input.password)
+            )
             .map(authSuccess)
         )
       }
@@ -60,9 +76,14 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
         error => mutationResult(UseCaseIO.left(error)),
-        profile => mutationResult(
-          hiring.accountService.updateMyProfile(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), actor, profile)
-        )
+        profile =>
+          mutationResult(
+            hiring.accountService.updateMyProfile(
+              idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+              actor,
+              profile
+            )
+          )
       )
     }
 
@@ -84,22 +105,40 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
       IO.realTimeInstant.flatMap { now =>
-      inputResult(userPage(requested, context.arg(afterArgument), status, role, cursor => CursorCodec.decode[UserCursor](cursor, now))).flatMap {
-        case (request, pageSize) =>
+        inputResult(
+          userPage(
+            requested,
+            context.arg(afterArgument),
+            status,
+            role,
+            cursor => CursorCodec.decode[UserCursor](cursor, now)
+          )
+        ).flatMap { case (request, pageSize) =>
           raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
             .map(values => userConnection(values, pageSize, now))
-      }
+        }
       }
     }
 
-  private def updateProfileInput(role: UserRole, input: UpdateProfileGraphQLInput): Either[UseCaseError, AccountProfileInput] =
+  private def updateProfileInput(
+      role: UserRole,
+      input: UpdateProfileGraphQLInput
+  ): Either[UseCaseError, AccountProfileInput] =
     profileFor(role, input.skills, input.experienceSummary, input.resumeRef, input.organizationName, input.jobTitle)
       .map(AccountProfileInput.apply)
 
   private def signUpProfile(input: SignUpGraphQLInput): Either[UseCaseError, Option[UserProfile]] =
     input.role match {
       case UserRole.Admin => Right(None)
-      case other => profileFor(other, input.skills, input.experienceSummary, input.resumeRef, input.organizationName, input.jobTitle).map(Some(_))
+      case other          =>
+        profileFor(
+          other,
+          input.skills,
+          input.experienceSummary,
+          input.resumeRef,
+          input.organizationName,
+          input.jobTitle
+        ).map(Some(_))
     }
 
   private def profileFor(
@@ -123,6 +162,8 @@ private[graphql] object HiringGraphQLAccountResolvers {
     case (user, token) => AuthSuccess(user, token.value, token.expiresAt)
   }
 
-  private def userConnection(values: List[User], requested: Int, now: Instant)(using CursorCodec.CursorKey): Connection[User] =
+  private def userConnection(values: List[User], requested: Int, now: Instant)(using
+      CursorCodec.CursorKey
+  ): Connection[User] =
     connection(values, requested)(user => CursorCodec.encode(UserCursor(user.createdAt, user.id), now))
 }

@@ -17,7 +17,10 @@ final class MediaTypeNegotiationSpec extends FunSuite {
 
     headers.foreach { raw =>
       val accept = Accept.parse(raw).fold(error => fail(s"invalid test Accept header $raw: $error"), identity)
-      assert(MediaTypeNegotiation.selectResponseMediaType(Some(accept)).forall(MediaTypeNegotiation.supported.contains), raw)
+      assert(
+        MediaTypeNegotiation.selectResponseMediaType(Some(accept)).forall(MediaTypeNegotiation.supported.contains),
+        raw
+      )
     }
   }
 
@@ -35,7 +38,10 @@ final class MediaTypeNegotiationSpec extends FunSuite {
     val tied = Accept.parse("application/json;q=0.5, application/graphql-response+json;q=0.5").toOption.get
 
     assertEquals(MediaTypeNegotiation.selectResponseMediaType(None), Some(MediaTypeNegotiation.graphqlResponse))
-    assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(graphqlPreferred)), Some(MediaTypeNegotiation.graphqlResponse))
+    assertEquals(
+      MediaTypeNegotiation.selectResponseMediaType(Some(graphqlPreferred)),
+      Some(MediaTypeNegotiation.graphqlResponse)
+    )
     assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(jsonPreferred)), Some(MediaType.application.json))
     assertEquals(MediaTypeNegotiation.selectResponseMediaType(Some(tied)), Some(MediaTypeNegotiation.graphqlResponse))
   }

@@ -2,9 +2,29 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId}
-import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  Application,
+  ApplicationEvent,
+  ApplicationStatus,
+  CandidateProfile,
+  EmbeddingMeta,
+  EntityEmbedding,
+  Job,
+  JobStatus,
+  Location,
+  RecruiterProfile,
+  User,
+  UserProfile,
+  UserRole
+}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventType, SearchSession, SearchSessionResult}
+import com.example.graphQL.cats.shared.events.{
+  OperationalAggregateType,
+  OperationalEventEnvelope,
+  OperationalEventType,
+  SearchSession,
+  SearchSessionResult
+}
 import io.circe.Json
 import cats.data.NonEmptyList
 import java.time.Instant
@@ -26,8 +46,14 @@ class MongoHiringCodecsSpec extends FunSuite {
       Some("Builds backend services"),
       Some("resume://candidate-201")
     )
-    val user = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
-      Some(UserProfile.Candidate(profile)), now)
+    val user = User(
+      candidateId,
+      Some("candidate@example.com"),
+      "Candidate",
+      UserRole.Candidate,
+      Some(UserProfile.Candidate(profile)),
+      now
+    )
 
     val result = MongoHiringCodecs.readUser(MongoHiringCodecs.user(user))
 
@@ -69,8 +95,18 @@ class MongoHiringCodecsSpec extends FunSuite {
   }
 
   test("user codec rejects removed schema fields") {
-    val document = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
-      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)).append("schemaVersion", Int.box(1))
+    val document = MongoHiringCodecs
+      .user(
+        User(
+          candidateId,
+          Some("candidate@example.com"),
+          "Candidate",
+          UserRole.Candidate,
+          Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+          now
+        )
+      )
+      .append("schemaVersion", Int.box(1))
 
     assertEquals(
       MongoHiringCodecs.readUser(document).toEither,
@@ -125,10 +161,22 @@ class MongoHiringCodecsSpec extends FunSuite {
   }
 
   test("job codec rejects removed revision fields") {
-    val document = MongoHiringCodecs.job(Job(
-      jobId, recruiterId, "Senior Scala Developer", "Build services", List("Scala"), Set("Cats Effect"),
-      Location("Cyprus", "Nicosia", remote = true), JobStatus.Open, now, later
-    )).append("version", Long.box(1L))
+    val document = MongoHiringCodecs
+      .job(
+        Job(
+          jobId,
+          recruiterId,
+          "Senior Scala Developer",
+          "Build services",
+          List("Scala"),
+          Set("Cats Effect"),
+          Location("Cyprus", "Nicosia", remote = true),
+          JobStatus.Open,
+          now,
+          later
+        )
+      )
+      .append("version", Long.box(1L))
 
     assertEquals(
       MongoHiringCodecs.readJob(document).toEither,
@@ -137,17 +185,43 @@ class MongoHiringCodecsSpec extends FunSuite {
   }
 
   test("malformed stored documents decode to non-sensitive typed errors") {
-    val missingName = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+    val missingName = MongoHiringCodecs.user(
+      User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+    )
     missingName.remove("name")
-    val invalidRole = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+    val invalidRole = MongoHiringCodecs
+      .user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
       .append("role", "NotARole")
-    val invalidEmbedding = MongoHiringCodecs.job(Job(jobId, recruiterId, "Title", "Description", Nil, Set.empty, Location("Cyprus", "Nicosia", true), JobStatus.Open, now, now))
+    val invalidEmbedding = MongoHiringCodecs
+      .job(
+        Job(
+          jobId,
+          recruiterId,
+          "Title",
+          "Description",
+          Nil,
+          Set.empty,
+          Location("Cyprus", "Nicosia", true),
+          JobStatus.Open,
+          now,
+          now
+        )
+      )
       .append("embedding", List("not-a-number").asJava)
       .append("embeddingMeta", new Document("model", "model"))
 
-    assertEquals(MongoHiringCodecs.readUser(missingName).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.MissingField("name"))))
-    assertEquals(MongoHiringCodecs.readUser(invalidRole).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("role"))))
-    assertEquals(MongoHiringCodecs.readJob(invalidEmbedding).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("document"))))
+    assertEquals(
+      MongoHiringCodecs.readUser(missingName).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.MissingField("name")))
+    )
+    assertEquals(
+      MongoHiringCodecs.readUser(invalidRole).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("role")))
+    )
+    assertEquals(
+      MongoHiringCodecs.readJob(invalidEmbedding).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("document")))
+    )
     assertEquals(
       MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readUser(missingName)),
       Left(RepositoryError.Unavailable)
@@ -155,41 +229,57 @@ class MongoHiringCodecsSpec extends FunSuite {
   }
 
   test("codec accumulates independent semantic user errors") {
-    val malformed = MongoHiringCodecs.user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+    val malformed = MongoHiringCodecs.user(
+      User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+    )
     malformed.put("role", "NotARole")
     malformed.put("accountStatus", "NotAnAccountStatus")
 
     assertEquals(
       MongoHiringCodecs.readUser(malformed).toEither,
-      Left(NonEmptyList.of(
-        MongoHiringCodecs.StoredDocumentError.InvalidField("role"),
-        MongoHiringCodecs.StoredDocumentError.InvalidField("accountStatus")
-      ))
+      Left(
+        NonEmptyList.of(
+          MongoHiringCodecs.StoredDocumentError.InvalidField("role"),
+          MongoHiringCodecs.StoredDocumentError.InvalidField("accountStatus")
+        )
+      )
     )
   }
 
   test("user codec rejects role-profile mismatches and non-singleton admins") {
-    val candidateWithRecruiterProfile = MongoHiringCodecs.user(User(
-      candidateId,
-      Some("candidate@example.com"),
-      "Candidate",
-      UserRole.Candidate,
-      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
-      now
-    )).append("profile", MongoHiringCodecs.profile(UserProfile.Recruiter(RecruiterProfile("Acme", None))))
-    val adminWithoutSingleton = MongoHiringCodecs.user(User(
-      candidateId,
-      Some("admin@example.com"),
-      "Admin",
-      UserRole.Admin,
-      None,
-      now,
-      adminSingleton = true
-    ))
+    val candidateWithRecruiterProfile = MongoHiringCodecs
+      .user(
+        User(
+          candidateId,
+          Some("candidate@example.com"),
+          "Candidate",
+          UserRole.Candidate,
+          Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+          now
+        )
+      )
+      .append("profile", MongoHiringCodecs.profile(UserProfile.Recruiter(RecruiterProfile("Acme", None))))
+    val adminWithoutSingleton = MongoHiringCodecs.user(
+      User(
+        candidateId,
+        Some("admin@example.com"),
+        "Admin",
+        UserRole.Admin,
+        None,
+        now,
+        adminSingleton = true
+      )
+    )
     adminWithoutSingleton.remove("adminSingletonKey")
 
-    assertEquals(MongoHiringCodecs.readUser(candidateWithRecruiterProfile).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
-    assertEquals(MongoHiringCodecs.readUser(adminWithoutSingleton).toEither, Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)))
+    assertEquals(
+      MongoHiringCodecs.readUser(candidateWithRecruiterProfile).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
+    )
+    assertEquals(
+      MongoHiringCodecs.readUser(adminWithoutSingleton).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument))
+    )
   }
 
   test("codec builders do not share mutable document state") {
@@ -207,7 +297,8 @@ class MongoHiringCodecsSpec extends FunSuite {
     val applicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000205"))
     val applicationEventId = ApplicationEventId(UUID.fromString("00000000-0000-0000-0000-000000000206"))
     val application = Application.create(applicationId, candidateId, jobId, now)
-    val event = ApplicationEvent(applicationEventId, applicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
+    val event =
+      ApplicationEvent(applicationEventId, applicationId, None, ApplicationStatus.Created, candidateId, now, None, None)
     val operational = OperationalEventEnvelope(
       UUID.fromString("00000000-0000-0000-0000-000000000207"),
       OperationalEventType.SEARCH_PERFORMED,
@@ -229,10 +320,19 @@ class MongoHiringCodecsSpec extends FunSuite {
       later
     )
 
-    assertEquals(MongoHiringCodecs.readApplication(MongoHiringCodecs.application(application)).toEither, Right(application))
+    assertEquals(
+      MongoHiringCodecs.readApplication(MongoHiringCodecs.application(application)).toEither,
+      Right(application)
+    )
     assertEquals(MongoHiringCodecs.readEvent(MongoHiringCodecs.event(event)).toEither, Right(event))
-    assertEquals(MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.operationalEvent(operational)).toEither, Right(operational))
-    assertEquals(MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.outboxRecord(operational, now)).toEither, Right(operational))
+    assertEquals(
+      MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.operationalEvent(operational)).toEither,
+      Right(operational)
+    )
+    assertEquals(
+      MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.outboxRecord(operational, now)).toEither,
+      Right(operational)
+    )
     assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
   }
 }

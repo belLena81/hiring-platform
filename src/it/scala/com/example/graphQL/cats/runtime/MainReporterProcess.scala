@@ -35,27 +35,36 @@ object MainReporterProcess {
       override def flush(): Unit = this.synchronized(original.flush())
     }
     System.setOut(new PrintStream(forwarding, true, StandardCharsets.UTF_8))
-    val injector = new Thread(() => {
-      val _ = started.await(8, java.util.concurrent.TimeUnit.SECONDS)
-      if (arguments.contains("--exercise-payload")) {
-        val host = argumentValue("test-http-host").getOrElse("127.0.0.1")
-        val port = argumentValue("test-http-port").getOrElse("8080")
-        val authority = if (host.contains(':')) s"[$host]" else host
-        val query = """{"query":"query LocalHealth($include: Boolean = true) { health @include(if: $include) { status } __type(name: \"synthetic-secret\") { name } } # synthetic-comment", "variables":{"include":true,"password":"synthetic-secret","api-key":"synthetic-secret"}}"""
-        val request = HttpRequest.newBuilder(URI.create(s"http://$authority:$port/graphql"))
-          .timeout(Duration.ofSeconds(8))
-          .header("Content-Type", "application/json")
-          .header("Connection", "close")
-          .header("Cookie", "session=synthetic-secret")
-          .POST(HttpRequest.BodyPublishers.ofString(query)).build()
-        val response = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
-          .send(request, HttpResponse.BodyHandlers.ofString())
-        if (response.statusCode() != 200) System.exit(2)
-      }
-      IORuntime.global.compute.reportFailure(new RuntimeException("mongodb://user:synthetic-secret@host/private"))
-      Thread.sleep(2000)
-      System.exit(0)
-    }, "test-runtime-reporter")
+    val injector = new Thread(
+      () => {
+        val _ = started.await(8, java.util.concurrent.TimeUnit.SECONDS)
+        if (arguments.contains("--exercise-payload")) {
+          val host = argumentValue("test-http-host").getOrElse("127.0.0.1")
+          val port = argumentValue("test-http-port").getOrElse("8080")
+          val authority = if (host.contains(':')) s"[$host]" else host
+          val query =
+            """{"query":"query LocalHealth($include: Boolean = true) { health @include(if: $include) { status } __type(name: \"synthetic-secret\") { name } } # synthetic-comment", "variables":{"include":true,"password":"synthetic-secret","api-key":"synthetic-secret"}}"""
+          val request = HttpRequest
+            .newBuilder(URI.create(s"http://$authority:$port/graphql"))
+            .timeout(Duration.ofSeconds(8))
+            .header("Content-Type", "application/json")
+            .header("Connection", "close")
+            .header("Cookie", "session=synthetic-secret")
+            .POST(HttpRequest.BodyPublishers.ofString(query))
+            .build()
+          val response = HttpClient
+            .newBuilder()
+            .connectTimeout(Duration.ofSeconds(2))
+            .build()
+            .send(request, HttpResponse.BodyHandlers.ofString())
+          if (response.statusCode() != 200) System.exit(2)
+        }
+        IORuntime.global.compute.reportFailure(new RuntimeException("mongodb://user:synthetic-secret@host/private"))
+        Thread.sleep(2000)
+        System.exit(0)
+      },
+      "test-runtime-reporter"
+    )
     injector.setDaemon(true)
     injector.start()
     Main.main(args)

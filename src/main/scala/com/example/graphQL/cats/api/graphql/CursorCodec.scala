@@ -89,13 +89,16 @@ private[cats] object CursorCodec {
     given clock: JavaClock = JavaClock.fixed(now, ZoneOffset.UTC)
 
     for {
-      claim <- JwtCirce(clock).decode(value, key.secretKey, Algorithms, Options).toEither
-        .left.map(_ => CursorError.Malformed("Invalid cursor"))
+      claim <- JwtCirce(clock)
+        .decode(value, key.secretKey, Algorithms, Options)
+        .toEither
+        .left
+        .map(_ => CursorError.Malformed("Invalid cursor"))
       _ <- Either.cond(claim.isValid(CursorIssuer, CursorAudience), (), CursorError.Malformed("Invalid cursor"))
       payload <- claim.subject.toRight(CursorError.Malformed("Invalid cursor subject"))
       parts <- payload.split("\\|", -1) match {
         case Array(tag, at, id) => Right((tag, at, id))
-        case _ => Left(CursorError.Malformed("Invalid cursor shape"))
+        case _                  => Left(CursorError.Malformed("Invalid cursor shape"))
       }
       (tag, at, id) = parts
       actualKind <- CursorKind.values.find(_.tag == tag).toRight(CursorError.Malformed("Unknown cursor kind"))

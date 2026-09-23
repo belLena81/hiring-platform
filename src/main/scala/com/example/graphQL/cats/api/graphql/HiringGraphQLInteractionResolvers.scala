@@ -13,7 +13,13 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       val input = context.arg(recordJobViewInputArgument)
       mutationResult(
         hiring.interactionService
-          .recordJobView(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), actor, input.eventId, input.jobId, input.searchId)
+          .recordJobView(
+            idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+            actor,
+            input.eventId,
+            input.jobId,
+            input.searchId
+          )
           .map(_ => InteractionSuccess(true))
       )
     }
@@ -23,7 +29,13 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       val input = context.arg(recordSearchResultClickInputArgument)
       mutationResult(
         hiring.interactionService
-          .recordSearchResultClick(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), actor, input.eventId, input.searchId, input.resultId.toString)
+          .recordSearchResultClick(
+            idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+            actor,
+            input.eventId,
+            input.searchId,
+            input.resultId.toString
+          )
           .map(_ => InteractionSuccess(true))
       )
     }

@@ -11,8 +11,12 @@ final class RequestContextSpec extends CatsEffectSuite {
     for {
       entered <- Deferred[IO, Unit]
       cancelled <- Deferred[IO, Unit]
-      allocated <- TestGraphQLSupport.context((entered.complete(()) *> IO.never[ProbeResult])
-        .onCancel(cancelled.complete(()) *> IO.unit)).allocated
+      allocated <- TestGraphQLSupport
+        .context(
+          (entered.complete(()) *> IO.never[ProbeResult])
+            .onCancel(cancelled.complete(()) *> IO.unit)
+        )
+        .allocated
       (context, release) = allocated
       _ <- IO(context.unsafeToFuture(context.readiness))
       _ <- entered.get.timeout(2.seconds)
@@ -28,10 +32,18 @@ final class RequestContextSpec extends CatsEffectSuite {
       firstCancelled <- Deferred[IO, Unit]
       secondEntered <- Deferred[IO, Unit]
       secondReady <- Deferred[IO, ProbeResult]
-      first <- TestGraphQLSupport.context((firstEntered.complete(()) *> IO.never[ProbeResult])
-        .onCancel(firstCancelled.complete(()) *> IO.unit)).allocated
-      second <- TestGraphQLSupport.context((secondEntered.complete(()) *> secondReady.get)
-        .onCancel(IO.unit)).allocated
+      first <- TestGraphQLSupport
+        .context(
+          (firstEntered.complete(()) *> IO.never[ProbeResult])
+            .onCancel(firstCancelled.complete(()) *> IO.unit)
+        )
+        .allocated
+      second <- TestGraphQLSupport
+        .context(
+          (secondEntered.complete(()) *> secondReady.get)
+            .onCancel(IO.unit)
+        )
+        .allocated
       _ <- IO(first._1.unsafeToFuture(first._1.readiness))
       _ <- IO(second._1.unsafeToFuture(second._1.readiness))
       _ <- firstEntered.get.timeout(2.seconds)
@@ -39,7 +51,9 @@ final class RequestContextSpec extends CatsEffectSuite {
       _ <- first._2
       _ <- firstCancelled.get.timeout(2.seconds)
       _ <- secondReady.complete(ProbeResult.Ready)
-      secondResult <- IO(second._1.unsafeToFuture(second._1.readiness)).flatMap(future => IO.fromFuture(IO.pure(future))).attempt
+      secondResult <- IO(second._1.unsafeToFuture(second._1.readiness))
+        .flatMap(future => IO.fromFuture(IO.pure(future)))
+        .attempt
       _ <- second._2
     } yield assert(secondResult.isRight)
   }

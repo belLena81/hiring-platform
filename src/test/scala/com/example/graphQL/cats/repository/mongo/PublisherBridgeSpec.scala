@@ -67,13 +67,15 @@ class PublisherBridgeSpec extends CatsEffectSuite {
   }
 
   test("empty completion returns None") {
-    PublisherBridge.first[Int](subscriber => {
-      subscriber.onSubscribe(new Subscription {
-        override def request(count: Long): Unit = ()
-        override def cancel(): Unit = ()
+    PublisherBridge
+      .first[Int](subscriber => {
+        subscriber.onSubscribe(new Subscription {
+          override def request(count: Long): Unit = ()
+          override def cancel(): Unit = ()
+        })
+        subscriber.onComplete()
       })
-      subscriber.onComplete()
-    }).map(result => assertEquals(result, None))
+      .map(result => assertEquals(result, None))
   }
 
   test("bounded collection completes within its declared limit") {

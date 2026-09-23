@@ -9,10 +9,14 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
     GraphQLDocumentCache.resource.use { cache =>
       for {
         firstResult <- cache.document(query)
-        first <- IO.fromEither(firstResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        first <- IO.fromEither(
+          firstResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure"))
+        )
         _ <- cache.store(query, first.document)
         secondResult <- cache.document(query)
-        second <- IO.fromEither(secondResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        second <- IO.fromEither(
+          secondResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure"))
+        )
       } yield {
         assert(!first.cached)
         assert(second.cached)
@@ -26,10 +30,14 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
       val lookup = cache.document(query)
       for {
         firstResult <- lookup
-        first <- IO.fromEither(firstResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        first <- IO.fromEither(
+          firstResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure"))
+        )
         _ <- cache.store(query, first.document)
         secondResult <- lookup
-        second <- IO.fromEither(secondResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure")))
+        second <- IO.fromEither(
+          secondResult.left.map(failure => new AssertionError(s"Unexpected cache failure: $failure"))
+        )
       } yield assert(second.cached)
     }
   }

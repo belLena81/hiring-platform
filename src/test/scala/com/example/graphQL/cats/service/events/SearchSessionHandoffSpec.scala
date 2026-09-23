@@ -24,11 +24,13 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       claimed <- Ref.of[IO, Int](0)
       terminal <- Deferred[IO, Unit]
       repository = failingRepository(claimed, retried, failed, terminal)
-      result <- SearchSessionHandoff.resource(
-        repository,
-        SearchSessionHandoffConfig(parallelism = 1, retryDelay = 1.millis, pollInterval = 1.hour),
-        Diagnostics.noop
-      ).use(_ => terminal.get *> (retried.get, failed.get).tupled)
+      result <- SearchSessionHandoff
+        .resource(
+          repository,
+          SearchSessionHandoffConfig(parallelism = 1, retryDelay = 1.millis, pollInterval = 1.hour),
+          Diagnostics.noop
+        )
+        .use(_ => terminal.get *> (retried.get, failed.get).tupled)
     } yield {
       assertEquals(result._1, Vector(1, 2))
       assertEquals(result._2, Vector(3 -> SearchSessionWorkFailure.RetryExhausted))
@@ -64,7 +66,11 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       override def findForActor(actor: UserId, search: UUID): IO[Either[RepositoryError, Option[SearchSessionLookup]]] =
         IO.pure(Right(None))
 
-      override def claim(workerId: String, currentTime: Instant, leaseUntil: Instant): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]] =
+      override def claim(
+          workerId: String,
+          currentTime: Instant,
+          leaseUntil: Instant
+      ): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]] =
         claimed.modify { attempt =>
           val next = attempt + 1
           if (next <= 3) (next, Right(Some(ClaimedSearchSessionWork(work, next, s"lease-$next"))))

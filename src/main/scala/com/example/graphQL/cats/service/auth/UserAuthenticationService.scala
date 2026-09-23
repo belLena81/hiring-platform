@@ -9,8 +9,14 @@ import com.example.graphQL.cats.service.protocol.UserAuthenticator
 
 final class UserAuthenticationService(users: UserRepository) extends UserAuthenticator {
   override def actorFor(userId: UserId): IO[Either[RepositoryError, Option[ActorContext]]] =
-    users.find(userId).map(_.map(_.filter(_.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active)
-      .map(user => ActorContext(user.id, user.role))))
+    users
+      .find(userId)
+      .map(
+        _.map(
+          _.filter(_.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active)
+            .map(user => ActorContext(user.id, user.role))
+        )
+      )
 }
 
 object UserAuthenticationService {

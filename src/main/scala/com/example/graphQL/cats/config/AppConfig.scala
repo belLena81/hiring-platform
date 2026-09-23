@@ -70,36 +70,101 @@ enum ConfigError(val key: String) {
 
 object ConfigError {
   val publicKeys: Set[String] = List[ConfigError](
-    InvalidConfigFile(""), InvalidHost, InvalidPort, InvalidAdmissionPermits, InvalidRequestTimeout,
-    InvalidMongoUri, InvalidMongoDatabase, InvalidMaskSensitive, InvalidJwtSecret,
-    InvalidJwtIssuer, InvalidJwtAudience, InvalidCursorTtl, InvalidPasswordHashIterations, InvalidPasswordHashMemory,
-    InvalidPasswordHashParallelism, InvalidAuthRateLimitWindow, InvalidAuthRateLimitAttempts,
-    InvalidAuthRateLimitBuckets, InvalidTrustedProxyCidrs, InvalidVectorSearchEnabled, InvalidVoyageApiKey,
-    InvalidVoyageEndpoint, InvalidVoyageModel, InvalidVoyageDimension,
-    InvalidEmbeddingQueueSize, InvalidEmbeddingParallelism, InvalidEmbeddingTimeout, InvalidEmbeddingRetryAttempts,
-    InvalidEmbeddingRetryDelay, InvalidJobVectorIndex, InvalidCandidateVectorIndex, InvalidJobLexicalIndex,
-    InvalidSearchIndexReadyTimeout, InvalidSearchIndexPollInterval, InvalidVectorNumCandidates, InvalidKafkaEnabled,
-    InvalidKafkaBootstrapServers, InvalidKafkaTopic, InvalidKafkaConsumerGroup, InvalidKafkaBatchSize,
-    InvalidKafkaLeaseSeconds, InvalidKafkaRetryDelaySeconds, InvalidKafkaMaxAttempts, InvalidKafkaPollInterval,
-    InvalidKafkaReceiptTtl, InvalidKafkaQuarantineTtl
+    InvalidConfigFile(""),
+    InvalidHost,
+    InvalidPort,
+    InvalidAdmissionPermits,
+    InvalidRequestTimeout,
+    InvalidMongoUri,
+    InvalidMongoDatabase,
+    InvalidMaskSensitive,
+    InvalidJwtSecret,
+    InvalidJwtIssuer,
+    InvalidJwtAudience,
+    InvalidCursorTtl,
+    InvalidPasswordHashIterations,
+    InvalidPasswordHashMemory,
+    InvalidPasswordHashParallelism,
+    InvalidAuthRateLimitWindow,
+    InvalidAuthRateLimitAttempts,
+    InvalidAuthRateLimitBuckets,
+    InvalidTrustedProxyCidrs,
+    InvalidVectorSearchEnabled,
+    InvalidVoyageApiKey,
+    InvalidVoyageEndpoint,
+    InvalidVoyageModel,
+    InvalidVoyageDimension,
+    InvalidEmbeddingQueueSize,
+    InvalidEmbeddingParallelism,
+    InvalidEmbeddingTimeout,
+    InvalidEmbeddingRetryAttempts,
+    InvalidEmbeddingRetryDelay,
+    InvalidJobVectorIndex,
+    InvalidCandidateVectorIndex,
+    InvalidJobLexicalIndex,
+    InvalidSearchIndexReadyTimeout,
+    InvalidSearchIndexPollInterval,
+    InvalidVectorNumCandidates,
+    InvalidKafkaEnabled,
+    InvalidKafkaBootstrapServers,
+    InvalidKafkaTopic,
+    InvalidKafkaConsumerGroup,
+    InvalidKafkaBatchSize,
+    InvalidKafkaLeaseSeconds,
+    InvalidKafkaRetryDelaySeconds,
+    InvalidKafkaMaxAttempts,
+    InvalidKafkaPollInterval,
+    InvalidKafkaReceiptTtl,
+    InvalidKafkaQuarantineTtl
   ).map(_.key).toSet
 }
 
-final case class VectorSearchConfig(enabled: Boolean, voyageApiKey: Option[String], voyageEndpoint: String,
-    voyageModel: String, voyageDimension: Int, queueSize: Int, parallelism: Int,
-    timeoutMillis: Int, retryAttempts: Int, retryDelayMillis: Int, jobVectorIndex: String, candidateVectorIndex: String, jobLexicalIndex: String,
-    indexReadyTimeoutMillis: Int, indexPollIntervalMillis: Int, numCandidates: Int)
+final case class VectorSearchConfig(
+    enabled: Boolean,
+    voyageApiKey: Option[String],
+    voyageEndpoint: String,
+    voyageModel: String,
+    voyageDimension: Int,
+    queueSize: Int,
+    parallelism: Int,
+    timeoutMillis: Int,
+    retryAttempts: Int,
+    retryDelayMillis: Int,
+    jobVectorIndex: String,
+    candidateVectorIndex: String,
+    jobLexicalIndex: String,
+    indexReadyTimeoutMillis: Int,
+    indexPollIntervalMillis: Int,
+    numCandidates: Int
+)
 
-final case class JwtAuthConfig(hmacSecret: String, issuer: String, audience: String, accessTokenSeconds: Long = 900L,
-    cursorTtlSeconds: Long = 900L)
+final case class JwtAuthConfig(
+    hmacSecret: String,
+    issuer: String,
+    audience: String,
+    accessTokenSeconds: Long = 900L,
+    cursorTtlSeconds: Long = 900L
+)
 final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])
-final case class KafkaPublisherConfig(workerId: String, batchSize: Int, leaseSeconds: Int,
-    retryDelaySeconds: Int, maxAttempts: Int, pollIntervalMillis: Int)
+final case class KafkaPublisherConfig(
+    workerId: String,
+    batchSize: Int,
+    leaseSeconds: Int,
+    retryDelaySeconds: Int,
+    maxAttempts: Int,
+    pollIntervalMillis: Int
+)
 final case class KafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int)
-final case class KafkaConfig(enabled: Boolean, bootstrapServers: String, topic: String, consumerGroup: String,
-    publisher: KafkaPublisherConfig, consumer: KafkaConsumerConfig)
+final case class KafkaConfig(
+    enabled: Boolean,
+    bootstrapServers: String,
+    topic: String,
+    consumerGroup: String,
+    publisher: KafkaPublisherConfig,
+    consumer: KafkaConsumerConfig
+)
 
 type Port = Int :| Interval.Closed[1, 65535]
 type AdmissionPermits = Int :| Interval.Closed[1, 1024]
@@ -111,11 +176,22 @@ type Parallelism = Int :| Interval.Closed[1, 64]
 type TimeoutMs = Int :| Interval.Closed[100, 60000]
 type HttpsUrl = String :| StartWith["https://"]
 
-final case class AppConfig(host: Host, port: Ip4sPort, admissionPermits: Int, requestTimeout: FiniteDuration,
+final case class AppConfig(
+    host: Host,
+    port: Ip4sPort,
+    admissionPermits: Int,
+    requestTimeout: FiniteDuration,
     trustedProxy: TrustedProxyConfig,
-    mongoUri: String, mongoDatabase: String,
-    maskSensitive: Boolean, jwtAuth: JwtAuthConfig, passwordHash: PasswordHashConfig, authRateLimit: AuthRateLimitConfig,
-    vectorSearch: VectorSearchConfig, kafka: KafkaConfig, resetOnStart: Boolean = false) {
+    mongoUri: String,
+    mongoDatabase: String,
+    maskSensitive: Boolean,
+    jwtAuth: JwtAuthConfig,
+    passwordHash: PasswordHashConfig,
+    authRateLimit: AuthRateLimitConfig,
+    vectorSearch: VectorSearchConfig,
+    kafka: KafkaConfig,
+    resetOnStart: Boolean = false
+) {
   override def toString: String = "AppConfig([REDACTED])"
 }
 
@@ -129,7 +205,10 @@ object AppConfig {
   def fromConfig(raw: String, env: Map[String, String]): Either[NonEmptyList[ConfigError], AppConfig] =
     for {
       parsed <- Either.catchNonFatal(ConfigFactory.parseString(raw, parseOptions)).left.map(parseError)
-      resolved <- Either.catchNonFatal(parsed.withFallback(ConfigFactory.parseMap(env.asJava)).resolve(ConfigResolveOptions.noSystem())).left.map(parseError)
+      resolved <- Either
+        .catchNonFatal(parsed.withFallback(ConfigFactory.parseMap(env.asJava)).resolve(ConfigResolveOptions.noSystem()))
+        .left
+        .map(parseError)
       config <- ConfigSource.fromConfig(resolved).load[RawAppConfig].left.map(readError).flatMap(read)
     } yield config
 
@@ -148,47 +227,105 @@ object AppConfig {
     val indexes = vector.indexes
 
     val transport =
-      (validHost(http.host), validPort(http.port), http.admissionPermits.validNel[ConfigError],
+      (
+        validHost(http.host),
+        validPort(http.port),
+        http.admissionPermits.validNel[ConfigError],
         validRequestTimeout(http.requestTimeoutMs),
         validTrustedProxyCidrs(http.trustedProxyCidrs),
-        validMongoUri(mongo.uri), validMongoDatabase(mongo.database)).mapN {
-        (host, port, permits, requestTimeout, trustedProxy, uri, database) =>
-          (host, port, permits, requestTimeout.millis, trustedProxy, uri, database)
+        validMongoUri(mongo.uri),
+        validMongoDatabase(mongo.database)
+      ).mapN { (host, port, permits, requestTimeout, trustedProxy, uri, database) =>
+        (host, port, permits, requestTimeout.millis, trustedProxy, uri, database)
       }
 
     val authConfig =
-      (validJwtSecret(jwt.hs256Secret),
+      (
+        validJwtSecret(jwt.hs256Secret),
         validCursorTtl(jwt.cursorTtlSeconds),
-        validPasswordHashIterations(passwordHash.iterations), validPasswordHashMemory(passwordHash.memoryKib),
-        validPasswordHashParallelism(passwordHash.parallelism), validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds),
-        validAuthRateLimitAttempts(raw.auth.rateLimit.attempts), validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets)).mapN {
-        (secret, cursorTtl, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets) =>
-          (JwtAuthConfig(secret, jwt.issuer, jwt.audience, cursorTtlSeconds = cursorTtl.toLong), PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
-            AuthRateLimitConfig(windowSeconds, attempts, maxBuckets))
+        validPasswordHashIterations(passwordHash.iterations),
+        validPasswordHashMemory(passwordHash.memoryKib),
+        validPasswordHashParallelism(passwordHash.parallelism),
+        validAuthRateLimitWindow(raw.auth.rateLimit.windowSeconds),
+        validAuthRateLimitAttempts(raw.auth.rateLimit.attempts),
+        validAuthRateLimitBuckets(raw.auth.rateLimit.maxBuckets)
+      ).mapN { (secret, cursorTtl, hashIterations, hashMemory, hashParallelism, windowSeconds, attempts, maxBuckets) =>
+        (
+          JwtAuthConfig(secret, jwt.issuer, jwt.audience, cursorTtlSeconds = cursorTtl.toLong),
+          PasswordHashConfig(hashIterations, hashMemory, hashParallelism),
+          AuthRateLimitConfig(windowSeconds, attempts, maxBuckets)
+        )
       }
 
     val kafkaConfig =
-      (validKafkaBootstrapServers(kafka.bootstrapServers), validKafkaTopic(kafka.topic), validKafkaConsumerGroup(kafka.consumerGroup),
-        validKafkaBatchSize(kafka.publisher.batchSize), validKafkaLeaseSeconds(kafka.publisher.leaseSeconds),
-        validKafkaRetryDelaySeconds(kafka.publisher.retryDelaySeconds), validKafkaMaxAttempts(kafka.publisher.maxAttempts),
-        validKafkaPollInterval(kafka.publisher.pollIntervalMs), validKafkaReceiptTtl(kafka.consumer.receiptTtlDays),
-        validKafkaQuarantineTtl(kafka.consumer.quarantineTtlDays)).mapN {
-        (bootstrapServers, topic, consumerGroup, batchSize, leaseSeconds, retryDelaySeconds, maxAttempts,
-            kafkaPollInterval, receiptTtl, quarantineTtl) =>
-          KafkaConfig(kafka.enabled, bootstrapServers, topic, consumerGroup,
-            KafkaPublisherConfig(kafka.publisher.workerId, batchSize, leaseSeconds, retryDelaySeconds, maxAttempts, kafkaPollInterval),
-            KafkaConsumerConfig(kafka.consumer.enabled, receiptTtl, quarantineTtl))
+      (
+        validKafkaBootstrapServers(kafka.bootstrapServers),
+        validKafkaTopic(kafka.topic),
+        validKafkaConsumerGroup(kafka.consumerGroup),
+        validKafkaBatchSize(kafka.publisher.batchSize),
+        validKafkaLeaseSeconds(kafka.publisher.leaseSeconds),
+        validKafkaRetryDelaySeconds(kafka.publisher.retryDelaySeconds),
+        validKafkaMaxAttempts(kafka.publisher.maxAttempts),
+        validKafkaPollInterval(kafka.publisher.pollIntervalMs),
+        validKafkaReceiptTtl(kafka.consumer.receiptTtlDays),
+        validKafkaQuarantineTtl(kafka.consumer.quarantineTtlDays)
+      ).mapN {
+        (
+            bootstrapServers,
+            topic,
+            consumerGroup,
+            batchSize,
+            leaseSeconds,
+            retryDelaySeconds,
+            maxAttempts,
+            kafkaPollInterval,
+            receiptTtl,
+            quarantineTtl
+        ) =>
+          KafkaConfig(
+            kafka.enabled,
+            bootstrapServers,
+            topic,
+            consumerGroup,
+            KafkaPublisherConfig(
+              kafka.publisher.workerId,
+              batchSize,
+              leaseSeconds,
+              retryDelaySeconds,
+              maxAttempts,
+              kafkaPollInterval
+            ),
+            KafkaConsumerConfig(kafka.consumer.enabled, receiptTtl, quarantineTtl)
+          )
       }
 
     val vectorConfig =
-      (validVoyageApiKey(vector.enabled, voyage.apiKey),
-        validIndexReadyTimeout(vector.indexes.readyTimeoutMs), validIndexPollInterval(vector.indexes.pollIntervalMs),
-        validNumCandidates(vector.numCandidates), validEmbeddingRetryAttempts(embedding.retryAttempts),
-        validEmbeddingRetryDelay(embedding.retryDelayMs)).mapN {
-        (apiKey, readyTimeout, searchIndexPollInterval, numCandidates, retryAttempts, retryDelay) =>
-          VectorSearchConfig(vector.enabled, apiKey, voyage.endpoint, voyage.model, voyage.dimension,
-            embedding.queueSize, embedding.parallelism, embedding.timeoutMs, retryAttempts, retryDelay,
-            indexes.jobs, indexes.candidates, indexes.lexical, readyTimeout, searchIndexPollInterval, numCandidates)
+      (
+        validVoyageApiKey(vector.enabled, voyage.apiKey),
+        validIndexReadyTimeout(vector.indexes.readyTimeoutMs),
+        validIndexPollInterval(vector.indexes.pollIntervalMs),
+        validNumCandidates(vector.numCandidates),
+        validEmbeddingRetryAttempts(embedding.retryAttempts),
+        validEmbeddingRetryDelay(embedding.retryDelayMs)
+      ).mapN { (apiKey, readyTimeout, searchIndexPollInterval, numCandidates, retryAttempts, retryDelay) =>
+        VectorSearchConfig(
+          vector.enabled,
+          apiKey,
+          voyage.endpoint,
+          voyage.model,
+          voyage.dimension,
+          embedding.queueSize,
+          embedding.parallelism,
+          embedding.timeoutMs,
+          retryAttempts,
+          retryDelay,
+          indexes.jobs,
+          indexes.candidates,
+          indexes.lexical,
+          readyTimeout,
+          searchIndexPollInterval,
+          numCandidates
+        )
       }
 
     (transport, authConfig, kafkaConfig, vectorConfig).mapN {
@@ -198,8 +335,22 @@ object AppConfig {
             kafkaConfig,
             vectorSearchConfig
           ) =>
-        AppConfig(host, port, permits, requestTimeout, trustedProxy, uri, database, raw.logging.maskSensitive,
-          jwtConfig, passwordHashConfig, rateLimitConfig, vectorSearchConfig, kafkaConfig, raw.mongo.resetOnStart.getOrElse(false))
+        AppConfig(
+          host,
+          port,
+          permits,
+          requestTimeout,
+          trustedProxy,
+          uri,
+          database,
+          raw.logging.maskSensitive,
+          jwtConfig,
+          passwordHashConfig,
+          rateLimitConfig,
+          vectorSearchConfig,
+          kafkaConfig,
+          raw.mongo.resetOnStart.getOrElse(false)
+        )
     }
   }
 
@@ -212,14 +363,26 @@ object AppConfig {
   private def validPort(value: Port): ValidatedNel[ConfigError, Ip4sPort] =
     Ip4sPort.fromInt(value).toValidNel(ConfigError.InvalidPort)
   private def validMongoUri(value: String): ValidatedNel[ConfigError, String] =
-    Either.catchNonFatal(new ConnectionString(value)).leftMap(_ => ConfigError.InvalidMongoUri).toValidatedNel.map(_ => value)
+    Either
+      .catchNonFatal(new ConnectionString(value))
+      .leftMap(_ => ConfigError.InvalidMongoUri)
+      .toValidatedNel
+      .map(_ => value)
   private def validMongoDatabase(value: String): ValidatedNel[ConfigError, String] =
-    Either.cond(value.nonEmpty && value.getBytes(StandardCharsets.UTF_8).length < 64 &&
-      !value.exists(c => c.isWhitespace || c.isControl || "/\\.\"$*<>:|?".contains(c)), value,
-      ConfigError.InvalidMongoDatabase).toValidatedNel
+    Either
+      .cond(
+        value.nonEmpty && value.getBytes(StandardCharsets.UTF_8).length < 64 &&
+          !value.exists(c => c.isWhitespace || c.isControl || "/\\.\"$*<>:|?".contains(c)),
+        value,
+        ConfigError.InvalidMongoDatabase
+      )
+      .toValidatedNel
   private def validJwtSecret(value: Option[String]): ValidatedNel[ConfigError, String] =
-    value.filter(_ != "disabled").filter(_.trim.nonEmpty).fold(ConfigError.InvalidJwtSecret.invalidNel[String]) { secret =>
-      Either.cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, secret, ConfigError.InvalidJwtSecret).toValidatedNel
+    value.filter(_ != "disabled").filter(_.trim.nonEmpty).fold(ConfigError.InvalidJwtSecret.invalidNel[String]) {
+      secret =>
+        Either
+          .cond(secret.getBytes(StandardCharsets.UTF_8).length >= 32, secret, ConfigError.InvalidJwtSecret)
+          .toValidatedNel
     }
   private def validCursorTtl(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(60, 86400, ConfigError.InvalidCursorTtl)(value)
@@ -238,13 +401,20 @@ object AppConfig {
   private def validRequestTimeout(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(100, 60000, ConfigError.InvalidRequestTimeout)(value)
   private def validTrustedProxyCidrs(values: List[String]): ValidatedNel[ConfigError, TrustedProxyConfig] =
-    values.traverse { value =>
-      Cidr.fromString(value).filter(_.prefixBits > 0)
-        .toRight(ConfigError.InvalidTrustedProxyCidrs).toValidatedNel
-    }.map(TrustedProxyConfig.apply)
+    values
+      .traverse { value =>
+        Cidr
+          .fromString(value)
+          .filter(_.prefixBits > 0)
+          .toRight(ConfigError.InvalidTrustedProxyCidrs)
+          .toValidatedNel
+      }
+      .map(TrustedProxyConfig.apply)
   private def validVoyageApiKey(enabled: Boolean, value: Option[String]): ValidatedNel[ConfigError, Option[String]] =
     val normalized = value.filter(_ != "disabled")
-    Either.cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey).toValidatedNel
+    Either
+      .cond(!enabled || normalized.exists(_.trim.nonEmpty), normalized, ConfigError.InvalidVoyageApiKey)
+      .toValidatedNel
   private def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates)(value)
   private def validIndexReadyTimeout(value: Int): ValidatedNel[ConfigError, Int] =
@@ -256,7 +426,9 @@ object AppConfig {
   private def validEmbeddingRetryDelay(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(100, 60000, ConfigError.InvalidEmbeddingRetryDelay)(value)
   private def validKafkaBootstrapServers(value: String): ValidatedNel[ConfigError, String] =
-    Either.cond(value.trim.nonEmpty && value.length <= 512, value, ConfigError.InvalidKafkaBootstrapServers).toValidatedNel
+    Either
+      .cond(value.trim.nonEmpty && value.length <= 512, value, ConfigError.InvalidKafkaBootstrapServers)
+      .toValidatedNel
   private def validKafkaTopic(value: String): ValidatedNel[ConfigError, String] =
     Either.cond(value.trim.nonEmpty && value.length <= 249, value, ConfigError.InvalidKafkaTopic).toValidatedNel
   private def validKafkaConsumerGroup(value: String): ValidatedNel[ConfigError, String] =
@@ -279,92 +451,149 @@ object AppConfig {
   private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
     val errors = failures.toList.flatMap {
       case ConvertFailure(KeyNotFound(key, _), _, path) => configErrorForPath(fullPath(path, key))
-      case ConvertFailure(_, _, path) => configErrorForPath(path)
-      case _ => None
+      case ConvertFailure(_, _, path)                   => configErrorForPath(path)
+      case _                                            => None
     }.distinct
-    NonEmptyList.fromList(errors).getOrElse(NonEmptyList.one(ConfigError.InvalidConfigFile("configuration decoding failed")))
+    NonEmptyList
+      .fromList(errors)
+      .getOrElse(NonEmptyList.one(ConfigError.InvalidConfigFile("configuration decoding failed")))
   }
 
   private def parseError(error: Throwable): NonEmptyList[ConfigError] =
-    NonEmptyList.one(ConfigError.InvalidConfigFile(Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)))
+    NonEmptyList.one(
+      ConfigError.InvalidConfigFile(Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName))
+    )
 
-  private def fullPath(path: String, key: String): String = Option(path).filter(_.nonEmpty).fold(key)(parent => s"$parent.$key")
+  private def fullPath(path: String, key: String): String =
+    Option(path).filter(_.nonEmpty).fold(key)(parent => s"$parent.$key")
   private def configErrorForPath(path: String): Option[ConfigError] = path match {
-    case "http.host" => Some(ConfigError.InvalidHost)
-    case "http.port" => Some(ConfigError.InvalidPort)
-    case "http.admission-permits" => Some(ConfigError.InvalidAdmissionPermits)
-    case "http.request-timeout-ms" => Some(ConfigError.InvalidRequestTimeout)
-    case "mongo.uri" => Some(ConfigError.InvalidMongoUri)
-    case "mongo.database" => Some(ConfigError.InvalidMongoDatabase)
-    case "logging.mask-sensitive" => Some(ConfigError.InvalidMaskSensitive)
-    case "auth.jwt.hs256-secret" => Some(ConfigError.InvalidJwtSecret)
-    case "auth.jwt.issuer" => Some(ConfigError.InvalidJwtIssuer)
-    case "auth.jwt.audience" => Some(ConfigError.InvalidJwtAudience)
-    case "auth.jwt.cursor-ttl-seconds" => Some(ConfigError.InvalidCursorTtl)
-    case "auth.password-hash.iterations" => Some(ConfigError.InvalidPasswordHashIterations)
-    case "auth.password-hash.memory-kib" => Some(ConfigError.InvalidPasswordHashMemory)
-    case "auth.password-hash.parallelism" => Some(ConfigError.InvalidPasswordHashParallelism)
-    case "auth.rate-limit.window-seconds" => Some(ConfigError.InvalidAuthRateLimitWindow)
-    case "auth.rate-limit.attempts" => Some(ConfigError.InvalidAuthRateLimitAttempts)
-    case "auth.rate-limit.max-buckets" => Some(ConfigError.InvalidAuthRateLimitBuckets)
-    case "http.trusted-proxy-cidrs" => Some(ConfigError.InvalidTrustedProxyCidrs)
-    case "vector-search.enabled" => Some(ConfigError.InvalidVectorSearchEnabled)
-    case "vector-search.voyage.api-key" => Some(ConfigError.InvalidVoyageApiKey)
-    case "vector-search.voyage.endpoint" => Some(ConfigError.InvalidVoyageEndpoint)
-    case "vector-search.voyage.model" => Some(ConfigError.InvalidVoyageModel)
-    case "vector-search.voyage.dimension" => Some(ConfigError.InvalidVoyageDimension)
-    case "vector-search.embedding.queue-size" => Some(ConfigError.InvalidEmbeddingQueueSize)
-    case "vector-search.embedding.parallelism" => Some(ConfigError.InvalidEmbeddingParallelism)
-    case "vector-search.embedding.timeout-ms" => Some(ConfigError.InvalidEmbeddingTimeout)
+    case "http.host"                              => Some(ConfigError.InvalidHost)
+    case "http.port"                              => Some(ConfigError.InvalidPort)
+    case "http.admission-permits"                 => Some(ConfigError.InvalidAdmissionPermits)
+    case "http.request-timeout-ms"                => Some(ConfigError.InvalidRequestTimeout)
+    case "mongo.uri"                              => Some(ConfigError.InvalidMongoUri)
+    case "mongo.database"                         => Some(ConfigError.InvalidMongoDatabase)
+    case "logging.mask-sensitive"                 => Some(ConfigError.InvalidMaskSensitive)
+    case "auth.jwt.hs256-secret"                  => Some(ConfigError.InvalidJwtSecret)
+    case "auth.jwt.issuer"                        => Some(ConfigError.InvalidJwtIssuer)
+    case "auth.jwt.audience"                      => Some(ConfigError.InvalidJwtAudience)
+    case "auth.jwt.cursor-ttl-seconds"            => Some(ConfigError.InvalidCursorTtl)
+    case "auth.password-hash.iterations"          => Some(ConfigError.InvalidPasswordHashIterations)
+    case "auth.password-hash.memory-kib"          => Some(ConfigError.InvalidPasswordHashMemory)
+    case "auth.password-hash.parallelism"         => Some(ConfigError.InvalidPasswordHashParallelism)
+    case "auth.rate-limit.window-seconds"         => Some(ConfigError.InvalidAuthRateLimitWindow)
+    case "auth.rate-limit.attempts"               => Some(ConfigError.InvalidAuthRateLimitAttempts)
+    case "auth.rate-limit.max-buckets"            => Some(ConfigError.InvalidAuthRateLimitBuckets)
+    case "http.trusted-proxy-cidrs"               => Some(ConfigError.InvalidTrustedProxyCidrs)
+    case "vector-search.enabled"                  => Some(ConfigError.InvalidVectorSearchEnabled)
+    case "vector-search.voyage.api-key"           => Some(ConfigError.InvalidVoyageApiKey)
+    case "vector-search.voyage.endpoint"          => Some(ConfigError.InvalidVoyageEndpoint)
+    case "vector-search.voyage.model"             => Some(ConfigError.InvalidVoyageModel)
+    case "vector-search.voyage.dimension"         => Some(ConfigError.InvalidVoyageDimension)
+    case "vector-search.embedding.queue-size"     => Some(ConfigError.InvalidEmbeddingQueueSize)
+    case "vector-search.embedding.parallelism"    => Some(ConfigError.InvalidEmbeddingParallelism)
+    case "vector-search.embedding.timeout-ms"     => Some(ConfigError.InvalidEmbeddingTimeout)
     case "vector-search.embedding.retry-attempts" => Some(ConfigError.InvalidEmbeddingRetryAttempts)
     case "vector-search.embedding.retry-delay-ms" => Some(ConfigError.InvalidEmbeddingRetryDelay)
-    case "vector-search.indexes.jobs" => Some(ConfigError.InvalidJobVectorIndex)
-    case "vector-search.indexes.candidates" => Some(ConfigError.InvalidCandidateVectorIndex)
-    case "vector-search.indexes.lexical" => Some(ConfigError.InvalidJobLexicalIndex)
+    case "vector-search.indexes.jobs"             => Some(ConfigError.InvalidJobVectorIndex)
+    case "vector-search.indexes.candidates"       => Some(ConfigError.InvalidCandidateVectorIndex)
+    case "vector-search.indexes.lexical"          => Some(ConfigError.InvalidJobLexicalIndex)
     case "vector-search.indexes.ready-timeout-ms" => Some(ConfigError.InvalidSearchIndexReadyTimeout)
     case "vector-search.indexes.poll-interval-ms" => Some(ConfigError.InvalidSearchIndexPollInterval)
-    case "vector-search.num-candidates" => Some(ConfigError.InvalidVectorNumCandidates)
-    case "kafka.enabled" => Some(ConfigError.InvalidKafkaEnabled)
-    case "kafka.bootstrap-servers" => Some(ConfigError.InvalidKafkaBootstrapServers)
-    case "kafka.topic" => Some(ConfigError.InvalidKafkaTopic)
-    case "kafka.consumer-group" => Some(ConfigError.InvalidKafkaConsumerGroup)
-    case "kafka.publisher.batch-size" => Some(ConfigError.InvalidKafkaBatchSize)
-    case "kafka.publisher.lease-seconds" => Some(ConfigError.InvalidKafkaLeaseSeconds)
-    case "kafka.publisher.retry-delay-seconds" => Some(ConfigError.InvalidKafkaRetryDelaySeconds)
-    case "kafka.publisher.max-attempts" => Some(ConfigError.InvalidKafkaMaxAttempts)
-    case "kafka.publisher.poll-interval-ms" => Some(ConfigError.InvalidKafkaPollInterval)
-    case "kafka.consumer.receipt-ttl-days" => Some(ConfigError.InvalidKafkaReceiptTtl)
-    case "kafka.consumer.quarantine-ttl-days" => Some(ConfigError.InvalidKafkaQuarantineTtl)
-    case _ => None
+    case "vector-search.num-candidates"           => Some(ConfigError.InvalidVectorNumCandidates)
+    case "kafka.enabled"                          => Some(ConfigError.InvalidKafkaEnabled)
+    case "kafka.bootstrap-servers"                => Some(ConfigError.InvalidKafkaBootstrapServers)
+    case "kafka.topic"                            => Some(ConfigError.InvalidKafkaTopic)
+    case "kafka.consumer-group"                   => Some(ConfigError.InvalidKafkaConsumerGroup)
+    case "kafka.publisher.batch-size"             => Some(ConfigError.InvalidKafkaBatchSize)
+    case "kafka.publisher.lease-seconds"          => Some(ConfigError.InvalidKafkaLeaseSeconds)
+    case "kafka.publisher.retry-delay-seconds"    => Some(ConfigError.InvalidKafkaRetryDelaySeconds)
+    case "kafka.publisher.max-attempts"           => Some(ConfigError.InvalidKafkaMaxAttempts)
+    case "kafka.publisher.poll-interval-ms"       => Some(ConfigError.InvalidKafkaPollInterval)
+    case "kafka.consumer.receipt-ttl-days"        => Some(ConfigError.InvalidKafkaReceiptTtl)
+    case "kafka.consumer.quarantine-ttl-days"     => Some(ConfigError.InvalidKafkaQuarantineTtl)
+    case _                                        => None
   }
 
   private val parseOptions = ConfigParseOptions.defaults().setAllowMissing(false)
-  private final case class RawAppConfig(http: RawHttpConfig, mongo: RawMongoConfig, logging: RawLoggingConfig,
-      auth: RawAuthConfig, kafka: RawKafkaConfig, vectorSearch: RawVectorSearchConfig) derives ConfigReader
-  private final case class RawHttpConfig(host: String, port: Port, admissionPermits: AdmissionPermits,
-      requestTimeoutMs: Int, trustedProxyCidrs: List[String]) derives ConfigReader
-  private final case class RawMongoConfig(uri: String, database: String, resetOnStart: Option[Boolean]) derives ConfigReader
+  private final case class RawAppConfig(
+      http: RawHttpConfig,
+      mongo: RawMongoConfig,
+      logging: RawLoggingConfig,
+      auth: RawAuthConfig,
+      kafka: RawKafkaConfig,
+      vectorSearch: RawVectorSearchConfig
+  ) derives ConfigReader
+  private final case class RawHttpConfig(
+      host: String,
+      port: Port,
+      admissionPermits: AdmissionPermits,
+      requestTimeoutMs: Int,
+      trustedProxyCidrs: List[String]
+  ) derives ConfigReader
+  private final case class RawMongoConfig(uri: String, database: String, resetOnStart: Option[Boolean])
+      derives ConfigReader
   private final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
-  private final case class RawAuthConfig(jwt: RawJwtAuthConfig, passwordHash: Option[RawPasswordHashConfig],
-      rateLimit: RawAuthRateLimitConfig) derives ConfigReader
-  private final case class RawJwtAuthConfig(hs256Secret: Option[String], issuer: NonBlank128, audience: NonBlank128,
-      cursorTtlSeconds: Int)
-  private final case class RawAuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int) derives ConfigReader
+  private final case class RawAuthConfig(
+      jwt: RawJwtAuthConfig,
+      passwordHash: Option[RawPasswordHashConfig],
+      rateLimit: RawAuthRateLimitConfig
+  ) derives ConfigReader
+  private final case class RawJwtAuthConfig(
+      hs256Secret: Option[String],
+      issuer: NonBlank128,
+      audience: NonBlank128,
+      cursorTtlSeconds: Int
+  )
+  private final case class RawAuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
+      derives ConfigReader
   private final case class RawPasswordHashConfig(iterations: Int, memoryKib: Int, parallelism: Int) derives ConfigReader
   private val defaultPasswordHash = RawPasswordHashConfig(iterations = 2, memoryKib = 19456, parallelism = 1)
-  private final case class RawKafkaConfig(enabled: Boolean, bootstrapServers: String, topic: NonBlankStr,
-      consumerGroup: NonBlankStr, publisher: RawKafkaPublisherConfig, consumer: RawKafkaConsumerConfig) derives ConfigReader
-  private final case class RawKafkaPublisherConfig(workerId: NonBlankStr, batchSize: Int, leaseSeconds: Int,
-      retryDelaySeconds: Int, maxAttempts: Int, pollIntervalMs: Int) derives ConfigReader
-  private final case class RawKafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int) derives ConfigReader
-  private final case class RawVectorSearchConfig(enabled: Boolean, voyage: RawVoyageConfig, embedding: RawEmbeddingConfig,
-      indexes: RawVectorIndexesConfig, numCandidates: Int) derives ConfigReader
-  private final case class RawVoyageConfig(apiKey: Option[String], endpoint: HttpsUrl, model: NonBlankStr,
-      dimension: VoyageDim) derives ConfigReader
-  private final case class RawEmbeddingConfig(queueSize: QueueSize, parallelism: Parallelism,
-      timeoutMs: TimeoutMs, retryAttempts: Int, retryDelayMs: Int) derives ConfigReader
-  private final case class RawVectorIndexesConfig(jobs: NonBlankStr, candidates: NonBlankStr, lexical: NonBlankStr,
-      readyTimeoutMs: Int, pollIntervalMs: Int) derives ConfigReader
+  private final case class RawKafkaConfig(
+      enabled: Boolean,
+      bootstrapServers: String,
+      topic: NonBlankStr,
+      consumerGroup: NonBlankStr,
+      publisher: RawKafkaPublisherConfig,
+      consumer: RawKafkaConsumerConfig
+  ) derives ConfigReader
+  private final case class RawKafkaPublisherConfig(
+      workerId: NonBlankStr,
+      batchSize: Int,
+      leaseSeconds: Int,
+      retryDelaySeconds: Int,
+      maxAttempts: Int,
+      pollIntervalMs: Int
+  ) derives ConfigReader
+  private final case class RawKafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int)
+      derives ConfigReader
+  private final case class RawVectorSearchConfig(
+      enabled: Boolean,
+      voyage: RawVoyageConfig,
+      embedding: RawEmbeddingConfig,
+      indexes: RawVectorIndexesConfig,
+      numCandidates: Int
+  ) derives ConfigReader
+  private final case class RawVoyageConfig(
+      apiKey: Option[String],
+      endpoint: HttpsUrl,
+      model: NonBlankStr,
+      dimension: VoyageDim
+  ) derives ConfigReader
+  private final case class RawEmbeddingConfig(
+      queueSize: QueueSize,
+      parallelism: Parallelism,
+      timeoutMs: TimeoutMs,
+      retryAttempts: Int,
+      retryDelayMs: Int
+  ) derives ConfigReader
+  private final case class RawVectorIndexesConfig(
+      jobs: NonBlankStr,
+      candidates: NonBlankStr,
+      lexical: NonBlankStr,
+      readyTimeoutMs: Int,
+      pollIntervalMs: Int
+  ) derives ConfigReader
 
   // Derived naming does not preserve the hs256-secret acronym, so keep this key explicit.
   private given ConfigReader[RawJwtAuthConfig] =

@@ -42,19 +42,21 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
   test("disabled embedding capability skips embedding factories") {
     for {
       events <- Ref.of[IO, Vector[String]](Vector.empty)
-      capability <- EmbeddingCapability.resource[Work, Users, Jobs, Search](
-        vectorSearchConfig(enabled = false, apiKey = None),
-        events.update(_ :+ "work") *> IO(new Work),
-        work => events.update(_ :+ "users") *> IO(Users(work)),
-        work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
-        events.update(_ :+ "search") *> IO(new Search),
-        (_, _) => Resource.eval(events.update(_ :+ "provider") *> IO.pure(embeddings)),
-        (_, _, _, _) => Resource.eval(events.update(_ :+ "pipeline") *> IO.pure(EmbeddingWorkPublisher.noop))
-      ).use(IO.pure)
+      capability <- EmbeddingCapability
+        .resource[Work, Users, Jobs, Search](
+          vectorSearchConfig(enabled = false, apiKey = None),
+          events.update(_ :+ "work") *> IO(new Work),
+          work => events.update(_ :+ "users") *> IO(Users(work)),
+          work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
+          events.update(_ :+ "search") *> IO(new Search),
+          (_, _) => Resource.eval(events.update(_ :+ "provider") *> IO.pure(embeddings)),
+          (_, _, _, _) => Resource.eval(events.update(_ :+ "pipeline") *> IO.pure(EmbeddingWorkPublisher.noop))
+        )
+        .use(IO.pure)
       recorded <- events.get
     } yield {
       assert(capability match {
-        case EmbeddingCapability.Disabled(_, _) => true
+        case EmbeddingCapability.Disabled(_, _)               => true
         case EmbeddingCapability.Enabled(_, _, _, _, _, _, _) => false
       })
       assertEquals(capability.users.work, None)
@@ -66,15 +68,18 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
   test("enabled embedding capability validates its API key before invoking factories") {
     for {
       events <- Ref.of[IO, Vector[String]](Vector.empty)
-      result <- EmbeddingCapability.resource[Work, Users, Jobs, Search](
-        vectorSearchConfig(enabled = true, apiKey = None),
-        events.update(_ :+ "work") *> IO(new Work),
-        work => events.update(_ :+ "users") *> IO(Users(work)),
-        work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
-        events.update(_ :+ "search") *> IO(new Search),
-        (_, _) => Resource.eval(events.update(_ :+ "provider") *> IO.pure(embeddings)),
-        (_, _, _, _) => Resource.eval(events.update(_ :+ "pipeline") *> IO.pure(EmbeddingWorkPublisher.noop))
-      ).use(_ => IO.unit).attempt
+      result <- EmbeddingCapability
+        .resource[Work, Users, Jobs, Search](
+          vectorSearchConfig(enabled = true, apiKey = None),
+          events.update(_ :+ "work") *> IO(new Work),
+          work => events.update(_ :+ "users") *> IO(Users(work)),
+          work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
+          events.update(_ :+ "search") *> IO(new Search),
+          (_, _) => Resource.eval(events.update(_ :+ "provider") *> IO.pure(embeddings)),
+          (_, _, _, _) => Resource.eval(events.update(_ :+ "pipeline") *> IO.pure(EmbeddingWorkPublisher.noop))
+        )
+        .use(_ => IO.unit)
+        .attempt
       recorded <- events.get
     } yield {
       assert(result.swap.exists(_.isInstanceOf[IllegalArgumentException]))
@@ -85,52 +90,72 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
   test("enabled embedding capability shares work and releases pipeline before provider") {
     for {
       events <- Ref.of[IO, Vector[String]](Vector.empty)
-      observed <- EmbeddingCapability.resource[Work, Users, Jobs, Search](
-        vectorSearchConfig(enabled = true, apiKey = Some("test-key")),
-        events.update(_ :+ "work") *> IO(new Work),
-        work => events.update(_ :+ "users") *> IO(Users(work)),
-        work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
-        events.update(_ :+ "search") *> IO(new Search),
-        (_, _) => Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(
-          _ => events.update(_ :+ "provider-release")
-        ),
-        (work, users, jobs, _) => Resource.make(
-          events.update(_ :+ "pipeline-acquire").as((work, users, jobs, EmbeddingWorkPublisher.noop))
-        )(_ => events.update(_ :+ "pipeline-release")).map(_._4)
-      ).use {
-        case EmbeddingCapability.Enabled(work, users, jobs, _, _, _, model) =>
-          IO.pure((users.work.exists(_ eq work), jobs.work.exists(_ eq work), model))
-        case EmbeddingCapability.Disabled(_, _) =>
-          IO.raiseError(new AssertionError("expected enabled embedding capability"))
-      }
+      observed <- EmbeddingCapability
+        .resource[Work, Users, Jobs, Search](
+          vectorSearchConfig(enabled = true, apiKey = Some("test-key")),
+          events.update(_ :+ "work") *> IO(new Work),
+          work => events.update(_ :+ "users") *> IO(Users(work)),
+          work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
+          events.update(_ :+ "search") *> IO(new Search),
+          (_, _) =>
+            Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(_ =>
+              events.update(_ :+ "provider-release")
+            ),
+          (work, users, jobs, _) =>
+            Resource
+              .make(
+                events.update(_ :+ "pipeline-acquire").as((work, users, jobs, EmbeddingWorkPublisher.noop))
+              )(_ => events.update(_ :+ "pipeline-release"))
+              .map(_._4)
+        )
+        .use {
+          case EmbeddingCapability.Enabled(work, users, jobs, _, _, _, model) =>
+            IO.pure((users.work.exists(_ eq work), jobs.work.exists(_ eq work), model))
+          case EmbeddingCapability.Disabled(_, _) =>
+            IO.raiseError(new AssertionError("expected enabled embedding capability"))
+        }
       recorded <- events.get
     } yield {
       assertEquals(observed, (true, true, "test-model"))
-      assertEquals(recorded, Vector(
-        "work", "users", "jobs", "search", "provider-acquire", "pipeline-acquire",
-        "pipeline-release", "provider-release"
-      ))
+      assertEquals(
+        recorded,
+        Vector(
+          "work",
+          "users",
+          "jobs",
+          "search",
+          "provider-acquire",
+          "pipeline-acquire",
+          "pipeline-release",
+          "provider-release"
+        )
+      )
     }
   }
 
   test("pipeline acquisition failure releases the acquired embedding provider") {
     for {
       events <- Ref.of[IO, Vector[String]](Vector.empty)
-      result <- EmbeddingCapability.resource[Work, Users, Jobs, Search](
-        vectorSearchConfig(enabled = true, apiKey = Some("test-key")),
-        IO(new Work),
-        work => IO(Users(work)),
-        work => IO(Jobs(work)),
-        IO(new Search),
-        (_, _) => Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(
-          _ => events.update(_ :+ "provider-release")
-        ),
-        (_, _, _, _) => Resource.eval(
-          events.update(_ :+ "pipeline-acquire") *> IO.raiseError[EmbeddingWorkPublisher](
-            new RuntimeException("synthetic pipeline acquisition failure")
-          )
+      result <- EmbeddingCapability
+        .resource[Work, Users, Jobs, Search](
+          vectorSearchConfig(enabled = true, apiKey = Some("test-key")),
+          IO(new Work),
+          work => IO(Users(work)),
+          work => IO(Jobs(work)),
+          IO(new Search),
+          (_, _) =>
+            Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(_ =>
+              events.update(_ :+ "provider-release")
+            ),
+          (_, _, _, _) =>
+            Resource.eval(
+              events.update(_ :+ "pipeline-acquire") *> IO.raiseError[EmbeddingWorkPublisher](
+                new RuntimeException("synthetic pipeline acquisition failure")
+              )
+            )
         )
-      ).use(_ => IO.unit).attempt
+        .use(_ => IO.unit)
+        .attempt
       recorded <- events.get
     } yield {
       assert(result.isLeft)
@@ -147,22 +172,37 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
         work => IO(Users(work)),
         work => IO(Jobs(work)),
         IO(new Search),
-        (_, _) => Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(
-          _ => events.update(_ :+ "provider-release")
-        ),
-        (_, _, _, _) => Resource.make(events.update(_ :+ "pipeline-acquire").as(EmbeddingWorkPublisher.noop))(
-          _ => events.update(_ :+ "pipeline-release")
-        )
+        (_, _) =>
+          Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(_ =>
+            events.update(_ :+ "provider-release")
+          ),
+        (_, _, _, _) =>
+          Resource.make(events.update(_ :+ "pipeline-acquire").as(EmbeddingWorkPublisher.noop))(_ =>
+            events.update(_ :+ "pipeline-release")
+          )
       )
-      result <- capability.flatMap(_ => Resource.eval(IO.raiseError[Unit](
-        new RuntimeException("synthetic downstream acquisition failure")
-      ))).use(_ => IO.unit).attempt
+      result <- capability
+        .flatMap(_ =>
+          Resource.eval(
+            IO.raiseError[Unit](
+              new RuntimeException("synthetic downstream acquisition failure")
+            )
+          )
+        )
+        .use(_ => IO.unit)
+        .attempt
       recorded <- events.get
     } yield {
       assert(result.isLeft)
-      assertEquals(recorded, Vector(
-        "provider-acquire", "pipeline-acquire", "pipeline-release", "provider-release"
-      ))
+      assertEquals(
+        recorded,
+        Vector(
+          "provider-acquire",
+          "pipeline-acquire",
+          "pipeline-release",
+          "provider-release"
+        )
+      )
     }
   }
 
@@ -170,26 +210,36 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
     for {
       events <- Ref.of[IO, Vector[String]](Vector.empty)
       acquired <- Deferred[IO, Unit]
-      use = EmbeddingCapability.resource[Work, Users, Jobs, Search](
-        vectorSearchConfig(enabled = true, apiKey = Some("test-key")),
-        IO(new Work),
-        work => IO(Users(work)),
-        work => IO(Jobs(work)),
-        IO(new Search),
-        (_, _) => Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(
-          _ => events.update(_ :+ "provider-release")
-        ),
-        (_, _, _, _) => Resource.make(
-          events.update(_ :+ "pipeline-acquire") *> acquired.complete(()).as(EmbeddingWorkPublisher.noop)
-        )(_ => events.update(_ :+ "pipeline-release"))
-      ).use(_ => IO.never)
+      use = EmbeddingCapability
+        .resource[Work, Users, Jobs, Search](
+          vectorSearchConfig(enabled = true, apiKey = Some("test-key")),
+          IO(new Work),
+          work => IO(Users(work)),
+          work => IO(Jobs(work)),
+          IO(new Search),
+          (_, _) =>
+            Resource.make(events.update(_ :+ "provider-acquire").as(embeddings))(_ =>
+              events.update(_ :+ "provider-release")
+            ),
+          (_, _, _, _) =>
+            Resource.make(
+              events.update(_ :+ "pipeline-acquire") *> acquired.complete(()).as(EmbeddingWorkPublisher.noop)
+            )(_ => events.update(_ :+ "pipeline-release"))
+        )
+        .use(_ => IO.never)
       fiber <- use.start
       _ <- acquired.get
       _ <- fiber.cancel
       recorded <- events.get
-    } yield assertEquals(recorded, Vector(
-      "provider-acquire", "pipeline-acquire", "pipeline-release", "provider-release"
-    ))
+    } yield assertEquals(
+      recorded,
+      Vector(
+        "provider-acquire",
+        "pipeline-acquire",
+        "pipeline-release",
+        "provider-release"
+      )
+    )
   }
 
   test("readiness observes setup without cancelling its resource-owned operation") {
@@ -253,7 +303,9 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
         override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
           events.update(event :: _)
       }
-      _ <- SetupLifecycle.resource(IO.raiseError[Unit](new RuntimeException("synthetic setup failure")), diagnostics).use(_.await)
+      _ <- SetupLifecycle
+        .resource(IO.raiseError[Unit](new RuntimeException("synthetic setup failure")), diagnostics)
+        .use(_.await)
       recorded <- events.get
     } yield assertEquals(recorded, List(LogEvent.MongoSetupFailed))
   }

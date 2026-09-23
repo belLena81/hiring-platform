@@ -32,34 +32,41 @@ object SafeDiagnostics {
 
   def apply(maskSensitive: Boolean = true): Diagnostics = {
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
-    withEventSink(maskSensitive, levelEnabled(structuredLogger, _), (event, message) => {
-      val logger = structuredLogger.addContext(Map("category" -> event.category, "marker" -> event.marker))
-      event.level match {
-        case LogLevel.Trace => logger.trace(message)
-        case LogLevel.Debug => logger.debug(message)
-        case LogLevel.Info => logger.info(message)
-        case LogLevel.Warn => logger.warn(message)
-        case LogLevel.Error => logger.error(message)
+    withEventSink(
+      maskSensitive,
+      levelEnabled(structuredLogger, _),
+      (event, message) => {
+        val logger = structuredLogger.addContext(Map("category" -> event.category, "marker" -> event.marker))
+        event.level match {
+          case LogLevel.Trace => logger.trace(message)
+          case LogLevel.Debug => logger.debug(message)
+          case LogLevel.Info  => logger.info(message)
+          case LogLevel.Warn  => logger.warn(message)
+          case LogLevel.Error => logger.error(message)
+        }
       }
-    })
+    )
   }
 
   private[logging] def withSink(sink: String => IO[Unit], maskSensitive: Boolean = true): Diagnostics =
     withEventSink(maskSensitive, _ => IO.pure(true), (_, message) => sink(message))
 
-  private def levelEnabled(logger: org.typelevel.log4cats.SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] = level match {
-    case LogLevel.Trace => logger.isTraceEnabled
-    case LogLevel.Debug => logger.isDebugEnabled
-    case LogLevel.Info => logger.isInfoEnabled
-    case LogLevel.Warn => logger.isWarnEnabled
-    case LogLevel.Error => logger.isErrorEnabled
-  }
+  private def levelEnabled(logger: org.typelevel.log4cats.SelfAwareStructuredLogger[IO], level: LogLevel): IO[Boolean] =
+    level match {
+      case LogLevel.Trace => logger.isTraceEnabled
+      case LogLevel.Debug => logger.isDebugEnabled
+      case LogLevel.Info  => logger.isInfoEnabled
+      case LogLevel.Warn  => logger.isWarnEnabled
+      case LogLevel.Error => logger.isErrorEnabled
+    }
 
   private def requireSafeUnmaskedDestination(): Unit = {
     val files = activeLogFiles
     val unsafe = files.isEmpty || files.exists { file =>
       val directory = file.getParent
-      !Files.isRegularFile(file) || !Files.isDirectory(directory) || !Files.isWritable(directory) || !privatePath(directory) || !privatePath(file)
+      !Files.isRegularFile(file) || !Files.isDirectory(directory) || !Files.isWritable(directory) || !privatePath(
+        directory
+      ) || !privatePath(file)
     }
     if (unsafe) throw new IllegalStateException("Unmasked diagnostics require a private pre-provisioned file directory")
   }
@@ -73,15 +80,19 @@ object SafeDiagnostics {
   }
 
   private def appenderFiles(appender: Any): List[Path] = {
-    val direct = try Option(appender.getClass.getMethod("getFile").invoke(appender)).collect {
-      case file: String if file.nonEmpty => Paths.get(file).toAbsolutePath.normalize
-    }.toList catch {
+    val direct = try
+      Option(appender.getClass.getMethod("getFile").invoke(appender)).collect {
+        case file: String if file.nonEmpty => Paths.get(file).toAbsolutePath.normalize
+      }.toList
+    catch {
       case _: ReflectiveOperationException => Nil
     }
-    val nested = try Option(appender.getClass.getMethod("iteratorForAppenders").invoke(appender))
-      .collect { case iterator: java.util.Iterator[?] => iterator.asScala.toList }
-      .getOrElse(Nil)
-      .flatMap(appenderFiles) catch {
+    val nested = try
+      Option(appender.getClass.getMethod("iteratorForAppenders").invoke(appender))
+        .collect { case iterator: java.util.Iterator[?] => iterator.asScala.toList }
+        .getOrElse(Nil)
+        .flatMap(appenderFiles)
+    catch {
       case _: ReflectiveOperationException => Nil
     }
     direct ++ nested
@@ -90,25 +101,28 @@ object SafeDiagnostics {
   private def restrictToCurrentUser(path: Path): Unit =
     try {
       val permissions =
-        if (Files.isDirectory(path)) Set(
-          PosixFilePermission.OWNER_READ,
-          PosixFilePermission.OWNER_WRITE,
-          PosixFilePermission.OWNER_EXECUTE
-        )
-        else Set(
-          PosixFilePermission.OWNER_READ,
-          PosixFilePermission.OWNER_WRITE
-        )
+        if (Files.isDirectory(path))
+          Set(
+            PosixFilePermission.OWNER_READ,
+            PosixFilePermission.OWNER_WRITE,
+            PosixFilePermission.OWNER_EXECUTE
+          )
+        else
+          Set(
+            PosixFilePermission.OWNER_READ,
+            PosixFilePermission.OWNER_WRITE
+          )
       Files.setPosixFilePermissions(path, permissions.asJava): Unit
-    }
-    catch {
+    } catch {
       case _: UnsupportedOperationException => ()
     }
 
   private def privatePath(path: Path): Boolean =
     try {
       val permissions = Files.getPosixFilePermissions(path)
-      !permissions.asScala.exists(permission => permission.toString.startsWith("GROUP_") || permission.toString.startsWith("OTHERS_"))
+      !permissions.asScala.exists(permission =>
+        permission.toString.startsWith("GROUP_") || permission.toString.startsWith("OTHERS_")
+      )
     } catch {
       case _: UnsupportedOperationException => true
     }
@@ -118,7 +132,11 @@ object SafeDiagnostics {
     val clipped = count > limit
     val end = value.offsetByCodePoints(0, if (clipped) limit - 1 else count)
     val normalized = value.substring(0, end).map { character =>
-      if (character.isControl || Character.getType(character) == Character.FORMAT || character == '\u2028' || character == '\u2029') ' '
+      if (
+        character.isControl || Character.getType(
+          character
+        ) == Character.FORMAT || character == '\u2028' || character == '\u2029'
+      ) ' '
       else character
     }
     if (clipped) normalized + "…" else normalized
@@ -129,36 +147,40 @@ object SafeDiagnostics {
       isEnabled: LogLevel => IO[Boolean],
       sink: (LogEvent, String) => IO[Unit]
   ): Diagnostics = new Diagnostics {
-    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO.defer {
-      isEnabled(event.level).flatMap { enabled =>
-      if (!enabled) IO.unit
-      else IO.realTimeInstant.flatMap { timestamp =>
-        val safeId = requestId.filter(isCorrelationId)
-        val details = fields.toList.sortBy(_._1.ordinal).take(12).map { case (field, value) =>
-          val rendered =
-            if (field.sensitive && maskSensitive) "[REDACTED]"
-            else if (field.sensitive || LogFields.validPublic(field, value)) bounded(value, 128)
-            else "[FILTERED]"
-          field.key -> Json.fromString(rendered)
+    def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = IO
+      .defer {
+        isEnabled(event.level).flatMap { enabled =>
+          if (!enabled) IO.unit
+          else
+            IO.realTimeInstant.flatMap { timestamp =>
+              val safeId = requestId.filter(isCorrelationId)
+              val details = fields.toList.sortBy(_._1.ordinal).take(12).map { case (field, value) =>
+                val rendered =
+                  if (field.sensitive && maskSensitive) "[REDACTED]"
+                  else if (field.sensitive || LogFields.validPublic(field, value)) bounded(value, 128)
+                  else "[FILTERED]"
+                field.key -> Json.fromString(rendered)
+              }
+              val record = Json.obj(
+                "timestamp" -> Json.fromString(timestamp.toString),
+                "severity" -> Json.fromString(event.severity),
+                "category" -> Json.fromString(event.category),
+                "requestId" -> safeId.fold(Json.Null)(Json.fromString),
+                "marker" -> Json.fromString(event.marker),
+                "component" -> Json.fromString(event.component),
+                "message" -> Json.fromString(event.message),
+                "masking" -> Json.fromString(if (maskSensitive) "enabled" else "disabled"),
+                "details" -> Json.obj(details*)
+              )
+              val encoded = record.noSpaces
+              val line =
+                if (encoded.getBytes(StandardCharsets.UTF_8).length <= 8192) encoded
+                else record.mapObject(_.add("details", Json.obj())).noSpaces
+              sink(event, line)
+            }
         }
-        val record = Json.obj(
-          "timestamp" -> Json.fromString(timestamp.toString),
-          "severity" -> Json.fromString(event.severity),
-          "category" -> Json.fromString(event.category),
-          "requestId" -> safeId.fold(Json.Null)(Json.fromString),
-          "marker" -> Json.fromString(event.marker),
-          "component" -> Json.fromString(event.component),
-          "message" -> Json.fromString(event.message),
-          "masking" -> Json.fromString(if (maskSensitive) "enabled" else "disabled"),
-          "details" -> Json.obj(details*)
-        )
-        val encoded = record.noSpaces
-        val line = if (encoded.getBytes(StandardCharsets.UTF_8).length <= 8192) encoded
-          else record.mapObject(_.add("details", Json.obj())).noSpaces
-        sink(event, line)
       }
-      }
-    }.handleError(_ => ())
+      .handleError(_ => ())
   }
 
   private def isCorrelationId(value: String): Boolean =

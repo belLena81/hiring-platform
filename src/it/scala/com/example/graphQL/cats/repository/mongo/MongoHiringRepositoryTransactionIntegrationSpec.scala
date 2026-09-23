@@ -3,7 +3,16 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  AccountStatus,
+  Job,
+  JobStatus,
+  Location,
+  RecruiterProfile,
+  User,
+  UserProfile,
+  UserRole
+}
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
@@ -31,7 +40,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
   private def replicaSet: Resource[IO, ReplicaSet] =
     Resource.make(IO.blocking {
       val instance = new ReplicaSet
-      val _ = instance.withExposedPorts(27017)
+      val _ = instance
+        .withExposedPorts(27017)
         .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
         .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
       try {
@@ -53,10 +63,11 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
     })(instance => IO.blocking(instance.stop()))
 
   private def awaitPrimary(instance: ReplicaSet, remaining: Int = 60): IO[Unit] =
-    IO.blocking(instance.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")).flatMap { result =>
-      if (result.getExitCode == 0 && result.getStdout.trim == "true") IO.unit
-      else if (remaining > 0) IO.sleep(250.millis) *> awaitPrimary(instance, remaining - 1)
-      else IO.raiseError(new AssertionError(s"Mongo replica set did not elect a primary: ${result.getStderr}"))
+    IO.blocking(instance.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")).flatMap {
+      result =>
+        if (result.getExitCode == 0 && result.getStdout.trim == "true") IO.unit
+        else if (remaining > 0) IO.sleep(250.millis) *> awaitPrimary(instance, remaining - 1)
+        else IO.raiseError(new AssertionError(s"Mongo replica set did not elect a primary: ${result.getStderr}"))
     }
 
   private def uri(instance: ReplicaSet): String =
@@ -112,20 +123,30 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- MongoHiringSetup.initialize(database)
           _ <- jobs.createWithEvents(directJob, now, List(directEvent)).flatMap(requireResult)
-          receiptResult <- receipts.execute[Unit, String](receiptKey, receiptFingerprint, now, now.plusSeconds(3600)) { context =>
-            jobs.createWithEvents(receiptJob, now, List(receiptEvent), context).map(
-              _.map(_ => Right(MutationReceiptWrite((), MutationEntityReference("Job", receiptJob.id.value.toString))))
-            )
-          }.flatMap(requireResult)
-          receiptRollback <- Idempotent(receipts).execute[Job](
-            "createJob",
-            recruiterId.value.toString,
-            IdempotencyRequest.fromCanonicalInput(UUID.randomUUID(), receiptRolledBackJob.id.value.toString),
-            value => MutationEntityReference("Job", value.id.value.toString),
-            _ => UseCaseIO.pure(receiptRolledBackJob)
-          ) { context =>
-            UseCaseIO.repository(jobs.createWithEvents(receiptRolledBackJob, now, List(receiptDuplicateEvent), context)).as(receiptRolledBackJob)
-          }.value
+          receiptResult <- receipts
+            .execute[Unit, String](receiptKey, receiptFingerprint, now, now.plusSeconds(3600)) { context =>
+              jobs
+                .createWithEvents(receiptJob, now, List(receiptEvent), context)
+                .map(
+                  _.map(_ =>
+                    Right(MutationReceiptWrite((), MutationEntityReference("Job", receiptJob.id.value.toString)))
+                  )
+                )
+            }
+            .flatMap(requireResult)
+          receiptRollback <- Idempotent(receipts)
+            .execute[Job](
+              "createJob",
+              recruiterId.value.toString,
+              IdempotencyRequest.fromCanonicalInput(UUID.randomUUID(), receiptRolledBackJob.id.value.toString),
+              value => MutationEntityReference("Job", value.id.value.toString),
+              _ => UseCaseIO.pure(receiptRolledBackJob)
+            ) { context =>
+              UseCaseIO
+                .repository(jobs.createWithEvents(receiptRolledBackJob, now, List(receiptDuplicateEvent), context))
+                .as(receiptRolledBackJob)
+            }
+            .value
           storedJobs <- PublisherBridge.first(database.getCollection("jobs").countDocuments())
           storedEvents <- PublisherBridge.first(database.getCollection("event_outbox").countDocuments())
           storedEmbeddingWork <- PublisherBridge.first(database.getCollection("embedding_work").countDocuments())
@@ -145,7 +166,10 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
             assertEquals(storedJobs.map(_.longValue), Some(2L))
             assertEquals(storedEvents.map(_.longValue), Some(2L))
             assertEquals(storedEmbeddingWork.map(_.longValue), Some(2L))
-            assertEquals(receiptRollback, Left(com.example.graphQL.cats.service.UseCaseError.Repository(RepositoryError.Conflict)))
+            assertEquals(
+              receiptRollback,
+              Left(com.example.graphQL.cats.service.UseCaseError.Repository(RepositoryError.Conflict))
+            )
             assertEquals(storedMutationReceipts.map(_.longValue), Some(1L))
             assertEquals(receiptRolledBackStored, None)
             assertEquals(rollbackResult, Left(RepositoryError.Conflict))
@@ -187,9 +211,14 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
           storedFirst <- jobs.find(firstOpen.id).flatMap(requireResult)
           storedSecond <- jobs.find(secondOpen.id).flatMap(requireResult)
           storedClosed <- jobs.find(alreadyClosed.id).flatMap(requireResult)
-          closeEvents <- PublisherBridge.collectWithin(database.getCollection("event_outbox").find(
-            Filters.eq("eventType", OperationalEventType.JOB_CLOSED.toString)
-          ), 10)
+          closeEvents <- PublisherBridge.collectWithin(
+            database
+              .getCollection("event_outbox")
+              .find(
+                Filters.eq("eventType", OperationalEventType.JOB_CLOSED.toString)
+              ),
+            10
+          )
         } yield {
           assertEquals(deletion, Right(()))
           assertEquals(storedRecruiter.map(_.accountStatus), Some(AccountStatus.Deleted))
@@ -201,7 +230,10 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
           assertEquals(storedSecond.map(_.status), Some(JobStatus.Closed))
           assertEquals(storedClosed, Some(alreadyClosed))
           assertEquals(closeEvents.size, 2)
-          assertEquals(closeEvents.map(_.getString("aggregateId")).toSet, Set(firstOpen.id.value.toString, secondOpen.id.value.toString))
+          assertEquals(
+            closeEvents.map(_.getString("aggregateId")).toSet,
+            Set(firstOpen.id.value.toString, secondOpen.id.value.toString)
+          )
         }
       }
     }
@@ -218,12 +250,16 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- MongoHiringSetup.initialize(database)
           _ <- users.insert(recruiter).flatMap(requireResult)
-          _ <- PublisherBridge.first(database.getCollection("jobs").insertOne(
-            new Document("_id", UUID.randomUUID().toString)
-              .append("recruiterId", recruiterId.value.toString)
-              .append("status", JobStatus.Open.toString)
-              .append("createdAt", Date.from(now.plusSeconds(1)))
-          ))
+          _ <- PublisherBridge.first(
+            database
+              .getCollection("jobs")
+              .insertOne(
+                new Document("_id", UUID.randomUUID().toString)
+                  .append("recruiterId", recruiterId.value.toString)
+                  .append("status", JobStatus.Open.toString)
+                  .append("createdAt", Date.from(now.plusSeconds(1)))
+              )
+          )
           deletion <- users.deleteAccount(recruiterId, now.plusSeconds(2), "deleted-account")
           storedRecruiter <- users.find(recruiterId).flatMap(requireResult)
           eventsAfterFailure <- PublisherBridge.first(database.getCollection("event_outbox").countDocuments())

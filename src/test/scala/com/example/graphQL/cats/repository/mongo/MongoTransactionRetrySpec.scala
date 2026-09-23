@@ -91,8 +91,9 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
     for {
       runs <- Ref.of[IO, Int](0)
       runner = recordingRunner(runs)
-      result <- MongoMutationWriteContext.run(MongoMutationWriteContext(None), runner, transactionRequired = true) { session =>
-        IO.pure(Right(session))
+      result <- MongoMutationWriteContext.run(MongoMutationWriteContext(None), runner, transactionRequired = true) {
+        session =>
+          IO.pure(Right(session))
       }
       runCount <- runs.get
     } yield {
@@ -112,7 +113,9 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
 
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =
     new MongoTransactionRunner {
-      override def run[A](operation: Option[com.mongodb.reactivestreams.client.ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]] =
+      override def run[A](
+          operation: Option[com.mongodb.reactivestreams.client.ClientSession] => IO[Either[RepositoryError, A]]
+      ): IO[Either[RepositoryError, A]] =
         runs.update(_ + 1) *> operation(None)
     }
 }

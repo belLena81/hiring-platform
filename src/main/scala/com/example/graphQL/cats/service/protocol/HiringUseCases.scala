@@ -4,7 +4,12 @@ import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
-import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest, PageSize}
+import com.example.graphQL.cats.shared.pagination.{
+  ApplicationEventPageRequest,
+  ApplicationPageRequest,
+  JobPageRequest,
+  PageSize
+}
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor}
@@ -21,7 +26,10 @@ trait HiringReadModel {
   def jobs(ids: List[JobId]): UseCaseIO[List[Job]]
   def application(id: ApplicationId): UseCaseIO[Option[Application]]
   def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseIO[Unit]
-  def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): UseCaseIO[List[ApplicationEvent]]
+  def applicationHistory(
+      applicationId: ApplicationId,
+      page: ApplicationEventPageRequest
+  ): UseCaseIO[List[ApplicationEvent]]
 }
 
 trait UserAuthenticator {
@@ -78,17 +86,41 @@ trait SearchUseCases {
 }
 
 trait InteractionUseCases {
-  def recordJobView(request: IdempotencyRequest, actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID]): UseCaseIO[Unit]
-  def recordSearchResultClick(request: IdempotencyRequest, actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String): UseCaseIO[Unit]
+  def recordJobView(
+      request: IdempotencyRequest,
+      actor: ActorContext,
+      eventId: UUID,
+      jobId: JobId,
+      searchId: Option[UUID]
+  ): UseCaseIO[Unit]
+  def recordSearchResultClick(
+      request: IdempotencyRequest,
+      actor: ActorContext,
+      eventId: UUID,
+      searchId: UUID,
+      resultId: String
+  ): UseCaseIO[Unit]
 }
 
 object InteractionUseCases {
   def noop: InteractionUseCases = new InteractionUseCases {
-    override def recordJobView(request: IdempotencyRequest, actor: ActorContext, eventId: UUID, jobId: JobId, searchId: Option[UUID]): UseCaseIO[Unit] = {
+    override def recordJobView(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        eventId: UUID,
+        jobId: JobId,
+        searchId: Option[UUID]
+    ): UseCaseIO[Unit] = {
       val _ = (request, actor, eventId, jobId, searchId)
       UseCaseIO.pure(())
     }
-    override def recordSearchResultClick(request: IdempotencyRequest, actor: ActorContext, eventId: UUID, searchId: UUID, resultId: String): UseCaseIO[Unit] = {
+    override def recordSearchResultClick(
+        request: IdempotencyRequest,
+        actor: ActorContext,
+        eventId: UUID,
+        searchId: UUID,
+        resultId: String
+    ): UseCaseIO[Unit] = {
       val _ = (request, actor, eventId, searchId, resultId)
       UseCaseIO.pure(())
     }

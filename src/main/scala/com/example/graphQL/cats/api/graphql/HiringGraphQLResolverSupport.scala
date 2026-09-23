@@ -29,9 +29,9 @@ private[graphql] object HiringGraphQLResolverSupport {
 
   def mutationResult[A](value: UseCaseIO[A]): IO[MutationOutcome[A]] =
     value.value.flatMap {
-      case Right(result) => IO.pure(result)
+      case Right(result)                               => IO.pure(result)
       case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(validationError(errors))
-      case Left(error) =>
+      case Left(error)                                 =>
         val failure = toGraphQLFailure(error)
         if (failure.exceptional) liftUseCase(error)
         else IO.pure(DomainError(failure.code, failure.message))
@@ -45,8 +45,9 @@ private[graphql] object HiringGraphQLResolverSupport {
 
   def jobFilter(value: Option[JobFilterGraphQLInput]): JobSearchFilter =
     value match {
-      case None => JobSearchFilter(None, Set.empty, None)
-      case Some(filter) => JobSearchFilter(filter.city, filter.skills.fold(Set.empty[String])(_.toSet), filter.createdAfter)
+      case None         => JobSearchFilter(None, Set.empty, None)
+      case Some(filter) =>
+        JobSearchFilter(filter.city, filter.skills.fold(Set.empty[String])(_.toSet), filter.createdAfter)
     }
 
   def filterJson(value: JobSearchFilter): Json =
@@ -166,10 +167,13 @@ private[graphql] object HiringGraphQLResolverSupport {
       decode: String => Either[CursorCodec.CursorError, A]
   )(build: (Option[A], PageSize) => B): Either[GraphQLFailure, (B, Int)] =
     pageSize(first).flatMap { size =>
-      after.traverse(decode)
+      after
+        .traverse(decode)
         .leftMap {
-          case CursorCodec.CursorError.WrongKind(_) => GraphQLFailure("WRONG_CURSOR_KIND", "Cursor belongs to a different connection", exceptional = false)
-          case CursorCodec.CursorError.Malformed(_) => GraphQLFailure("INVALID_CURSOR", "Invalid cursor", exceptional = false)
+          case CursorCodec.CursorError.WrongKind(_) =>
+            GraphQLFailure("WRONG_CURSOR_KIND", "Cursor belongs to a different connection", exceptional = false)
+          case CursorCodec.CursorError.Malformed(_) =>
+            GraphQLFailure("INVALID_CURSOR", "Invalid cursor", exceptional = false)
         }
         .map(cursor => build(cursor, PageSize.next(size)) -> size.value)
     }

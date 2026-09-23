@@ -29,7 +29,11 @@ private[graphql] object HiringGraphQLModel {
   final case class PageInfo(hasNextPage: Boolean, endCursor: Option[String])
   final case class Edge[A](node: A, cursor: String)
   final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, searchId: Option[String] = None)
-  final case class JobFilterGraphQLInput(city: Option[String], skills: Option[List[String]], createdAfter: Option[Instant]) derives Decoder
+  final case class JobFilterGraphQLInput(
+      city: Option[String],
+      skills: Option[List[String]],
+      createdAfter: Option[Instant]
+  ) derives Decoder
   final case class CandidateMatchProfile(skills: Set[String], experienceSummary: Option[String])
   final case class CandidateMatchCandidate(id: String, name: String, profile: Option[CandidateMatchProfile])
 
@@ -39,10 +43,18 @@ private[graphql] object HiringGraphQLModel {
   }
 
   final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, searchId: String)
-  final case class RankedCandidatePayload(candidate: CandidateMatchCandidate, score: Double, searchMode: SearchMode, model: String, searchId: String)
+  final case class RankedCandidatePayload(
+      candidate: CandidateMatchCandidate,
+      score: Double,
+      searchMode: SearchMode,
+      model: String,
+      searchId: String
+  )
   final case class RankedJobResults(results: List[RankedJobPayload])
   final case class RankedCandidateResults(results: List[RankedCandidatePayload])
-  final case class AnalyticsReportPayload(snapshot: com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot)
+  final case class AnalyticsReportPayload(
+      snapshot: com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot
+  )
 
   final case class SubmitApplicationGraphQLInput(jobId: JobId, idempotencyKey: UUID) derives Decoder
   final case class CreateJobGraphQLInput(
@@ -67,8 +79,16 @@ private[graphql] object HiringGraphQLModel {
   final case class UpdateJobGraphQLInput(idempotencyKey: UUID, id: JobId, patch: JobGraphQLInput) derives Decoder
   final case class JobActionGraphQLInput(idempotencyKey: UUID, jobId: JobId) derives Decoder
   final case class ApplicationActionGraphQLInput(idempotencyKey: UUID, applicationId: ApplicationId) derives Decoder
-  final case class RejectApplicationGraphQLInput(idempotencyKey: UUID, applicationId: ApplicationId, feedback: Option[String]) derives Decoder
-  final case class DeclineApplicationGraphQLInput(idempotencyKey: UUID, applicationId: ApplicationId, reason: Option[String]) derives Decoder
+  final case class RejectApplicationGraphQLInput(
+      idempotencyKey: UUID,
+      applicationId: ApplicationId,
+      feedback: Option[String]
+  ) derives Decoder
+  final case class DeclineApplicationGraphQLInput(
+      idempotencyKey: UUID,
+      applicationId: ApplicationId,
+      reason: Option[String]
+  ) derives Decoder
   final case class SignUpGraphQLInput(
       idempotencyKey: UUID,
       name: String,
@@ -91,6 +111,12 @@ private[graphql] object HiringGraphQLModel {
       jobTitle: Option[String]
   ) derives Decoder
   final case class DeleteMyAccountGraphQLInput(idempotencyKey: UUID) derives Decoder
-  final case class RecordJobViewGraphQLInput(idempotencyKey: UUID, eventId: UUID, jobId: JobId, searchId: Option[UUID]) derives Decoder
-  final case class RecordSearchResultClickGraphQLInput(idempotencyKey: UUID, eventId: UUID, searchId: UUID, resultId: UUID) derives Decoder
+  final case class RecordJobViewGraphQLInput(idempotencyKey: UUID, eventId: UUID, jobId: JobId, searchId: Option[UUID])
+      derives Decoder
+  final case class RecordSearchResultClickGraphQLInput(
+      idempotencyKey: UUID,
+      eventId: UUID,
+      searchId: UUID,
+      resultId: UUID
+  ) derives Decoder
 }

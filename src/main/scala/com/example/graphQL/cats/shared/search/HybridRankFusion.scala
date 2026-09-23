@@ -16,11 +16,21 @@ object HybridRankFusion {
     }
     val entries = lexical.zipWithIndex.foldLeft(vectorEntries) { case (current, (job, index)) =>
       val key = job.job.id.value.toString
-      current.updated(key, current.get(key).fold(Entry(job, None, Some(index + 1)))(_.copy(lexicalRank = Some(index + 1))))
+      current.updated(
+        key,
+        current.get(key).fold(Entry(job, None, Some(index + 1)))(_.copy(lexicalRank = Some(index + 1)))
+      )
     }
 
     entries.valuesIterator.toList
-      .sortBy(entry => (-entry.score, entry.vectorRank.getOrElse(Int.MaxValue), entry.lexicalRank.getOrElse(Int.MaxValue), entry.job.job.id.value.toString))
+      .sortBy(entry =>
+        (
+          -entry.score,
+          entry.vectorRank.getOrElse(Int.MaxValue),
+          entry.lexicalRank.getOrElse(Int.MaxValue),
+          entry.job.job.id.value.toString
+        )
+      )
       .take(limit)
       .map(entry => entry.job.copy(score = entry.score, mode = entry.job.mode))
   }

@@ -18,8 +18,12 @@ private[service] final class AuthorizedJobAccess(
   )(operation: Job => UseCaseIO[A]): UseCaseIO[A] =
     for {
       user <- authorization.resolve(actor)
-      job <- UseCase.repository(jobs.find(jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(Either.cond(authorization.canManage(user, job), (), UseCaseError.Domain(DomainError.Forbidden)))
+      job <- UseCase
+        .repository(jobs.find(jobId))
+        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- UseCase.fromEither(
+        Either.cond(authorization.canManage(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
+      )
       result <- operation(job)
     } yield result
 }

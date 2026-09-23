@@ -11,10 +11,16 @@ private[graphql] object HiringGraphQLDsl {
       arguments: List[Argument[?]] = Nil,
       complexity: Option[(RequestContext, Args, Double) => Double] = None
   )(resolve: Context[RequestContext, Val] => IO[Res]): Field[RequestContext, Val] =
-    Field(name, fieldType, arguments = arguments, complexity = complexity,
-      resolve = context => context.ctx.unsafeFieldToFuture(name, resolve(context)))
+    Field(
+      name,
+      fieldType,
+      arguments = arguments,
+      complexity = complexity,
+      resolve = context => context.ctx.unsafeFieldToFuture(name, resolve(context))
+    )
 
-  def ioFetcher[Res, Id](fetch: (RequestContext, Seq[Id]) => IO[Seq[Res]])(using HasId[Res, Id])
-      : Fetcher[RequestContext, Res, Res, Id] =
+  def ioFetcher[Res, Id](fetch: (RequestContext, Seq[Id]) => IO[Seq[Res]])(using
+      HasId[Res, Id]
+  ): Fetcher[RequestContext, Res, Res, Id] =
     Fetcher.caching[RequestContext, Res, Id]((context, ids) => context.unsafeToFuture(fetch(context, ids)))
 }

@@ -14,11 +14,10 @@ trait AccountUseCases {
   def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)]
   def bootstrapAdmin(request: IdempotencyRequest, input: BootstrapAdminInput): UseCaseIO[(User, AccountToken)]
   def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)]
-  def issueToken(userId: Identifiers.UserId, now: Instant): UseCaseIO[(User, AccountToken)] =
-    {
-      val _ = (userId, now)
-      UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable))
-    }
+  def issueToken(userId: Identifiers.UserId, now: Instant): UseCaseIO[(User, AccountToken)] = {
+    val _ = (userId, now)
+    UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable))
+  }
   def me(actor: ActorContext): UseCaseIO[User]
   def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput): UseCaseIO[User]
   def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[Unit]

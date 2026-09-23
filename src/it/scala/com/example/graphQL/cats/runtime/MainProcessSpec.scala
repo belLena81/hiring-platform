@@ -21,9 +21,10 @@ class MainProcessSpec extends CatsEffectSuite {
   private val childClasspath = {
     val integrationClasses = Path.of(getClass.getProtectionDomain.getCodeSource.getLocation.toURI)
     val outputDirectory = integrationClasses.getParent
-    val projectOutputs = List(integrationClasses, outputDirectory.resolve("classes"), outputDirectory.resolve("test-classes"))
-      .filter(Files.isDirectory(_))
-      .map(_.toString)
+    val projectOutputs =
+      List(integrationClasses, outputDirectory.resolve("classes"), outputDirectory.resolve("test-classes"))
+        .filter(Files.isDirectory(_))
+        .map(_.toString)
     (projectOutputs :+ System.getProperty("java.class.path")).mkString(java.io.File.pathSeparator)
   }
 
@@ -51,40 +52,52 @@ class MainProcessSpec extends CatsEffectSuite {
     }
   }
 
-  private def runChild(entryPoint: String, environment: Map[String, String], arguments: List[String] = Nil): IO[ChildResult] =
+  private def runChild(
+      entryPoint: String,
+      environment: Map[String, String],
+      arguments: List[String] = Nil
+  ): IO[ChildResult] =
     outputDirectory.use { directory =>
       val stdout = directory.resolve("stdout.log")
       val stderr = directory.resolve("stderr.log")
-      Resource.make(IO.blocking {
-        val configFile = directory.resolve("local.conf")
-        val config = hoconConfig(environment.removed("MONGODB_URI"))
-        Files.writeString(configFile, config)
-        val builder = new ProcessBuilder((List(
-          Path.of(System.getProperty("java.home"), "bin", "java").toString,
-          "-Dfile.encoding=UTF-8",
-          s"-Dconfig.file=${configFile.toAbsolutePath}",
-          "-Djdk.httpclient.allowRestrictedHeaders=connection",
-          "-cp", childClasspath, entryPoint
-        ) ++ arguments)*).directory(directory.toFile).redirectOutput(stdout.toFile).redirectError(stderr.toFile)
-        val childEnvironment = builder.environment()
-        childEnvironment.clear()
-        (Map(
-          "MONGODB_URI" -> s"mongodb://test-user:$secret@127.0.0.1:1/?authSource=admin",
-          "OTEL_SDK_DISABLED" -> "true"
-        ) ++ environment.filter { case (key, _) => key == "MONGODB_URI" || key.startsWith("OTEL_") }).foreach { case (key, value) =>
-          val _ = childEnvironment.put(key, value)
+      Resource
+        .make(IO.blocking {
+          val configFile = directory.resolve("local.conf")
+          val config = hoconConfig(environment.removed("MONGODB_URI"))
+          Files.writeString(configFile, config)
+          val builder = new ProcessBuilder(
+            (List(
+              Path.of(System.getProperty("java.home"), "bin", "java").toString,
+              "-Dfile.encoding=UTF-8",
+              s"-Dconfig.file=${configFile.toAbsolutePath}",
+              "-Djdk.httpclient.allowRestrictedHeaders=connection",
+              "-cp",
+              childClasspath,
+              entryPoint
+            ) ++ arguments)*
+          ).directory(directory.toFile).redirectOutput(stdout.toFile).redirectError(stderr.toFile)
+          val childEnvironment = builder.environment()
+          childEnvironment.clear()
+          (Map(
+            "MONGODB_URI" -> s"mongodb://test-user:$secret@127.0.0.1:1/?authSource=admin",
+            "OTEL_SDK_DISABLED" -> "true"
+          ) ++ environment.filter { case (key, _) => key == "MONGODB_URI" || key.startsWith("OTEL_") }).foreach {
+            case (key, value) =>
+              val _ = childEnvironment.put(key, value)
+          }
+          builder.start()
+        })(terminate)
+        .use { process =>
+          IO.blocking {
+            assert(process.waitFor(25, TimeUnit.SECONDS), "Child JVM exceeded the 25-second harness deadline")
+            assert(Files.size(stdout) <= 65536, "Unexpectedly large child stdout")
+            assert(Files.size(stderr) <= 65536, "Unexpectedly large child stderr")
+            val diagnostics = directory.resolve("_logs/hiring-platform.log")
+            val output =
+              if (Files.isRegularFile(diagnostics)) Files.readString(diagnostics) else Files.readString(stdout)
+            ChildResult(process.exitValue(), output, Files.readString(stderr))
+          }
         }
-        builder.start()
-      })(terminate).use { process =>
-        IO.blocking {
-          assert(process.waitFor(25, TimeUnit.SECONDS), "Child JVM exceeded the 25-second harness deadline")
-          assert(Files.size(stdout) <= 65536, "Unexpectedly large child stdout")
-          assert(Files.size(stderr) <= 65536, "Unexpectedly large child stderr")
-          val diagnostics = directory.resolve("_logs/hiring-platform.log")
-          val output = if (Files.isRegularFile(diagnostics)) Files.readString(diagnostics) else Files.readString(stdout)
-          ChildResult(process.exitValue(), output, Files.readString(stderr))
-        }
-      }
     }
 
   private def hoconConfig(overrides: Map[String, String]): String = {
@@ -156,8 +169,12 @@ class MainProcessSpec extends CatsEffectSuite {
     assert(lines.nonEmpty, "Expected structured diagnostic output")
     val events = lines.map { line =>
       val event = parse(line).toOption.getOrElse(fail("Child stdout contains non-JSON output"))
-      assertEquals(event.asObject.map(_.keys.toSet), Some(Set("timestamp", "severity", "category", "requestId",
-        "marker", "component", "message", "masking", "details")))
+      assertEquals(
+        event.asObject.map(_.keys.toSet),
+        Some(
+          Set("timestamp", "severity", "category", "requestId", "marker", "component", "message", "masking", "details")
+        )
+      )
       val category = event.hcursor.get[String]("category").toOption.getOrElse(fail("Missing category"))
       val component = event.hcursor.get[String]("component").toOption.getOrElse(fail("Missing component"))
       assertEquals(event.hcursor.get[String]("marker"), Right(s"HP.$component.$category"))
@@ -184,8 +201,10 @@ class MainProcessSpec extends CatsEffectSuite {
       assert(result.exitCode != 0)
       val events = assertSanitized(result, "CONFIG_INVALID")
       assertEquals(events.size, 1)
-      assertEquals(events.headOption.map(_.hcursor.downField("details").get[String]("configKey")),
-        Some(Right("MONGODB_URI")))
+      assertEquals(
+        events.headOption.map(_.hcursor.downField("details").get[String]("configKey")),
+        Some(Right("MONGODB_URI"))
+      )
       assert(events.forall(_.hcursor.get[String]("masking") == Right("enabled")))
     }
   }
@@ -205,9 +224,11 @@ class MainProcessSpec extends CatsEffectSuite {
   test("P1-AC09 actual Main runtime reporter emits only a safe event for a synthetic-secret failure") {
     for {
       port <- listeningSocket().use(socket => IO.pure(socket.getLocalPort))
-      result <- runChild("com.example.graphQL.cats.runtime.MainReporterProcess",
+      result <- runChild(
+        "com.example.graphQL.cats.runtime.MainReporterProcess",
         Map("HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO"),
-        List("--exercise-payload", "--test-http-host=127.0.0.1", s"--test-http-port=$port"))
+        List("--exercise-payload", "--test-http-host=127.0.0.1", s"--test-http-port=$port")
+      )
     } yield {
       assertEquals(result.exitCode, 0)
       val events = assertSanitized(result, "RUNTIME_FAILED")
@@ -218,16 +239,29 @@ class MainProcessSpec extends CatsEffectSuite {
       assert(!categories.contains("STARTUP_FAILED"))
       assert(!categories.contains("LOCAL_UNMASKED"))
       assert(events.forall(_.hcursor.get[String]("masking") == Right("enabled")))
-      val started = events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
+      val started =
+        events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
       assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right("[REDACTED]"))
       assertEquals(started.hcursor.downField("details").get[String]("httpPort"), Right(port.toString))
     }
   }
 
   List(
-    ("IPv4 wildcard invalid masking flag", Map("HTTP_HOST" -> "0.0.0.0", "LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE"),
-    ("IPv6 wildcard invalid masking flag", Map("HTTP_HOST" -> "::", "LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE"),
-    ("IPv6 nonloopback invalid masking flag", Map("HTTP_HOST" -> "2001:db8::1", "LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE"),
+    (
+      "IPv4 wildcard invalid masking flag",
+      Map("HTTP_HOST" -> "0.0.0.0", "LOG_MASK_SENSITIVE" -> "FALSE"),
+      "LOG_MASK_SENSITIVE"
+    ),
+    (
+      "IPv6 wildcard invalid masking flag",
+      Map("HTTP_HOST" -> "::", "LOG_MASK_SENSITIVE" -> "FALSE"),
+      "LOG_MASK_SENSITIVE"
+    ),
+    (
+      "IPv6 nonloopback invalid masking flag",
+      Map("HTTP_HOST" -> "2001:db8::1", "LOG_MASK_SENSITIVE" -> "FALSE"),
+      "LOG_MASK_SENSITIVE"
+    ),
     ("invalid masking flag", Map("LOG_MASK_SENSITIVE" -> "FALSE"), "LOG_MASK_SENSITIVE")
   ).foreach { case (label, environment, key) =>
     test(s"LOG-03 actual Main rejects $label before emitting local diagnostics") {
@@ -247,21 +281,33 @@ class MainProcessSpec extends CatsEffectSuite {
     test(s"LOG-03 actual Main accepts local loopback $host while its runtime reporter stays masked") {
       for {
         port <- listeningSocket(host).use(socket => IO.pure(socket.getLocalPort))
-        result <- runChild("com.example.graphQL.cats.runtime.MainReporterProcess", Map(
-          "HTTP_HOST" -> host, "HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO",
-          "LOG_MASK_SENSITIVE" -> "false"
-        ), List("--exercise-payload", s"--test-http-host=$host", s"--test-http-port=$port"))
+        result <- runChild(
+          "com.example.graphQL.cats.runtime.MainReporterProcess",
+          Map(
+            "HTTP_HOST" -> host,
+            "HTTP_PORT" -> port.toString,
+            "LOG_LEVEL" -> "INFO",
+            "LOG_MASK_SENSITIVE" -> "false"
+          ),
+          List("--exercise-payload", s"--test-http-host=$host", s"--test-http-port=$port")
+        )
       } yield {
         assertEquals(result.exitCode, 0)
         val events = assertSanitized(result, "RUNTIME_FAILED")
         assert(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")) >= 1)
         events.foreach { event =>
-          assert(Set(Right("enabled"), Right("disabled"), Right("disabled-local")).contains(event.hcursor.get[String]("masking")))
+          assert(
+            Set(Right("enabled"), Right("disabled"), Right("disabled-local")).contains(
+              event.hcursor.get[String]("masking")
+            )
+          )
         }
-        val started = events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
+        val started =
+          events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
         val expectedHost = com.comcast.ip4s.IpAddress.fromString(host).map(_.toString).getOrElse(host)
         assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right(expectedHost))
-        val failure = events.find(_.hcursor.get[String]("category") == Right("RUNTIME_FAILED")).getOrElse(fail("Missing failure"))
+        val failure =
+          events.find(_.hcursor.get[String]("category") == Right("RUNTIME_FAILED")).getOrElse(fail("Missing failure"))
         assertEquals(failure.hcursor.downField("details").get[String]("errorType"), Right("java.lang.RuntimeException"))
       }
     }
@@ -269,15 +315,15 @@ class MainProcessSpec extends CatsEffectSuite {
 
   test("LOG-03 local unmasked warning bypasses ERROR and has no duplicates") {
     listeningSocket().use { socket =>
-      runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString,
-        "LOG_MASK_SENSITIVE" -> "false")).map { result =>
-        assert(result.exitCode != 0)
-        val events = assertSanitized(result, "STARTUP_FAILED")
-        assert(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")) >= 1)
-        events.filter(_.hcursor.get[String]("category").exists(_.startsWith("LOCAL_"))).foreach { warning =>
-          assertEquals(warning.hcursor.get[String]("severity"), Right("WARN"))
-          assert(Set(Right("disabled"), Right("disabled-local")).contains(warning.hcursor.get[String]("masking")))
-        }
+      runChild(mainClass, Map("HTTP_PORT" -> socket.getLocalPort.toString, "LOG_MASK_SENSITIVE" -> "false")).map {
+        result =>
+          assert(result.exitCode != 0)
+          val events = assertSanitized(result, "STARTUP_FAILED")
+          assert(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")) >= 1)
+          events.filter(_.hcursor.get[String]("category").exists(_.startsWith("LOCAL_"))).foreach { warning =>
+            assertEquals(warning.hcursor.get[String]("severity"), Right("WARN"))
+            assert(Set(Right("disabled"), Right("disabled-local")).contains(warning.hcursor.get[String]("masking")))
+          }
       }
     }
   }

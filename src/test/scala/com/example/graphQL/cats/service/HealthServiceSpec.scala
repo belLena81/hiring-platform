@@ -28,7 +28,8 @@ class HealthServiceSpec extends CatsEffectSuite {
           forwarded.set(id) *> IO.raiseError(new IllegalStateException("synthetic-service-secret"))
       }
       sink = new Diagnostics {
-        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] = recorded.set(fields)
+        def event(event: LogEvent, id: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          recorded.set(fields)
       }
       result <- new HealthService(contextual, sink).readiness(requestId)
       id <- forwarded.get
@@ -52,7 +53,8 @@ class HealthServiceSpec extends CatsEffectSuite {
           else IO.raiseError(new IllegalStateException("synthetic-sink-secret"))
       }
       List(ProbeResult.Ready, ProbeResult.Unavailable, ProbeResult.AuthenticationFailed).traverse_ { expected =>
-        new HealthService(probe(IO.pure(expected)), sink).readiness(requestId)
+        new HealthService(probe(IO.pure(expected)), sink)
+          .readiness(requestId)
           .map(result => assertEquals(result, expected))
       }
     }
@@ -92,8 +94,11 @@ class HealthServiceSpec extends CatsEffectSuite {
     List(
       (IO.pure(ProbeResult.Unavailable), ProbeResult.Unavailable, LogEvent.MongoUnavailable),
       (IO.pure(ProbeResult.AuthenticationFailed), ProbeResult.AuthenticationFailed, LogEvent.MongoAuthFailed),
-      (IO.raiseError[ProbeResult](new RuntimeException("mongodb://user:synthetic-secret@host")),
-        ProbeResult.Unavailable, LogEvent.MongoUnavailable)
+      (
+        IO.raiseError[ProbeResult](new RuntimeException("mongodb://user:synthetic-secret@host")),
+        ProbeResult.Unavailable,
+        LogEvent.MongoUnavailable
+      )
     ).traverse_ { case (effect, expected, expectedEvent) =>
       for {
         events <- Ref.of[IO, Vector[(LogEvent, Option[String])]](Vector.empty)
@@ -111,10 +116,13 @@ class HealthServiceSpec extends CatsEffectSuite {
     for {
       calls <- Ref.of[IO, Int](0)
       events <- Ref.of[IO, Vector[(LogEvent, Option[String])]](Vector.empty)
-      service = new HealthService(probe(calls.getAndUpdate(_ + 1).map {
-        case 0 => ProbeResult.Unavailable
-        case _ => ProbeResult.Ready
-      }), diagnostics(events))
+      service = new HealthService(
+        probe(calls.getAndUpdate(_ + 1).map {
+          case 0 => ProbeResult.Unavailable
+          case _ => ProbeResult.Ready
+        }),
+        diagnostics(events)
+      )
       first <- service.readiness(requestId)
       second <- service.readiness(requestId)
       count <- calls.get
@@ -132,9 +140,12 @@ class HealthServiceSpec extends CatsEffectSuite {
       entered <- Deferred[IO, Unit]
       canceled <- Deferred[IO, Unit]
       events <- Ref.of[IO, Vector[(LogEvent, Option[String])]](Vector.empty)
-      service = new HealthService(probe(
-        (entered.complete(()).void *> IO.never[ProbeResult]).onCancel(canceled.complete(()).void)
-      ), diagnostics(events))
+      service = new HealthService(
+        probe(
+          (entered.complete(()).void *> IO.never[ProbeResult]).onCancel(canceled.complete(()).void)
+        ),
+        diagnostics(events)
+      )
       started <- IO.monotonic
       result <- service.readiness(requestId).background.use { completion =>
         entered.get *> completion.flatMap(_.embedNever)
@@ -156,22 +167,28 @@ class HealthServiceSpec extends CatsEffectSuite {
       entered <- Deferred[IO, Unit]
       canceled <- Deferred[IO, Unit]
       events <- Ref.of[IO, Vector[(LogEvent, Option[String])]](Vector.empty)
-      service = new HealthService(probe(
-        (entered.complete(()).void *> IO.never[ProbeResult]).onCancel(canceled.complete(()).void)
-      ), diagnostics(events))
-      _ <- service.readiness(requestId).start.bracket { fiber =>
-        for {
-          _ <- entered.get
-          _ <- fiber.cancel
-          outcome <- fiber.join
-          finalized <- canceled.tryGet
-          recorded <- events.get
-        } yield {
-          assert(outcome.isCanceled)
-          assertEquals(finalized, Some(()))
-          assertEquals(recorded, Vector.empty)
-        }
-      }(_.cancel)
+      service = new HealthService(
+        probe(
+          (entered.complete(()).void *> IO.never[ProbeResult]).onCancel(canceled.complete(()).void)
+        ),
+        diagnostics(events)
+      )
+      _ <- service
+        .readiness(requestId)
+        .start
+        .bracket { fiber =>
+          for {
+            _ <- entered.get
+            _ <- fiber.cancel
+            outcome <- fiber.join
+            finalized <- canceled.tryGet
+            recorded <- events.get
+          } yield {
+            assert(outcome.isCanceled)
+            assertEquals(finalized, Some(()))
+            assertEquals(recorded, Vector.empty)
+          }
+        }(_.cancel)
     } yield ()).timeout(6.seconds)
   }
 }

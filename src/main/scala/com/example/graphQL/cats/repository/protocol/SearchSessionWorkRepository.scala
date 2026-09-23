@@ -2,7 +2,12 @@ package com.example.graphQL.cats.repository.protocol
 
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventType, SearchSession}
+import com.example.graphQL.cats.shared.events.{
+  OperationalAggregateType,
+  OperationalEventEnvelope,
+  OperationalEventType,
+  SearchSession
+}
 
 import java.time.Instant
 import java.util.UUID
@@ -36,19 +41,37 @@ enum SearchSessionLookup {
 trait SearchSessionWorkRepository {
   def enqueue(work: PendingSearchSessionWork, now: Instant): IO[Either[RepositoryError, Unit]]
   def findForActor(actorId: UserId, searchId: UUID): IO[Either[RepositoryError, Option[SearchSessionLookup]]]
-  def claim(workerId: String, now: Instant, leaseUntil: Instant): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]]
+  def claim(
+      workerId: String,
+      now: Instant,
+      leaseUntil: Instant
+  ): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]]
   def complete(claim: ClaimedSearchSessionWork, now: Instant): IO[Either[RepositoryError, Unit]]
   def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): IO[Either[RepositoryError, Unit]]
-  def fail(claim: ClaimedSearchSessionWork, failure: SearchSessionWorkFailure, now: Instant): IO[Either[RepositoryError, Unit]]
+  def fail(
+      claim: ClaimedSearchSessionWork,
+      failure: SearchSessionWorkFailure,
+      now: Instant
+  ): IO[Either[RepositoryError, Unit]]
 }
 
 object SearchSessionWorkRepository {
   val noop: SearchSessionWorkRepository = new SearchSessionWorkRepository {
     def enqueue(work: PendingSearchSessionWork, now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
-    def findForActor(actorId: UserId, searchId: UUID): IO[Either[RepositoryError, Option[SearchSessionLookup]]] = IO.pure(Right(None))
-    def claim(workerId: String, now: Instant, leaseUntil: Instant): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]] = IO.pure(Right(None))
+    def findForActor(actorId: UserId, searchId: UUID): IO[Either[RepositoryError, Option[SearchSessionLookup]]] =
+      IO.pure(Right(None))
+    def claim(
+        workerId: String,
+        now: Instant,
+        leaseUntil: Instant
+    ): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]] = IO.pure(Right(None))
     def complete(claim: ClaimedSearchSessionWork, now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
-    def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
-    def fail(claim: ClaimedSearchSessionWork, failure: SearchSessionWorkFailure, now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Right(()))
+    def fail(
+        claim: ClaimedSearchSessionWork,
+        failure: SearchSessionWorkFailure,
+        now: Instant
+    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 }

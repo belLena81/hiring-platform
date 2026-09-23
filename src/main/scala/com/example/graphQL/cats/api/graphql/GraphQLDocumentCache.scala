@@ -14,8 +14,13 @@ final class GraphQLDocumentCache private (cache: Cache[String, Document]) {
   def document(query: String): IO[Either[HiringGraphQLSchema.Failure, GraphQLDocument]] =
     IO.delay(Option(cache.getIfPresent(query))).map {
       case Some(value) => Right(GraphQLDocument(value, QueryValidator.empty, cached = true))
-      case None => QueryParser.parse(query).toEither.left.map(_ => HiringGraphQLSchema.Failure.InvalidQuery)
-        .map(value => GraphQLDocument(value, QueryValidator.default, cached = false))
+      case None        =>
+        QueryParser
+          .parse(query)
+          .toEither
+          .left
+          .map(_ => HiringGraphQLSchema.Failure.InvalidQuery)
+          .map(value => GraphQLDocument(value, QueryValidator.default, cached = false))
     }
 
   def store(query: String, document: Document): IO[Unit] = IO.delay(cache.put(query, document))
@@ -26,6 +31,13 @@ object GraphQLDocumentCache {
   private val ExpirySeconds = 60L
 
   def resource: Resource[IO, GraphQLDocumentCache] =
-    Resource.pure(new GraphQLDocumentCache(
-      Caffeine.newBuilder().maximumSize(MaximumEntries).expireAfterWrite(ExpirySeconds, TimeUnit.SECONDS).build[String, Document]()))
+    Resource.pure(
+      new GraphQLDocumentCache(
+        Caffeine
+          .newBuilder()
+          .maximumSize(MaximumEntries)
+          .expireAfterWrite(ExpirySeconds, TimeUnit.SECONDS)
+          .build[String, Document]()
+      )
+    )
 }

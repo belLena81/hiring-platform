@@ -33,7 +33,7 @@ final class ClientAddressResolver private (trustedProxyCidrs: List[Cidr[IpAddres
       node.nodeName match {
         case Forwarded.Node.Name.Ipv4(address) => Some(address)
         case Forwarded.Node.Name.Ipv6(address) => Some(address)
-        case _ => None
+        case _                                 => None
       }
     }
 }

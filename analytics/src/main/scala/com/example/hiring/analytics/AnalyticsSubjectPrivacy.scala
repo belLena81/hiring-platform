@@ -8,11 +8,10 @@ import java.util.Base64
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/**
-  * Deterministically maps an operational subject identifier to a versioned, opaque token.
+/** Deterministically maps an operational subject identifier to a versioned, opaque token.
   *
-  * The HMAC key is owned by runtime configuration and is never written to a dataframe,
-  * Delta table, log, or manifest. A new key needs a new token version and a rebuild.
+  * The HMAC key is owned by runtime configuration and is never written to a dataframe, Delta table, log, or manifest. A
+  * new key needs a new token version and a rebuild.
   */
 final class SubjectPseudonymizer private (secret: Array[Byte]) extends Serializable {
   private val key = secret.clone()
@@ -46,9 +45,8 @@ object AnalyticsSubjectPrivacy {
   private val CandidateIdJsonPath = "$.payload.candidateId"
   private val SubjectTokenColumn = "subjectToken"
 
-  /**
-    * Candidate identity takes precedence for application events. Events without a candidate use
-    * the authenticated actor identifier, ensuring every valid operational event has one token.
+  /** Candidate identity takes precedence for application events. Events without a candidate use the authenticated actor
+    * identifier, ensuring every valid operational event has one token.
     */
   def withSubjectToken(events: DataFrame, pseudonymizer: SubjectPseudonymizer): DataFrame = {
     val tokenize = udf((value: String) => pseudonymizer.token(value))
@@ -57,9 +55,8 @@ object AnalyticsSubjectPrivacy {
     events.withColumn(SubjectTokenColumn, tokenize(coalesce(subjectId, lit(""))))
   }
 
-  /**
-    * Removes data for active erasure markers before it can be merged into Silver. Marker sources
-    * expose only the already-HMACed token; this transform has no persistence or Mongo dependency.
+  /** Removes data for active erasure markers before it can be merged into Silver. Marker sources expose only the
+    * already-HMACed token; this transform has no persistence or Mongo dependency.
     */
   def excludeActiveDeletionMarkers(events: DataFrame, activeMarkerTokens: DataFrame): DataFrame = {
     require(events.columns.contains(SubjectTokenColumn), "events must contain a subjectToken")
@@ -74,6 +71,11 @@ object AnalyticsSubjectPrivacy {
   def emptyMarkers(events: DataFrame): DataFrame =
     events.sparkSession.createDataFrame(
       events.sparkSession.sparkContext.emptyRDD[org.apache.spark.sql.Row],
-      org.apache.spark.sql.types.StructType(Seq(org.apache.spark.sql.types.StructField(SubjectTokenColumn, org.apache.spark.sql.types.StringType, nullable = false)))
+      org.apache.spark.sql.types.StructType(
+        Seq(
+          org.apache.spark.sql.types
+            .StructField(SubjectTokenColumn, org.apache.spark.sql.types.StringType, nullable = false)
+        )
+      )
     )
 }

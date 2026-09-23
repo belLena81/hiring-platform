@@ -17,7 +17,8 @@ object HiringPlatformServer {
       app: HttpApp[IO],
       diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, Server] =
-    EmberServerBuilder.default[IO]
+    EmberServerBuilder
+      .default[IO]
       .withHost(host)
       .withPort(port)
       .withHttpApp(app)
@@ -28,7 +29,8 @@ object HiringPlatformServer {
       .withMaxHeaderSize(8192)
       .withMaxConnections(64)
       .withErrorHandler { case error =>
-        diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+        diagnostics
+          .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
           .as(Response[IO](Status.InternalServerError))
       }
       .build

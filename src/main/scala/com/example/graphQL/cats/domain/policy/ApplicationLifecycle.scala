@@ -2,7 +2,9 @@ package com.example.graphQL.cats.domain.policy
 
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.error.DomainError.{
-  DeclineReasonRequired, InvalidStatusTransition, RejectionFeedbackRequired
+  DeclineReasonRequired,
+  InvalidStatusTransition,
+  RejectionFeedbackRequired
 }
 import com.example.graphQL.cats.domain.model.Application
 import com.example.graphQL.cats.domain.model.ApplicationStatus
@@ -23,7 +25,11 @@ object ApplicationLifecycle {
       reason: Option[String]
   ): Either[DomainError, StatusChange] =
     for {
-      _ <- Either.cond(canTransition(application.status, target), (), InvalidStatusTransition(application.status, target))
+      _ <- Either.cond(
+        canTransition(application.status, target),
+        (),
+        InvalidStatusTransition(application.status, target)
+      )
       _ <- Either.cond(target != Rejected || feedback.exists(_.trim.nonEmpty), (), RejectionFeedbackRequired)
       _ <- Either.cond(target != Declined || reason.exists(_.trim.nonEmpty), (), DeclineReasonRequired)
     } yield StatusChange(
@@ -47,11 +53,11 @@ object ApplicationLifecycle {
 }
 
 final case class StatusChange(
-  application: Application,
-  previousStatus: ApplicationStatus,
-  newStatus: ApplicationStatus,
-  actorId: UserId,
-  occurredAt: Instant,
-  feedback: Option[String],
-  reason: Option[String]
+    application: Application,
+    previousStatus: ApplicationStatus,
+    newStatus: ApplicationStatus,
+    actorId: UserId,
+    occurredAt: Instant,
+    feedback: Option[String],
+    reason: Option[String]
 )

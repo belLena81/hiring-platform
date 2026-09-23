@@ -19,12 +19,15 @@ final class MongoJobRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
     embeddingWork: Option[MongoEmbeddingWorkRepository] = None
-) extends JobRepository with MongoConflictWriteMapping with MongoOperationalEventInsertion {
+) extends JobRepository
+    with MongoConflictWriteMapping
+    with MongoOperationalEventInsertion {
   private val collection = database.getCollection("jobs")
   private val outbox = database.getCollection("event_outbox")
 
   override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
-    PublisherBridge.first(collection.find(Filters.eq("_id", id.value.toString)))
+    PublisherBridge
+      .first(collection.find(Filters.eq("_id", id.value.toString)))
       .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
@@ -38,10 +41,20 @@ final class MongoJobRepository(
     findMany(baseJobFilter(List(page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
   override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
-    findMany(baseJobFilter(List(Some(Filters.eq("recruiterId", recruiterId.value.toString)), page.status.map(status => Filters.eq("status", status.toString))), page), page)
+    findMany(
+      baseJobFilter(
+        List(
+          Some(Filters.eq("recruiterId", recruiterId.value.toString)),
+          page.status.map(status => Filters.eq("status", status.toString))
+        ),
+        page
+      ),
+      page
+    )
 
   override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
-    if (embeddingWork.nonEmpty) transactionRunner.run(session => writeJobSession(job, now, Nil, session)).handleError(mapWrite)
+    if (embeddingWork.nonEmpty)
+      transactionRunner.run(session => writeJobSession(job, now, Nil, session)).handleError(mapWrite)
     else writeJobSession(job, now, Nil, None).handleError(mapWrite)
 
   override def createWithEvents(
@@ -50,11 +63,13 @@ final class MongoJobRepository(
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Unit]] =
-    MongoMutationWriteContext.run(
-      context,
-      transactionRunner,
-      transactionRequired = embeddingWork.nonEmpty || events.nonEmpty
-    )(session => writeJobSession(job, now, events, session)).handleError(mapWrite)
+    MongoMutationWriteContext
+      .run(
+        context,
+        transactionRunner,
+        transactionRequired = embeddingWork.nonEmpty || events.nonEmpty
+      )(session => writeJobSession(job, now, events, session))
+      .handleError(mapWrite)
 
   private def writeJobSession(
       job: Job,
@@ -64,18 +79,22 @@ final class MongoJobRepository(
   ): IO[Either[RepositoryError, Unit]] =
     insertOne(session, MongoHiringCodecs.job(job)).flatMap {
       case Some(_) =>
-        embeddingWork.fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
-          _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
-        ).flatMap {
-          case Right(()) => insertOperationalEvents(outbox, session, events, now)
-          case Left(error) => IO.pure(Left(error))
-        }
+        embeddingWork
+          .fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
+            _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+          )
+          .flatMap {
+            case Right(())   => insertOperationalEvents(outbox, session, events, now)
+            case Left(error) => IO.pure(Left(error))
+          }
       case None => IO.pure(Left(RepositoryError.Unavailable))
     }
 
   override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
     if (embeddingWork.nonEmpty) {
-      transactionRunner.run(session => writeJobUpdateSession(expected, replacement, now, Nil, session)).handleError(mapWrite)
+      transactionRunner
+        .run(session => writeJobUpdateSession(expected, replacement, now, Nil, session))
+        .handleError(mapWrite)
     } else writeJobUpdateSession(expected, replacement, now, Nil, None).handleError(mapWrite)
 
   override def updateWithEvents(
@@ -85,11 +104,13 @@ final class MongoJobRepository(
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Job]] =
-    MongoMutationWriteContext.run(
-      context,
-      transactionRunner,
-      transactionRequired = embeddingWork.nonEmpty || events.nonEmpty
-    )(session => writeJobUpdateSession(expected, replacement, now, events, session)).handleError(mapWrite)
+    MongoMutationWriteContext
+      .run(
+        context,
+        transactionRunner,
+        transactionRequired = embeddingWork.nonEmpty || events.nonEmpty
+      )(session => writeJobUpdateSession(expected, replacement, now, events, session))
+      .handleError(mapWrite)
 
   private def writeJobUpdateSession(
       expected: Job,
@@ -104,63 +125,75 @@ final class MongoJobRepository(
       MongoHiringCodecs.job(replacement)
     ).flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
-        embeddingWork.fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
-          _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
-        ).flatMap {
-          case Right(()) => insertOperationalEvents(outbox, session, events, now).map(_.as(replacement))
-          case Left(error) => IO.pure(Left(error))
-        }
+        embeddingWork
+          .fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
+            _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
+          )
+          .flatMap {
+            case Right(())   => insertOperationalEvents(outbox, session, events, now).map(_.as(replacement))
+            case Left(error) => IO.pure(Left(error))
+          }
       case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None => IO.pure(Left(RepositoryError.Unavailable))
+      case None    => IO.pure(Left(RepositoryError.Unavailable))
     }
 
   override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
     find(id).flatMap {
       case Right(Some(job)) => updateEmbedding(job, embedding)
-      case Right(None) => IO.pure(Left(RepositoryError.Conflict))
-      case Left(error) => IO.pure(Left(error))
+      case Right(None)      => IO.pure(Left(RepositoryError.Conflict))
+      case Left(error)      => IO.pure(Left(error))
     }
 
   override def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
-    PublisherBridge.first(collection.updateOne(
-      MongoObservedStateFilters.jobEmbedding(observed),
-      Updates.combine(
-        Updates.set("embedding", encoded.get("embedding")),
-        Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
+    PublisherBridge
+      .first(
+        collection.updateOne(
+          MongoObservedStateFilters.jobEmbedding(observed),
+          Updates.combine(
+            Updates.set("embedding", encoded.get("embedding")),
+            Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
+          )
+        )
       )
-    )).map {
-      case Some(result) if result.getMatchedCount == 1L => Right(())
-      case Some(_) => Left(RepositoryError.Conflict)
-      case None => Left(RepositoryError.Unavailable)
-    }.handleError(mapWrite)
+      .map {
+        case Some(result) if result.getMatchedCount == 1L => Right(())
+        case Some(_)                                      => Left(RepositoryError.Conflict)
+        case None                                         => Left(RepositoryError.Unavailable)
+      }
+      .handleError(mapWrite)
   }
-
 
   private def findMany(filter: Bson, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)
 
   private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): Bson =
-    baseJobFilter(List(
-      Some(Filters.eq("status", JobStatus.Open.toString)),
-      filter.city.map(city => Filters.eq("location.city", city)),
-      Option.when(filter.skills.nonEmpty)(Filters.all("skills", filter.skills.toList.sorted*)),
-      filter.createdAfter.map(createdAfter => Filters.gte("createdAt", java.util.Date.from(createdAfter)))
-    ), page)
+    baseJobFilter(
+      List(
+        Some(Filters.eq("status", JobStatus.Open.toString)),
+        filter.city.map(city => Filters.eq("location.city", city)),
+        Option.when(filter.skills.nonEmpty)(Filters.all("skills", filter.skills.toList.sorted*)),
+        filter.createdAfter.map(createdAfter => Filters.gte("createdAt", java.util.Date.from(createdAfter)))
+      ),
+      page
+    )
 
   private def baseJobFilter(filters: List[Option[Bson]], page: JobPageRequest): Bson = {
-    val cursorFilter = page.cursor.map(cursor =>
-      MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString)
-    )
+    val cursorFilter =
+      page.cursor.map(cursor => MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString))
     val activeFilters = (filters :+ cursorFilter).flatten
     if (activeFilters.isEmpty) new Document() else Filters.and(activeFilters*)
   }
 
   private def insertOne(session: Option[ClientSession], document: Document) =
-    session.fold(PublisherBridge.first(collection.insertOne(document)))(active => PublisherBridge.first(collection.insertOne(active, document)))
+    session.fold(PublisherBridge.first(collection.insertOne(document)))(active =>
+      PublisherBridge.first(collection.insertOne(active, document))
+    )
 
   private def replaceOne(session: Option[ClientSession], filter: Bson, document: Document) =
-    session.fold(PublisherBridge.first(collection.replaceOne(filter, document)))(active => PublisherBridge.first(collection.replaceOne(active, filter, document)))
+    session.fold(PublisherBridge.first(collection.replaceOne(filter, document)))(active =>
+      PublisherBridge.first(collection.replaceOne(active, filter, document))
+    )
 }
 
 object MongoJobRepository {

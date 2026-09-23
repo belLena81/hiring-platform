@@ -36,8 +36,12 @@ class JobServiceSpec extends CatsEffectSuite {
         Location("Cyprus", "Nicosia", remote = true),
         JobStatus.Draft
       )
-      created <- service.createJob(request("create-recruiter"), ActorContext(recruiterId, UserRole.Recruiter), input).value
-      rejected <- service.createJob(request("create-candidate"), ActorContext(candidateId, UserRole.Candidate), input).value
+      created <- service
+        .createJob(request("create-recruiter"), ActorContext(recruiterId, UserRole.Recruiter), input)
+        .value
+      rejected <- service
+        .createJob(request("create-candidate"), ActorContext(candidateId, UserRole.Candidate), input)
+        .value
     } yield {
       assertEquals(created.map(_.recruiterId), Right(recruiterId))
       assertEquals(created.map(_.title), Right("New role"))
@@ -50,11 +54,20 @@ class JobServiceSpec extends CatsEffectSuite {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
       service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(now), List(jobId.value))
-      result <- service.createJob(
-        request("create-closed"),
-        ActorContext(recruiterId, UserRole.Recruiter),
-        CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Closed)
-      ).value
+      result <- service
+        .createJob(
+          request("create-closed"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          CreateJobInput(
+            "New role",
+            "Build services",
+            List("Scala"),
+            Set("Scala"),
+            Location("Cyprus", "Nicosia", remote = true),
+            JobStatus.Closed
+          )
+        )
+        .value
       stored <- jobs.get
     } yield {
       assertEquals(result, Left(UseCaseError.Domain(DomainError.InvalidInitialJobStatus(JobStatus.Closed))))
@@ -83,8 +96,12 @@ class JobServiceSpec extends CatsEffectSuite {
         JobStatus.Open
       )
       created <- service.createJob(request("create"), ActorContext(recruiterId, UserRole.Recruiter), input).value
-      rejected <- service.createJob(request("create-forbidden"), ActorContext(candidateId, UserRole.Candidate), input).value
-      updated <- service.updateJob(request("update"), ActorContext(recruiterId, UserRole.Recruiter), jobId, updatedInput).value
+      rejected <- service
+        .createJob(request("create-forbidden"), ActorContext(candidateId, UserRole.Candidate), input)
+        .value
+      updated <- service
+        .updateJob(request("update"), ActorContext(recruiterId, UserRole.Recruiter), jobId, updatedInput)
+        .value
     } yield {
       assertEquals(created.map(_.id), Right(jobId))
       assertEquals(rejected, Left(UseCaseError.Domain(DomainError.Forbidden)))
@@ -101,11 +118,20 @@ class JobServiceSpec extends CatsEffectSuite {
         override def wake: IO[Unit] = wakes.update(_ + 1)
       }
       service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(now), List(jobId.value), publisher)
-      result <- service.createJob(
-        request("create-with-wake"),
-        ActorContext(recruiterId, UserRole.Recruiter),
-        CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Open)
-      ).value
+      result <- service
+        .createJob(
+          request("create-with-wake"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          CreateJobInput(
+            "New role",
+            "Build services",
+            List("Scala"),
+            Set("Scala"),
+            Location("Cyprus", "Nicosia", remote = true),
+            JobStatus.Open
+          )
+        )
+        .value
       wakeCount <- wakes.get
     } yield {
       assertEquals(result.map(_.id), Right(jobId))
@@ -120,11 +146,20 @@ class JobServiceSpec extends CatsEffectSuite {
       outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
       jobRepository = InMemoryJobs(jobs, Some(outbox))
       service <- deterministicService(InMemoryUsers(users), jobRepository, List(now), List(jobId.value))
-      result <- service.createJob(
-        request("create-with-event"),
-        ActorContext(recruiterId, UserRole.Recruiter),
-        CreateJobInput("New role", "Build services", List("Scala"), Set("Scala"), Location("Cyprus", "Nicosia", remote = true), JobStatus.Open)
-      ).value
+      result <- service
+        .createJob(
+          request("create-with-event"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          CreateJobInput(
+            "New role",
+            "Build services",
+            List("Scala"),
+            Set("Scala"),
+            Location("Cyprus", "Nicosia", remote = true),
+            JobStatus.Open
+          )
+        )
+        .value
       events <- jobRepository.allOperationalEvents
     } yield {
       assertEquals(result.map(_.id), Right(jobId))
@@ -242,7 +277,7 @@ class JobServiceSpec extends CatsEffectSuite {
     values
       .modify {
         case head :: tail => (tail, Right(head))
-        case Nil => (Nil, Left(new AssertionError(s"No deterministic $label remains")))
+        case Nil          => (Nil, Left(new AssertionError(s"No deterministic $label remains")))
       }
       .flatMap(IO.fromEither)
 }

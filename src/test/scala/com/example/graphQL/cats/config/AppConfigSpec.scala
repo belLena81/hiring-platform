@@ -10,13 +10,13 @@ class AppConfigSpec extends FunSuite {
   private def assertContainsError(result: Either[NonEmptyList[ConfigError], AppConfig], expected: ConfigError): Unit =
     result match {
       case Left(issues) => assert(issues.toList.contains(expected), clues(expected))
-      case other => fail(s"Expected aggregated configuration error containing $expected, got $other")
+      case other        => fail(s"Expected aggregated configuration error containing $expected, got $other")
     }
 
   private def assertInvalidConfig(result: Either[NonEmptyList[ConfigError], AppConfig]): Unit =
     result match {
       case Left(issues) => assert(issues.toList.exists(_.key == "CONFIG_FILE"), clues(issues))
-      case other => fail(s"Expected invalid configuration result, got $other")
+      case other        => fail(s"Expected invalid configuration result, got $other")
     }
 
   private val defaultConfig =
@@ -205,17 +205,32 @@ class AppConfigSpec extends FunSuite {
         |  num-candidates = 100
         |}
         |""".stripMargin
-    assertEquals(AppConfig.fromConfig(config, Map(
-      "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
-      "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
-    )), Right(AppConfig(Host.fromString("::1").get, Ip4sPort.fromInt(65535).get, 64, 5.seconds, TrustedProxyConfig(Nil),
-      "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
-      "hiring_test-2", true,
-      JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
-      defaultPasswordHash,
-      AuthRateLimitConfig(30, 10, 500),
-      defaultVectorSearch,
-      defaultKafka)))
+    assertEquals(
+      AppConfig.fromConfig(
+        config,
+        Map(
+          "MONGODB_URI" -> "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
+          "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901"
+        )
+      ),
+      Right(
+        AppConfig(
+          Host.fromString("::1").get,
+          Ip4sPort.fromInt(65535).get,
+          64,
+          5.seconds,
+          TrustedProxyConfig(Nil),
+          "mongodb://test-user:synthetic-secret@localhost:27018/?authSource=admin",
+          "hiring_test-2",
+          true,
+          JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api"),
+          defaultPasswordHash,
+          AuthRateLimitConfig(30, 10, 500),
+          defaultVectorSearch,
+          defaultKafka
+        )
+      )
+    )
   }
 
   test("VHS-AC07 rejects a vector candidate budget below the maximum page size") {
@@ -226,7 +241,10 @@ class AppConfigSpec extends FunSuite {
 
   test("Mongo startup reset is disabled by default and opt-in") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.resetOnStart), Right(false))
-    assertEquals(AppConfig.fromConfig(defaultConfig + "mongo.reset-on-start = true\n", Map.empty).map(_.resetOnStart), Right(true))
+    assertEquals(
+      AppConfig.fromConfig(defaultConfig + "mongo.reset-on-start = true\n", Map.empty).map(_.resetOnStart),
+      Right(true)
+    )
   }
 
   test("VHS-AC08 packaged application config is grouped, sanitized and fails safely without required local values") {
@@ -256,22 +274,29 @@ class AppConfigSpec extends FunSuite {
         |auth.jwt.hs256-secret = "01234567890123456789012345678901"
         |""".stripMargin
     val result = AppConfig.fromConfig(raw + local, Map.empty)
-    assertEquals(result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
-      Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017")))
+    assertEquals(
+      result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017"))
+    )
   }
 
   test("VHS-AC08 packaged application config resolves cloud environment values at startup") {
     val raw = resource("application.conf")
-    val result = AppConfig.fromConfig(raw, Map(
-      "HTTP_HOST" -> "::1",
-      "HTTP_PORT" -> "9090",
-      "HTTP_ADMISSION_PERMITS" -> "96",
-      "MONGODB_URI" -> "mongodb://127.0.0.1:27018",
-      "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901",
-      "VOYAGE_MODEL" -> "voyage-4-lite"
-    ))
-    assertEquals(result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
-      Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018")))
+    val result = AppConfig.fromConfig(
+      raw,
+      Map(
+        "HTTP_HOST" -> "::1",
+        "HTTP_PORT" -> "9090",
+        "HTTP_ADMISSION_PERMITS" -> "96",
+        "MONGODB_URI" -> "mongodb://127.0.0.1:27018",
+        "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901",
+        "VOYAGE_MODEL" -> "voyage-4-lite"
+      )
+    )
+    assertEquals(
+      result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018"))
+    )
   }
 
   test("CFG-AC02 injected env resolution ignores process system properties") {
@@ -390,16 +415,21 @@ class AppConfigSpec extends FunSuite {
         |vector-search.voyage.model = "voyage-4-lite"
         |""".stripMargin
 
-    assertEquals(AppConfig.fromConfig(defaults + local, Map.empty).map(config =>
-      (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
-      Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018")))
+    assertEquals(
+      AppConfig
+        .fromConfig(defaults + local, Map.empty)
+        .map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
+      Right(("127.42.10.8", 9091, 16, "mongodb://127.0.0.1:27018"))
+    )
   }
 
   test("P1-AC01 config text rejects malformed HOCON and missing required paths safely") {
     assertInvalidConfig(AppConfig.fromConfig("http { host = 127.0.0.1\n", Map.empty))
     assertInvalidConfig(AppConfig.fromConfig("mongo.uri=${MONGODB_URI}\n", Map.empty))
     assertInvalidConfig(AppConfig.fromConfig(defaultConfig.replace("  host = \"127.0.0.1\"\n", ""), Map.empty))
-    assertInvalidConfig(AppConfig.fromConfig(defaultConfig.replace("  uri = \"mongodb://127.0.0.1:27017\"\n", ""), Map.empty))
+    assertInvalidConfig(
+      AppConfig.fromConfig(defaultConfig.replace("  uri = \"mongodb://127.0.0.1:27017\"\n", ""), Map.empty)
+    )
     assertInvalidConfig(AppConfig.fromConfig(defaultConfig + "mongo.database = \"a\u0000b\"\n", Map.empty))
     assertInvalidConfig(AppConfig.fromConfig("", Map.empty))
   }
@@ -409,12 +439,17 @@ class AppConfigSpec extends FunSuite {
       ("http.host", List("not-an-ip"), ConfigError.InvalidHost),
       ("http.port", List("0", "65536", "-1", "2147483648"), ConfigError.InvalidPort),
       ("http.admission-permits", List("0", "1025", "-1", "synthetic-secret"), ConfigError.InvalidAdmissionPermits),
-      ("mongo.uri", List("https://synthetic-secret", "mongodb://", "mongodb://host:wrong"), ConfigError.InvalidMongoUri),
+      (
+        "mongo.uri",
+        List("https://synthetic-secret", "mongodb://", "mongodb://host:wrong"),
+        ConfigError.InvalidMongoUri
+      ),
       ("mongo.database", List("a/b", "a.b", "a b", "a$b", "a" * 64), ConfigError.InvalidMongoDatabase)
     )
     invalid.foreach { case (key, values, error) =>
       values.foreach { value =>
-        val rendered = if (key == "http.port" || key == "http.admission-permits") then s"$key = $value" else key + " = \"" + value + "\""
+        val rendered = if (key == "http.port" || key == "http.admission-permits") then s"$key = $value"
+        else key + " = \"" + value + "\""
         val result = AppConfig.fromConfig(defaultConfig + rendered + "\n", Map.empty)
         assertContainsError(result, error)
         assert(!result.toString.contains("synthetic-secret"))
@@ -432,9 +467,12 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("P1-AC01 config rendering never exposes a secret-bearing URI") {
-    val result = AppConfig.fromConfig(defaultConfig +
-      """mongo.uri = "mongodb://user:synthetic-secret@localhost:27017"
-        |""".stripMargin, Map.empty)
+    val result = AppConfig.fromConfig(
+      defaultConfig +
+        """mongo.uri = "mongodb://user:synthetic-secret@localhost:27017"
+        |""".stripMargin,
+      Map.empty
+    )
     assert(result.isRight)
     assert(!result.toString.contains("synthetic-secret"))
     assert(!result.toString.contains("mongodb://"))
@@ -446,61 +484,125 @@ class AppConfigSpec extends FunSuite {
   }
 
   test("LOG-03 explicit unmasking accepts parsed loopback addresses") {
-    List("127.0.0.1", "127.0.0.0", "127.25.67.89", "127.255.255.255",
-      "::1", "0:0:0:0:0:0:0:1", "0000:0000:0000:0000:0000:0000:0000:0001",
-      "::ffff:127.0.0.1").foreach { host =>
-      val result = AppConfig.fromConfig(defaultConfig +
-        s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
-      assertEquals(result.map(value => (value.host.toString, value.maskSensitive)),
-        Right((Host.fromString(host).get.toString, false)), clues(host))
+    List(
+      "127.0.0.1",
+      "127.0.0.0",
+      "127.25.67.89",
+      "127.255.255.255",
+      "::1",
+      "0:0:0:0:0:0:0:1",
+      "0000:0000:0000:0000:0000:0000:0000:0001",
+      "::ffff:127.0.0.1"
+    ).foreach { host =>
+      val result = AppConfig.fromConfig(
+        defaultConfig +
+          s"""http.host = "$host"\nlogging.mask-sensitive = false\n""",
+        Map.empty
+      )
+      assertEquals(
+        result.map(value => (value.host.toString, value.maskSensitive)),
+        Right((Host.fromString(host).get.toString, false)),
+        clues(host)
+      )
     }
   }
 
   test("LOG-03 masking policy is independent of the bind address") {
-    List("0.0.0.0", "::", "192.0.2.1", "126.255.255.255", "128.0.0.1",
-      "::2", "2001:db8::1", "::ffff:192.0.2.1").foreach { host =>
-      assertEquals(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
-        .map(_.maskSensitive), Right(false), clues(host))
-      assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
-    }
-    assertEquals(AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
-      Right(AppConfig(Host.fromString("127.0.0.1").get, Ip4sPort.fromInt(8080).get, 16, 5.seconds, TrustedProxyConfig(Nil), "mongodb://127.0.0.1:27017", "hiring",
-        false, defaultJwtAuth, defaultPasswordHash, defaultAuthRateLimit, defaultVectorSearch.copy(enabled = false), defaultKafka)))
+    List("0.0.0.0", "::", "192.0.2.1", "126.255.255.255", "128.0.0.1", "::2", "2001:db8::1", "::ffff:192.0.2.1")
+      .foreach { host =>
+        assertEquals(
+          AppConfig
+            .fromConfig(defaultConfig + s"""http.host = "$host"\nlogging.mask-sensitive = false\n""", Map.empty)
+            .map(_.maskSensitive),
+          Right(false),
+          clues(host)
+        )
+        assert(AppConfig.fromConfig(defaultConfig + s"""http.host = "$host"\n""", Map.empty).isRight, clues(host))
+      }
+    assertEquals(
+      AppConfig.fromConfig(defaultConfig + "logging.mask-sensitive = false\n", Map.empty),
+      Right(
+        AppConfig(
+          Host.fromString("127.0.0.1").get,
+          Ip4sPort.fromInt(8080).get,
+          16,
+          5.seconds,
+          TrustedProxyConfig(Nil),
+          "mongodb://127.0.0.1:27017",
+          "hiring",
+          false,
+          defaultJwtAuth,
+          defaultPasswordHash,
+          defaultAuthRateLimit,
+          defaultVectorSearch.copy(enabled = false),
+          defaultKafka
+        )
+      )
+    )
   }
 
   test("VHS-AC08 vector search requires an explicit Voyage API key when enabled") {
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "vector-search.enabled = true\n", Map.empty), ConfigError.InvalidVoyageApiKey)
-    val result = AppConfig.fromConfig(defaultConfig +
-      """vector-search.enabled = true
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "vector-search.enabled = true\n", Map.empty),
+      ConfigError.InvalidVoyageApiKey
+    )
+    val result = AppConfig.fromConfig(
+      defaultConfig +
+        """vector-search.enabled = true
         |vector-search.voyage.api-key = ${VOYAGE_API_KEY}
-        |""".stripMargin, Map("VOYAGE_API_KEY" -> "synthetic-voyage-key"))
+        |""".stripMargin,
+      Map("VOYAGE_API_KEY" -> "synthetic-voyage-key")
+    )
     assertEquals(result.map(_.vectorSearch.voyageApiKey), Right(Some("synthetic-voyage-key")))
   }
 
   test("HGQL-AC02 JWT auth config requires a strong secret") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth), Right(defaultJwtAuth))
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = disabled\n", Map.empty), ConfigError.InvalidJwtSecret)
-    assertContainsError(AppConfig.fromConfig(defaultConfig.replace("hs256-secret = \"01234567890123456789012345678901\"", ""), Map.empty), ConfigError.InvalidJwtSecret)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = \"short\"\n", Map.empty), ConfigError.InvalidJwtSecret)
-    val loaded = AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = ${AUTH_JWT_HS256_SECRET}\n",
-      Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456"))
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = disabled\n", Map.empty),
+      ConfigError.InvalidJwtSecret
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig.replace("hs256-secret = \"01234567890123456789012345678901\"", ""), Map.empty),
+      ConfigError.InvalidJwtSecret
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "auth.jwt.hs256-secret = \"short\"\n", Map.empty),
+      ConfigError.InvalidJwtSecret
+    )
+    val loaded = AppConfig.fromConfig(
+      defaultConfig + "auth.jwt.hs256-secret = ${AUTH_JWT_HS256_SECRET}\n",
+      Map("AUTH_JWT_HS256_SECRET" -> "abcdefghijklmnopqrstuvwxyz123456")
+    )
     assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right("abcdefghijklmnopqrstuvwxyz123456"))
   }
 
   test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(900L))
-    assertContainsError(AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty), ConfigError.InvalidCursorTtl)
-    assertContainsError(AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 86401"), Map.empty), ConfigError.InvalidCursorTtl)
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 59"), Map.empty),
+      ConfigError.InvalidCursorTtl
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig.replace("cursor-ttl-seconds = 900", "cursor-ttl-seconds = 86401"), Map.empty),
+      ConfigError.InvalidCursorTtl
+    )
   }
 
   test("HGQL-AC02 auth limiter config is bounded and explicit") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.authRateLimit), Right(defaultAuthRateLimit))
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.window-seconds = 0\n", Map.empty),
-      ConfigError.InvalidAuthRateLimitWindow)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.attempts = 0\n", Map.empty),
-      ConfigError.InvalidAuthRateLimitAttempts)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
-      ConfigError.InvalidAuthRateLimitBuckets)
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "auth.rate-limit.window-seconds = 0\n", Map.empty),
+      ConfigError.InvalidAuthRateLimitWindow
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "auth.rate-limit.attempts = 0\n", Map.empty),
+      ConfigError.InvalidAuthRateLimitAttempts
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "auth.rate-limit.max-buckets = 0\n", Map.empty),
+      ConfigError.InvalidAuthRateLimitBuckets
+    )
   }
 
   test("password hash cost is explicit and bounded") {
@@ -513,12 +615,18 @@ class AppConfigSpec extends FunSuite {
         |""".stripMargin
     val configured = AppConfig.fromConfig(defaultConfig + passwordHash, Map.empty)
     assertEquals(configured.map(_.passwordHash), Right(PasswordHashConfig(3, 32768, 2)))
-    assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("iterations = 3", "iterations = 0"), Map.empty),
-      ConfigError.InvalidPasswordHashIterations)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("memory-kib = 32768", "memory-kib = 1"), Map.empty),
-      ConfigError.InvalidPasswordHashMemory)
-    assertContainsError(AppConfig.fromConfig(defaultConfig + passwordHash.replace("parallelism = 2", "parallelism = 0"), Map.empty),
-      ConfigError.InvalidPasswordHashParallelism)
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + passwordHash.replace("iterations = 3", "iterations = 0"), Map.empty),
+      ConfigError.InvalidPasswordHashIterations
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + passwordHash.replace("memory-kib = 32768", "memory-kib = 1"), Map.empty),
+      ConfigError.InvalidPasswordHashMemory
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + passwordHash.replace("parallelism = 2", "parallelism = 0"), Map.empty),
+      ConfigError.InvalidPasswordHashParallelism
+    )
   }
 
   test("shared bounded validation keeps inclusive numeric boundaries") {
@@ -540,25 +648,34 @@ class AppConfigSpec extends FunSuite {
 
   test("request timeout is bounded") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.requestTimeout), Right(5.seconds))
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "http.request-timeout-ms = 99\n", Map.empty),
-      ConfigError.InvalidRequestTimeout)
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "http.request-timeout-ms = 99\n", Map.empty),
+      ConfigError.InvalidRequestTimeout
+    )
   }
 
   test("trusted proxy CIDRs are explicit, typed, and never global") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.trustedProxy.cidrs), Right(Nil))
-    val configured = AppConfig.fromConfig(defaultConfig +
-      "http.trusted-proxy-cidrs = [\"10.0.0.5/32\", \"2001:db8:10::5/128\"]\n", Map.empty)
-    assertEquals(configured.map(_.trustedProxy.cidrs.map(_.toString)),
-      Right(List("10.0.0.5/32", "2001:db8:10::5/128")))
+    val configured = AppConfig.fromConfig(
+      defaultConfig +
+        "http.trusted-proxy-cidrs = [\"10.0.0.5/32\", \"2001:db8:10::5/128\"]\n",
+      Map.empty
+    )
+    assertEquals(configured.map(_.trustedProxy.cidrs.map(_.toString)), Right(List("10.0.0.5/32", "2001:db8:10::5/128")))
     List("not-a-cidr", "0.0.0.0/0", "::/0").foreach { cidr =>
-      assertContainsError(AppConfig.fromConfig(defaultConfig + s"http.trusted-proxy-cidrs = [\"$cidr\"]\n", Map.empty),
-        ConfigError.InvalidTrustedProxyCidrs)
+      assertContainsError(
+        AppConfig.fromConfig(defaultConfig + s"http.trusted-proxy-cidrs = [\"$cidr\"]\n", Map.empty),
+        ConfigError.InvalidTrustedProxyCidrs
+      )
     }
   }
 
   test("VHS-AC07 vector search dimension is fixed to the configured Atlas index contract") {
     List("256", "512", "2048").foreach { dimension =>
-      assertContainsError(AppConfig.fromConfig(defaultConfig + s"vector-search.voyage.dimension = $dimension\n", Map.empty), ConfigError.InvalidVoyageDimension)
+      assertContainsError(
+        AppConfig.fromConfig(defaultConfig + s"vector-search.voyage.dimension = $dimension\n", Map.empty),
+        ConfigError.InvalidVoyageDimension
+      )
     }
     assert(AppConfig.fromConfig(defaultConfig + "vector-search.voyage.dimension = 1024\n", Map.empty).isRight)
   }
@@ -569,7 +686,10 @@ class AppConfigSpec extends FunSuite {
       assertContainsError(result, ConfigError.InvalidMaskSensitive)
       assert(!result.toString.contains("synthetic-secret"))
     }
-    assertContainsError(AppConfig.fromConfig(defaultConfig + "http.host = \"not-an-ip\"\nlogging.mask-sensitive = false\n", Map.empty), ConfigError.InvalidHost)
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "http.host = \"not-an-ip\"\nlogging.mask-sensitive = false\n", Map.empty),
+      ConfigError.InvalidHost
+    )
   }
 
   test("P1-AC01 aggregates independent configuration failures") {
@@ -579,21 +699,26 @@ class AppConfigSpec extends FunSuite {
       .replace("enabled = false", "enabled = true")
     AppConfig.fromConfig(invalid, Map.empty) match {
       case Left(issues) =>
-        assertEquals(issues.toList.toSet, Set(
-          ConfigError.InvalidHost,
-          ConfigError.InvalidMongoDatabase,
-          ConfigError.InvalidVoyageApiKey
-        ))
+        assertEquals(
+          issues.toList.toSet,
+          Set(
+            ConfigError.InvalidHost,
+            ConfigError.InvalidMongoDatabase,
+            ConfigError.InvalidVoyageApiKey
+          )
+        )
       case other => fail(s"Expected aggregated configuration failures, got $other")
     }
   }
 
   test("LOG-04 configuration remains redacted when local metadata is enabled") {
-    val result = AppConfig.fromConfig(defaultConfig +
-      """logging.mask-sensitive = false
+    val result = AppConfig.fromConfig(
+      defaultConfig +
+        """logging.mask-sensitive = false
         |mongo.uri = "mongodb://user:synthetic-secret@127.0.0.1:1"
         |""".stripMargin,
-      Map.empty)
+      Map.empty
+    )
     assert(result.isRight)
     assert(!result.toString.contains("synthetic-secret"))
     assert(!result.toString.contains("mongodb://"))

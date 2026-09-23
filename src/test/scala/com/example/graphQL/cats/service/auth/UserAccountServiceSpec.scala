@@ -4,7 +4,18 @@ import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepository, MutationEntityReference, MutationReceiptExecution, MutationReceiptFingerprint, MutationReceiptKey, MutationReceiptRepository, MutationReceiptWrite, MutationWriteContext, UserAccountRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{
+  AnalyticsErasureRequestRepository,
+  MutationEntityReference,
+  MutationReceiptExecution,
+  MutationReceiptFingerprint,
+  MutationReceiptKey,
+  MutationReceiptRepository,
+  MutationReceiptWrite,
+  MutationWriteContext,
+  UserAccountRepository,
+  UserRepository
+}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AnalyticsError, UseCaseError}
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -18,10 +29,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   private val now = Instant.parse("2026-09-18T10:00:00Z")
   private val userId = UserId(UUID.fromString("20000000-0000-0000-0000-000000000001"))
   private val recruiterId = UserId(UUID.fromString("20000000-0000-0000-0000-000000000002"))
-  private val recruiter = User(recruiterId, None, "Recruiter", UserRole.Recruiter,
-    Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
+  private val recruiter = User(
+    recruiterId,
+    None,
+    "Recruiter",
+    UserRole.Recruiter,
+    Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
+    now
+  )
   private val admin = User(userId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
-  private val deletedRecruiter = recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None, deletedAt = Some(now))
+  private val deletedRecruiter =
+    recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None, deletedAt = Some(now))
   private val request = IdempotencyRequest.fromCanonicalInput(
     UUID.fromString("20000000-0000-0000-0000-000000000003"),
     "{}"
@@ -39,12 +57,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts)
-      result <- service.signUp(request, SignUpInput(
-        "Candidate",
-        UserRole.Candidate,
-        "password-password",
-        Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
-      )).value
+      result <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "Candidate",
+            UserRole.Candidate,
+            "password-password",
+            Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
+          )
+        )
+        .value
     } yield assertEquals(result, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
   }
 
@@ -52,8 +75,12 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts)
-      candidate <- service.signUp(request, SignUpInput("Candidate", UserRole.Candidate, "password-password", None)).value
-      recruiter <- service.signUp(request, SignUpInput("Recruiter", UserRole.Recruiter, "password-password", None)).value
+      candidate <- service
+        .signUp(request, SignUpInput("Candidate", UserRole.Candidate, "password-password", None))
+        .value
+      recruiter <- service
+        .signUp(request, SignUpInput("Recruiter", UserRole.Recruiter, "password-password", None))
+        .value
     } yield {
       assertEquals(candidate, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
       assertEquals(recruiter, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
@@ -75,11 +102,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts)
-      result <- service.signUp(
-        request,
-        SignUpInput("Candidate", UserRole.Candidate, "password-password",
-          Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))))
-      ).value
+      result <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "Candidate",
+            UserRole.Candidate,
+            "password-password",
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+          )
+        )
+        .value
       stored <- accounts.values.get
     } yield {
       assert(result.exists(_._2.value.nonEmpty))
@@ -91,11 +124,25 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts)
-      result <- service.signUp(
-        request,
-        SignUpInput("   ", UserRole.Candidate, "password-password", Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))))
-      ).value
-    } yield assertEquals(result, Left(UseCaseError.ValidationFailed(cats.data.NonEmptyList.one(com.example.graphQL.cats.domain.error.DomainValidationError.BlankField("name")))))
+      result <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "   ",
+            UserRole.Candidate,
+            "password-password",
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+          )
+        )
+        .value
+    } yield assertEquals(
+      result,
+      Left(
+        UseCaseError.ValidationFailed(
+          cats.data.NonEmptyList.one(com.example.graphQL.cats.domain.error.DomainValidationError.BlankField("name"))
+        )
+      )
+    )
   }
 
   test("token issuance failure does not persist an account and is not a repository failure") {
@@ -106,13 +153,23 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts, tokenIssuer = unavailableIssuer)
-      result <- service.signUp(
-        request,
-        SignUpInput("Candidate", UserRole.Candidate, "password-password", Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))))
-      ).value
+      result <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "Candidate",
+            UserRole.Candidate,
+            "password-password",
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+          )
+        )
+        .value
       stored <- accounts.values.get
     } yield {
-      assertEquals(result, Left(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
+      assertEquals(
+        result,
+        Left(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady))
+      )
       assertEquals(stored, Map.empty)
     }
   }
@@ -121,11 +178,13 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map(recruiter.id -> recruiter)), accounts)
-      result <- service.updateMyProfile(
-        request,
-        ActorContext(recruiter.id, UserRole.Recruiter),
-        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
-      ).value
+      result <- service
+        .updateMyProfile(
+          request,
+          ActorContext(recruiter.id, UserRole.Recruiter),
+          AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+        )
+        .value
     } yield assertEquals(result, Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
   }
 
@@ -133,11 +192,13 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map(admin.id -> admin)), accounts)
-      result <- service.updateMyProfile(
-        request,
-        ActorContext(admin.id, UserRole.Admin),
-        AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
-      ).value
+      result <- service
+        .updateMyProfile(
+          request,
+          ActorContext(admin.id, UserRole.Admin),
+          AccountProfileInput(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+        )
+        .value
     } yield assertEquals(result, Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole)))
   }
 
@@ -145,12 +206,17 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts)
-      result <- service.signUp(request, SignUpInput(
-        "Recruiter",
-        UserRole.Recruiter,
-        "password-password",
-        Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
-      )).value
+      result <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "Recruiter",
+            UserRole.Recruiter,
+            "password-password",
+            Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
+          )
+        )
+        .value
     } yield assert(result.isRight)
   }
 
@@ -158,18 +224,28 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     for {
       accounts <- TestAccounts.create(initialized = true)
       service = accountService(new TestUsers(Map.empty), accounts)
-      first <- service.signUp(request, SignUpInput(
-        "Candidate Name",
-        UserRole.Candidate,
-        "password-password",
-        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
-      )).value
-      duplicate <- service.signUp(request, SignUpInput(
-        " candidate name ",
-        UserRole.Candidate,
-        "password-password",
-        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
-      )).value
+      first <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "Candidate Name",
+            UserRole.Candidate,
+            "password-password",
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+          )
+        )
+        .value
+      duplicate <- service
+        .signUp(
+          request,
+          SignUpInput(
+            " candidate name ",
+            UserRole.Candidate,
+            "password-password",
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+          )
+        )
+        .value
     } yield {
       assert(first.isRight)
       assertEquals(duplicate, Left(UseCaseError.Account(AccountError.NameTaken)))
@@ -197,7 +273,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("Argon2 unknown-user verification accepts arbitrary credentials without retaining their hash") {
     Semaphore[IO](1).flatMap { permits =>
       val hasher = new Argon2PasswordHasher(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits)
-      hasher.verifyUnknown("first-password").flatMap(_ => hasher.verifyUnknown("second-password")).map(assertEquals(_, ()))
+      hasher
+        .verifyUnknown("first-password")
+        .flatMap(_ => hasher.verifyUnknown("second-password"))
+        .map(assertEquals(_, ()))
     }
   }
 
@@ -270,7 +349,11 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   }
 
   private object TestErasureRequests extends AnalyticsErasureRequestRepository {
-    override def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def enqueue(
+        userId: UserId,
+        now: Instant,
+        context: MutationWriteContext
+    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private object TransactionalReceipts extends MutationReceiptRepository {
@@ -281,12 +364,18 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         fingerprint: MutationReceiptFingerprint,
         now: Instant,
         expiresAt: Instant
-    )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+    )(
+        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, now, expiresAt)
-      write(context).map(_.map(_.fold(
-        MutationReceiptExecution.Rejected(_),
-        value => MutationReceiptExecution.Applied(value.value, value.entity)
-      )))
+      write(context).map(
+        _.map(
+          _.fold(
+            MutationReceiptExecution.Rejected(_),
+            value => MutationReceiptExecution.Applied(value.value, value.entity)
+          )
+        )
+      )
     }
   }
 
@@ -296,7 +385,9 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         fingerprint: MutationReceiptFingerprint,
         now: Instant,
         expiresAt: Instant
-    )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+    )(
+        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, now, expiresAt, write)
       IO.pure(Right(MutationReceiptExecution.Replay(reference)))
     }
@@ -305,29 +396,52 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   private final class TestUsers(values: Map[UserId, User]) extends UserRepository {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
-    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(ids.flatMap(values.get)))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
+      IO.pure(Right(ids.flatMap(values.get)))
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Right(()))
   }
 
   private final class TestAccounts(
       initializedState: Boolean,
       val values: Ref[IO, Map[String, AccountCredentials]]
   ) extends UserAccountRepository {
-    override def bootstrap(user: User, passwordHash: String, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
+    override def bootstrap(
+        user: User,
+        passwordHash: String,
+        context: MutationWriteContext
+    ): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
     override def initialized: IO[Either[RepositoryError, Boolean]] = IO.pure(Right(initializedState))
-    override def createAccount(user: User, passwordHash: String, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] =
+    override def createAccount(
+        user: User,
+        passwordHash: String,
+        now: Instant,
+        context: MutationWriteContext
+    ): IO[Either[RepositoryError, Unit]] =
       values.modify { current =>
         val key = AccountName.canonical(user.name)
         if (current.contains(key)) current -> Left(RepositoryError.Conflict)
         else (current.updated(key, AccountCredentials(user, passwordHash)), Right(()))
       }
-    override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] = values.get.map(values => Right(values.get(nameCanonical)))
-    override def updateProfile(userId: UserId, profile: UserProfile, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
+    override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] =
+      values.get.map(values => Right(values.get(nameCanonical)))
+    override def updateProfile(
+        userId: UserId,
+        profile: UserProfile,
+        now: Instant,
+        context: MutationWriteContext
+    ): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
     override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
-    override def deleteAccount(userId: UserId, now: Instant, tombstone: String, context: MutationWriteContext): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def deleteAccount(
+        userId: UserId,
+        now: Instant,
+        tombstone: String,
+        context: MutationWriteContext
+    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private object TestAccounts {
-    def create(initialized: Boolean): IO[TestAccounts] = Ref.of[IO, Map[String, AccountCredentials]](Map.empty).map(new TestAccounts(initialized, _))
+    def create(initialized: Boolean): IO[TestAccounts] =
+      Ref.of[IO, Map[String, AccountCredentials]](Map.empty).map(new TestAccounts(initialized, _))
   }
 }

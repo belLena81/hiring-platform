@@ -1,6 +1,11 @@
 package com.example.graphQL.cats.repository.mongo
 
-import com.example.graphQL.cats.repository.protocol.{AnalyticsFunnelDay, AnalyticsReportSnapshot, AnalyticsSkillPostingDay, AnalyticsTimeToHire}
+import com.example.graphQL.cats.repository.protocol.{
+  AnalyticsFunnelDay,
+  AnalyticsReportSnapshot,
+  AnalyticsSkillPostingDay,
+  AnalyticsTimeToHire
+}
 import munit.FunSuite
 
 import java.time.Instant

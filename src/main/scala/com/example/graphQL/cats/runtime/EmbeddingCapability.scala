@@ -38,9 +38,11 @@ private[runtime] object EmbeddingCapability {
       Resource.eval((makeUsers(None), makeJobs(None)).mapN(Disabled(_, _)))
     } else {
       for {
-        apiKey <- Resource.eval(IO.fromOption(config.voyageApiKey)(
-          new IllegalArgumentException("VOYAGE_API_KEY is required when vector search is enabled")
-        ))
+        apiKey <- Resource.eval(
+          IO.fromOption(config.voyageApiKey)(
+            new IllegalArgumentException("VOYAGE_API_KEY is required when vector search is enabled")
+          )
+        )
         work <- Resource.eval(makeWork)
         users <- Resource.eval(makeUsers(Some(work)))
         jobs <- Resource.eval(makeJobs(Some(work)))

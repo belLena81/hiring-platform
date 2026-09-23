@@ -17,8 +17,7 @@ import com.example.graphQL.cats.runtime.{HiringPlatformServer, MongoHiringRuntim
 import scala.util.control.NoStackTrace
 
 object Main extends IOApp {
-  private final case class ConfigInvalid(errors: NonEmptyList[ConfigError])
-      extends RuntimeException with NoStackTrace
+  private final case class ConfigInvalid(errors: NonEmptyList[ConfigError]) extends RuntimeException with NoStackTrace
 
   override protected def reportFailure(error: Throwable): IO[Unit] =
     SafeDiagnostics.configure().flatMap { diagnostics =>
@@ -28,21 +27,27 @@ object Main extends IOApp {
   private def program: Resource[IO, Unit] = for {
     mask <- Resource.eval(AppConfig.loadMaskSensitive)
     telemetry <- TelemetryRuntime.resource
-    config <- Resource.eval(AppConfig.load.flatMap(_.fold(
-      errors => IO.raiseError[AppConfig](ConfigInvalid(errors)),
-      IO.pure
-    )))
+    config <- Resource.eval(
+      AppConfig.load.flatMap(
+        _.fold(
+          errors => IO.raiseError[AppConfig](ConfigInvalid(errors)),
+          IO.pure
+        )
+      )
+    )
     diagnostics <- Resource.eval(SafeDiagnostics.configure(mask && config.maskSensitive))
-    runtime <- MongoHiringRuntime.resource(MongoHiringRuntime.RuntimeConfig(
-      config.mongoUri,
-      config.mongoDatabase,
-      diagnostics,
-      config.vectorSearch,
-      config.jwtAuth,
-      config.passwordHash,
-      config.kafka,
-      config.resetOnStart
-    ))
+    runtime <- MongoHiringRuntime.resource(
+      MongoHiringRuntime.RuntimeConfig(
+        config.mongoUri,
+        config.mongoDatabase,
+        diagnostics,
+        config.vectorSearch,
+        config.jwtAuth,
+        config.passwordHash,
+        config.kafka,
+        config.resetOnStart
+      )
+    )
     contextFactory <- RequestContextFactory.resource
     documentCache <- GraphQLDocumentCache.resource
     rateLimiter <- Resource.eval(AuthRateLimiter.create(config.authRateLimit))
@@ -66,18 +71,23 @@ object Main extends IOApp {
     routeSet <- Resource.eval(routeBuilder.httpRoutes(routeConfig))
     routes <- telemetry.instrument(routeSet)
     _ <- HiringPlatformServer.resource(config.host, config.port, routes, diagnostics)
-    _ <- Resource.make(diagnostics.emit(LogEvent.Started, fields = Map(
-      LogField.HttpHost -> config.host.toString,
-      LogField.HttpPort -> config.port.toString
-    )))(_ => diagnostics.emit(LogEvent.Shutdown))
+    _ <- Resource.make(
+      diagnostics.emit(
+        LogEvent.Started,
+        fields = Map(
+          LogField.HttpHost -> config.host.toString,
+          LogField.HttpPort -> config.port.toString
+        )
+      )
+    )(_ => diagnostics.emit(LogEvent.Shutdown))
   } yield ()
 
   private def handleStartupFailure(error: Throwable): IO[ExitCode] =
     AppConfig.loadMaskSensitive.flatMap { maskSensitive =>
       SafeDiagnostics.configure(maskSensitive).flatMap { diagnostics =>
         val event = error match {
-          case ConfigInvalid(errors) => diagnostics.emit(LogEvent.ConfigInvalid,
-            fields = Map(LogField.ConfigKey -> errors.head.key))
+          case ConfigInvalid(errors) =>
+            diagnostics.emit(LogEvent.ConfigInvalid, fields = Map(LogField.ConfigKey -> errors.head.key))
           case _ => diagnostics.emit(LogEvent.StartupFailed, fields = LogFields.failure(error))
         }
         event.as(ExitCode.Error)

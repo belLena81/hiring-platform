@@ -10,9 +10,11 @@ import com.example.graphQL.cats.domain.model.{AccountStatus, Job, JobStatus, Use
 final class ActorAuthorization(users: UserRepository) {
   def resolve(actor: ActorContext, allowDeleted: Boolean = false): UseCaseIO[User] =
     actor match {
-      case authenticated: AuthenticatedActor => UseCase.fromEither(validate(authenticated.claims, authenticated.viewer, allowDeleted))
+      case authenticated: AuthenticatedActor =>
+        UseCase.fromEither(validate(authenticated.claims, authenticated.viewer, allowDeleted))
       case _ =>
-        UseCase.repository(users.find(actor.userId))
+        UseCase
+          .repository(users.find(actor.userId))
           .subflatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
           .subflatMap(validate(actor, _, allowDeleted))
     }

@@ -26,18 +26,25 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
         for {
           userId <- EitherT.fromOptionF(
             JwtActorAuthenticator.verify(value, config.hmacSecret, config.issuer, config.audience, clock),
-            AuthFailure.InvalidToken)
-          actor <- EitherT(users.actorFor(userId).map(_.leftMap(_ => AuthFailure.Unavailable)
-            .flatMap(_.toRight(AuthFailure.UnknownActor))))
+            AuthFailure.InvalidToken
+          )
+          actor <- EitherT(
+            users
+              .actorFor(userId)
+              .map(
+                _.leftMap(_ => AuthFailure.Unavailable)
+                  .flatMap(_.toRight(AuthFailure.UnknownActor))
+              )
+          )
         } yield actor
       }
     } yield actor).value
 
   private def bearerToken(request: Request[IO]): Either[AuthFailure, Option[String]] =
     request.headers.get(Authorization.headerInstance.name).map(_.toList) match {
-      case None | Some(Nil) => Right(None)
+      case None | Some(Nil)  => Right(None)
       case Some(_ :: _ :: _) => Left(AuthFailure.MalformedCredentials)
-      case Some(_) =>
+      case Some(_)           =>
         request.headers.get[Authorization] match {
           case Some(Authorization(Credentials.Token(AuthScheme.Bearer, token))) if token.nonEmpty => Right(Some(token))
           case _ => Left(AuthFailure.MalformedCredentials)
@@ -49,10 +56,22 @@ object JwtActorAuthenticator {
   private val Algorithms = Seq(JwtAlgorithm.HS256)
   private val Options = JwtOptions(signature = true, expiration = true, notBefore = true, leeway = 0)
 
-  def verify(token: String, secret: String, issuer: String, audience: String, clock: EffectClock[IO]): IO[Option[UserId]] =
+  def verify(
+      token: String,
+      secret: String,
+      issuer: String,
+      audience: String,
+      clock: EffectClock[IO]
+  ): IO[Option[UserId]] =
     clock.realTimeInstant.map(instant => verifyAt(token, secret, issuer, audience, instant))
 
-  private[auth] def verifyAt(token: String, secret: String, issuer: String, audience: String, now: Instant): Option[UserId] =
+  private[auth] def verifyAt(
+      token: String,
+      secret: String,
+      issuer: String,
+      audience: String,
+      now: Instant
+  ): Option[UserId] =
     given clock: JavaClock = JavaClock.fixed(now, ZoneOffset.UTC)
 
     JwtCirce(clock)

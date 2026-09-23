@@ -169,10 +169,14 @@ private[mongo] object MongoHiringPersistenceCodecs {
 
   private[mongo] def decodeUser(document: Document): Either[Throwable, StoredUser] = decode(document, userCodec)
   private[mongo] def decodeJob(document: Document): Either[Throwable, StoredJob] = decode(document, jobCodec)
-  private[mongo] def decodeApplication(document: Document): Either[Throwable, StoredApplication] = decode(document, applicationCodec)
-  private[mongo] def decodeApplicationEvent(document: Document): Either[Throwable, StoredApplicationEvent] = decode(document, applicationEventCodec)
-  private[mongo] def decodeOperationalEvent(document: Document): Either[Throwable, StoredOperationalEvent] = decode(document, operationalEventCodec)
-  private[mongo] def decodeSearchSession(document: Document): Either[Throwable, StoredSearchSession] = decode(document, searchSessionCodec)
+  private[mongo] def decodeApplication(document: Document): Either[Throwable, StoredApplication] =
+    decode(document, applicationCodec)
+  private[mongo] def decodeApplicationEvent(document: Document): Either[Throwable, StoredApplicationEvent] =
+    decode(document, applicationEventCodec)
+  private[mongo] def decodeOperationalEvent(document: Document): Either[Throwable, StoredOperationalEvent] =
+    decode(document, operationalEventCodec)
+  private[mongo] def decodeSearchSession(document: Document): Either[Throwable, StoredSearchSession] =
+    decode(document, searchSessionCodec)
 
   private def encode[A](value: A, codec: Codec[A]): Document = {
     val bson = new BsonDocument()

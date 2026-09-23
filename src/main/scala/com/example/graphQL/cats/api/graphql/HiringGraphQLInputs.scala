@@ -22,7 +22,8 @@ private[graphql] object HiringGraphQLInputs {
   lazy val healthStatus: EnumType[String] = enumType("HealthStatus", List("UP"))
   lazy val readinessStatus: EnumType[String] = enumType("ReadinessStatus", List("READY", "NOT_READY"))
   lazy val jobStatus: EnumType[JobStatus] = enumType("JobStatus", JobStatus.values.toList)
-  lazy val applicationStatus: EnumType[ApplicationStatus] = enumType("ApplicationStatus", ApplicationStatus.values.toList)
+  lazy val applicationStatus: EnumType[ApplicationStatus] =
+    enumType("ApplicationStatus", ApplicationStatus.values.toList)
   lazy val userRole: EnumType[UserRole] = enumType("UserRole", UserRole.values.toList)
   lazy val userStatus: EnumType[AccountStatus] = enumType("UserStatus", AccountStatus.values.toList)
   lazy val searchMode: EnumType[SearchMode] = enumType("SearchMode", SearchMode.values.toList)
@@ -31,18 +32,28 @@ private[graphql] object HiringGraphQLInputs {
     EnumType(name, values = values.map(value => EnumValue(value.toString.toUpperCase(Locale.ROOT), value = value)))
 
   private def stringScalar[A](name: String, parse: String => Either[Violation, A], render: A => String): ScalarType[A] =
-    ScalarType[A](name,
+    ScalarType[A](
+      name,
       coerceOutput = (value, _) => render(value),
       coerceUserInput = { case value: String => parse(value); case _ => Left(NotAString(name)) },
-      coerceInput = { case sangria.ast.StringValue(value, _, _, _, _) => parse(value); case _ => Left(NotAString(name)) })
+      coerceInput = {
+        case sangria.ast.StringValue(value, _, _, _, _) => parse(value); case _ => Left(NotAString(name))
+      }
+    )
 
   private def uuidScalar[A](name: String, wrap: UUID => A, unwrap: A => UUID): ScalarType[A] =
-    stringScalar(name,
+    stringScalar(
+      name,
       value => Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap),
-      value => unwrap(value).toString)
+      value => unwrap(value).toString
+    )
 
   lazy val instantType: ScalarType[Instant] =
-    stringScalar("Instant", value => Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation()), _.toString)
+    stringScalar(
+      "Instant",
+      value => Either.catchNonFatal(Instant.parse(value)).left.map(_ => InstantCoercionViolation()),
+      _.toString
+    )
 
   def instantField[A](name: String, resolve: A => Instant): Field[RequestContext, A] =
     Field(name, instantType, resolve = context => resolve(context.value))
@@ -66,18 +77,21 @@ private[graphql] object HiringGraphQLInputs {
   lazy val firstArgument: Argument[Int] = Argument("first", IntType)
   lazy val afterArgument: Argument[Option[String]] = Argument("after", OptionInputType(StringType))
   lazy val cityArgument: Argument[Option[String]] = Argument("city", OptionInputType(StringType))
-  lazy val skillsArgument: Argument[Option[Seq[String]]] = Argument("skills", OptionInputType(ListInputType(StringType)))
+  lazy val skillsArgument: Argument[Option[Seq[String]]] =
+    Argument("skills", OptionInputType(ListInputType(StringType)))
   lazy val createdAfterArgument: Argument[Option[Instant]] = Argument("createdAfter", OptionInputType(instantType))
   lazy val analyticsFromArgument: Argument[Instant] = Argument("from", instantType)
   lazy val analyticsToArgument: Argument[Instant] = Argument("to", instantType)
   lazy val searchIdArgument: Argument[Option[UUID]] = Argument("searchId", OptionInputType(uuidType))
   lazy val jobStatusArgument: Argument[Option[JobStatus]] = Argument("status", OptionInputType(jobStatus))
-  lazy val applicationStatusArgument: Argument[Option[ApplicationStatus]] = Argument("status", OptionInputType(applicationStatus))
+  lazy val applicationStatusArgument: Argument[Option[ApplicationStatus]] =
+    Argument("status", OptionInputType(applicationStatus))
   lazy val userRoleArgument: Argument[Option[UserRole]] = Argument("role", OptionInputType(userRole))
   lazy val userStatusArgument: Argument[Option[AccountStatus]] = Argument("status", OptionInputType(userStatus))
   lazy val jobFilterInputType: InputObjectType[JobFilterGraphQLInput] =
     deriveInputObjectType[JobFilterGraphQLInput](InputObjectTypeName("JobFilter"))
-  lazy val jobFilterArgument: Argument[Option[JobFilterGraphQLInput]] = Argument("filter", OptionInputType(jobFilterInputType))
+  lazy val jobFilterArgument: Argument[Option[JobFilterGraphQLInput]] =
+    Argument("filter", OptionInputType(jobFilterInputType))
   lazy val submitApplicationInputType: InputObjectType[SubmitApplicationGraphQLInput] =
     deriveInputObjectType[SubmitApplicationGraphQLInput](InputObjectTypeName("SubmitApplicationInput"))
   lazy val createJobInputType: InputObjectType[CreateJobGraphQLInput] =
@@ -95,13 +109,17 @@ private[graphql] object HiringGraphQLInputs {
     deriveInputObjectType[RejectApplicationGraphQLInput](InputObjectTypeName("RejectApplicationInput"))
   lazy val declineApplicationInputType: InputObjectType[DeclineApplicationGraphQLInput] =
     deriveInputObjectType[DeclineApplicationGraphQLInput](InputObjectTypeName("DeclineApplicationInput"))
-  lazy val submitApplicationInputArgument: Argument[SubmitApplicationGraphQLInput] = Argument("input", submitApplicationInputType)
+  lazy val submitApplicationInputArgument: Argument[SubmitApplicationGraphQLInput] =
+    Argument("input", submitApplicationInputType)
   lazy val createJobInputArgument: Argument[CreateJobGraphQLInput] = Argument("input", createJobInputType)
   lazy val updateJobInputArgument: Argument[UpdateJobGraphQLInput] = Argument("input", updateJobInputType)
   lazy val jobActionInputArgument: Argument[JobActionGraphQLInput] = Argument("input", jobActionInputType)
-  lazy val applicationActionInputArgument: Argument[ApplicationActionGraphQLInput] = Argument("input", applicationActionInputType)
-  lazy val rejectApplicationInputArgument: Argument[RejectApplicationGraphQLInput] = Argument("input", rejectApplicationInputType)
-  lazy val declineApplicationInputArgument: Argument[DeclineApplicationGraphQLInput] = Argument("input", declineApplicationInputType)
+  lazy val applicationActionInputArgument: Argument[ApplicationActionGraphQLInput] =
+    Argument("input", applicationActionInputType)
+  lazy val rejectApplicationInputArgument: Argument[RejectApplicationGraphQLInput] =
+    Argument("input", rejectApplicationInputType)
+  lazy val declineApplicationInputArgument: Argument[DeclineApplicationGraphQLInput] =
+    Argument("input", declineApplicationInputType)
   lazy val signUpInputType: InputObjectType[SignUpGraphQLInput] =
     deriveInputObjectType[SignUpGraphQLInput](InputObjectTypeName("SignUpInput"))
   lazy val bootstrapAdminInputType: InputObjectType[BootstrapAdminGraphQLInput] =
@@ -111,12 +129,14 @@ private[graphql] object HiringGraphQLInputs {
   lazy val updateProfileInputType: InputObjectType[UpdateProfileGraphQLInput] =
     deriveInputObjectType[UpdateProfileGraphQLInput](InputObjectTypeName("UpdateMyProfileInput"))
   lazy val signUpInputArgument: Argument[SignUpGraphQLInput] = Argument("input", signUpInputType)
-  lazy val bootstrapAdminInputArgument: Argument[BootstrapAdminGraphQLInput] = Argument("input", bootstrapAdminInputType)
+  lazy val bootstrapAdminInputArgument: Argument[BootstrapAdminGraphQLInput] =
+    Argument("input", bootstrapAdminInputType)
   lazy val loginInputArgument: Argument[LoginGraphQLInput] = Argument("input", loginInputType)
   lazy val updateProfileInputArgument: Argument[UpdateProfileGraphQLInput] = Argument("input", updateProfileInputType)
   lazy val deleteMyAccountInputType: InputObjectType[DeleteMyAccountGraphQLInput] =
     deriveInputObjectType[DeleteMyAccountGraphQLInput](InputObjectTypeName("DeleteMyAccountInput"))
-  lazy val deleteMyAccountInputArgument: Argument[DeleteMyAccountGraphQLInput] = Argument("input", deleteMyAccountInputType)
+  lazy val deleteMyAccountInputArgument: Argument[DeleteMyAccountGraphQLInput] =
+    Argument("input", deleteMyAccountInputType)
   lazy val recordJobViewInputType: InputObjectType[RecordJobViewGraphQLInput] =
     deriveInputObjectType[RecordJobViewGraphQLInput](InputObjectTypeName("RecordJobViewInput"))
   lazy val recordSearchResultClickInputType: InputObjectType[RecordSearchResultClickGraphQLInput] =

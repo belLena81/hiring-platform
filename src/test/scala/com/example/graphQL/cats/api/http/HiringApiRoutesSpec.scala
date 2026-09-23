@@ -4,9 +4,23 @@ import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.FixedTestClock
-import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices, TestGraphQLSupport}
+import com.example.graphQL.cats.api.graphql.{
+  GraphQLRequest,
+  HiringGraphQLSchema,
+  HiringGraphQLServices,
+  TestGraphQLSupport
+}
 import com.example.graphQL.cats.api.http.HiringApiRoutes
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, HiringReadService, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{
+  DatabaseProbe,
+  Diagnostics,
+  HealthService,
+  HiringReadService,
+  LogEvent,
+  LogField,
+  LogFields,
+  ProbeResult
+}
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.application.ApplicationService
 import com.example.graphQL.cats.service.job.JobService
@@ -40,13 +54,16 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       service: HealthService,
       diagnostics: Diagnostics,
       hiring: HiringGraphQLServices = TestGraphQLSupport.emptyServices,
-      authenticate: Request[IO] => IO[Either[com.example.graphQL.cats.api.auth.AuthFailure, Option[com.example.graphQL.cats.service.ActorContext]]] =
-        _ => IO.pure(Right(None)),
+      authenticate: Request[IO] => IO[
+        Either[com.example.graphQL.cats.api.auth.AuthFailure, Option[com.example.graphQL.cats.service.ActorContext]]
+      ] = _ => IO.pure(Right(None)),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
       authRateLimit: AuthRateLimitConfig = AuthRateLimitConfig(60, 100, 1000),
-      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil),
+      trustedProxy: TrustedProxyConfig = TrustedProxyConfig(Nil)
   ): IO[HiringApiRoutes] =
-    TestGraphQLSupport.dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy).allocated
+    TestGraphQLSupport
+      .dependencies(hiring, authenticate, hiringReady, authRateLimit, trustedProxy)
+      .allocated
       .map { case (dependencies, _) => new HiringApiRoutes(service, diagnostics, dependencies) }
 
   private def defaultApp(routes: HiringApiRoutes): IO[HttpApp[IO]] =
@@ -68,11 +85,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val socket = if (peer.contains(':')) s"[$peer]:12345" else s"$peer:12345"
     request(query)
       .putHeaders(Header.Raw(CIString(headerName), value))
-      .withAttribute(Request.Keys.ConnectionInfo, Request.Connection(
-        SocketAddress.fromStringIp("127.0.0.1:8080").get,
-        SocketAddress.fromStringIp(socket).get,
-        secure = false
-      ))
+      .withAttribute(
+        Request.Keys.ConnectionInfo,
+        Request.Connection(
+          SocketAddress.fromStringIp("127.0.0.1:8080").get,
+          SocketAddress.fromStringIp(socket).get,
+          secure = false
+        )
+      )
   }
 
   private val health = request("{ health { status } }")
@@ -139,33 +159,67 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |  }
         |}""".stripMargin
     for {
-      usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
-        Map(ServiceFixtures.candidateId -> ServiceFixtures.candidate, ServiceFixtures.recruiterId -> ServiceFixtures.recruiter)
+      usersRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.UserId,
+        com.example.graphQL.cats.domain.model.User
+      ]](
+        Map(
+          ServiceFixtures.candidateId -> ServiceFixtures.candidate,
+          ServiceFixtures.recruiterId -> ServiceFixtures.recruiter
+        )
       )
-      jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](
+      jobsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.JobId,
+        com.example.graphQL.cats.domain.model.Job
+      ]](
         Map(ServiceFixtures.jobId -> ServiceFixtures.openJob)
       )
-      applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
+      applicationsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.ApplicationId,
+        com.example.graphQL.cats.domain.model.Application
+      ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
-      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService(users), FixedTestClock.at(ServiceFixtures.now))
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
-        authenticate = authenticator.authenticate).flatMap(defaultApp)
+      services = HiringGraphQLServices(
+        HiringReadService(users, jobs, applications),
+        JobService(users, jobs),
+        ApplicationService(users, jobs, applications),
+        TestGraphQLSupport.cursorKey,
+        TestGraphQLSupport.accountService
+      )
+      authenticator = JwtActorAuthenticator(
+        jwtConfig,
+        UserAuthenticationService(users),
+        FixedTestClock.at(ServiceFixtures.now)
+      )
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        hiring = services,
+        authenticate = authenticator.authenticate
+      ).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Admin)
-      submitted <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
-      listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))).flatMap(_.as[Json])
+      submitted <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
+        .flatMap(_.as[Json])
+      listed <- http(request(applicationsQuery).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
+        .flatMap(_.as[Json])
     } yield {
       val payload = submitted.hcursor.downField("data").downField("submitApplication")
       assertEquals(payload.get[String]("status"), Right("CREATED"))
       val edge = listed.hcursor.downField("data").downField("myApplications").downField("edges").downArray
       assertEquals(edge.downField("node").get[String]("status"), Right("CREATED"))
-      assertEquals(edge.downField("node").downField("job").get[String]("id"), Right(ServiceFixtures.jobId.value.toString))
-      assertEquals(edge.downField("node").downField("candidate").get[String]("id"), Right(ServiceFixtures.candidateId.value.toString))
+      assertEquals(
+        edge.downField("node").downField("job").get[String]("id"),
+        Right(ServiceFixtures.jobId.value.toString)
+      )
+      assertEquals(
+        edge.downField("node").downField("candidate").get[String]("id"),
+        Right(ServiceFixtures.candidateId.value.toString)
+      )
       assert(!submitted.noSpaces.contains("Admin"))
     }
   }
@@ -179,23 +233,47 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
          |  }
          |}""".stripMargin
     for {
-      usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
+      usersRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.UserId,
+        com.example.graphQL.cats.domain.model.User
+      ]](
         Map(ServiceFixtures.candidateId -> ServiceFixtures.candidate)
       )
-      jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](
+      jobsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.JobId,
+        com.example.graphQL.cats.domain.model.Job
+      ]](
         Map(ServiceFixtures.jobId -> ServiceFixtures.openJob)
       )
-      applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
+      applicationsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.ApplicationId,
+        com.example.graphQL.cats.domain.model.Application
+      ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
-      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService(users), FixedTestClock.at(ServiceFixtures.now))
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
-        authenticate = authenticator.authenticate, hiringReady = IO.pure(ProbeResult.Unavailable)).flatMap(defaultApp)
+      services = HiringGraphQLServices(
+        HiringReadService(users, jobs, applications),
+        JobService(users, jobs),
+        ApplicationService(users, jobs, applications),
+        TestGraphQLSupport.cursorKey,
+        TestGraphQLSupport.accountService
+      )
+      authenticator = JwtActorAuthenticator(
+        jwtConfig,
+        UserAuthenticationService(users),
+        FixedTestClock.at(ServiceFixtures.now)
+      )
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        hiring = services,
+        authenticate = authenticator.authenticate,
+        hiringReady = IO.pure(ProbeResult.Unavailable)
+      ).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       response <- http(request(mutation).putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       body <- response.as[Json]
@@ -212,11 +290,20 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("authenticated public GraphQL health and readiness bypass hiring setup readiness") {
     for {
-      usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
+      usersRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.UserId,
+        com.example.graphQL.cats.domain.model.User
+      ]](
         Map(ServiceFixtures.candidateId -> ServiceFixtures.candidate)
       )
-      jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](Map.empty)
-      applicationsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.ApplicationId, com.example.graphQL.cats.domain.model.Application]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.JobId,
+        com.example.graphQL.cats.domain.model.Job
+      ]](Map.empty)
+      applicationsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.ApplicationId,
+        com.example.graphQL.cats.domain.model.Application
+      ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
       setupChecks <- Ref.of[IO, Int](0)
@@ -224,22 +311,41 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
-      services = HiringGraphQLServices(HiringReadService(users, jobs, applications), JobService(users, jobs), ApplicationService(users, jobs, applications), TestGraphQLSupport.cursorKey, TestGraphQLSupport.accountService)
-      authenticator = JwtActorAuthenticator(jwtConfig, UserAuthenticationService(users), FixedTestClock.at(ServiceFixtures.now))
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop, hiring = services,
+      services = HiringGraphQLServices(
+        HiringReadService(users, jobs, applications),
+        JobService(users, jobs),
+        ApplicationService(users, jobs, applications),
+        TestGraphQLSupport.cursorKey,
+        TestGraphQLSupport.accountService
+      )
+      authenticator = JwtActorAuthenticator(
+        jwtConfig,
+        UserAuthenticationService(users),
+        FixedTestClock.at(ServiceFixtures.now)
+      )
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        hiring = services,
         authenticate = authenticator.authenticate,
-        hiringReady = setupChecks.update(_ + 1).as(ProbeResult.Unavailable)).flatMap(defaultApp)
+        hiringReady = setupChecks.update(_ + 1).as(ProbeResult.Unavailable)
+      ).flatMap(defaultApp)
       token = signedToken(ServiceFixtures.candidateId, UserRole.Candidate)
       authenticatedHealth <- http(health.putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
       healthBody <- authenticatedHealth.as[Json]
-      authenticatedReadiness <- http(request("{ readiness { status } }").putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token")))
+      authenticatedReadiness <- http(
+        request("{ readiness { status } }").putHeaders(Header.Raw(CIString("Authorization"), s"Bearer $token"))
+      )
       readinessBody <- authenticatedReadiness.as[Json]
       setupCount <- setupChecks.get
     } yield {
       assertEquals(authenticatedHealth.status, Status.Ok)
       assertEquals(healthBody.hcursor.downField("data").downField("health").get[String]("status"), Right("UP"))
       assertEquals(authenticatedReadiness.status, Status.Ok)
-      assertEquals(readinessBody.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
+      assertEquals(
+        readinessBody.hcursor.downField("data").downField("readiness").get[String]("status"),
+        Right("NOT_READY")
+      )
       assertEquals(setupCount, 0)
     }
   }
@@ -259,8 +365,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       body <- response.as[Json]
     } yield {
       assertEquals(response.status, Status.Ok)
-      assertEquals(body.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
-        Right("UNAUTHORIZED"))
+      assertEquals(
+        body.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("UNAUTHORIZED")
+      )
     }
   }
 
@@ -282,8 +390,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       diagnostics = capture(records)
-      http <- buildRoutes(new HealthService(probe, diagnostics), diagnostics,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, diagnostics),
+        diagnostics,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+      ).flatMap(defaultApp)
       firstLogin <- http(request(login))
       limitedLogin <- http(request(login))
       firstSignup <- http(request(signup))
@@ -296,11 +407,22 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(limitedLogin.status, Status.Ok)
       assertEquals(limitedSignup.status, Status.Ok)
       assertEquals(firstSignup.status, Status.Ok)
-      assertEquals(limitedLogin.contentType.map(_.mediaType), Some(MediaType.unsafeParse("application/graphql-response+json")))
+      assertEquals(
+        limitedLogin.contentType.map(_.mediaType),
+        Some(MediaType.unsafeParse("application/graphql-response+json"))
+      )
       assert(limitedLogin.headers.get(CIString("Retry-After")).isEmpty)
-      assertEquals(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
-      assert(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[Long]("retryAfter").exists(_ >= 1))
-      assertEquals(limitedSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
+      assert(
+        limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[Long]("retryAfter").exists(_ >= 1)
+      )
+      assertEquals(
+        limitedSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
       assert(captured.exists(record => record._1 == LogEvent.GraphQLCompleted))
     }
   }
@@ -308,14 +430,16 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   test("authentication failure returns a typed bearer challenge") {
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.InvalidToken)))
-          .flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        authenticate = _ => IO.pure(Left(com.example.graphQL.cats.api.auth.AuthFailure.InvalidToken))
+      )
+        .flatMap(defaultApp)
       response <- http(health)
     } yield {
       assertEquals(response.status, Status.Unauthorized)
-      assertEquals(response.headers.get[`WWW-Authenticate`].map(_.values.head),
-        Some(Challenge("Bearer", "hiring")))
+      assertEquals(response.headers.get[`WWW-Authenticate`].map(_.values.head), Some(Challenge("Bearer", "hiring")))
     }
   }
 
@@ -326,8 +450,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(response.headers.get[`Cache-Control`].map(_.values.toList), Some(List(CacheDirective.`no-store`)))
       assertEquals(response.headers.get(CIString("X-Content-Type-Options")).map(_.head.value), Some("nosniff"))
-      assertEquals(response.headers.get(CIString("Content-Security-Policy")).map(_.head.value),
-        Some("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"))
+      assertEquals(
+        response.headers.get(CIString("Content-Security-Policy")).map(_.head.value),
+        Some("default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+      )
     }
   }
 
@@ -344,15 +470,21 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |}""".stripMargin
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+      ).flatMap(defaultApp)
       aliasResponse <- http(request(repeatedAliases))
       mixedResponse <- http(request(mixedOperations))
       mixedBody <- mixedResponse.as[Json]
     } yield {
       assertEquals(aliasResponse.status, Status.Ok)
       assertEquals(mixedResponse.status, Status.Ok)
-      assertEquals(mixedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        mixedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
     }
   }
 
@@ -380,8 +512,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+      ).flatMap(defaultApp)
       harmlessFirst <- http(request(document, "Harmless"))
       harmlessSecond <- http(request(document, "Harmless"))
       sensitiveFirst <- http(request(document, "SelectedSingle"))
@@ -392,7 +527,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(harmlessSecond.status, Status.Ok)
       assertEquals(sensitiveFirst.status, Status.Ok)
       assertEquals(sensitiveSecond.status, Status.Ok)
-      assertEquals(sensitiveSecondBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        sensitiveSecondBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
     }
   }
 
@@ -426,8 +564,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+      ).flatMap(defaultApp)
       firstNamedLogin <- http(request(namedLogin))
       limitedNamedLogin <- http(request(namedLogin))
       firstInlineSignup <- http(request(inlineSignup))
@@ -444,9 +585,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(limitedInlineSignup.status, Status.Ok)
       assertEquals(firstBootstrap.status, Status.Ok)
       assertEquals(limitedBootstrap.status, Status.Ok)
-      assertEquals(limitedNamedLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
-      assertEquals(limitedInlineSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
-      assertEquals(limitedBootstrapBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        limitedNamedLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
+      assertEquals(
+        limitedInlineSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
+      assertEquals(
+        limitedBootstrapBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
     }
   }
 
@@ -473,8 +623,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+      ).flatMap(defaultApp)
       firstCreate <- http(request(createJob))
       secondCreate <- http(request(createJob))
       firstNamed <- http(request(operationNamedLogin))
@@ -500,9 +653,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
         authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
-        trustedProxy = trustedProxy).flatMap(defaultApp)
+        trustedProxy = trustedProxy
+      ).flatMap(defaultApp)
       firstClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.10"))
       limitedClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.10"))
       secondClientLogin <- http(proxiedRequest(login, "10.0.0.5", "for=203.0.113.11"))
@@ -518,8 +674,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(firstClientSignup.status, Status.Ok)
       assertEquals(limitedClientSignup.status, Status.Ok)
       assertEquals(secondClientSignup.status, Status.Ok)
-      assertEquals(limitedClientLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
-      assertEquals(limitedClientSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        limitedClientLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
+      assertEquals(
+        limitedClientSignupBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
     }
   }
 
@@ -531,15 +693,21 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
-        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)).flatMap(defaultApp)
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
+        authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100)
+      ).flatMap(defaultApp)
       first <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.10"))
       limited <- http(proxiedRequest(login, "198.51.100.10", "for=203.0.113.11"))
       limitedBody <- limited.as[Json]
     } yield {
       assertEquals(first.status, Status.Ok)
       assertEquals(limited.status, Status.Ok)
-      assertEquals(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
     }
   }
 
@@ -552,9 +720,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
     for {
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      http <- buildRoutes(new HealthService(probe, Diagnostics.noop), Diagnostics.noop,
+      http <- buildRoutes(
+        new HealthService(probe, Diagnostics.noop),
+        Diagnostics.noop,
         authRateLimit = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 100),
-        trustedProxy = trustedProxy).flatMap(defaultApp)
+        trustedProxy = trustedProxy
+      ).flatMap(defaultApp)
       first <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))
       limited <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.10"))
       second <- http(proxiedHeaderRequest(login, "10.0.0.5", "X-Forwarded-For", "203.0.113.11"))
@@ -563,7 +734,10 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(first.status, Status.Ok)
       assertEquals(limited.status, Status.Ok)
       assertEquals(second.status, Status.Ok)
-      assertEquals(limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"), Right("RATE_LIMITED"))
+      assertEquals(
+        limitedBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        Right("RATE_LIMITED")
+      )
     }
   }
 
@@ -581,16 +755,31 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           executionRecords.update(_ :+ ((event, id, fields))) *>
             (if event == LogEvent.RuntimeFailed then executionFailure.complete(()).void else IO.unit)
       }
-      parsed <- IO.fromEither(Json.obj(
-        "query" -> Json.fromString("query Selected($include: Boolean!) { readiness @include(if: $include) { status } } # synthetic-field-comment-secret"),
-        "operationName" -> Json.fromString("Selected"),
-        "variables" -> Json.obj("include" -> Json.True, "password" -> Json.fromString("synthetic-field-value-secret"))
-      ).as[GraphQLRequest].leftMap(error => new IllegalArgumentException("Invalid test query", error)))
-      execution <- TestGraphQLSupport.context(IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")), diagnostics = executionSink,
-        requestId = Some("00000000-0000-0000-0000-000000000901")).use { context =>
-        TestGraphQLSupport.parseAndExecute(parsed, context).flatTap(_ => executionFailure.get.timeout(5.seconds))
-      }
-      result <- IO.fromEither(execution.left.map(failure => new AssertionError(s"Expected field error result: $failure")))
+      parsed <- IO.fromEither(
+        Json
+          .obj(
+            "query" -> Json.fromString(
+              "query Selected($include: Boolean!) { readiness @include(if: $include) { status } } # synthetic-field-comment-secret"
+            ),
+            "operationName" -> Json.fromString("Selected"),
+            "variables" -> Json
+              .obj("include" -> Json.True, "password" -> Json.fromString("synthetic-field-value-secret"))
+          )
+          .as[GraphQLRequest]
+          .leftMap(error => new IllegalArgumentException("Invalid test query", error))
+      )
+      execution <- TestGraphQLSupport
+        .context(
+          IO.raiseError[ProbeResult](new IllegalStateException("synthetic-resolver-secret")),
+          diagnostics = executionSink,
+          requestId = Some("00000000-0000-0000-0000-000000000901")
+        )
+        .use { context =>
+          TestGraphQLSupport.parseAndExecute(parsed, context).flatTap(_ => executionFailure.get.timeout(5.seconds))
+        }
+      result <- IO.fromEither(
+        execution.left.map(failure => new AssertionError(s"Expected field error result: $failure"))
+      )
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       id <- IO.randomUUID.map(_.toString)
       response <- TestGraphQLSupport.dependencies().use { dependencies =>
@@ -610,11 +799,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assert(error.hcursor.downField("locations").succeeded)
       assertEquals(captured.map(_._1), Vector(LogEvent.GraphQLCompleted))
       assert(captured.forall(_._2.contains(id)))
-      assert(captured.filter(_._1 == LogEvent.GraphQLCompleted).forall(_._3.get(LogField.Outcome).contains("FIELD_ERROR")))
+      assert(
+        captured.filter(_._1 == LogEvent.GraphQLCompleted).forall(_._3.get(LogField.Outcome).contains("FIELD_ERROR"))
+      )
       val runtimeFailures = executionCaptured.filter(_._1 == LogEvent.RuntimeFailed)
       assertEquals(runtimeFailures.map(_._1), Vector(LogEvent.RuntimeFailed))
       assertEquals(runtimeFailures.head._2, Some("00000000-0000-0000-0000-000000000901"))
-      assert(runtimeFailures.head._3.get(LogField.ErrorLocation).exists(LogFields.validPublic(LogField.ErrorLocation, _)))
+      assert(
+        runtimeFailures.head._3.get(LogField.ErrorLocation).exists(LogFields.validPublic(LogField.ErrorLocation, _))
+      )
       assert(!body.noSpaces.contains("Request context is closed"))
     }
   }
@@ -640,26 +833,29 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         finish <- Deferred[IO, Unit]
         probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
         http <- buildRoutes(new HealthService(probe, sink), sink).flatMap(defaultApp)
-        slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
-          .onFinalize(finalizing.complete(()) *> finish.get *> IO.delay(finalized.set(true))))
+        slow = health.withBodyStream(
+          fs2.Stream
+            .eval(entered.complete(()) *> IO.never[Byte])
+            .onFinalize(finalizing.complete(()) *> finish.get *> IO.delay(finalized.set(true)))
+        )
         _ <- Resource.make(http(slow).start)(fiber => finish.complete(()).void *> fiber.cancel).use { fiber =>
-              entered.get.timeout(2.seconds) *> fiber.cancel.background.use { joined =>
-                (for {
-                  _ <- finalizing.get.timeout(2.seconds)
-                  during <- IO(attempts.get())
-                  _ <- IO(assert(during.isEmpty))
-                  _ <- finish.complete(())
-                  _ <- joined.flatMap(_.embedNever)
-                  outcome <- fiber.join
-                  recovered <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
-                  after <- IO(attempts.get())
-                } yield {
-                  assert(outcome.isCanceled)
-                  assertEquals(recovered.status, Status.Ok)
-                  assertEquals(after, Vector.empty)
-                }).guarantee(finish.complete(()).void)
-              }
-            }
+          entered.get.timeout(2.seconds) *> fiber.cancel.background.use { joined =>
+            (for {
+              _ <- finalizing.get.timeout(2.seconds)
+              during <- IO(attempts.get())
+              _ <- IO(assert(during.isEmpty))
+              _ <- finish.complete(())
+              _ <- joined.flatMap(_.embedNever)
+              outcome <- fiber.join
+              recovered <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
+              after <- IO(attempts.get())
+            } yield {
+              assert(outcome.isCanceled)
+              assertEquals(recovered.status, Status.Ok)
+              assertEquals(after, Vector.empty)
+            }).guarantee(finish.complete(()).void)
+          }
+        }
       } yield ()
     }
   }
@@ -668,8 +864,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       records <- Ref.of[IO, Vector[DiagnosticRecord]](Vector.empty)
       http <- app(IO.pure(ProbeResult.Ready), capture(records))
-      response <- http(Request[IO](Method.fromString("SYNTHETIC").getOrElse(fail("Invalid test method")),
-        Uri.unsafeFromString("/synthetic-path-secret?password=synthetic-query-secret")))
+      response <- http(
+        Request[IO](
+          Method.fromString("SYNTHETIC").getOrElse(fail("Invalid test method")),
+          Uri.unsafeFromString("/synthetic-path-secret?password=synthetic-query-secret")
+        )
+      )
       body <- response.as[Json]
       captured <- records.get
     } yield {
@@ -678,9 +878,17 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assert(id.exists(isUuid))
       assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Not found")))))
       assert(captured.forall(_._2 == id))
-      assert(captured.exists(record => record._1 == LogEvent.RequestRejected &&
-        record._3.get(LogField.Reason).contains("NOT_FOUND")))
-      assert(!captured.exists(record => record._1.toString == "REQUEST_COMPLETED" || record._1.toString == "REQUEST_CANCELLED"))
+      assert(
+        captured.exists(record =>
+          record._1 == LogEvent.RequestRejected &&
+            record._3.get(LogField.Reason).contains("NOT_FOUND")
+        )
+      )
+      assert(
+        !captured.exists(record =>
+          record._1.toString == "REQUEST_COMPLETED" || record._1.toString == "REQUEST_CANCELLED"
+        )
+      )
       assert(captured.forall(_._3.forall { case (field, value) => LogFields.validPublic(field, value) }))
       assert(!captured.toString.contains("synthetic"))
     }
@@ -690,13 +898,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       authenticationCalls <- Ref.of[IO, Int](0)
       http <- buildRoutes(
-        new HealthService(new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }, Diagnostics.noop),
+        new HealthService(
+          new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) },
+          Diagnostics.noop
+        ),
         Diagnostics.noop,
-        authenticate = _ => authenticationCalls.update(_ + 1).as(
-          Left(com.example.graphQL.cats.api.auth.AuthFailure.MalformedCredentials))
+        authenticate = _ =>
+          authenticationCalls.update(_ + 1).as(Left(com.example.graphQL.cats.api.auth.AuthFailure.MalformedCredentials))
       ).flatMap(defaultApp)
-      response <- http(Request[IO](Method.GET, Uri.unsafeFromString("/unrelated"))
-        .putHeaders(Header.Raw(CIString("Authorization"), "malformed")))
+      response <- http(
+        Request[IO](Method.GET, Uri.unsafeFromString("/unrelated"))
+          .putHeaders(Header.Raw(CIString("Authorization"), "malformed"))
+      )
       calls <- authenticationCalls.get
     } yield {
       assertEquals(response.status, Status.NotFound)
@@ -750,8 +963,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           records.update(_ :+ ((event, id, fields)))
       }
       http <- app(IO.pure(ProbeResult.Ready), sink)
-      slow = health.withBodyStream(fs2.Stream.eval(entered.complete(()) *> IO.never[Byte])
-        .onFinalize(finalizing.complete(()) *> finish.get))
+      slow = health.withBodyStream(
+        fs2.Stream
+          .eval(entered.complete(()) *> IO.never[Byte])
+          .onFinalize(finalizing.complete(()) *> finish.get)
+      )
       _ <- Resource.make(http(slow).start)(fiber => finish.complete(()).void *> fiber.cancel).use { fiber =>
         entered.get.timeout(2.seconds) *> fiber.cancel.background.use { joined =>
           (for {
@@ -782,10 +998,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         http <- app(IO.pure(ProbeResult.Unavailable), sink)
         success <- http(request("{ readiness { status } }"))
         rejected <- http(request("{ missingField }"))
-        unexpected <- http(health.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException("synthetic-body-secret"))))
+        unexpected <- http(
+          health.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException("synthetic-body-secret")))
+        )
         bodies <- List(success, rejected, unexpected).traverse(_.as[String])
       } yield {
-        assertEquals(List(success.status, rejected.status, unexpected.status), List(Status.Ok, Status.BadRequest, Status.InternalServerError))
+        assertEquals(
+          List(success.status, rejected.status, unexpected.status),
+          List(Status.Ok, Status.BadRequest, Status.InternalServerError)
+        )
         assert(bodies.forall(body => !body.contains("synthetic-")))
       }
     }
@@ -804,7 +1025,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         http(health.putHeaders(Header.Raw(CIString("Accept"), accept)))
           .map { response =>
             assertEquals(response.status, expected, accept)
-            assertEquals(response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"), Some(mediaType), accept)
+            assertEquals(
+              response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"),
+              Some(mediaType),
+              accept
+            )
           }
       }
     }
@@ -814,14 +1039,21 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     val cases = List(
       ("application/*;q=1, application/graphql-response+json;q=0", Status.Ok, "application/json"),
       ("*/*;q=1, application/json;q=0", Status.Ok, "application/graphql-response+json"),
-      ("application/*;q=1, application/graphql-response+json;q=0, application/json;q=0", Status.NotAcceptable, "application/json")
+      (
+        "application/*;q=1, application/graphql-response+json;q=0, application/json;q=0",
+        Status.NotAcceptable,
+        "application/json"
+      )
     )
     app(IO.pure(ProbeResult.Ready)).flatMap { http =>
       cases.traverse_ { case (accept, expectedStatus, expectedMediaType) =>
         http(health.putHeaders(Header.Raw(CIString("Accept"), accept))).map { response =>
           assertEquals(response.status, expectedStatus, accept)
-          assertEquals(response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"),
-            Some(expectedMediaType), accept)
+          assertEquals(
+            response.contentType.map(header => s"${header.mediaType.mainType}/${header.mediaType.subType}"),
+            Some(expectedMediaType),
+            accept
+          )
         }
       }
     }
@@ -845,8 +1077,11 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
           .flatMap { response =>
             response.as[Json].map { body =>
               assertEquals(response.status, Status.NotAcceptable, accept)
-              assertEquals(body.hcursor.downField("errors").downArray.get[String]("message"),
-                Right("Expected application/graphql-response+json or application/json"), accept)
+              assertEquals(
+                body.hcursor.downField("errors").downArray.get[String]("message"),
+                Right("Expected application/graphql-response+json or application/json"),
+                accept
+              )
             }
           }
       }
@@ -925,11 +1160,19 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
 
   test("JSON envelope and GraphQL failures are sanitized, before probe execution") {
     val malformed = List(
-      "not-json", "[]", "{\"query\":1}", "{\"query\":\"{ health { status } }\",\"variables\":[]}",
+      "not-json",
+      "[]",
+      "{\"query\":1}",
+      "{\"query\":\"{ health { status } }\",\"variables\":[]}",
       "{\"query\":\"{ health { status } }\",\"operationName\":2}"
     ).map(body => health.withEntity(body).putHeaders(Header.Raw(CIString("Content-Type"), "application/json")))
-    val queries = List("{ privateSecret }", "{ users { email } }", "query A { health { status } } query B { health { status } }",
-      "query Test($include: Boolean!) { readiness @include(if: $include) { status } }", "{ health").map(request)
+    val queries = List(
+      "{ privateSecret }",
+      "{ users { email } }",
+      "query A { health { status } } query B { health { status } }",
+      "query Test($include: Boolean!) { readiness @include(if: $include) { status } }",
+      "{ health"
+    ).map(request)
     for {
       count <- Ref.of[IO, Int](0)
       http <- app(count.update(_ + 1).as(ProbeResult.Ready))
@@ -993,16 +1236,35 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   }
 
   test("named operation, variables, explicit nulls, methods and media negotiation") {
-    val selected = health.withEntity(Json.obj(
-      "query" -> Json.fromString("query First { readiness { status } } query Second($include: Boolean!) { health @include(if: $include) { status } }"),
-      "operationName" -> Json.fromString("Second"), "variables" -> Json.obj("include" -> Json.True)))
+    val selected = health.withEntity(
+      Json.obj(
+        "query" -> Json.fromString(
+          "query First { readiness { status } } query Second($include: Boolean!) { health @include(if: $include) { status } }"
+        ),
+        "operationName" -> Json.fromString("Second"),
+        "variables" -> Json.obj("include" -> Json.True)
+      )
+    )
     for {
       http <- app(IO.raiseError(new IllegalStateException("probe must not execute")))
       named <- http(selected)
-      nulls <- http(health.withEntity(Json.obj("query" -> Json.fromString("{health{status}}"),
-        "operationName" -> Json.Null, "variables" -> Json.Null)))
-      missingOperation <- http(selected.withEntity(Json.obj("query" -> Json.fromString("query Named { health { status } }"),
-        "operationName" -> Json.fromString("Missing"))))
+      nulls <- http(
+        health.withEntity(
+          Json.obj(
+            "query" -> Json.fromString("{health{status}}"),
+            "operationName" -> Json.Null,
+            "variables" -> Json.Null
+          )
+        )
+      )
+      missingOperation <- http(
+        selected.withEntity(
+          Json.obj(
+            "query" -> Json.fromString("query Named { health { status } }"),
+            "operationName" -> Json.fromString("Missing")
+          )
+        )
+      )
       method <- http(Request[IO](Method.GET, Uri.unsafeFromString("/graphql")))
       media <- http(health.withEntity("query"))
       accept <- http(health.putHeaders(Header.Raw(CIString("Accept"), "text/html")))
@@ -1036,10 +1298,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
   }
 
   test("invalid field in an unselected operation rejects a valid selected health operation") {
-    val selected = health.withEntity(Json.obj(
-      "query" -> Json.fromString("query Selected { health { status } } query Unselected { invalidField readiness { status } }"),
-      "operationName" -> Json.fromString("Selected")
-    ))
+    val selected = health.withEntity(
+      Json.obj(
+        "query" -> Json.fromString(
+          "query Selected { health { status } } query Unselected { invalidField readiness { status } }"
+        ),
+        "operationName" -> Json.fromString("Selected")
+      )
+    )
     for {
       calls <- Ref.of[IO, Int](0)
       http <- app(calls.update(_ + 1).as(ProbeResult.Ready))
@@ -1058,13 +1324,20 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)
       diagnostics = new Diagnostics {
-        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = events.update(_ :+ (event -> requestId))
+        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          events.update(_ :+ (event -> requestId))
       }
       http <- app(IO.pure(ProbeResult.Ready), diagnostics)
-      response <- http(health.withEntity(Json.obj(
-        "query" -> Json.fromString("{ unknownField }"),
-        "variables" -> Json.obj("password" -> Json.fromString(secret))
-      )).putHeaders(Header.Raw(CIString("X-Request-ID"), secret)))
+      response <- http(
+        health
+          .withEntity(
+            Json.obj(
+              "query" -> Json.fromString("{ unknownField }"),
+              "variables" -> Json.obj("password" -> Json.fromString(secret))
+            )
+          )
+          .putHeaders(Header.Raw(CIString("X-Request-ID"), secret))
+      )
       body <- response.as[String]
       captured <- events.get
     } yield {
@@ -1083,7 +1356,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     for {
       events <- Ref.of[IO, List[(LogEvent, Option[String])]](Nil)
       diagnostics = new Diagnostics {
-        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] = events.update(_ :+ (event -> requestId))
+        def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          events.update(_ :+ (event -> requestId))
       }
       http <- app(IO.pure(ProbeResult.Ready), diagnostics)
       response <- http(health.withBodyStream(fs2.Stream.raiseError[IO](new IllegalStateException(secret))))
@@ -1121,10 +1395,13 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
       assert(!body.hcursor.downField("errors").succeeded)
       val correlationId = requestId(response)
-      assertEquals(captured, List(
-        LogEvent.MongoUnavailable -> correlationId,
-        LogEvent.GraphQLCompleted -> correlationId
-      ))
+      assertEquals(
+        captured,
+        List(
+          LogEvent.MongoUnavailable -> correlationId,
+          LogEvent.GraphQLCompleted -> correlationId
+        )
+      )
       assert(!body.noSpaces.contains(secret))
       assert(!response.headers.toString.contains(secret))
       assert(!captured.toString.contains(secret))
@@ -1146,15 +1423,22 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
     } yield {
       assertEquals(large.status, Status.PayloadTooLarge)
       assertEquals(response.status, Status.GatewayTimeout)
-      assertEquals(body, Json.obj("errors" -> Json.arr(Json.obj(
-        "message" -> Json.fromString("Request deadline exceeded")))))
+      assertEquals(
+        body,
+        Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Request deadline exceeded"))))
+      )
       assertEquals(successful.status, Status.Ok)
       val id = requestId(response)
       val deadline = captured.filter(_._2 == id)
       assertEquals(deadline.map(_._1), Vector(LogEvent.RequestRejected))
-      assert(deadline.filter(_._1 == LogEvent.RequestRejected).forall(record =>
-        record._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED") &&
-          record._3.get(LogField.Status).contains("504")))
+      assert(
+        deadline
+          .filter(_._1 == LogEvent.RequestRejected)
+          .forall(record =>
+            record._3.get(LogField.Reason).contains("DEADLINE_EXCEEDED") &&
+              record._3.get(LogField.Status).contains("504")
+          )
+      )
     }
   }
 
@@ -1166,28 +1450,38 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       release <- Deferred[IO, Unit]
       http <- app(
         started.updateAndGet(_ + 1).flatMap(count => if (count == 16) allStarted.complete(()).void else IO.unit) *>
-          release.get.as(ProbeResult.Ready), diagnostics = capture(records))
-      _ <- List.fill(16)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use { fibers =>
-        for {
-          _ <- allStarted.get.timeout(5.seconds)
-          rejected <- http(health)
-          rejectedBody <- rejected.as[Json]
-          liveness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
-          _ <- release.complete(())
-          _ <- fibers.traverse_(_.joinWithNever)
-          captured <- records.get
-          _ <- IO {
-            assertEquals(rejected.status, Status.ServiceUnavailable)
-            assertEquals(rejectedBody, Json.obj("errors" -> Json.arr(Json.obj(
-              "message" -> Json.fromString("Server busy")))))
-            assertEquals(liveness.status, Status.Ok)
-            val id = requestId(rejected)
-            assert(id.exists(value => captured.exists(record =>
-              record._1 == LogEvent.RequestRejected && record._2.contains(value) &&
-                record._3.get(LogField.Reason).contains("OVERLOADED") &&
-                record._3.get(LogField.Status).contains("503"))))
-          }
-        } yield ()
+          release.get.as(ProbeResult.Ready),
+        diagnostics = capture(records)
+      )
+      _ <- List.fill(16)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use {
+        fibers =>
+          for {
+            _ <- allStarted.get.timeout(5.seconds)
+            rejected <- http(health)
+            rejectedBody <- rejected.as[Json]
+            liveness <- http(Request[IO](Method.GET, Uri.unsafeFromString("/health")))
+            _ <- release.complete(())
+            _ <- fibers.traverse_(_.joinWithNever)
+            captured <- records.get
+            _ <- IO {
+              assertEquals(rejected.status, Status.ServiceUnavailable)
+              assertEquals(
+                rejectedBody,
+                Json.obj("errors" -> Json.arr(Json.obj("message" -> Json.fromString("Server busy"))))
+              )
+              assertEquals(liveness.status, Status.Ok)
+              val id = requestId(rejected)
+              assert(
+                id.exists(value =>
+                  captured.exists(record =>
+                    record._1 == LogEvent.RequestRejected && record._2.contains(value) &&
+                      record._3.get(LogField.Reason).contains("OVERLOADED") &&
+                      record._3.get(LogField.Status).contains("503")
+                  )
+                )
+              )
+            }
+          } yield ()
       }
     } yield ()
   }
@@ -1199,16 +1493,19 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       release <- Deferred[IO, Unit]
       http <- app(
         started.updateAndGet(_ + 1).flatMap(count => if (count == 2) bothStarted.complete(()).void else IO.unit) *>
-          release.get *> IO.pure(ProbeResult.Ready), admissionPermits = 2)
-      _ <- List.fill(2)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use { fibers =>
-        (for {
-          _ <- bothStarted.get.timeout(2.seconds)
-          overflow <- http(health)
-          _ <- IO(assertEquals(overflow.status, Status.ServiceUnavailable))
-          _ <- release.complete(())
-          completed <- fibers.traverse(_.joinWithNever)
-          _ <- IO(assert(completed.forall(_.status == Status.Ok)))
-        } yield ()).guarantee(release.complete(()).void)
+          release.get *> IO.pure(ProbeResult.Ready),
+        admissionPermits = 2
+      )
+      _ <- List.fill(2)(Resource.make(http(request("{ readiness { status } }")).start)(_.cancel)).sequence.use {
+        fibers =>
+          (for {
+            _ <- bothStarted.get.timeout(2.seconds)
+            overflow <- http(health)
+            _ <- IO(assertEquals(overflow.status, Status.ServiceUnavailable))
+            _ <- release.complete(())
+            completed <- fibers.traverse(_.joinWithNever)
+            _ <- IO(assert(completed.forall(_.status == Status.Ok)))
+          } yield ()).guarantee(release.complete(()).void)
       }
     } yield ()
   }

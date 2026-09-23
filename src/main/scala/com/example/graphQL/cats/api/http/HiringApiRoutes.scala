@@ -13,8 +13,12 @@ import org.http4s.dsl.Http4sDsl
 import org.typelevel.otel4s.trace.Tracer
 import scala.concurrent.duration.*
 
-final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
-    dependencies: HiringApiRoutes.Dependencies, tracer: Tracer[IO] = Tracer.noop[IO]) {
+final class HiringApiRoutes(
+    service: HealthService,
+    diagnostics: Diagnostics,
+    dependencies: HiringApiRoutes.Dependencies,
+    tracer: Tracer[IO] = Tracer.noop[IO]
+) {
   private object dsl extends Http4sDsl[IO]
   import dsl.*
 
@@ -36,16 +40,30 @@ final class HiringApiRoutes(service: HealthService, diagnostics: Diagnostics,
     val graphQL = new GraphQLHttpRoutes(service, diagnostics, dependencies, tracer)
     val onError = (request: Request[IO], failure: Throwable) =>
       graphQL.rejection(HttpRejection.Internal, request, LogFields.failure(failure))
-    val onEntityTooLarge = (request: Request[IO]) =>
-      graphQL.rejection(HttpRejection.PayloadTooLarge, request)
+    val onEntityTooLarge = (request: Request[IO]) => graphQL.rejection(HttpRejection.PayloadTooLarge, request)
 
     for {
-      protectedRoutes <- HttpMiddleware(config, graphQL.routes.orNotFound, diagnostics, tracer, onError, onEntityTooLarge)
-      probeRoutes <- HttpMiddleware(config, healthRoutes.orNotFound, diagnostics, tracer, onError, onEntityTooLarge,
-        applyAdmissionControl = false)
+      protectedRoutes <- HttpMiddleware(
+        config,
+        graphQL.routes.orNotFound,
+        diagnostics,
+        tracer,
+        onError,
+        onEntityTooLarge
+      )
+      probeRoutes <- HttpMiddleware(
+        config,
+        healthRoutes.orNotFound,
+        diagnostics,
+        tracer,
+        onError,
+        onEntityTooLarge,
+        applyAdmissionControl = false
+      )
     } yield Kleisli { request =>
-      val app = if (probePaths.contains(request.uri.path)) probeRoutes
-      else protectedRoutes
+      val app =
+        if (probePaths.contains(request.uri.path)) probeRoutes
+        else protectedRoutes
       OptionT.liftF(app(request))
     }
   }

@@ -41,15 +41,17 @@ final class SemanticSearchService(
       )
       vector <- embedQuery(text)
       results <- vectorSearch(
-        search.searchJobs(VectorSearchQuery(
-          vector.values,
-          Some(text),
-          filter,
-          first,
-          SearchMode.HYBRID,
-          embeddingModel,
-          searchId
-        ))
+        search.searchJobs(
+          VectorSearchQuery(
+            vector.values,
+            Some(text),
+            filter,
+            first,
+            SearchMode.HYBRID,
+            embeddingModel,
+            searchId
+          )
+        )
       )
     } yield results
 
@@ -60,8 +62,9 @@ final class SemanticSearchService(
   ): UseCaseIO[List[RankedJob]] =
     resolveCandidate(actor).flatMap { user =>
       (user.candidateProfile, user.embedding) match {
-        case (Some(profile), Some(embedding)) if embedding.meta.model == embeddingModel &&
-            embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile)) =>
+        case (Some(profile), Some(embedding))
+            if embedding.meta.model == embeddingModel &&
+              embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile)) =>
           val query = VectorSearchQuery(
             embedding.values,
             None,
@@ -73,7 +76,7 @@ final class SemanticSearchService(
           )
           vectorSearch(search.recommendedJobs(query))
         case (Some(_), Some(_)) => UseCase.left(UseCaseError.Search(SearchError.StaleEmbedding("candidate")))
-        case _ => UseCase.left(UseCaseError.Search(SearchError.MissingEmbedding("candidate")))
+        case _                  => UseCase.left(UseCaseError.Search(SearchError.MissingEmbedding("candidate")))
       }
     }
 
@@ -88,7 +91,8 @@ final class SemanticSearchService(
       _ <- UseCase.fromEither(
         Either.cond(user.role != UserRole.Candidate, (), UseCaseError.Domain(DomainError.RecruiterRequired))
       )
-      job <- UseCase.repository(jobs.find(jobId))
+      job <- UseCase
+        .repository(jobs.find(jobId))
         .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
       _ <- UseCase.fromEither(
         Either.cond(
@@ -101,8 +105,9 @@ final class SemanticSearchService(
         Either.cond(job.status == JobStatus.Open, (), UseCaseError.Domain(DomainError.JobMustBeOpen))
       )
       results <- job.embedding match {
-        case Some(embedding) if embedding.meta.model == embeddingModel &&
-            embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
+        case Some(embedding)
+            if embedding.meta.model == embeddingModel &&
+              embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
           val query = VectorSearchQuery(
             embedding.values,
             None,
@@ -114,7 +119,7 @@ final class SemanticSearchService(
           )
           vectorSearch(search.candidateMatches(query))
         case Some(_) => UseCase.left(UseCaseError.Search(SearchError.StaleEmbedding("job")))
-        case None => UseCase.left(UseCaseError.Search(SearchError.MissingEmbedding("job")))
+        case None    => UseCase.left(UseCaseError.Search(SearchError.MissingEmbedding("job")))
       }
     } yield results
 
@@ -125,7 +130,8 @@ final class SemanticSearchService(
     }
 
   private def embedQuery(text: String): UseCaseIO[EmbeddingVector] =
-    UseCase.liftIO(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Query)))
+    UseCase
+      .liftIO(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Query)))
       .subflatMap(_.leftMap(_ => UseCaseError.Search(SearchError.ProviderUnavailable)))
 
   private def vectorSearch[A](result: IO[Either[RepositoryError, A]]): UseCaseIO[A] =

@@ -10,7 +10,18 @@ import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
-import com.example.graphQL.cats.service.protocol.{AccountProfileInput, AccountUseCases, ApplicationUseCases, BootstrapAdminInput, HiringReadModel, IdempotencyRequest, JobUseCases, LoginInput, SignUpInput, UseCaseIO}
+import com.example.graphQL.cats.service.protocol.{
+  AccountProfileInput,
+  AccountUseCases,
+  ApplicationUseCases,
+  BootstrapAdminInput,
+  HiringReadModel,
+  IdempotencyRequest,
+  JobUseCases,
+  LoginInput,
+  SignUpInput,
+  UseCaseIO
+}
 import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import io.circe.Json
@@ -59,7 +70,14 @@ object TestGraphQLSupport {
       def submitApplication(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
       def myApplications(actor: ActorContext, page: ApplicationPageRequest) = unsupported
       def jobApplications(actor: ActorContext, jobId: JobId, page: ApplicationPageRequest) = unsupported
-      def changeStatus(request: IdempotencyRequest, actor: ActorContext, applicationId: ApplicationId, target: ApplicationStatus, feedback: Option[String], reason: Option[String]) = unsupported
+      def changeStatus(
+          request: IdempotencyRequest,
+          actor: ActorContext,
+          applicationId: ApplicationId,
+          target: ApplicationStatus,
+          feedback: Option[String],
+          reason: Option[String]
+      ) = unsupported
     },
     cursorKey,
     accountService
@@ -73,12 +91,15 @@ object TestGraphQLSupport {
       diagnostics: Diagnostics = Diagnostics.noop,
       requestId: Option[String] = None
   ): Resource[IO, RequestContext] =
-    RequestContextFactory.resource.flatMap(_.resource(RequestContextParameters(probe, actor, hiring, hiringReady,
-      diagnostics = diagnostics, requestId = requestId)))
+    RequestContextFactory.resource.flatMap(
+      _.resource(
+        RequestContextParameters(probe, actor, hiring, hiringReady, diagnostics = diagnostics, requestId = requestId)
+      )
+    )
 
   def parseAndExecute(request: GraphQLRequest, context: RequestContext): IO[Either[HiringGraphQLSchema.Failure, Json]] =
     GraphQLDocumentCache.resource.use(_.document(request.query).flatMap {
-      case Left(failure) => IO.pure(Left(failure))
+      case Left(failure)   => IO.pure(Left(failure))
       case Right(document) => HiringGraphQLSchema.executeInContext(request, document, context)
     })
 
@@ -93,6 +114,13 @@ object TestGraphQLSupport {
       factory <- RequestContextFactory.resource
       documentCache <- GraphQLDocumentCache.resource
       limiter <- Resource.eval(AuthRateLimiter.create(authRateLimit))
-    } yield HiringApiRoutes.Dependencies(hiring, Kleisli(authenticate), hiringReady, factory, documentCache, limiter,
-      ClientAddressResolver(trustedProxy))
+    } yield HiringApiRoutes.Dependencies(
+      hiring,
+      Kleisli(authenticate),
+      hiringReady,
+      factory,
+      documentCache,
+      limiter,
+      ClientAddressResolver(trustedProxy)
+    )
 }

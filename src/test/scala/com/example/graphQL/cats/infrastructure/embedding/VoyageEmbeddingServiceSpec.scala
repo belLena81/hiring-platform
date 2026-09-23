@@ -2,7 +2,12 @@ package com.example.graphQL.cats.infrastructure.embedding
 
 import cats.effect.IO
 import cats.data.Kleisli
-import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingInputType, EmbeddingVector}
+import com.example.graphQL.cats.repository.protocol.{
+  EmbeddingError,
+  EmbeddingInput,
+  EmbeddingInputType,
+  EmbeddingVector
+}
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.{Header, HttpApp, Method, Request, Response, Status, Uri}
@@ -53,14 +58,13 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
       IO.pure(jsonResponse(Status.Ok, "not-json"))
     }
     val wrongDimensionApp: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
-      IO.pure(jsonResponse(Status.Ok,
-        """{"data":[{"embedding":[0.1]}],"model":"voyage-4-lite"}"""
-      ))
+      IO.pure(jsonResponse(Status.Ok, """{"data":[{"embedding":[0.1]}],"model":"voyage-4-lite"}"""))
     }
     val malformed = Client.fromHttpApp[IO](malformedApp)
     val wrongDimension = Client.fromHttpApp[IO](wrongDimensionApp)
     val malformedService = new VoyageEmbeddingService(malformed, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
-    val wrongDimensionService = new VoyageEmbeddingService(wrongDimension, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
+    val wrongDimensionService =
+      new VoyageEmbeddingService(wrongDimension, "test-key", endpoint, "voyage-4-lite", 2, 1.second)
 
     for {
       malformedResult <- malformedService.embed(input)
@@ -80,7 +84,8 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
   }
 
   test("rejects an invalid endpoint while constructing the provider resource") {
-    VoyageEmbeddingService.resource("test-key", "not a URI", "voyage-4-lite", 2, 1.second)
+    VoyageEmbeddingService
+      .resource("test-key", "not a URI", "voyage-4-lite", 2, 1.second)
       .use(_ => IO.raiseError[Unit](new AssertionError("invalid endpoint was accepted")))
       .attempt
       .map(result => assert(result.isLeft))

@@ -21,24 +21,45 @@ final class CursorCodecSpec extends CatsEffectSuite {
   private val id = UUID.fromString("10000000-0000-0000-0000-000000000001")
 
   test("all cursor types round-trip through expiring JWTs") {
-    assertEquals(CursorCodec.decode[JobCursor](CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt), issuedAt), Right(JobCursor(issuedAt, JobId(id))))
-    assertEquals(CursorCodec.decode[ApplicationCursor](CursorCodec.encode(ApplicationCursor(issuedAt, ApplicationId(id)), issuedAt), issuedAt), Right(ApplicationCursor(issuedAt, ApplicationId(id))))
-    assertEquals(CursorCodec.decode[ApplicationEventCursor](CursorCodec.encode(ApplicationEventCursor(issuedAt, ApplicationEventId(id)), issuedAt), issuedAt), Right(ApplicationEventCursor(issuedAt, ApplicationEventId(id))))
-    assertEquals(CursorCodec.decode[UserCursor](CursorCodec.encode(UserCursor(issuedAt, UserId(id)), issuedAt), issuedAt), Right(UserCursor(issuedAt, UserId(id))))
+    assertEquals(
+      CursorCodec.decode[JobCursor](CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt), issuedAt),
+      Right(JobCursor(issuedAt, JobId(id)))
+    )
+    assertEquals(
+      CursorCodec.decode[ApplicationCursor](
+        CursorCodec.encode(ApplicationCursor(issuedAt, ApplicationId(id)), issuedAt),
+        issuedAt
+      ),
+      Right(ApplicationCursor(issuedAt, ApplicationId(id)))
+    )
+    assertEquals(
+      CursorCodec.decode[ApplicationEventCursor](
+        CursorCodec.encode(ApplicationEventCursor(issuedAt, ApplicationEventId(id)), issuedAt),
+        issuedAt
+      ),
+      Right(ApplicationEventCursor(issuedAt, ApplicationEventId(id)))
+    )
+    assertEquals(
+      CursorCodec.decode[UserCursor](CursorCodec.encode(UserCursor(issuedAt, UserId(id)), issuedAt), issuedAt),
+      Right(UserCursor(issuedAt, UserId(id)))
+    )
   }
 
   test("a cursor key remains safe for concurrent signing and verification") {
     val cursor = JobCursor(issuedAt, JobId(id))
     val expected = CursorCodec.encode(cursor, issuedAt)
 
-    List.fill(256)(()).parTraverse { _ =>
-      IO.cede *> IO {
-        val encoded = CursorCodec.encode(cursor, issuedAt)
-        (encoded, CursorCodec.decode[JobCursor](encoded, issuedAt))
+    List
+      .fill(256)(())
+      .parTraverse { _ =>
+        IO.cede *> IO {
+          val encoded = CursorCodec.encode(cursor, issuedAt)
+          (encoded, CursorCodec.decode[JobCursor](encoded, issuedAt))
+        }
       }
-    }.map { results =>
-      assert(results.forall { case (encoded, decoded) => encoded == expected && decoded == Right(cursor) })
-    }
+      .map { results =>
+        assert(results.forall { case (encoded, decoded) => encoded == expected && decoded == Right(cursor) })
+      }
   }
 
   test("cursor values are three-part JWTs carrying the signed keyset subject") {
@@ -73,8 +94,12 @@ final class CursorCodecSpec extends CatsEffectSuite {
   test("malformed, legacy, and non-cursor JWTs do not decode") {
     val legacy = encodeText(s"j|$issuedAt|$id|AAAAAAAAAAAAAAAAAAAAAA")
     val accessLike = JwtCirce.encode(
-      JwtClaim().about(id.toString).by("hiring-platform-local").to("hiring-graphql-api")
-        .issuedAt(issuedAt.getEpochSecond).expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
+      JwtClaim()
+        .about(id.toString)
+        .by("hiring-platform-local")
+        .to("hiring-graphql-api")
+        .issuedAt(issuedAt.getEpochSecond)
+        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
       summon[CursorCodec.CursorKey].secretKey,
       JwtAlgorithm.HS256
     )
@@ -87,17 +112,26 @@ final class CursorCodecSpec extends CatsEffectSuite {
   test("payload, signature, issuer, and audience tampering do not decode") {
     val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)
     val parts = encoded.split("\\.", -1)
-    val changedPayload = parts.updated(1, encodeSegment(s"""{"sub":"j|$issuedAt|${UUID.randomUUID()}"}""")).mkString(".")
+    val changedPayload =
+      parts.updated(1, encodeSegment(s"""{"sub":"j|$issuedAt|${UUID.randomUUID()}"}""")).mkString(".")
     val changedSignature = parts.updated(2, parts(2).reverse).mkString(".")
     val wrongIssuer = JwtCirce.encode(
-      JwtClaim().about(s"j|$issuedAt|$id").by("wrong-issuer").to("hiring-graphql-api")
-        .issuedAt(issuedAt.getEpochSecond).expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
+      JwtClaim()
+        .about(s"j|$issuedAt|$id")
+        .by("wrong-issuer")
+        .to("hiring-graphql-api")
+        .issuedAt(issuedAt.getEpochSecond)
+        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
       summon[CursorCodec.CursorKey].secretKey,
       JwtAlgorithm.HS256
     )
     val wrongAudience = JwtCirce.encode(
-      JwtClaim().about(s"j|$issuedAt|$id").by("hiring-platform-cursor").to("wrong-audience")
-        .issuedAt(issuedAt.getEpochSecond).expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
+      JwtClaim()
+        .about(s"j|$issuedAt|$id")
+        .by("hiring-platform-cursor")
+        .to("wrong-audience")
+        .issuedAt(issuedAt.getEpochSecond)
+        .expiresAt(issuedAt.plusSeconds(ttlSeconds).getEpochSecond),
       summon[CursorCodec.CursorKey].secretKey,
       JwtAlgorithm.HS256
     )
@@ -109,10 +143,16 @@ final class CursorCodecSpec extends CatsEffectSuite {
   }
 
   test("wrong signing keys are rejected") {
-    val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)(using summon[CursorCodec.Keyed[JobCursor]], defaultKey)
-    given otherKey: CursorCodec.CursorKey = CursorCodec.keyFromSecret("other-cursor-secret-01234567890123456789", ttlSeconds)
+    val encoded = CursorCodec.encode(JobCursor(issuedAt, JobId(id)), issuedAt)(using
+      summon[CursorCodec.Keyed[JobCursor]],
+      defaultKey
+    )
+    given otherKey: CursorCodec.CursorKey =
+      CursorCodec.keyFromSecret("other-cursor-secret-01234567890123456789", ttlSeconds)
 
-    assert(CursorCodec.decode[JobCursor](encoded, issuedAt)(using summon[CursorCodec.Keyed[JobCursor]], otherKey).isLeft)
+    assert(
+      CursorCodec.decode[JobCursor](encoded, issuedAt)(using summon[CursorCodec.Keyed[JobCursor]], otherKey).isLeft
+    )
   }
 
   private def encodeText(value: String): String = encodeSegment(value)

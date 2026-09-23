@@ -3,13 +3,27 @@ package com.example.graphQL.cats.service.events
 import cats.effect.{IO, Ref}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, UserRole}
-import com.example.graphQL.cats.repository.protocol.{MutationEntityReference, MutationReceiptExecution, MutationReceiptFingerprint, MutationReceiptKey, MutationReceiptRepository, MutationWriteContext, SearchSessionRepository, SearchSessionWorkRepository}
+import com.example.graphQL.cats.repository.protocol.{
+  MutationEntityReference,
+  MutationReceiptExecution,
+  MutationReceiptFingerprint,
+  MutationReceiptKey,
+  MutationReceiptRepository,
+  MutationWriteContext,
+  SearchSessionRepository,
+  SearchSessionWorkRepository
+}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
-import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, OperationalEventType, SearchSession, SearchSessionResult}
+import com.example.graphQL.cats.shared.events.{
+  OperationalEventEnvelope,
+  OperationalEventType,
+  SearchSession,
+  SearchSessionResult
+}
 import io.circe.Json
 import munit.CatsEffectSuite
 
@@ -42,10 +56,15 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
   test("recordSearchResultClick rejects forged actor and result data") {
     withService().flatMap { case (_, service) =>
       val actor = ActorContext(candidateId, UserRole.Candidate)
-      val otherActor = ActorContext(com.example.graphQL.cats.domain.model.Identifiers.UserId(otherActorId), UserRole.Candidate)
+      val otherActor =
+        ActorContext(com.example.graphQL.cats.domain.model.Identifiers.UserId(otherActorId), UserRole.Candidate)
       for {
-        forgedActor <- service.recordSearchResultClick(request(clickEventId), otherActor, clickEventId, searchId, jobId.value.toString).value
-        forgedResult <- service.recordSearchResultClick(request(clickEventId), actor, clickEventId, searchId, "not-a-result").value
+        forgedActor <- service
+          .recordSearchResultClick(request(clickEventId), otherActor, clickEventId, searchId, jobId.value.toString)
+          .value
+        forgedResult <- service
+          .recordSearchResultClick(request(clickEventId), actor, clickEventId, searchId, "not-a-result")
+          .value
       } yield {
         assertEquals(forgedActor, Left(UseCaseError.Domain(DomainError.Forbidden)))
         assertEquals(forgedResult, Left(UseCaseError.Domain(DomainError.Forbidden)))
@@ -77,25 +96,48 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       idempotent = Idempotent(ReplayReceipts(MutationEntityReference("interaction", eventId.toString)))
     ).flatMap { case (sessions, service) =>
       for {
-        result <- service.recordJobView(request(eventId), ActorContext(candidateId, UserRole.Candidate), eventId, jobId, Some(searchId)).value
+        result <- service
+          .recordJobView(
+            request(eventId),
+            ActorContext(candidateId, UserRole.Candidate),
+            eventId,
+            jobId,
+            Some(searchId)
+          )
+          .value
         events <- sessions.events
       } yield {
-        assertEquals(result, Left(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)))
+        assertEquals(
+          result,
+          Left(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized))
+        )
         assertEquals(events, Vector.empty)
       }
     }
   }
 
   private def withService(
-      extraJobs: Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job] = Map.empty,
-      userValues: Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User] = Map(candidateId -> candidate, recruiterId -> recruiter),
+      extraJobs: Map[
+        com.example.graphQL.cats.domain.model.Identifiers.JobId,
+        com.example.graphQL.cats.domain.model.Job
+      ] = Map.empty,
+      userValues: Map[
+        com.example.graphQL.cats.domain.model.Identifiers.UserId,
+        com.example.graphQL.cats.domain.model.User
+      ] = Map(candidateId -> candidate, recruiterId -> recruiter),
       idempotent: Idempotent = Idempotent.noop
   ) =
     for {
-      usersRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, com.example.graphQL.cats.domain.model.User]](
+      usersRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.UserId,
+        com.example.graphQL.cats.domain.model.User
+      ]](
         userValues
       )
-      jobsRef <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.JobId, com.example.graphQL.cats.domain.model.Job]](
+      jobsRef <- Ref.of[IO, Map[
+        com.example.graphQL.cats.domain.model.Identifiers.JobId,
+        com.example.graphQL.cats.domain.model.Job
+      ]](
         Map(jobId -> openJob) ++ extraJobs
       )
       sessionsRef <- Ref.of[IO, Map[UUID, SearchSession]](Map(searchId -> session))
@@ -137,8 +179,11 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         fingerprint: MutationReceiptFingerprint,
         now: java.time.Instant,
         expiresAt: java.time.Instant
-    )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, com.example.graphQL.cats.repository.protocol.MutationReceiptWrite[A]]]]):
-        IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+    )(
+        write: MutationWriteContext => IO[
+          Either[RepositoryError, Either[E, com.example.graphQL.cats.repository.protocol.MutationReceiptWrite[A]]]
+        ]
+    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, now, expiresAt, write)
       IO.pure(Right(MutationReceiptExecution.Replay(reference)))
     }
@@ -156,12 +201,15 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
     override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
       sessions.get.map(values => Right(values.get(id)))
 
-    override def recordInteraction(event: OperationalEventEnvelope, context: MutationWriteContext): IO[Either[RepositoryError, Boolean]] =
+    override def recordInteraction(
+        event: OperationalEventEnvelope,
+        context: MutationWriteContext
+    ): IO[Either[RepositoryError, Boolean]] =
       storedEvents.modify { events =>
         events.find(_.eventId == event.eventId) match {
           case Some(existing) if sameLogicalEvent(existing, event) => events -> Right(false)
-          case Some(_) => events -> Left(RepositoryError.Conflict)
-          case None => (events :+ event) -> Right(true)
+          case Some(_)                                             => events -> Left(RepositoryError.Conflict)
+          case None                                                => (events :+ event) -> Right(true)
         }
       }
 

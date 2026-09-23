@@ -4,7 +4,17 @@ import cats.effect.{IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.HiringApiRoutes
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{CandidateProfile, EmbeddingMeta, EntityEmbedding, Job, JobStatus, Location, User, UserProfile, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  CandidateProfile,
+  EmbeddingMeta,
+  EntityEmbedding,
+  Job,
+  JobStatus,
+  Location,
+  User,
+  UserProfile,
+  UserRole
+}
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.github.dockerjava.api.model.ExposedPort
@@ -34,11 +44,13 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
     val password = UUID.randomUUID().toString
     Resource.make(IO.blocking {
       val instance = new Standalone
-      val _ = instance.withExposedPorts(27017)
+      val _ = instance
+        .withExposedPorts(27017)
         .withCommand("mongod", "--bind_ip_all")
         .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
       if (auth) {
-        val _ = instance.withEnv("MONGO_INITDB_ROOT_USERNAME", "foundation")
+        val _ = instance
+          .withEnv("MONGO_INITDB_ROOT_USERNAME", "foundation")
           .withEnv("MONGO_INITDB_ROOT_PASSWORD", password)
       }
       try {
@@ -57,9 +69,9 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
 
   private def ready(probe: DatabaseProbe, remaining: Int = 30): IO[Unit] =
     probe.check.flatMap {
-      case ProbeResult.Ready => IO.unit
+      case ProbeResult.Ready  => IO.unit
       case _ if remaining > 0 => IO.sleep(200.millis) *> ready(probe, remaining - 1)
-      case other => IO.raiseError(new AssertionError(s"Expected ready, received $other"))
+      case other              => IO.raiseError(new AssertionError(s"Expected ready, received $other"))
     }
 
   private def requireResult[A](result: Either[RepositoryError, A]): IO[A] =
@@ -102,11 +114,20 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
         val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
         for {
           _ <- requireIO(jobs.create(job, fixtureTime))
-          observed <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
+          observed <- jobs
+            .find(job.id)
+            .flatMap(requireResult)
+            .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
           first = observed.copy(title = "First concurrent update", updatedAt = fixtureTime.plusSeconds(1))
           second = observed.copy(title = "Second concurrent update", updatedAt = fixtureTime.plusSeconds(2))
-          outcomes <- IO.both(jobs.update(observed, first, first.updatedAt), jobs.update(observed, second, second.updatedAt))
-          current <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
+          outcomes <- IO.both(
+            jobs.update(observed, first, first.updatedAt),
+            jobs.update(observed, second, second.updatedAt)
+          )
+          current <- jobs
+            .find(job.id)
+            .flatMap(requireResult)
+            .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
         } yield {
           assertEquals(List(outcomes._1, outcomes._2).count(_.isRight), 1)
           assertEquals(List(outcomes._1, outcomes._2).count(_.isLeft), 1)
@@ -128,16 +149,36 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
         val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", "stale-source", fixtureTime))
         for {
           _ <- requireIO(jobs.create(job, fixtureTime))
-          observedJob <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
-          _ <- requireIO(jobs.update(observedJob, observedJob.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)), fixtureTime.plusSeconds(1)))
+          observedJob <- jobs
+            .find(job.id)
+            .flatMap(requireResult)
+            .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
+          _ <- requireIO(
+            jobs.update(
+              observedJob,
+              observedJob.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)),
+              fixtureTime.plusSeconds(1)
+            )
+          )
           staleJobWrite <- jobs.updateEmbedding(observedJob, embedding)
           _ <- requireIO(users.insert(candidate))
-          observedCandidate <- users.find(candidate.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("candidate was not created")))
+          observedCandidate <- users
+            .find(candidate.id)
+            .flatMap(requireResult)
+            .flatMap(IO.fromOption(_)(new AssertionError("candidate was not created")))
           changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated backend engineer"), None)
-          _ <- requireIO(users.updateProfile(candidate.id, UserProfile.Candidate(changedProfile), fixtureTime.plusSeconds(1)))
+          _ <- requireIO(
+            users.updateProfile(candidate.id, UserProfile.Candidate(changedProfile), fixtureTime.plusSeconds(1))
+          )
           staleCandidateWrite <- users.updateEmbedding(observedCandidate, embedding)
-          currentJob <- jobs.find(job.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
-          currentCandidate <- users.find(candidate.id).flatMap(requireResult).flatMap(IO.fromOption(_)(new AssertionError("candidate disappeared")))
+          currentJob <- jobs
+            .find(job.id)
+            .flatMap(requireResult)
+            .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
+          currentCandidate <- users
+            .find(candidate.id)
+            .flatMap(requireResult)
+            .flatMap(IO.fromOption(_)(new AssertionError("candidate disappeared")))
         } yield {
           assertEquals(staleJobWrite, Left(RepositoryError.Conflict))
           assertEquals(staleCandidateWrite, Left(RepositoryError.Conflict))
@@ -159,34 +200,54 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
             for {
               hello <- PublisherBridge.first(database.runCommand(new Document("hello", 1)))
               _ <- IO(assert(hello.exists(document => !document.containsKey("setName"))))
-              _ <- PublisherBridge.first(database.getCollection("retention").insertOne(
-                new Document("_id", "foundation-fixture").append("value", "synthetic")
-              ))
+              _ <- PublisherBridge.first(
+                database
+                  .getCollection("retention")
+                  .insertOne(
+                    new Document("_id", "foundation-fixture").append("value", "synthetic")
+                  )
+              )
             } yield ()
           }
-          _ <- Resource.make(
-            IO.blocking(instance.getDockerClient.pauseContainerCmd(instance.getContainerId).exec())
-          )(_ => IO.blocking(instance.getDockerClient.unpauseContainerCmd(instance.getContainerId).exec()).void).use { _ =>
-            probe.check.flatMap(result => IO(assertEquals(result, ProbeResult.Unavailable)))
-          }
+          _ <- Resource
+            .make(
+              IO.blocking(instance.getDockerClient.pauseContainerCmd(instance.getContainerId).exec())
+            )(_ => IO.blocking(instance.getDockerClient.unpauseContainerCmd(instance.getContainerId).exec()).void)
+            .use { _ =>
+              probe.check.flatMap(result => IO(assertEquals(result, ProbeResult.Unavailable)))
+            }
           _ <- ready(probe)
           _ <- IO.blocking(instance.getDockerClient.stopContainerCmd(instance.getContainerId).exec())
           _ <- IO.blocking(instance.getDockerClient.startContainerCmd(instance.getContainerId).exec())
           restartedUri <- IO.blocking {
             val info = instance.getDockerClient.inspectContainerCmd(instance.getContainerId).exec()
-            val port = info.getNetworkSettings.getPorts.getBindings.get(ExposedPort.tcp(27017))
-              .headOption.map(_.getHostPortSpec).getOrElse(throw new AssertionError("Missing Mongo port"))
+            val port = info.getNetworkSettings.getPorts.getBindings
+              .get(ExposedPort.tcp(27017))
+              .headOption
+              .map(_.getHostPortSpec)
+              .getOrElse(throw new AssertionError("Missing Mongo port"))
             s"mongodb://${instance.getHost}:$port"
           }
           _ <- MongoDatabaseProbe.resource(restartedUri, "foundation").use(restarted => ready(restarted))
           closedClient <- MongoDatabaseProbe.clientResource(restartedUri).use { client =>
-            PublisherBridge.first(client.getDatabase("foundation").getCollection("retention")
-              .find(new Document("_id", "foundation-fixture"))).flatMap { fixture =>
-              IO(assert(fixture.exists(_.getString("value") == "synthetic"))).as(client)
-            }
+            PublisherBridge
+              .first(
+                client
+                  .getDatabase("foundation")
+                  .getCollection("retention")
+                  .find(new Document("_id", "foundation-fixture"))
+              )
+              .flatMap { fixture =>
+                IO(assert(fixture.exists(_.getString("value") == "synthetic"))).as(client)
+              }
           }
-          afterClose <- PublisherBridge.first(closedClient.getDatabase("foundation")
-            .runCommand(new Document("ping", 1))).attempt
+          afterClose <- PublisherBridge
+            .first(
+              closedClient
+                .getDatabase("foundation")
+                .runCommand(new Document("ping", 1))
+            )
+            .attempt
           _ <- IO(assert(afterClose.isLeft))
         } yield ()
       }
@@ -214,9 +275,9 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
             assertEquals(captured.size, 1)
             assert(captured.forall { case (event, id, fields) =>
               event == LogEvent.MongoProbeFailed && id == requestId &&
-                fields.get(LogField.Reason).contains("AUTHENTICATION_FAILED") &&
-                fields.get(LogField.ErrorType).contains("com.mongodb.MongoSecurityException") &&
-                fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0)
+              fields.get(LogField.Reason).contains("AUTHENTICATION_FAILED") &&
+              fields.get(LogField.ErrorType).contains("com.mongodb.MongoSecurityException") &&
+              fields.get(LogField.DurationMs).flatMap(_.toLongOption).exists(_ >= 0)
             })
             assert(!captured.toString.contains("incorrect"))
             assert(!captured.toString.contains(password))
@@ -228,21 +289,35 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
               dependencies <- TestGraphQLSupport.dependencies().allocated.map(_._1)
               http <- new HiringApiRoutes(new HealthService(rejected, diagnostics), diagnostics, dependencies)
                 .httpApp(HiringApiRoutes.HttpConfig(16L, 5.seconds))
-              response <- http(Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
-                .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }"))))
+              response <- http(
+                Request[IO](Method.POST, Uri.unsafeFromString("/graphql"))
+                  .withEntity(Json.obj("query" -> Json.fromString("{ readiness { status } }")))
+              )
               body <- response.as[Json]
               correlated <- records.get
             } yield {
               val id = response.headers.get(CIString("X-Request-ID")).map(_.head.value)
               assertEquals(response.status, Status.Ok)
-              assertEquals(body.hcursor.downField("data").downField("readiness").get[String]("status"), Right("NOT_READY"))
+              assertEquals(
+                body.hcursor.downField("data").downField("readiness").get[String]("status"),
+                Right("NOT_READY")
+              )
               val domainEvents = correlated.map(_._1)
-              assertEquals(domainEvents, Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed,
-                LogEvent.GraphQLCompleted))
+              assertEquals(
+                domainEvents,
+                Vector(LogEvent.MongoProbeFailed, LogEvent.MongoAuthFailed, LogEvent.GraphQLCompleted)
+              )
               assert(id.exists(value => scala.util.Try(UUID.fromString(value)).isSuccess))
               assert(correlated.forall(_._2 == id))
-              assert(correlated.filter(_._1 == LogEvent.MongoProbeFailed).forall(_._3.get(LogField.ErrorType)
-                .contains("com.mongodb.MongoSecurityException")))
+              assert(
+                correlated
+                  .filter(_._1 == LogEvent.MongoProbeFailed)
+                  .forall(
+                    _._3
+                      .get(LogField.ErrorType)
+                      .contains("com.mongodb.MongoSecurityException")
+                  )
+              )
             }
           }
           throwing = new Diagnostics {

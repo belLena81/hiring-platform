@@ -16,9 +16,8 @@ import java.util.UUID
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-/**
-  * Runs against the local `compose.yaml` Mongo replica set and Kafka broker.
-  * It is opt-in because the normal integration suite owns disposable Mongo containers.
+/** Runs against the local `compose.yaml` Mongo replica set and Kafka broker. It is opt-in because the normal
+  * integration suite owns disposable Mongo containers.
   */
 class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 2.minutes
@@ -53,19 +52,33 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
     createdAt
   )
 
-  private def waitForReceipts(database: com.mongodb.reactivestreams.client.MongoDatabase, eventIds: Set[String]): IO[Unit] = {
+  private def waitForReceipts(
+      database: com.mongodb.reactivestreams.client.MongoDatabase,
+      eventIds: Set[String]
+  ): IO[Unit] = {
     val receipts = database.getCollection("consumer_receipts")
     def loop(deadline: Instant): IO[Unit] =
-      PublisherBridge.collectWithin(receipts.find(Filters.and(
-        Filters.eq("consumerGroup", kafka.consumerGroup),
-        Filters.in("eventId", eventIds.toList.asJava)
-      )).limit(eventIds.size), eventIds.size + 1).flatMap { values =>
-        if (values.size >= eventIds.size) IO.unit
-        else IO.realTimeInstant.flatMap(now =>
-          if (!now.isBefore(deadline)) IO.raiseError(new AssertionError(s"only ${values.size}/${eventIds.size} receipts"))
-          else IO.sleep(250.millis) *> loop(deadline)
+      PublisherBridge
+        .collectWithin(
+          receipts
+            .find(
+              Filters.and(
+                Filters.eq("consumerGroup", kafka.consumerGroup),
+                Filters.in("eventId", eventIds.toList.asJava)
+              )
+            )
+            .limit(eventIds.size),
+          eventIds.size + 1
         )
-      }
+        .flatMap { values =>
+          if (values.size >= eventIds.size) IO.unit
+          else
+            IO.realTimeInstant.flatMap(now =>
+              if (!now.isBefore(deadline))
+                IO.raiseError(new AssertionError(s"only ${values.size}/${eventIds.size} receipts"))
+              else IO.sleep(250.millis) *> loop(deadline)
+            )
+        }
     IO.realTimeInstant.flatMap(now => loop(now.plusSeconds(60)))
   }
 
@@ -98,19 +111,34 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
             _ = assert(writes.forall(_._2.isRight), clues(writes.count(_._2.isRight)))
             eventIds = writes.map(_._1.toString).toSet
             _ <- waitForReceipts(database, eventIds)
-            outboxRows <- PublisherBridge.collectWithin(database.getCollection("event_outbox").find(
-              new Document("state", "Published")
-            ), 120)
-            receiptRows <- PublisherBridge.collectWithin(database.getCollection("consumer_receipts")
-              .find(Filters.and(
-                Filters.eq("consumerGroup", kafka.consumerGroup),
-                Filters.in("eventId", eventIds.toList.asJava)
-              )).limit(100), 120)
+            outboxRows <- PublisherBridge.collectWithin(
+              database
+                .getCollection("event_outbox")
+                .find(
+                  new Document("state", "Published")
+                ),
+              120
+            )
+            receiptRows <- PublisherBridge.collectWithin(
+              database
+                .getCollection("consumer_receipts")
+                .find(
+                  Filters.and(
+                    Filters.eq("consumerGroup", kafka.consumerGroup),
+                    Filters.in("eventId", eventIds.toList.asJava)
+                  )
+                )
+                .limit(100),
+              120
+            )
             p95 <- IO {
-              val receiptById = receiptRows.map(row => row.get("eventId").toString -> row.getDate("createdAt").toInstant).toMap
+              val receiptById =
+                receiptRows.map(row => row.get("eventId").toString -> row.getDate("createdAt").toInstant).toMap
               val latencies = outboxRows.flatMap { row =>
                 Option(row.getDate("createdAt")).flatMap(created =>
-                  receiptById.get(row.get("_id").toString).map(received => Duration.between(created.toInstant, received).toMillis)
+                  receiptById
+                    .get(row.get("_id").toString)
+                    .map(received => Duration.between(created.toInstant, received).toMillis)
                 )
               }.sorted
               assertEquals(latencies.size, 100)
@@ -118,7 +146,9 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
             }
           } yield {
             assert(p95 < 30000L, clues(p95))
-            println(s"Phase 5 local evidence: events=100, consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95")
+            println(
+              s"Phase 5 local evidence: events=100, consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95"
+            )
           }
         }
       }

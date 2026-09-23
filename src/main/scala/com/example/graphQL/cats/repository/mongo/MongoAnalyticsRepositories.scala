@@ -3,7 +3,17 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{AnalyticsErasureRequestRepository, AnalyticsFunnelDay, AnalyticsReportRepository, AnalyticsReportSnapshot, AnalyticsReportSnapshotPublisher, AnalyticsSkillPostingDay, AnalyticsTimeToHire, MutationWriteContext, RepositoryError}
+import com.example.graphQL.cats.repository.protocol.{
+  AnalyticsErasureRequestRepository,
+  AnalyticsFunnelDay,
+  AnalyticsReportRepository,
+  AnalyticsReportSnapshot,
+  AnalyticsReportSnapshotPublisher,
+  AnalyticsSkillPostingDay,
+  AnalyticsTimeToHire,
+  MutationWriteContext,
+  RepositoryError
+}
 import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.{MongoClient, MongoDatabase}
 import org.bson.Document
@@ -30,42 +40,59 @@ final class MongoAnalyticsErasureRequestRepository(
       val operation = session.fold(
         PublisherBridge.first(collection.updateOne(filter, update, new UpdateOptions().upsert(true)))
       )(active => PublisherBridge.first(collection.updateOne(active, filter, update, new UpdateOptions().upsert(true))))
-      operation.map {
-        case Some(_) => Right(())
-        case None => Left(RepositoryError.Unavailable)
-      }.handleError(_ => Left(RepositoryError.Unavailable))
+      operation
+        .map {
+          case Some(_) => Right(())
+          case None    => Left(RepositoryError.Unavailable)
+        }
+        .handleError(_ => Left(RepositoryError.Unavailable))
     }
 }
 
 object MongoAnalyticsErasureRequestRepository {
   def transactional(database: MongoDatabase, client: MongoClient): MongoAnalyticsErasureRequestRepository =
-    new MongoAnalyticsErasureRequestRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict))
+    new MongoAnalyticsErasureRequestRepository(
+      database,
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict)
+    )
 }
 
 /** Publishes complete analytics snapshots atomically and exposes the newest valid one to the API. */
-final class MongoAnalyticsReportRepository(database: MongoDatabase) extends AnalyticsReportRepository, AnalyticsReportSnapshotPublisher {
+final class MongoAnalyticsReportRepository(database: MongoDatabase)
+    extends AnalyticsReportRepository,
+      AnalyticsReportSnapshotPublisher {
   private val collection = database.getCollection("analytics_report_snapshots")
 
   override def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]] =
-    PublisherBridge.first(collection.find(Filters.and(
-      Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId),
-      Filters.eq("state", "Published"),
-      Filters.gt("expiresAt", new Date())
-    )))
+    PublisherBridge
+      .first(
+        collection.find(
+          Filters.and(
+            Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId),
+            Filters.eq("state", "Published"),
+            Filters.gt("expiresAt", new Date())
+          )
+        )
+      )
       .map(_.flatMap(AnalyticsReportSnapshotDocument.read).asRight[RepositoryError])
       .handleError(_ => Left(RepositoryError.Unavailable))
 
   override def publish(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): IO[Either[RepositoryError, Unit]] =
     if (!expiresAt.isAfter(snapshot.asOf)) IO.pure(Left(RepositoryError.Conflict))
     else
-      PublisherBridge.first(collection.replaceOne(
-        Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId),
-        AnalyticsReportSnapshotDocument.write(snapshot, expiresAt),
-        new ReplaceOptions().upsert(true)
-      )).map {
-        case Some(_) => Right(())
-        case None => Left(RepositoryError.Unavailable)
-      }.handleError(_ => Left(RepositoryError.Unavailable))
+      PublisherBridge
+        .first(
+          collection.replaceOne(
+            Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId),
+            AnalyticsReportSnapshotDocument.write(snapshot, expiresAt),
+            new ReplaceOptions().upsert(true)
+          )
+        )
+        .map {
+          case Some(_) => Right(())
+          case None    => Left(RepositoryError.Unavailable)
+        }
+        .handleError(_ => Left(RepositoryError.Unavailable))
 }
 
 private[mongo] object AnalyticsReportSnapshotDocument {
@@ -86,7 +113,12 @@ private[mongo] object AnalyticsReportSnapshotDocument {
       asOf <- Option(document.getDate("asOf")).map(_.toInstant)
       funnel <- documents(document, "funnel").flatMap(_.traverse(readFunnel))
       skills <- documents(document, "skillPostingActivity").flatMap(_.traverse(readSkill))
-    } yield AnalyticsReportSnapshot(asOf, funnel, Option(document.get("timeToHire", classOf[Document])).flatMap(readTimeToHire), skills)
+    } yield AnalyticsReportSnapshot(
+      asOf,
+      funnel,
+      Option(document.get("timeToHire", classOf[Document])).flatMap(readTimeToHire),
+      skills
+    )
 
   private def writeFunnel(value: AnalyticsFunnelDay): Document =
     new Document("day", Date.from(value.day))
@@ -137,7 +169,9 @@ private[mongo] object AnalyticsReportSnapshotDocument {
     } yield AnalyticsSkillPostingDay(day, skill, postings)
 
   private def documents(document: Document, field: String): Option[List[Document]] =
-    Option(document.get(field, classOf[java.util.List[?]])).map(_.toArray.toList.collect { case value: Document => value })
+    Option(document.get(field, classOf[java.util.List[?]])).map(_.toArray.toList.collect { case value: Document =>
+      value
+    })
 
   private def count(document: Document, field: String): Option[Long] =
     Option(document.get(field)).collect { case value: Number => value.longValue }

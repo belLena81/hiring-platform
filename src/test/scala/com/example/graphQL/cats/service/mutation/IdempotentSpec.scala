@@ -48,36 +48,52 @@ final class IdempotentSpec extends CatsEffectSuite {
           fingerprint: MutationReceiptFingerprint,
           currentTime: Instant,
           expiresAt: Instant
-      )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]):
-          IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+      )(
+          write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+      ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
         val _ = (key, fingerprint, currentTime, expiresAt)
-        write(expected).map(_.map(_.fold(MutationReceiptExecution.Rejected(_), value => MutationReceiptExecution.Applied(value.value, value.entity))))
+        write(expected).map(
+          _.map(
+            _.fold(
+              MutationReceiptExecution.Rejected(_),
+              value => MutationReceiptExecution.Applied(value.value, value.entity)
+            )
+          )
+        )
       }
     }
-    Idempotent.withClock(receipts, IO.pure(now)).execute[String](
-      "createJob",
-      "actor-1",
-      request,
-      value => MutationEntityReference("job", value),
-      reference => UseCaseIO.pure(reference.entityId)
-    )(context => UseCaseIO.pure(if (context eq expected) "same-context" else "different-context")).value.map { result =>
-      assertEquals(result, Right("same-context"))
-    }
-  }
-
-  test("maps fingerprint conflicts and in-progress receipts to stable use-case errors") {
-    def result(execution: MutationReceiptExecution[Nothing, Nothing]) =
-      Idempotent.withClock(new FixedReceiptRepository(execution), IO.pure(now)).execute[String](
+    Idempotent
+      .withClock(receipts, IO.pure(now))
+      .execute[String](
         "createJob",
         "actor-1",
         request,
         value => MutationEntityReference("job", value),
         reference => UseCaseIO.pure(reference.entityId)
-      )(_ => UseCaseIO.pure("unused")).value
+      )(context => UseCaseIO.pure(if (context eq expected) "same-context" else "different-context"))
+      .value
+      .map { result =>
+        assertEquals(result, Right("same-context"))
+      }
+  }
 
-    (result(MutationReceiptExecution.FingerprintMismatch), result(MutationReceiptExecution.InProgress)).mapN { (conflict, inProgress) =>
-      assertEquals(conflict, Left(UseCaseError.Repository(RepositoryError.Conflict)))
-      assertEquals(inProgress, Left(UseCaseError.Repository(RepositoryError.Unavailable)))
+  test("maps fingerprint conflicts and in-progress receipts to stable use-case errors") {
+    def result(execution: MutationReceiptExecution[Nothing, Nothing]) =
+      Idempotent
+        .withClock(new FixedReceiptRepository(execution), IO.pure(now))
+        .execute[String](
+          "createJob",
+          "actor-1",
+          request,
+          value => MutationEntityReference("job", value),
+          reference => UseCaseIO.pure(reference.entityId)
+        )(_ => UseCaseIO.pure("unused"))
+        .value
+
+    (result(MutationReceiptExecution.FingerprintMismatch), result(MutationReceiptExecution.InProgress)).mapN {
+      (conflict, inProgress) =>
+        assertEquals(conflict, Left(UseCaseError.Repository(RepositoryError.Conflict)))
+        assertEquals(inProgress, Left(UseCaseError.Repository(RepositoryError.Unavailable)))
     }
   }
 
@@ -88,24 +104,29 @@ final class IdempotentSpec extends CatsEffectSuite {
           fingerprint: MutationReceiptFingerprint,
           currentTime: Instant,
           expiresAt: Instant
-      )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]):
-          IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+      )(
+          write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+      ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
         val _ = (key, fingerprint, currentTime, expiresAt)
         write(MutationWriteContext.noop).flatMap {
           case Left(error) => IO.pure(Left(error))
-          case other => IO.raiseError(new AssertionError(s"expected outer repository failure, received $other"))
+          case other       => IO.raiseError(new AssertionError(s"expected outer repository failure, received $other"))
         }
       }
     }
-    Idempotent.withClock(receipts, IO.pure(now)).execute[String](
-      "createJob",
-      "actor-1",
-      request,
-      value => MutationEntityReference("job", value),
-      reference => UseCaseIO.pure(reference.entityId)
-    )(_ => UseCaseIO.left(UseCaseError.Repository(RepositoryError.Conflict))).value.map { result =>
-      assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Conflict)))
-    }
+    Idempotent
+      .withClock(receipts, IO.pure(now))
+      .execute[String](
+        "createJob",
+        "actor-1",
+        request,
+        value => MutationEntityReference("job", value),
+        reference => UseCaseIO.pure(reference.entityId)
+      )(_ => UseCaseIO.left(UseCaseError.Repository(RepositoryError.Conflict)))
+      .value
+      .map { result =>
+        assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Conflict)))
+      }
   }
 
   test("preserves operation scope fingerprint entity and seven-day expiry") {
@@ -125,8 +146,9 @@ final class IdempotentSpec extends CatsEffectSuite {
             fingerprint: MutationReceiptFingerprint,
             currentTime: Instant,
             expiresAt: Instant
-        )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]):
-            IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
+        )(
+            write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+        ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
           write(MutationWriteContext.noop).flatMap {
             case Right(Right(value)) =>
               observed.set(Some(Observed(key, fingerprint, currentTime, expiresAt, value.entity))) *>
@@ -134,23 +156,31 @@ final class IdempotentSpec extends CatsEffectSuite {
             case other => IO.raiseError(new AssertionError(s"expected successful write, received $other"))
           }
       }
-      result <- Idempotent.withClock(receipts, IO.pure(now)).execute[String](
-        "createJob",
-        "actor-1",
-        request,
-        value => MutationEntityReference("job", value),
-        reference => UseCaseIO.pure(reference.entityId)
-      )(_ => UseCaseIO.pure("job-1")).value
+      result <- Idempotent
+        .withClock(receipts, IO.pure(now))
+        .execute[String](
+          "createJob",
+          "actor-1",
+          request,
+          value => MutationEntityReference("job", value),
+          reference => UseCaseIO.pure(reference.entityId)
+        )(_ => UseCaseIO.pure("job-1"))
+        .value
       captured <- observed.get
     } yield {
       assertEquals(result, Right("job-1"))
-      assertEquals(captured, Some(Observed(
-        MutationReceiptKey("createJob", "actor-1", request.idempotencyKey),
-        request.fingerprint,
-        now,
-        now.plusSeconds(7.days.toSeconds),
-        MutationEntityReference("job", "job-1")
-      )))
+      assertEquals(
+        captured,
+        Some(
+          Observed(
+            MutationReceiptKey("createJob", "actor-1", request.idempotencyKey),
+            request.fingerprint,
+            now,
+            now.plusSeconds(7.days.toSeconds),
+            MutationEntityReference("job", "job-1")
+          )
+        )
+      )
     }
   }
 
@@ -162,16 +192,19 @@ final class IdempotentSpec extends CatsEffectSuite {
         fingerprint: MutationReceiptFingerprint,
         currentTime: Instant,
         expiresAt: Instant
-    )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]):
-        IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+    )(
+        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, currentTime, expiresAt)
       state.get.flatMap {
         case Some(entity) => IO.pure(Right(MutationReceiptExecution.Replay(entity)))
-        case None => write(MutationWriteContext.noop).flatMap {
-          case Left(error) => IO.pure(Left(error))
-          case Right(Left(error)) => IO.pure(Right(MutationReceiptExecution.Rejected(error)))
-          case Right(Right(value)) => state.set(Some(value.entity)).as(Right(MutationReceiptExecution.Applied(value.value, value.entity)))
-        }
+        case None         =>
+          write(MutationWriteContext.noop).flatMap {
+            case Left(error)         => IO.pure(Left(error))
+            case Right(Left(error))  => IO.pure(Right(MutationReceiptExecution.Rejected(error)))
+            case Right(Right(value)) =>
+              state.set(Some(value.entity)).as(Right(MutationReceiptExecution.Applied(value.value, value.entity)))
+          }
       }
     }
   }
@@ -184,8 +217,9 @@ final class IdempotentSpec extends CatsEffectSuite {
         fingerprint: MutationReceiptFingerprint,
         currentTime: Instant,
         expiresAt: Instant
-    )(write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]):
-        IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+    )(
+        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, currentTime, expiresAt, write)
       IO.pure(Right(execution))
     }

@@ -25,7 +25,9 @@ final class HiringReadService(
     read(users.findMany(ids))
 
   override def canViewUserEmail(actor: ActorContext, userId: UserId): UseCaseIO[Boolean] =
-    authorization.resolve(actor).map(viewer => viewer.id == userId || (viewer.role == UserRole.Admin && viewer.adminSingleton))
+    authorization
+      .resolve(actor)
+      .map(viewer => viewer.id == userId || (viewer.role == UserRole.Admin && viewer.adminSingleton))
 
   override def canViewUserEmails(actor: ActorContext, userIds: List[UserId]): UseCaseIO[Set[UserId]] =
     authorization.resolve(actor).map { viewer =>
@@ -45,7 +47,8 @@ final class HiringReadService(
   override def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseIO[Unit] =
     for {
       user <- authorization.resolve(actor)
-      application <- read(applications.find(applicationId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
+      application <- read(applications.find(applicationId))
+        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
       _ <-
         if (application.candidateId == user.id && user.role == UserRole.Candidate) UseCase.pure(())
         else if (user.role == UserRole.Admin && user.adminSingleton) UseCase.pure(())
@@ -56,10 +59,15 @@ final class HiringReadService(
         else UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
     } yield ()
 
-  override def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest): UseCaseIO[List[ApplicationEvent]] =
+  override def applicationHistory(
+      applicationId: ApplicationId,
+      page: ApplicationEventPageRequest
+  ): UseCaseIO[List[ApplicationEvent]] =
     read(applications.history(applicationId, page))
 
-  private def read[A](value: cats.effect.IO[Either[com.example.graphQL.cats.repository.protocol.RepositoryError, A]]): UseCaseIO[A] =
+  private def read[A](
+      value: cats.effect.IO[Either[com.example.graphQL.cats.repository.protocol.RepositoryError, A]]
+  ): UseCaseIO[A] =
     UseCase.repository(value)
 }
 

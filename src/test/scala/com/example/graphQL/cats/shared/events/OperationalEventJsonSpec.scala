@@ -58,19 +58,21 @@ class OperationalEventJsonSpec extends FunSuite {
 
     assertEquals(
       OperationalEventJson.decode(fixture.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-      Right(OperationalEventEnvelope(
-        eventId,
-        OperationalEventType.APPLICATION_STATUS_CHANGED,
-        Instant.parse("2026-09-19T10:15:30Z"),
-        OperationalAggregateType.Application,
-        "application-1",
-        actorId,
-        Json.obj(
-          "applicationId" -> Json.fromString("application-1"),
-          "previousStatus" -> Json.fromString("Interview"),
-          "newStatus" -> Json.fromString("Hired")
+      Right(
+        OperationalEventEnvelope(
+          eventId,
+          OperationalEventType.APPLICATION_STATUS_CHANGED,
+          Instant.parse("2026-09-19T10:15:30Z"),
+          OperationalAggregateType.Application,
+          "application-1",
+          actorId,
+          Json.obj(
+            "applicationId" -> Json.fromString("application-1"),
+            "previousStatus" -> Json.fromString("Interview"),
+            "newStatus" -> Json.fromString("Hired")
+          )
         )
-      ))
+      )
     )
   }
 
@@ -87,7 +89,10 @@ class OperationalEventJsonSpec extends FunSuite {
         |  "payload": {}
         |}""".stripMargin
 
-    assertEquals(OperationalEventJson.decode(versioned.getBytes(java.nio.charset.StandardCharsets.UTF_8)), Left("MalformedEnvelope"))
+    assertEquals(
+      OperationalEventJson.decode(versioned.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+      Left("MalformedEnvelope")
+    )
   }
 
   test("malformed derived fields are normalized to the envelope error") {

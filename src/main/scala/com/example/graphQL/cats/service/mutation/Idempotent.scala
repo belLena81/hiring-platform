@@ -25,22 +25,24 @@ final class Idempotent private (
     EitherT {
       currentTime.flatMap { now =>
         val key = MutationReceiptKey(operation, actorScope, request.idempotencyKey)
-        receipts.execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
-          write(context).value.map {
-            case Left(UseCaseError.Repository(error)) => Left(error)
-            case Left(error) => Right(Left(error))
-            case Right(value) => Right(Right(MutationReceiptWrite(value, entity(value))))
+        receipts
+          .execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
+            write(context).value.map {
+              case Left(UseCaseError.Repository(error)) => Left(error)
+              case Left(error)                          => Right(Left(error))
+              case Right(value)                         => Right(Right(MutationReceiptWrite(value, entity(value))))
+            }
           }
-        }.flatMap {
-          case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
-          case Right(MutationReceiptExecution.Applied(value, _)) => IO.pure(Right(value))
-          case Right(MutationReceiptExecution.Replay(reference)) => replay(reference).value
-          case Right(MutationReceiptExecution.Rejected(error)) => IO.pure(Left(error))
-          case Right(MutationReceiptExecution.FingerprintMismatch) =>
-            IO.pure(Left(UseCaseError.Repository(RepositoryError.Conflict)))
-          case Right(MutationReceiptExecution.InProgress) =>
-            IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable)))
-        }
+          .flatMap {
+            case Left(error)                                         => IO.pure(Left(UseCaseError.Repository(error)))
+            case Right(MutationReceiptExecution.Applied(value, _))   => IO.pure(Right(value))
+            case Right(MutationReceiptExecution.Replay(reference))   => replay(reference).value
+            case Right(MutationReceiptExecution.Rejected(error))     => IO.pure(Left(error))
+            case Right(MutationReceiptExecution.FingerprintMismatch) =>
+              IO.pure(Left(UseCaseError.Repository(RepositoryError.Conflict)))
+            case Right(MutationReceiptExecution.InProgress) =>
+              IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable)))
+          }
       }
     }
 }

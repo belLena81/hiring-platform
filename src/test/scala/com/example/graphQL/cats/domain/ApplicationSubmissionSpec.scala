@@ -2,7 +2,16 @@ package com.example.graphQL.cats.domain
 
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
-import com.example.graphQL.cats.domain.model.{CandidateProfile, Job, JobStatus, Location, RecruiterProfile, User, UserProfile, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  CandidateProfile,
+  Job,
+  JobStatus,
+  Location,
+  RecruiterProfile,
+  User,
+  UserProfile,
+  UserRole
+}
 import com.example.graphQL.cats.domain.policy.ApplicationSubmission
 import java.time.Instant
 import java.util.UUID
@@ -15,10 +24,22 @@ class ApplicationSubmissionSpec extends FunSuite {
   private val jobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000003"))
   private val applicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000004"))
 
-  private val candidate = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate,
-    Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))), now)
-  private val recruiter = User(recruiterId, Some("recruiter@example.com"), "Recruiter", UserRole.Recruiter,
-    Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))), now)
+  private val candidate = User(
+    candidateId,
+    Some("candidate@example.com"),
+    "Candidate",
+    UserRole.Candidate,
+    Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+    now
+  )
+  private val recruiter = User(
+    recruiterId,
+    Some("recruiter@example.com"),
+    "Recruiter",
+    UserRole.Recruiter,
+    Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
+    now
+  )
   private val openJob = Job(
     jobId,
     recruiterId,

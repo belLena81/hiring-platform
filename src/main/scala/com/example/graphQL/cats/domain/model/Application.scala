@@ -11,12 +11,12 @@ enum ApplicationStatus {
 }
 
 final case class Application(
-  id: ApplicationId,
-  candidateId: UserId,
-  jobId: JobId,
-  status: ApplicationStatus,
-  createdAt: Instant,
-  updatedAt: Instant
+    id: ApplicationId,
+    candidateId: UserId,
+    jobId: JobId,
+    status: ApplicationStatus,
+    createdAt: Instant,
+    updatedAt: Instant
 )
 
 object Application {
@@ -30,14 +30,14 @@ object Application {
 }
 
 final case class ApplicationEvent(
-  id: ApplicationEventId,
-  applicationId: ApplicationId,
-  previousStatus: Option[ApplicationStatus],
-  newStatus: ApplicationStatus,
-  actorId: UserId,
-  occurredAt: Instant,
-  feedback: Option[String],
-  reason: Option[String]
+    id: ApplicationEventId,
+    applicationId: ApplicationId,
+    previousStatus: Option[ApplicationStatus],
+    newStatus: ApplicationStatus,
+    actorId: UserId,
+    occurredAt: Instant,
+    feedback: Option[String],
+    reason: Option[String]
 )
 
 object ApplicationEvent {

@@ -34,7 +34,8 @@ object JobLifecycle {
 
   def close(job: Job, updatedAt: Instant): Either[DomainError, Job] =
     job.status match {
-      case JobStatus.Draft | JobStatus.Open => Right(job.copy(status = JobStatus.Closed, updatedAt = updatedAt, closedAt = Some(updatedAt)))
+      case JobStatus.Draft | JobStatus.Open =>
+        Right(job.copy(status = JobStatus.Closed, updatedAt = updatedAt, closedAt = Some(updatedAt)))
       case JobStatus.Closed => Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed))
     }
 }

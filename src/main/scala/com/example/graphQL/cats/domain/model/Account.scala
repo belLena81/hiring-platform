@@ -15,6 +15,11 @@ final case class AccountCredentials(user: User, passwordHash: String)
 
 final case class UserCursor(createdAt: Instant, id: UserId)
 
-final case class UserPageRequest(status: AccountStatus, role: Option[UserRole], cursor: Option[UserCursor], pageSize: PageSize)
+final case class UserPageRequest(
+    status: AccountStatus,
+    role: Option[UserRole],
+    cursor: Option[UserCursor],
+    pageSize: PageSize
+)
 
 final case class AccountToken(value: String, expiresAt: Instant)

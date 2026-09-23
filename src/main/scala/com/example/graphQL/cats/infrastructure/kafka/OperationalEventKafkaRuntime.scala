@@ -4,8 +4,12 @@ import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.repository.protocol.{
-  ClaimedOperationalEvent, ConsumerReceiptRepository, EventQuarantineRecord, EventQuarantineRepository,
-  OperationalEventFailureCategory, OperationalEventOutboxRepository
+  ClaimedOperationalEvent,
+  ConsumerReceiptRepository,
+  EventQuarantineRecord,
+  EventQuarantineRepository,
+  OperationalEventFailureCategory,
+  OperationalEventOutboxRepository
 }
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
@@ -55,7 +59,8 @@ object OperationalEventKafkaRuntime {
       background(
         resilientStream(
           diagnostics,
-          Stream.awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
+          Stream
+            .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
             .evalMap(_ => publishBatch(config, outbox, producer)),
           config.publisher.retryDelaySeconds.seconds
         )
@@ -71,21 +76,30 @@ object OperationalEventKafkaRuntime {
     IO.realTimeInstant.flatMap { now =>
       val leaseUntil = now.plusSeconds(config.publisher.leaseSeconds.toLong)
       outbox.claim(config.publisher.workerId, now, leaseUntil, config.publisher.batchSize).flatMap {
-        case Left(_) => IO.unit
+        case Left(_)       => IO.unit
         case Right(claims) =>
           publishClaims(claims) { claim =>
             val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
             producer.produce(ProducerRecords.one(record)).flatten.attempt.flatMap {
               case Right(_) =>
                 IO.realTimeInstant.flatMap(done =>
-                  outbox.markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds)).void)
+                  outbox
+                    .markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds))
+                    .void
+                )
               case Left(error) =>
                 IO.realTimeInstant.flatMap { failedAt =>
                   if (claim.attempts >= config.publisher.maxAttempts)
                     outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error)).void
                   else
-                    outbox.releaseForRetry(claim.event.eventId, claim.leaseToken, failedAt,
-                      failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)).void
+                    outbox
+                      .releaseForRetry(
+                        claim.event.eventId,
+                        claim.leaseToken,
+                        failedAt,
+                        failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+                      )
+                      .void
                 }
             }
           }
@@ -118,7 +132,8 @@ object OperationalEventKafkaRuntime {
     background(
       resilientStream(
         diagnostics,
-        KafkaConsumer.stream(settings)
+        KafkaConsumer
+          .stream(settings)
           .subscribeTo(config.topic)
           .records
           .evalMap { message =>
@@ -143,17 +158,33 @@ object OperationalEventKafkaRuntime {
     IO.realTimeInstant.flatMap { now =>
       OperationalEventJson.decode(bytes) match {
         case Left(_) =>
-          quarantineRecord(config, quarantine, topic, partition, offset, OperationalEventFailureCategory.MalformedEnvelope,
-            "malformed event envelope", bytes, now).map(_.isRight)
+          quarantineRecord(
+            config,
+            quarantine,
+            topic,
+            partition,
+            offset,
+            OperationalEventFailureCategory.MalformedEnvelope,
+            "malformed event envelope",
+            bytes,
+            now
+          ).map(_.isRight)
         case Right(event) =>
           receipts.exists(config.consumerGroup, event.eventId).flatMap {
-            case Right(true) => IO.pure(true)
+            case Right(true)  => IO.pure(true)
             case Right(false) =>
-              receipts.record(config.consumerGroup, event, now, now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)).map {
-                case Right(_) => true
-                case Left(RepositoryError.Conflict) => true
-                case Left(_) => false
-              }
+              receipts
+                .record(
+                  config.consumerGroup,
+                  event,
+                  now,
+                  now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)
+                )
+                .map {
+                  case Right(_)                       => true
+                  case Left(RepositoryError.Conflict) => true
+                  case Left(_)                        => false
+                }
             case Left(_) => IO.pure(false)
           }
       }
@@ -170,16 +201,18 @@ object OperationalEventKafkaRuntime {
       bytes: Array[Byte],
       now: Instant
   ): IO[Either[RepositoryError, Unit]] =
-    quarantine.save(EventQuarantineRecord(
-      topic,
-      partition,
-      offset,
-      category,
-      reason,
-      bytes,
-      now,
-      now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
-    ))
+    quarantine.save(
+      EventQuarantineRecord(
+        topic,
+        partition,
+        offset,
+        category,
+        reason,
+        bytes,
+        now,
+        now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
+      )
+    )
 
   private[kafka] def resilientStream(
       diagnostics: Diagnostics,

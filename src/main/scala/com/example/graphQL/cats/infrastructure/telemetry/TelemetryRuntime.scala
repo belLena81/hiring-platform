@@ -16,8 +16,8 @@ import org.typelevel.otel4s.trace.TracerProvider
 
 /** The application boundary for HTTP traces and metrics.
   *
-  * Tracing uses the OpenTelemetry SDK's standard environment configuration, so Mongo/HTTP startup does not
-  * depend on an OTLP collector.
+  * Tracing uses the OpenTelemetry SDK's standard environment configuration, so Mongo/HTTP startup does not depend on an
+  * OTLP collector.
   */
 final case class TelemetryRuntime(
     tracer: Tracer[IO],
@@ -49,8 +49,8 @@ final case class TelemetryRuntime(
         .withPerRequestReversePropagationFilter(PerRequestFilter.alwaysEnabled)
         .build
     } yield {
-      val metricsRoutes = Metrics(metricsOps, classifierF = request =>
-        Some(TelemetryRuntime.routeLabel(request)))(routes)
+      val metricsRoutes =
+        Metrics(metricsOps, classifierF = request => Some(TelemetryRuntime.routeLabel(request)))(routes)
       serverMiddleware.wrapHttpApp(metricsRoutes.orNotFound)
     }
   }
@@ -65,7 +65,10 @@ object TelemetryRuntime {
 
   def resource: Resource[IO, TelemetryRuntime] =
     OtelJava.autoConfigured[IO]().flatMap { otel =>
-      Resource.eval(otel.tracerProvider.get(TracerName).map(tracer =>
-        TelemetryRuntime(tracer, otel.tracerProvider, otel.meterProvider)))
+      Resource.eval(
+        otel.tracerProvider
+          .get(TracerName)
+          .map(tracer => TelemetryRuntime(tracer, otel.tracerProvider, otel.meterProvider))
+      )
     }
 }
