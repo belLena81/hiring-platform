@@ -1,16 +1,22 @@
 package com.example.hiring.analytics
 
+import cats.effect.{Clock, IO}
+import cats.effect.unsafe.implicits.global
 import munit.FunSuite
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.functions.{col, lit}
+import org.apache.spark.storage.StorageLevel
+import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 
 import java.nio.file.Files
 import java.sql.Timestamp
 import java.time.Instant
+import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 class AnalyticsTransformsSpec extends FunSuite {
   private val pseudonymizer = SubjectPseudonymizer.fromSecret("analytics-test-secret".getBytes("UTF-8"))
-  private lazy val spark: SparkSession = SparkSession
+  private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
     .builder()
     .master("local[2]")
     .appName("AnalyticsTransformsSpec")
@@ -24,12 +30,43 @@ class AnalyticsTransformsSpec extends FunSuite {
     if (!spark.sparkContext.isStopped) spark.stop()
 
   private def records(values: Seq[(String, Int, Long, String)]) = {
-    import spark.implicits._
-    values
-      .toDF("topic", "partition", "offset", "value")
+    val schema = StructType(
+      Seq(
+        StructField("topic", StringType, nullable = false),
+        StructField("partition", IntegerType, nullable = false),
+        StructField("offset", LongType, nullable = false),
+        StructField("value", StringType, nullable = true)
+      )
+    )
+    spark
+      .createDataFrame(
+        values.map { case (topic, partition, offset, value) =>
+          Row(topic, partition, offset, value)
+        }.asJava,
+        schema
+      )
       .withColumn("value", org.apache.spark.sql.functions.encode(org.apache.spark.sql.functions.col("value"), "UTF-8"))
       .withColumn("timestamp", org.apache.spark.sql.functions.current_timestamp())
   }
+
+  private def validatedManifest(runId: String, ranges: Vector[PartitionOffsetRange]): AnalyticsRunManifest =
+    AnalyticsRunManifest.validated(runId, ranges).toEither.fold(errors => fail(errors.toString), identity)
+
+  private def fixedClock(instant: Instant): Clock[IO] = new Clock[IO] {
+    override val applicative: cats.Applicative[IO] = summon[cats.Applicative[IO]]
+    override def realTime: IO[FiniteDuration] = IO.pure(instant.toEpochMilli.millis)
+    override def monotonic: IO[FiniteDuration] = IO.pure(0.nanos)
+  }
+
+  private def markerFrame(tokens: Seq[String]) =
+    spark.createDataFrame(
+      tokens.map(Row(_)).asJava,
+      StructType(
+        Seq(
+          StructField("subjectToken", StringType, nullable = false)
+        )
+      )
+    )
 
   private def event(
       id: String,
@@ -94,8 +131,18 @@ class AnalyticsTransformsSpec extends FunSuite {
           ("hiring.operational-events", 0, 2L, event("   ", "APPLICATION_CREATED")),
           ("hiring.operational-events", 0, 3L, event("event-3", "APPLICATION_CREATED", aggregateId = "")),
           ("hiring.operational-events", 0, 4L, event("event-4", "APPLICATION_CREATED", aggregateId = "   ")),
-          ("hiring.operational-events", 0, 5L, """{"eventId":"\t","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"application-5","actorId":"actor-1","payload":{}}"""),
-          ("hiring.operational-events", 0, 6L, """{"eventId":"event-6","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"\n","actorId":"actor-1","payload":{}}""")
+          (
+            "hiring.operational-events",
+            0,
+            5L,
+            """{"eventId":"\t","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"application-5","actorId":"actor-1","payload":{}}"""
+          ),
+          (
+            "hiring.operational-events",
+            0,
+            6L,
+            """{"eventId":"event-6","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"\n","actorId":"actor-1","payload":{}}"""
+          )
         )
       )
     )
@@ -204,7 +251,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHire(silver).count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHire(silver).unsafeRunSync().count(), 0L)
   }
 
   test("ten eligible applications from one subject do not satisfy time-to-hire suppression") {
@@ -239,7 +286,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHire(silver).count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHire(silver).unsafeRunSync().count(), 0L)
   }
 
   test("skill posting activity normalizes only created job skills and applies k anonymity") {
@@ -285,16 +332,29 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("offset manifests reject impossible or duplicated partition ranges") {
     assertEquals(AnalyticsRetention.BronzeDays, 7)
     assertEquals(AnalyticsRetention.SilverDays, 30)
-    intercept[IllegalArgumentException](PartitionOffsetRange("topic", 0, 5L, 4L))
-    intercept[IllegalArgumentException](
-      AnalyticsRunManifest(
-        "run-1",
-        Vector(
-          PartitionOffsetRange("topic", 0, 0L, 1L),
-          PartitionOffsetRange("topic", 0, 1L, 2L)
+    assert(PartitionOffsetRange.validate(PartitionOffsetRange("topic", 0, 5L, 4L)).isInvalid)
+    assert(
+      AnalyticsRunManifest
+        .validated(
+          "run-1",
+          Vector(PartitionOffsetRange("topic", 0, 0L, 1L), PartitionOffsetRange("topic", 0, 1L, 2L))
         )
-      )
+        .isInvalid
     )
+    val errors = AnalyticsRunManifest
+      .validated(
+        "",
+        Vector(PartitionOffsetRange("", -1, -1L, -2L), PartitionOffsetRange("", -1, 0L, 1L))
+      )
+      .toEither
+      .swap
+      .toOption
+      .get
+      .toNonEmptyList
+      .toList
+    assert(errors.contains("run id must be non-empty"))
+    assert(errors.contains("topic must be non-empty"))
+    assert(errors.contains("each topic partition may occur only once"))
   }
 
   test("Kafka offset bounds are valid JSON without escaped structural quotes") {
@@ -327,14 +387,15 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 13L, event("outside", "APPLICATION_CREATED"))
       )
     )
-    val manifest = AnalyticsRunManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 13L)))
+    val manifest = validatedManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 13L)))
     val publication = new HiringAnalyticsBatch(
       AnalyticsLakehousePaths(lakehouse),
       pseudonymizer,
       DataFrameDeletionMarkerSource(emptyMarkers),
-      () => Instant.parse("2026-09-22T12:00:00Z")
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
     )
       .run(spark, DataFrameBatchSource(input), manifest)
+      .unsafeRunSync()
 
     assertEquals(publication.bronzeRecords, 12L)
     assertEquals(publication.conflictingEventIds, 1L)
@@ -360,19 +421,19 @@ class AnalyticsTransformsSpec extends FunSuite {
       paths,
       pseudonymizer,
       DataFrameDeletionMarkerSource(emptyMarkers),
-      () => Instant.parse("2026-09-22T12:00:00Z")
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
     )
-    val firstManifest = AnalyticsRunManifest(
+    val firstManifest = validatedManifest(
       "tombstone-first-run",
       Vector(PartitionOffsetRange("hiring.operational-events", 3, 17L, 18L))
     )
-    val replayManifest = AnalyticsRunManifest(
+    val replayManifest = validatedManifest(
       "tombstone-replay-run",
       Vector(PartitionOffsetRange("hiring.operational-events", 3, 17L, 18L))
     )
 
-    val first = batch.run(spark, DataFrameBatchSource(input), firstManifest)
-    val replay = batch.run(spark, DataFrameBatchSource(input), replayManifest)
+    val first = batch.run(spark, DataFrameBatchSource(input), firstManifest).unsafeRunSync()
+    val replay = batch.run(spark, DataFrameBatchSource(input), replayManifest).unsafeRunSync()
     val quarantine = spark.read.format("delta").load(paths.quarantine)
 
     assertEquals(first.quarantinedRecords, 1L)
@@ -387,18 +448,21 @@ class AnalyticsTransformsSpec extends FunSuite {
     val paths = AnalyticsLakehousePaths(lakehouse)
     val source = records(Seq(("hiring.operational-events", 0, 1L, event("created", "APPLICATION_CREATED"))))
     val markers = new ActiveDeletionMarkerSource {
-      override def activeSubjectTokens(spark: SparkSession) =
-        throw new IllegalStateException("marker source unavailable")
+      override def activeSubjectTokens(spark: SparkSession): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(AnalyticsError.MissingMarkerCollection)
     }
     val batch = new HiringAnalyticsBatch(paths, pseudonymizer, markers)
 
-    intercept[IllegalStateException] {
-      batch.run(
-        spark,
-        DataFrameBatchSource(source),
-        AnalyticsRunManifest("run-fail", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
-      )
+    val failure = intercept[AnalyticsError.MissingMarkerCollection.type] {
+      batch
+        .run(
+          spark,
+          DataFrameBatchSource(source),
+          validatedManifest("run-fail", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+        )
+        .unsafeRunSync()
     }
+    assertEquals(failure, AnalyticsError.MissingMarkerCollection)
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.bronze))
   }
@@ -422,16 +486,21 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val manifest =
-      AnalyticsRunManifest("run-published", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
+      validatedManifest("run-published", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
     val publication = new HiringAnalyticsBatch(
       paths,
       pseudonymizer,
       DataFrameDeletionMarkerSource(emptyMarkers),
-      () => Instant.parse("2026-09-22T12:00:00Z")
-    ).run(spark, DataFrameBatchSource(input), manifest)
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
+    ).run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
 
     assertEquals(publication.outcome, AnalyticsRunOutcome.Published)
+    assertEquals(publication.completedAt, Instant.parse("2026-09-22T12:00:00Z"))
     assertEquals(spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(), 1L)
+    assertEquals(
+      spark.read.format("delta").load(paths.manifests).select("updatedAt").collect().map(_.getString(0)).toSet,
+      Set("2026-09-22T12:00:00Z")
+    )
   }
 
   test("active deletion markers purge stored Silver and rebuild Gold before a quality-blocked range") {
@@ -477,21 +546,20 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 12L, "not-json")
       )
     )
-    import spark.implicits._
-    val markers = Seq(pseudonymizer.token("candidate-1")).toDF("subjectToken")
+    val markers = markerFrame(Seq(pseudonymizer.token("candidate-1")))
     val deletionBatch = new HiringAnalyticsBatch(
       paths,
       pseudonymizer,
       DataFrameDeletionMarkerSource(markers),
-      () => Instant.parse("2026-09-22T13:00:00Z")
+      fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
     )
-    val deletionRun = AnalyticsRunManifest(
+    val deletionRun = validatedManifest(
       "erasure-with-bad-range",
       Vector(PartitionOffsetRange("hiring.operational-events", 0, 11L, 13L))
     )
 
     assertEquals(
-      deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).outcome,
+      deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).unsafeRunSync().outcome,
       AnalyticsRunOutcome.QualityBlocked
     )
     assertEquals(spark.read.format("delta").load(paths.silver).count(), 9L)
@@ -505,8 +573,18 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 2L, event("out", "APPLICATION_CREATED"))
       )
     )
-    val manifest = AnalyticsRunManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
-    assertEquals(DataFrameBatchSource(source).read(spark, manifest).count(), 1L)
+    val manifest = validatedManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+    assertEquals(DataFrameBatchSource(source).read(spark, manifest).unsafeRunSync().count(), 1L)
+  }
+
+  test("data frame source reports missing Kafka columns as a typed schema error") {
+    val source = records(Seq.empty).drop("partition", "offset")
+    val manifest =
+      validatedManifest("run-missing-columns", Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L)))
+    val failure = intercept[AnalyticsError.InvalidSourceSchema] {
+      DataFrameBatchSource(source).read(spark, manifest).unsafeRunSync()
+    }
+    assertEquals(failure.missing, Vector("offset", "partition"))
   }
 
   test("subject tokens are deterministic opaque HMAC values") {
@@ -521,14 +599,16 @@ class AnalyticsTransformsSpec extends FunSuite {
     val subjectId = java.util.UUID.fromString("d31d0f7b-0abf-4e47-94da-b2f52cb5dd2e")
     assertEquals(
       MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", subjectId.toString), pseudonymizer),
-      pseudonymizer.token(subjectId.toString)
+      Right(SubjectToken.fromHmac(pseudonymizer.token(subjectId.toString)))
     )
-    intercept[IllegalStateException] {
-      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", "not-a-uuid"), pseudonymizer)
-    }
-    intercept[IllegalStateException] {
-      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", 17), pseudonymizer)
-    }
+    assertEquals(
+      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", "not-a-uuid"), pseudonymizer),
+      Left(AnalyticsError.MalformedMarker)
+    )
+    assertEquals(
+      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", 17), pseudonymizer),
+      Left(AnalyticsError.MalformedMarker)
+    )
   }
 
   test("active deletion tokens are excluded before Silver persistence without retaining raw identities") {
@@ -556,14 +636,31 @@ class AnalyticsTransformsSpec extends FunSuite {
         )
       )
     )
-    import spark.implicits._
-    val markers = Seq(pseudonymizer.token("candidate-1")).toDF("subjectToken")
+    val markers = markerFrame(Seq(pseudonymizer.token("candidate-1")))
     val silver =
       OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, markers)
 
-    assertEquals(silver.select("eventId").as[String].collect().toSet, Set("kept"))
-    assertEquals(silver.select("subjectToken").as[String].collect().toSet, Set(pseudonymizer.token("candidate-2")))
+    assertEquals(silver.select("eventId").collect().map(_.getString(0)).toSet, Set("kept"))
+    assertEquals(
+      silver.select("subjectToken").collect().map(_.getString(0)).toSet,
+      Set(pseudonymizer.token("candidate-2"))
+    )
     assert(!silver.columns.contains("actorId"))
     assert(!silver.columns.contains("candidateId"))
+  }
+
+  test("cached deletion markers are released when the source fails") {
+    val markers = markerFrame(Seq.empty)
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-cleanup").toUri.toString)
+    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markers))
+    val source = new BoundedOperationalEventSource {
+      override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(AnalyticsError.SourceReadFailure(new IllegalStateException("injected read failure")))
+    }
+    val manifest = validatedManifest("cleanup", Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+
+    intercept[AnalyticsError.SourceReadFailure](batch.run(spark, source, manifest).unsafeRunSync())
+    assertEquals(markers.storageLevel, StorageLevel.NONE)
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
   }
 }

@@ -44,11 +44,12 @@ object SubjectPseudonymizer {
   def fromBase64(secret: String): SubjectPseudonymizer = {
     if (secret == null || secret.isEmpty)
       throw AnalyticsError.InvalidConfiguration("base64 HMAC secret must be non-empty")
-    val decoded = try Base64.getDecoder.decode(secret)
-    catch {
-      case _: IllegalArgumentException =>
-        throw AnalyticsError.InvalidConfiguration("base64 HMAC secret is malformed")
-    }
+    val decoded =
+      try Base64.getDecoder.decode(secret)
+      catch {
+        case _: IllegalArgumentException =>
+          throw AnalyticsError.InvalidConfiguration("base64 HMAC secret is malformed")
+      }
     fromSecret(decoded)
   }
 }

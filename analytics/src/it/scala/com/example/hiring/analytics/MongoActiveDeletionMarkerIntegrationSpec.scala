@@ -23,9 +23,9 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   private final class MongoContainer extends GenericContainer[MongoContainer](DockerImageName.parse(image))
 
   private val pseudonymizer = SubjectPseudonymizer.fromSecret("analytics-integration-secret".getBytes("UTF-8"))
-  private var mongoContainer: MongoContainer = _
-  private var mongoClient: MongoClient = _
-  private var spark: SparkSession = _
+  private var mongoContainer: MongoContainer = scala.compiletime.uninitialized
+  private var mongoClient: MongoClient = scala.compiletime.uninitialized
+  private var spark: SparkSession = scala.compiletime.uninitialized
 
   private def manifest(runId: String): AnalyticsRunManifest =
     AnalyticsRunManifest
@@ -44,7 +44,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     mongoClient = MongoClients.create(
       s"mongodb://${mongoContainer.getHost}:${mongoContainer.getMappedPort(27017)}"
     )
-    spark = SparkSession
+    spark = org.apache.spark.sql.classic.SparkSession
       .builder()
       .master("local[2]")
       .appName("MongoActiveDeletionMarkerIntegrationSpec")
@@ -72,9 +72,12 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val pendingSubject = UUID.randomUUID().toString
     requests.insertOne(new Document("_id", pendingSubject).append("state", "Pending"))
 
-    val tokens = source.activeSubjectTokens(spark).flatMap { frame =>
-      IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet)
-    }.unsafeRunSync()
+    val tokens = source
+      .activeSubjectTokens(spark)
+      .flatMap { frame =>
+        IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet)
+      }
+      .unsafeRunSync()
 
     assertEquals(tokens, Set(pseudonymizer.token(pendingSubject)))
   }
@@ -171,5 +174,15 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.bronze))
       assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.silver))
     } finally unavailableClient.close()
+  }
+
+  test("closed Mongo marker client returns a typed storage error") {
+    val closedClient = MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")
+    val database = closedClient.getDatabase("closed_markers")
+    closedClient.close()
+
+    val source = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
+    val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeSubjectTokens(spark).unsafeRunSync())
+    assert(failure.getCause.isInstanceOf[IllegalStateException])
   }
 }

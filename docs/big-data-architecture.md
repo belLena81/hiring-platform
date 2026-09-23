@@ -13,6 +13,7 @@ Kafka retained range -> Bronze -> Silver -> Gold -> Mongo analytics projection -
 ```
 
 - The batch module reads an explicit, bounded Kafka offset range, preserves Kafka record coordinates, parses analytical facts, deduplicates, and quarantines malformed/conflicting input. A quality-blocked range cannot advance Gold or the published Mongo snapshot. K=10 suppression is checked per output cell using distinct pseudonymized subjects; it is not a formal anonymity guarantee. See the [implementation specification](specs/hiring-analytics-lakehouse.md) for exact metric, retry, and acceptance contracts.
+- The batch driver uses Scala 3.7.4 with Spark/Delta's Scala 2.13 artifacts. Cats Effect owns its blocking actions and client lifetimes; a Scala 3.9 driver compiled but failed a local Spark runtime check because Spark's 2.13 reflection requires the older standard library.
 - Delta Bronze, Silver, quarantine, Gold, and run-manifest datasets are written beneath a caller-selected local lakehouse root. The opt-in `analytics-batch` Compose profile persists that root at `.local/data/analytics/`.
 - The batch does not yet publish Gold results into MongoDB. GraphQL reports therefore remain dependent on a separately populated, bounded Mongo snapshot until the publish path is implemented.
 

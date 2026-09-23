@@ -45,16 +45,18 @@ final class KafkaOffsetRangeSource(connection: KafkaConnection) extends BoundedO
     for {
       _ <- IO.fromEither(KafkaConnection.validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply))
       _ <- IO.fromEither(AnalyticsRunManifest.validate(manifest).toEither.leftMap(AnalyticsError.InvalidInput.apply))
-      frame <- IO.blocking {
-        val topic = manifest.offsetRanges.head.topic
-        spark.read
-          .format("kafka")
-          .option("kafka.bootstrap.servers", connection.bootstrapServers)
-          .option("subscribe", topic)
-          .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
-          .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
-          .load()
-      }.adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
+      frame <- IO
+        .blocking {
+          val topic = manifest.offsetRanges.head.topic
+          spark.read
+            .format("kafka")
+            .option("kafka.bootstrap.servers", connection.bootstrapServers)
+            .option("subscribe", topic)
+            .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
+            .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
+            .load()
+        }
+        .adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
     } yield frame
 }
 
@@ -80,17 +82,21 @@ object KafkaOffsetRangeSource {
 /** Test and backfill adapter. Its frame must have Kafka's topic, partition, offset, timestamp and value columns. */
 final case class DataFrameBatchSource(records: DataFrame) extends BoundedOperationalEventSource {
   override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[DataFrame] =
-    IO.blocking {
-      val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
-        condition || (
-          col("topic") === lit(range.topic) &&
-            col("partition") === lit(range.partition) &&
-            col("offset") >= lit(range.startOffset) &&
-            col("offset") < lit(range.endOffsetExclusive)
-        )
-      }
-      records.filter(inManifest)
-    }.adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
+    IO.fromEither(AnalyticsRunManifest.validate(manifest).toEither.leftMap(AnalyticsError.InvalidInput.apply)) *>
+      IO.blocking(records.schema)
+        .adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
+        .flatMap(KafkaRecordColumns.validate) *>
+      IO.blocking {
+        val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
+          condition || (
+            col("topic") === lit(range.topic) &&
+              col("partition") === lit(range.partition) &&
+              col("offset") >= lit(range.startOffset) &&
+              col("offset") < lit(range.endOffsetExclusive)
+          )
+        }
+        records.filter(inManifest)
+      }.adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
 }
 
 final case class AnalyticsLakehousePaths(root: String) {
@@ -175,7 +181,9 @@ final class HiringAnalyticsBatch(
 
   private def cachedMarkers(spark: SparkSession): Resource[IO, DataFrame] =
     Resource.make(
-      deletionMarkers.activeSubjectTokens(spark).flatMap(frame => lakehouse(frame.persist(StorageLevel.MEMORY_AND_DISK)))
+      deletionMarkers
+        .activeSubjectTokens(spark)
+        .flatMap(frame => lakehouse(frame.persist(StorageLevel.MEMORY_AND_DISK)))
     )(frame => lakehouse(frame.unpersist(blocking = true)).void)
 
   def run(
@@ -213,17 +221,17 @@ final class HiringAnalyticsBatch(
   private def purgeMarkedSilver(spark: SparkSession, markerTokens: DataFrame): IO[Unit] =
     lakehouse {
       if (DeltaTable.isDeltaTable(spark, paths.silver)) {
-      val markedSubjects = markerTokens
-        .select(col("subjectToken"))
-        .filter(col("subjectToken").isNotNull)
-        .distinct()
-      DeltaTable
-        .forPath(spark, paths.silver)
-        .as("target")
-        .merge(markedSubjects.as("source"), "target.subjectToken = source.subjectToken")
-        .whenMatched()
-        .delete()
-        .execute()
+        val markedSubjects = markerTokens
+          .select(col("subjectToken"))
+          .filter(col("subjectToken").isNotNull)
+          .distinct()
+        DeltaTable
+          .forPath(spark, paths.silver)
+          .as("target")
+          .merge(markedSubjects.as("source"), "target.subjectToken = source.subjectToken")
+          .whenMatched()
+          .delete()
+          .execute()
       }
     }
 
@@ -235,8 +243,8 @@ final class HiringAnalyticsBatch(
           allSilver <- lakehouse(spark.read.format("delta").load(paths.silver))
           funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(allSilver))
           _ <- overwrite(funnel, paths.funnelGold)
-          timeToHire <- HiringGoldTransforms.timeToHire(allSilver).adaptError {
-            case NonFatal(cause) => AnalyticsError.LakehouseFailure(cause)
+          timeToHire <- HiringGoldTransforms.timeToHire(allSilver).adaptError { case NonFatal(cause) =>
+            AnalyticsError.LakehouseFailure(cause)
           }
           _ <- overwrite(timeToHire, paths.timeToHireGold)
           skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(allSilver))
@@ -250,113 +258,191 @@ final class HiringAnalyticsBatch(
         }
     }
 
+  private final case class BronzeInput(frame: DataFrame, startedAt: Instant, records: Long)
+  private final case class PreparedEvents(
+      incomingSilver: DataFrame,
+      conflicts: DataFrame,
+      validRecords: Long,
+      quarantinedRecords: Long,
+      conflictingEventIds: Long
+  )
+
   private def runWithMarkers(
       spark: SparkSession,
       source: BoundedOperationalEventSource,
       manifest: AnalyticsRunManifest,
       markerTokens: DataFrame
-  ): AnalyticsPublication = {
-    import spark.implicits._
-
-    val rawRecords = source.read(spark, manifest)
-    requireKafkaRecordColumns(rawRecords.schema)
-    val startedAt = clock()
-    val incomingBronze =
-      withExpiry(OperationalEventTransforms.bronze(rawRecords), startedAt, AnalyticsRetention.BronzeDays)
-    val bronzeRecords = incomingBronze.count()
-
-    writeManifest(spark, manifest, "STARTED", startedAt.toString)
-    merge(
-      incomingBronze,
-      paths.bronze,
-      "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
-    )
-
-    val parsed = OperationalEventTransforms.parseKafkaRecords(incomingBronze)
-    val valid = OperationalEventTransforms.validEvents(parsed)
-    val malformed = withExpiry(
-      OperationalEventTransforms
-        .malformedEvents(parsed)
-        .withColumn("quarantineId", quarantineId)
-        .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
-      startedAt,
-      AnalyticsRetention.QuarantineDays
-    )
-
-    val validRecords = valid.count()
-    val newConflicts = OperationalEventTransforms.conflictingEventIds(valid)
-    val incomingSilver = OperationalEventTransforms.silver(valid, pseudonymizer, markerTokens)
-    val storedSilver = readOrEmpty(spark, paths.silver, incomingSilver.schema)
-    val historicalConflicts = valid
-      .select("eventId", "rawValue")
-      .withColumn("incomingFingerprint", sha2(col("rawValue"), 256))
-      .join(
-        storedSilver.select("eventId", "eventFingerprint").withColumnRenamed("eventFingerprint", "storedFingerprint"),
-        Seq("eventId"),
-        "inner"
-      )
-      .filter(col("incomingFingerprint") =!= col("storedFingerprint"))
-      .select("eventId")
-      .distinct()
-    val conflicts = newConflicts.unionByName(historicalConflicts).distinct()
-    val conflictingEventIds = conflicts.count()
-
-    val conflictQuarantine = withExpiry(
-      valid
-        .join(conflicts, Seq("eventId"), "inner")
-        .withColumn("quarantineId", quarantineId)
-        .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
-      startedAt,
-      AnalyticsRetention.QuarantineDays
-    )
-    val quarantine = malformed.unionByName(conflictQuarantine)
-    val quarantinedRecords = quarantine.count()
-    merge(quarantine, paths.quarantine, "target.quarantineId = source.quarantineId")
-
-    val silver =
-      withExpiry(incomingSilver.join(conflicts, Seq("eventId"), "left_anti"), startedAt, AnalyticsRetention.SilverDays)
-    merge(silver, paths.silver, "target.eventId = source.eventId")
-
-    val completedAt = clock()
-    expire(spark, paths.bronze, startedAt)
-    expire(spark, paths.quarantine, startedAt)
-    expire(spark, paths.silver, startedAt)
-    val outcome = if (quarantinedRecords > 0L) {
-      writeManifest(spark, manifest, "QUALITY_BLOCKED", completedAt.toString)
-      AnalyticsRunOutcome.QualityBlocked
-    } else {
-      val allSilver = readOrEmpty(spark, paths.silver, silver.schema)
-      overwrite(HiringGoldTransforms.wideFunnelDay(allSilver), paths.funnelGold)
-      overwrite(HiringGoldTransforms.timeToHire(allSilver), paths.timeToHireGold)
-      overwrite(HiringGoldTransforms.skillPostingActivity(allSilver), paths.skillsGold)
-      writeManifest(spark, manifest, "PUBLISHED", completedAt.toString)
-      AnalyticsRunOutcome.Published
-    }
-    AnalyticsPublication(
+  ): IO[AnalyticsPublication] =
+    for {
+      bronze <- ingestBronze(spark, source, manifest)
+      prepared <- separateQuarantine(spark, bronze, markerTokens)
+      silver <- mergeSilver(prepared, bronze.startedAt)
+      silverSchema <- lakehouse(silver.schema)
+      completedAt <- now
+      _ <- expireStored(spark, bronze.startedAt)
+      outcome <- finishRun(spark, manifest, silverSchema, prepared.quarantinedRecords, completedAt)
+    } yield AnalyticsPublication(
       manifest.runId,
       outcome,
       completedAt,
       paths.funnelGold,
       paths.timeToHireGold,
       paths.skillsGold,
-      bronzeRecords,
-      validRecords,
-      quarantinedRecords,
-      conflictingEventIds
+      bronze.records,
+      prepared.validRecords,
+      prepared.quarantinedRecords,
+      prepared.conflictingEventIds
     )
-  }
+
+  private def ingestBronze(
+      spark: SparkSession,
+      source: BoundedOperationalEventSource,
+      manifest: AnalyticsRunManifest
+  ): IO[BronzeInput] =
+    for {
+      raw <- source.read(spark, manifest)
+      rawSchema <- lakehouse(raw.schema)
+      _ <- KafkaRecordColumns.validate(rawSchema)
+      startedAt <- now
+      incoming <- lakehouse(
+        withExpiry(OperationalEventTransforms.bronze(raw), startedAt, AnalyticsRetention.BronzeDays)
+      )
+      recordCount <- lakehouse(incoming.count())
+      _ <- writeManifest(spark, manifest, "STARTED", startedAt.toString)
+      _ <- merge(
+        incoming,
+        paths.bronze,
+        "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
+      )
+    } yield BronzeInput(incoming, startedAt, recordCount)
+
+  private def separateQuarantine(
+      spark: SparkSession,
+      bronze: BronzeInput,
+      markerTokens: DataFrame
+  ): IO[PreparedEvents] =
+    for {
+      parsed <- lakehouse(OperationalEventTransforms.parseKafkaRecords(bronze.frame))
+      valid <- lakehouse(OperationalEventTransforms.validEvents(parsed))
+      malformed <- lakehouse(
+        withExpiry(
+          OperationalEventTransforms
+            .malformedEvents(parsed)
+            .withColumn("quarantineId", quarantineId)
+            .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
+          bronze.startedAt,
+          AnalyticsRetention.QuarantineDays
+        )
+      )
+      validRecords <- lakehouse(valid.count())
+      newConflicts <- lakehouse(OperationalEventTransforms.conflictingEventIds(valid))
+      incomingSilver <- lakehouse(OperationalEventTransforms.silver(valid, pseudonymizer, markerTokens))
+      incomingSilverSchema <- lakehouse(incomingSilver.schema)
+      storedSilver <- readOrEmpty(spark, paths.silver, incomingSilverSchema)
+      historicalConflicts <- lakehouse(
+        valid
+          .select("eventId", "rawValue")
+          .withColumn("incomingFingerprint", sha2(col("rawValue"), 256))
+          .join(
+            storedSilver
+              .select("eventId", "eventFingerprint")
+              .withColumnRenamed("eventFingerprint", "storedFingerprint"),
+            Seq("eventId"),
+            "inner"
+          )
+          .filter(col("incomingFingerprint") =!= col("storedFingerprint"))
+          .select("eventId")
+          .distinct()
+      )
+      conflicts <- lakehouse(newConflicts.unionByName(historicalConflicts).distinct())
+      conflictingEventIds <- lakehouse(conflicts.count())
+      conflictQuarantine <- lakehouse(
+        withExpiry(
+          valid
+            .join(conflicts, Seq("eventId"), "inner")
+            .withColumn("quarantineId", quarantineId)
+            .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
+          bronze.startedAt,
+          AnalyticsRetention.QuarantineDays
+        )
+      )
+      quarantine <- lakehouse(malformed.unionByName(conflictQuarantine))
+      quarantinedRecords <- lakehouse(quarantine.count())
+      _ <- merge(quarantine, paths.quarantine, "target.quarantineId = source.quarantineId")
+    } yield PreparedEvents(incomingSilver, conflicts, validRecords, quarantinedRecords, conflictingEventIds)
+
+  private def mergeSilver(prepared: PreparedEvents, startedAt: Instant): IO[DataFrame] =
+    for {
+      silver <- lakehouse(
+        withExpiry(
+          prepared.incomingSilver.join(prepared.conflicts, Seq("eventId"), "left_anti"),
+          startedAt,
+          AnalyticsRetention.SilverDays
+        )
+      )
+      _ <- merge(silver, paths.silver, "target.eventId = source.eventId")
+    } yield silver
+
+  private def expireStored(spark: SparkSession, startedAt: Instant): IO[Unit] =
+    for {
+      _ <- expire(spark, paths.bronze, startedAt)
+      _ <- expire(spark, paths.quarantine, startedAt)
+      _ <- expire(spark, paths.silver, startedAt)
+    } yield ()
+
+  private def finishRun(
+      spark: SparkSession,
+      manifest: AnalyticsRunManifest,
+      silverSchema: StructType,
+      quarantinedRecords: Long,
+      completedAt: Instant
+  ): IO[AnalyticsRunOutcome] =
+    if (quarantinedRecords > 0L)
+      writeManifest(spark, manifest, "QUALITY_BLOCKED", completedAt.toString).as(AnalyticsRunOutcome.QualityBlocked)
+    else
+      for {
+        allSilver <- readOrEmpty(spark, paths.silver, silverSchema)
+        funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(allSilver))
+        _ <- overwrite(funnel, paths.funnelGold)
+        timeToHire <- HiringGoldTransforms.timeToHire(allSilver).adaptError { case NonFatal(cause) =>
+          AnalyticsError.LakehouseFailure(cause)
+        }
+        _ <- overwrite(timeToHire, paths.timeToHireGold)
+        skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(allSilver))
+        _ <- overwrite(skills, paths.skillsGold)
+        _ <- writeManifest(spark, manifest, "PUBLISHED", completedAt.toString)
+      } yield AnalyticsRunOutcome.Published
 
   private def writeManifest(
       spark: SparkSession,
       manifest: AnalyticsRunManifest,
       status: String,
       updatedAt: String
-  ): Unit = {
-    import spark.implicits._
+  ): IO[Unit] = lakehouse {
+    import scala.jdk.CollectionConverters.*
     val rows = manifest.offsetRanges.map(range =>
-      (manifest.runId, range.topic, range.partition, range.startOffset, range.endOffsetExclusive, status, updatedAt)
+      Row(
+        manifest.runId.value,
+        range.topic,
+        range.partition,
+        range.startOffset,
+        range.endOffsetExclusive,
+        status,
+        updatedAt
+      )
     )
-    val frame = rows.toDF("runId", "topic", "partition", "startOffset", "endOffsetExclusive", "status", "updatedAt")
+    val schema = StructType(
+      Seq(
+        StructField("runId", StringType, nullable = false),
+        StructField("topic", StringType, nullable = false),
+        StructField("partition", IntegerType, nullable = false),
+        StructField("startOffset", LongType, nullable = false),
+        StructField("endOffsetExclusive", LongType, nullable = false),
+        StructField("status", StringType, nullable = false),
+        StructField("updatedAt", StringType, nullable = false)
+      )
+    )
+    val frame = spark.createDataFrame(rows.asJava, schema)
     val condition =
       "target.runId = source.runId AND target.topic = source.topic AND target.partition = source.partition"
     if (DeltaTable.isDeltaTable(spark, paths.manifests))
@@ -372,7 +458,7 @@ final class HiringAnalyticsBatch(
     else frame.write.format("delta").mode("errorifexists").save(paths.manifests)
   }
 
-  private def merge(source: DataFrame, path: String, condition: String): Unit =
+  private def merge(source: DataFrame, path: String, condition: String): IO[Unit] = lakehouse {
     if (DeltaTable.isDeltaTable(source.sparkSession, path))
       DeltaTable
         .forPath(source.sparkSession, path)
@@ -382,13 +468,16 @@ final class HiringAnalyticsBatch(
         .insertAll()
         .execute()
     else source.write.format("delta").mode("errorifexists").save(path)
+  }
 
-  private def overwrite(source: DataFrame, path: String): Unit =
-    source.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path)
+  private def overwrite(source: DataFrame, path: String): IO[Unit] =
+    lakehouse(source.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path))
 
-  private def readOrEmpty(spark: SparkSession, path: String, schema: StructType): DataFrame =
-    if (DeltaTable.isDeltaTable(spark, path)) spark.read.format("delta").load(path)
-    else spark.createDataFrame(spark.sparkContext.emptyRDD[org.apache.spark.sql.Row], schema)
+  private def readOrEmpty(spark: SparkSession, path: String, schema: StructType): IO[DataFrame] =
+    lakehouse {
+      if (DeltaTable.isDeltaTable(spark, path)) spark.read.format("delta").load(path)
+      else spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema)
+    }
 
   private def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame =
     frame
@@ -404,55 +493,126 @@ final class HiringAnalyticsBatch(
       )
     ).otherwise(sha2(col("rawValue"), 256))
 
-  private def expire(spark: SparkSession, path: String, now: Instant): Unit =
+  private def expire(spark: SparkSession, path: String, now: Instant): IO[Unit] = lakehouse {
     if (DeltaTable.isDeltaTable(spark, path))
-      DeltaTable
-        .forPath(spark, path)
-        .delete(col("expiresAt") <= lit(Timestamp.from(now)))
+      DeltaTable.forPath(spark, path).delete(col("expiresAt") <= lit(Timestamp.from(now)))
+  }
 
-  private def requireKafkaRecordColumns(schema: StructType): Unit = {
+}
+
+private[analytics] object KafkaRecordColumns {
+  def validate(schema: StructType): IO[Unit] = {
     val required = Set("topic", "partition", "offset", "timestamp", "value")
-    val missing = required.diff(schema.fieldNames.toSet)
-    require(
-      missing.isEmpty,
-      s"Kafka batch records are missing required columns: ${missing.toSeq.sorted.mkString(", ")}"
-    )
+    val missing = required.diff(schema.fieldNames.toSet).toVector.sorted
+    if (missing.isEmpty) IO.unit else IO.raiseError(AnalyticsError.InvalidSourceSchema(missing))
   }
 }
 
 /** Bounded batch entry point: `runId bootstrapServers lakehouseRoot topic partition startOffset endOffsetExclusive`.
   * Publication is deliberately represented by [[AnalyticsPublication]] rather than an OLTP write.
   */
-object HiringAnalyticsBatchMain {
-  def main(args: Array[String]): Unit = args.toList match {
+object HiringAnalyticsBatchMain extends IOApp {
+  private val logger = Slf4jLogger.getLogger[IO]
+
+  private final case class BatchArguments(
+      manifest: AnalyticsRunManifest,
+      connection: KafkaConnection,
+      paths: AnalyticsLakehousePaths
+  )
+
+  private def number[A](raw: String, label: String, parse: String => A): ValidatedNec[String, A] =
+    Try(parse(raw)).toEither.leftMap(_ => s"$label must be numeric").toValidatedNec
+
+  private def parseArguments(args: List[String]): IO[BatchArguments] = args match {
     case runId :: bootstrapServers :: lakehouseRoot :: topic :: partition :: start :: end :: Nil =>
-      val manifest =
-        AnalyticsRunManifest(runId, Vector(PartitionOffsetRange(topic, partition.toInt, start.toLong, end.toLong)))
-      val spark = SparkSession
-        .builder()
-        .appName("hiring-analytics-batch")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-        .getOrCreate()
-      try {
-        val hmacSecret = sys.env.getOrElse(
-          "HIRING_ANALYTICS_HMAC_SECRET_BASE64",
-          sys.error("HIRING_ANALYTICS_HMAC_SECRET_BASE64 is required")
-        )
-        val pseudonymizer = SubjectPseudonymizer.fromBase64(hmacSecret)
-        val mongoUri = sys.env.getOrElse("MONGODB_URI", sys.error("MONGODB_URI is required"))
-        val mongoDatabase = sys.env.getOrElse("MONGODB_DATABASE", "hiring")
-        val mongoClient = com.mongodb.client.MongoClients.create(mongoUri)
-        try {
-          val markers = new MongoActiveDeletionMarkerSource(mongoClient.getDatabase(mongoDatabase), pseudonymizer)
-          val publication = new HiringAnalyticsBatch(AnalyticsLakehousePaths(lakehouseRoot), pseudonymizer, markers)
-            .run(spark, new KafkaOffsetRangeSource(KafkaConnection(bootstrapServers)), manifest)
-          println(publication)
-        } finally mongoClient.close()
-      } finally spark.stop()
+      val range = (
+        number(partition, "partition", _.toInt),
+        number(start, "start offset", _.toLong),
+        number(end, "end offset", _.toLong)
+      ).mapN((part, first, last) => PartitionOffsetRange(topic, part, first, last))
+      val manifest = range.andThen(r => AnalyticsRunManifest.validated(runId, Vector(r)))
+      val connection = KafkaConnection.validate(KafkaConnection(bootstrapServers))
+      val paths = AnalyticsLakehousePaths.validate(AnalyticsLakehousePaths(lakehouseRoot))
+      IO.fromEither(
+        (manifest, connection, paths).mapN(BatchArguments.apply).toEither.leftMap(AnalyticsError.InvalidInput.apply)
+      )
     case _ =>
-      sys.error(
-        "usage: HiringAnalyticsBatchMain runId bootstrapServers lakehouseRoot topic partition startOffset endOffsetExclusive"
+      IO.raiseError(
+        AnalyticsError.InvalidInput(
+          cats.data.NonEmptyChain.one(
+            "usage: HiringAnalyticsBatchMain runId bootstrapServers lakehouseRoot topic partition startOffset endOffsetExclusive"
+          )
+        )
       )
   }
+
+  private def requiredEnvironment(name: String): IO[String] =
+    IO.delay(sys.env.get(name).filter(_.trim.nonEmpty))
+      .flatMap(_.fold[IO[String]](IO.raiseError(AnalyticsError.InvalidConfiguration(s"$name is required")))(IO.pure))
+
+  private[analytics] def managedResources(
+      acquireSpark: IO[SparkSession],
+      acquireMongo: IO[MongoClient]
+  ): Resource[IO, (SparkSession, MongoClient)] =
+    for {
+      spark <- Resource.make(acquireSpark.adaptError { case NonFatal(cause) =>
+        AnalyticsError.SparkStartupFailure(cause)
+      })(session =>
+        IO.blocking(session.stop()).adaptError { case NonFatal(cause) =>
+          AnalyticsError.LakehouseFailure(cause)
+        }
+      )
+      mongo <- Resource.make(acquireMongo.adaptError {
+        case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
+        case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
+      })(client =>
+        IO.blocking(client.close()).adaptError { case NonFatal(cause) =>
+          AnalyticsError.MongoConnectionFailure(cause)
+        }
+      )
+    } yield (spark, mongo)
+
+  private def resources(mongoUri: String): Resource[IO, (SparkSession, MongoClient)] =
+    managedResources(
+      IO.blocking(
+        org.apache.spark.sql.classic.SparkSession
+          .builder()
+          .appName("hiring-analytics-batch")
+          .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+          .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+          .getOrCreate()
+      ),
+      IO.blocking(MongoClients.create(mongoUri))
+    )
+
+  private def program(args: List[String]): IO[AnalyticsPublication] =
+    for {
+      parsed <- parseArguments(args)
+      hmacSecret <- requiredEnvironment("HIRING_ANALYTICS_HMAC_SECRET_BASE64")
+      pseudonymizer <- IO.delay(SubjectPseudonymizer.fromBase64(hmacSecret)).adaptError { case NonFatal(_) =>
+        AnalyticsError.InvalidConfiguration("HIRING_ANALYTICS_HMAC_SECRET_BASE64 is invalid")
+      }
+      mongoUri <- requiredEnvironment("MONGODB_URI")
+      mongoDatabase <- IO.delay(sys.env.getOrElse("MONGODB_DATABASE", "hiring"))
+      publication <- resources(mongoUri).use { case (spark, mongo) =>
+        IO.blocking(mongo.getDatabase(mongoDatabase))
+          .adaptError {
+            case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("MONGODB_DATABASE is invalid")
+            case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
+          }
+          .flatMap { database =>
+            val markers = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
+            new HiringAnalyticsBatch(parsed.paths, pseudonymizer, markers)
+              .run(spark, new KafkaOffsetRangeSource(parsed.connection), parsed.manifest)
+          }
+      }
+    } yield publication
+
+  override def run(args: List[String]): IO[ExitCode] =
+    program(args).attempt.flatMap {
+      case Right(publication)          => logger.info(publication.toString).as(ExitCode.Success)
+      case Left(error: AnalyticsError) => logger.error(error.getMessage).as(ExitCode.Error)
+      case Left(error)                 =>
+        logger.error(s"analytics batch failed unexpectedly: ${error.getClass.getSimpleName}").as(ExitCode.Error)
+    }
 }

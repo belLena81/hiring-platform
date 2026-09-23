@@ -1,4 +1,4 @@
-ThisBuild / scalaVersion := "3.9.0"
+ThisBuild / scalaVersion := "3.7.4"
 
 lazy val sparkVersion = "4.0.1"
 lazy val deltaVersion = "4.0.0"
@@ -20,8 +20,7 @@ lazy val analytics = (project in file("."))
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
     IntegrationTest / parallelExecution := false,
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Werror"),
-    csrSameVersions := Nil,
-    dependencyOverrides += "org.scala-lang" % "scala-reflect" % "2.13.16",
+    dependencyOverrides += "org.scala-lang" % "scala-reflect" % "2.13.17",
     libraryDependencies ++= Seq(
       ("org.apache.spark" %% "spark-sql" % sparkVersion).cross(CrossVersion.for3Use2_13),
       ("org.apache.spark" %% "spark-sql-kafka-0-10" % sparkVersion).cross(CrossVersion.for3Use2_13),

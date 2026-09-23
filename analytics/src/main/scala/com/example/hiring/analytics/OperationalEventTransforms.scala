@@ -81,15 +81,15 @@ object OperationalEventTransforms {
   def validEvents(parsed: DataFrame): DataFrame =
     parsed.filter(
       requiredEnvelopeFields &&
-        col("eventType").isin(EventTypes: _*) &&
-        col("aggregateType").isin(AggregateTypes: _*)
+        col("eventType").isin(EventTypes*) &&
+        col("aggregateType").isin(AggregateTypes*)
     )
 
   def malformedEvents(parsed: DataFrame): DataFrame =
     parsed.filter(
       !(requiredEnvelopeFields &&
-        col("eventType").isin(EventTypes: _*) &&
-        col("aggregateType").isin(AggregateTypes: _*))
+        col("eventType").isin(EventTypes*) &&
+        col("aggregateType").isin(AggregateTypes*))
     )
 
   /** Event IDs are idempotency keys. Same bytes are duplicates; different bytes are conflicts. */
@@ -209,13 +209,13 @@ object HiringGoldTransforms {
     applicationLifecycle(silver)
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .groupBy("day")
-      .agg(counts.head, counts.tail: _*)
+      .agg(counts.head, counts.tail*)
       .filter(
         subjectColumns
           .map(name => col(name) === lit(0) || col(name) >= lit(AnalyticsRetention.MinimumContributors))
           .reduce(_ && _)
       )
-      .drop(subjectColumns: _*)
+      .drop(subjectColumns*)
   }
 
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */

@@ -14,8 +14,7 @@ object AnalyticsRetention {
   val MinimumContributors: Long = 10L
 }
 
-sealed abstract class AnalyticsError(message: String, cause: Throwable = null)
-    extends RuntimeException(message, cause)
+sealed abstract class AnalyticsError(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
 
 object AnalyticsError {
   final case class InvalidInput(problems: NonEmptyChain[String])
@@ -33,6 +32,10 @@ object AnalyticsError {
       extends AnalyticsError("analytics source read failed", underlying)
   final case class LakehouseFailure(underlying: Throwable)
       extends AnalyticsError("analytics lakehouse operation failed", underlying)
+  final case class SparkStartupFailure(underlying: Throwable)
+      extends AnalyticsError("analytics Spark session could not start", underlying)
+  final case class MongoConnectionFailure(underlying: Throwable)
+      extends AnalyticsError("analytics Mongo client could not start", underlying)
 }
 
 opaque type RunId = String
