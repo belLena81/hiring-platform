@@ -3,8 +3,11 @@ ThisBuild / scalaVersion := "2.13.16"
 lazy val sparkVersion = "4.0.1"
 lazy val deltaVersion = "4.0.0"
 lazy val munitVersion = "1.3.6"
+lazy val IntegrationTest = config("it") extend Test
 
 lazy val analytics = (project in file("."))
+  .configs(IntegrationTest)
+  .settings(inConfig(IntegrationTest)(Defaults.testSettings))
   .settings(
     name := "hiring-analytics",
     version := "0.1.0-SNAPSHOT",
@@ -13,11 +16,15 @@ lazy val analytics = (project in file("."))
     Test / fork := true,
     Test / parallelExecution := false,
     Test / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
+    IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",
+    IntegrationTest / parallelExecution := false,
     scalacOptions ++= Seq("-deprecation", "-feature", "-unchecked", "-Werror"),
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-sql" % sparkVersion,
       "org.apache.spark" %% "spark-sql-kafka-0-10" % sparkVersion,
       "io.delta" %% "delta-spark" % deltaVersion,
+      "org.mongodb" % "mongodb-driver-sync" % "5.12.0",
+      "org.testcontainers" % "testcontainers" % "2.0.5" % Test,
       "org.scalameta" %% "munit" % munitVersion % Test
     )
   )

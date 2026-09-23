@@ -32,7 +32,7 @@ Kafka publishes to `hiring.operational-events` with seven-day broker retention. 
 The analytics batch is an opt-in, one-shot Compose profile. It reads one explicit Kafka partition/offset range, writes local Delta data under the ignored `.local/data/analytics/` directory, and exits. It is not a streaming daemon and does not run with the default application stack.
 
 ```bash
-docker compose up -d kafka
+docker compose up -d mongodb kafka
 ANALYTICS_RUN_ID=local-001 \
   HIRING_ANALYTICS_HMAC_SECRET_BASE64="[REDACTED_SECRET]" \
   ANALYTICS_PARTITION=0 \
@@ -41,7 +41,7 @@ ANALYTICS_RUN_ID=local-001 \
   docker compose --profile analytics run --rm analytics-batch
 ```
 
-The profile uses Kafka's internal `kafka:9092` listener. Local host clients continue to use `127.0.0.1:9092`. Choose a range that exists in the local broker; the batch validates neither a live report publication nor account-erasure processing. See the [analytics specification](docs/specs/hiring-analytics-lakehouse.md) for the retention and release boundaries.
+The profile uses Kafka's internal `kafka:9092` listener and reads up to 100,000 pending account-erasure requests from the `hiring` Mongo database before it mutates Delta data. Mongo marker read/UUID validation failures and larger marker backlogs stop the run. Local host Kafka clients continue to use `127.0.0.1:9092`. Choose a range that exists in the local broker. This batch purges marked subjects from existing Silver and rebuilds local Gold, but it does not publish or hide the GraphQL Mongo snapshot or complete the full account-erasure workflow. See the [analytics specification](docs/specs/hiring-analytics-lakehouse.md) for the retention and release boundaries.
 
 `GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
 

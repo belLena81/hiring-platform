@@ -154,10 +154,45 @@ final class HiringAnalyticsBatch(
   ): AnalyticsPublication = {
     val markerTokens = deletionMarkers.activeSubjectTokens(spark).persist(StorageLevel.MEMORY_AND_DISK)
     try {
-      markerTokens.count()
+      require(markerTokens.columns.contains("subjectToken"), "deletion markers must contain a subjectToken")
+      val activeMarkerCount = markerTokens.count()
+      if (activeMarkerCount > 0L) {
+        val deletionTime = clock()
+        expire(spark, paths.silver, deletionTime)
+        purgeMarkedSilver(spark, markerTokens)
+        rebuildGoldFromStoredSilver(spark)
+      }
       runWithMarkers(spark, source, manifest, markerTokens)
     } finally markerTokens.unpersist(blocking = true)
   }
+
+  private def purgeMarkedSilver(spark: SparkSession, markerTokens: DataFrame): Unit =
+    if (DeltaTable.isDeltaTable(spark, paths.silver)) {
+      val markedSubjects = markerTokens
+        .select(col("subjectToken"))
+        .filter(col("subjectToken").isNotNull)
+        .distinct()
+      DeltaTable
+        .forPath(spark, paths.silver)
+        .as("target")
+        .merge(markedSubjects.as("source"), "target.subjectToken = source.subjectToken")
+        .whenMatched()
+        .delete()
+        .execute()
+    }
+
+  /** Deletion is applied to rebuildable Gold immediately, even if the new Kafka range later quality-blocks. */
+  private def rebuildGoldFromStoredSilver(spark: SparkSession): Unit =
+    if (DeltaTable.isDeltaTable(spark, paths.silver)) {
+      val allSilver = spark.read.format("delta").load(paths.silver)
+      overwrite(HiringGoldTransforms.wideFunnelDay(allSilver), paths.funnelGold)
+      overwrite(HiringGoldTransforms.timeToHire(allSilver), paths.timeToHireGold)
+      overwrite(HiringGoldTransforms.skillPostingActivity(allSilver), paths.skillsGold)
+    } else {
+      Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
+        if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
+      }
+    }
 
   private def runWithMarkers(
       spark: SparkSession,
@@ -340,18 +375,15 @@ object HiringAnalyticsBatchMain {
           sys.error("HIRING_ANALYTICS_HMAC_SECRET_BASE64 is required")
         )
         val pseudonymizer = SubjectPseudonymizer.fromBase64(hmacSecret)
-        val emptyMarkers = new ActiveDeletionMarkerSource {
-          override def activeSubjectTokens(spark: SparkSession): DataFrame = {
-            import org.apache.spark.sql.types.{StringType, StructField, StructType}
-            spark.createDataFrame(
-              spark.sparkContext.emptyRDD[org.apache.spark.sql.Row],
-              StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
-            )
-          }
-        }
-        val publication = new HiringAnalyticsBatch(AnalyticsLakehousePaths(lakehouseRoot), pseudonymizer, emptyMarkers)
-          .run(spark, new KafkaOffsetRangeSource(KafkaConnection(bootstrapServers)), manifest)
-        println(publication)
+        val mongoUri = sys.env.getOrElse("MONGODB_URI", sys.error("MONGODB_URI is required"))
+        val mongoDatabase = sys.env.getOrElse("MONGODB_DATABASE", "hiring")
+        val mongoClient = com.mongodb.client.MongoClients.create(mongoUri)
+        try {
+          val markers = new MongoActiveDeletionMarkerSource(mongoClient.getDatabase(mongoDatabase), pseudonymizer)
+          val publication = new HiringAnalyticsBatch(AnalyticsLakehousePaths(lakehouseRoot), pseudonymizer, markers)
+            .run(spark, new KafkaOffsetRangeSource(KafkaConnection(bootstrapServers)), manifest)
+          println(publication)
+        } finally mongoClient.close()
       } finally spark.stop()
     case _ =>
       sys.error(

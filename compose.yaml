@@ -40,6 +40,8 @@ services:
     depends_on:
       kafka:
         condition: service_started
+      mongodb:
+        condition: service_healthy
     environment:
       ANALYTICS_RUN_ID: ${ANALYTICS_RUN_ID:-}
       ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
@@ -49,5 +51,7 @@ services:
       ANALYTICS_START_OFFSET: ${ANALYTICS_START_OFFSET:-}
       ANALYTICS_END_OFFSET_EXCLUSIVE: ${ANALYTICS_END_OFFSET_EXCLUSIVE:-}
       HIRING_ANALYTICS_HMAC_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_SECRET_BASE64:-}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/?directConnection=true}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
     volumes:
       - ./.local/data/analytics:/var/lib/hiring-analytics

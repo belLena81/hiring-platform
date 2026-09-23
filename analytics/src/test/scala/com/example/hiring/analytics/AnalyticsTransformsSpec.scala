@@ -2,9 +2,10 @@ package com.example.hiring.analytics
 
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, lit}
 
 import java.nio.file.Files
+import java.sql.Timestamp
 import java.time.Instant
 
 class AnalyticsTransformsSpec extends FunSuite {
@@ -385,6 +386,70 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(), 1L)
   }
 
+  test("active deletion markers purge stored Silver and rebuild Gold before a quality-blocked range") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-silver-erasure").toUri.toString.stripSuffix("/")
+    val paths = AnalyticsLakehousePaths(lakehouse)
+    val initialEvents = (1 to 10).map(index =>
+      (
+        "hiring.operational-events",
+        0,
+        index.toLong,
+        event(
+          s"created-$index",
+          "APPLICATION_CREATED",
+          aggregateId = s"application-$index",
+          payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
+        )
+      )
+    )
+    val seedParsed = OperationalEventTransforms.parseKafkaRecords(records(initialEvents))
+    val seedAt = Instant.parse("2026-09-22T12:00:00Z")
+    val seedSilver = OperationalEventTransforms
+      .silver(OperationalEventTransforms.validEvents(seedParsed), pseudonymizer, emptyMarkers)
+      .withColumn("ingestedAt", lit(Timestamp.from(seedAt)))
+      .withColumn("expiresAt", lit(Timestamp.from(seedAt.plusSeconds(30L * 24L * 60L * 60L))))
+    seedSilver.write.format("delta").save(paths.silver)
+    HiringGoldTransforms.wideFunnelDay(seedSilver).write.format("delta").save(paths.funnelGold)
+    assertEquals(spark.read.format("delta").load(paths.silver).count(), 10L)
+    assertEquals(spark.read.format("delta").load(paths.funnelGold).count(), 1L)
+
+    val replayAndMalformed = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          11L,
+          event(
+            "created-1",
+            "APPLICATION_CREATED",
+            aggregateId = "application-1",
+            payload = Some("""{"applicationId":"application-1","candidateId":"candidate-1"}""")
+          )
+        ),
+        ("hiring.operational-events", 0, 12L, "not-json")
+      )
+    )
+    import spark.implicits._
+    val markers = Seq(pseudonymizer.token("candidate-1")).toDF("subjectToken")
+    val deletionBatch = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(markers),
+      () => Instant.parse("2026-09-22T13:00:00Z")
+    )
+    val deletionRun = AnalyticsRunManifest(
+      "erasure-with-bad-range",
+      Vector(PartitionOffsetRange("hiring.operational-events", 0, 11L, 13L))
+    )
+
+    assertEquals(
+      deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).outcome,
+      AnalyticsRunOutcome.QualityBlocked
+    )
+    assertEquals(spark.read.format("delta").load(paths.silver).count(), 9L)
+    assertEquals(spark.read.format("delta").load(paths.funnelGold).count(), 0L)
+  }
+
   test("data frame source honors the manifest offset boundary") {
     val source = records(
       Seq(
@@ -402,6 +467,20 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertNotEquals(token, pseudonymizer.token("candidate-2"))
     assert(!token.contains("candidate-1"))
     assert(token.startsWith("hmac-v1_"))
+  }
+
+  test("Mongo erasure request subject IDs map to HMAC tokens and malformed IDs fail closed") {
+    val subjectId = java.util.UUID.fromString("d31d0f7b-0abf-4e47-94da-b2f52cb5dd2e")
+    assertEquals(
+      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", subjectId.toString), pseudonymizer),
+      pseudonymizer.token(subjectId.toString)
+    )
+    intercept[IllegalStateException] {
+      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", "not-a-uuid"), pseudonymizer)
+    }
+    intercept[IllegalStateException] {
+      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", 17), pseudonymizer)
+    }
   }
 
   test("active deletion tokens are excluded before Silver persistence without retaining raw identities") {
