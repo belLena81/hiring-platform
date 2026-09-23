@@ -4,7 +4,6 @@ import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
-import io.circe.Json
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInteractionResolvers {
@@ -14,7 +13,7 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       mutationResult(
         hiring.interactionService
           .recordJobView(
-            idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+            idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
             actor,
             input.eventId,
             input.jobId,
@@ -30,7 +29,7 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       mutationResult(
         hiring.interactionService
           .recordSearchResultClick(
-            idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+            idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
             actor,
             input.eventId,
             input.searchId,

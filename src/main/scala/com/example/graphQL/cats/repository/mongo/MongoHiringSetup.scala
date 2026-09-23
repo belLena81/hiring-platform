@@ -97,23 +97,29 @@ object MongoHiringSetup {
 
   private def migrateAggregateVersions(database: MongoDatabase): IO[Unit] = {
     val ledger = database.getCollection("hiring_migration_ledger")
+    val migration = Filters.eq("_id", RevisionMigrationId)
+    val state = PublisherBridge.first(ledger.find(migration)).map(_.map(_.getString("state")))
     val started = Updates.combine(
       Updates.setOnInsert("_id", RevisionMigrationId),
       Updates.set("version", 1L),
       Updates.set("state", "Running")
     )
-    PublisherBridge
-      .first(ledger.updateOne(Filters.eq("_id", RevisionMigrationId), started, new UpdateOptions().upsert(true)))
-      .void *> List(database.getCollection("users"), database.getCollection("jobs")).traverse_(backfillVersions) *>
-      verifyAggregateVersions(database) *>
-      PublisherBridge
-        .first(
-          ledger.updateOne(
-            Filters.eq("_id", RevisionMigrationId),
-            Updates.combine(Updates.set("version", 1L), Updates.set("state", "Complete"))
-          )
-        )
-        .void
+    state.flatMap {
+      case Some("Complete") => IO.unit
+      case _                =>
+        PublisherBridge
+          .first(ledger.updateOne(migration, started, new UpdateOptions().upsert(true)))
+          .void *> List(database.getCollection("users"), database.getCollection("jobs")).traverse_(backfillVersions) *>
+          verifyAggregateVersions(database) *>
+          PublisherBridge
+            .first(
+              ledger.updateOne(
+                migration,
+                Updates.combine(Updates.set("version", 1L), Updates.set("state", "Complete"))
+              )
+            )
+            .void
+    }
   }
 
   private def backfillVersions(collection: MongoCollection[Document]): IO[Unit] = {

@@ -8,7 +8,6 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO}
-import io.circe.Json
 import com.example.graphQL.cats.shared.search.JobSearchFilter
 import com.example.graphQL.cats.shared.pagination.JobCursor
 import sangria.schema.Context
@@ -70,7 +69,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       val graphQLInput = context.arg(createJobInputArgument)
       mutationResult(
         hiring.jobService.createJob(
-          idempotencyRequest(graphQLInput.idempotencyKey, Json.fromString(graphQLInput.toString)),
+          idempotencyRequest(graphQLInput.idempotencyKey, graphQLInput.idempotencyPayload),
           actor,
           createJobInput(graphQLInput, JobStatus.Open)
         )
@@ -83,7 +82,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       val patch = updateInput(input.patch)
       mutationResult(
         hiring.jobService.updateJob(
-          idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+          idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
           actor,
           input.id,
           patch
@@ -101,7 +100,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       val input = context.arg(jobActionInputArgument)
       mutationResult(
         method(hiring.jobService)(
-          idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+          idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
           actor,
           input.jobId
         )

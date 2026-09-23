@@ -1,22 +1,22 @@
 package com.example.graphQL.cats.api.admission
 
-import cats.effect.{Clock, IO, Ref}
+import cats.effect.IO
 import cats.syntax.all.*
 import com.comcast.ip4s.IpAddress
 import com.example.graphQL.cats.config.AuthRateLimitConfig
+import com.github.benmanes.caffeine.cache.Ticker
 import scala.concurrent.duration.*
+import java.util.concurrent.atomic.AtomicLong
 import munit.CatsEffectSuite
 
 final class AuthRateLimiterSpec extends CatsEffectSuite {
-  private def testClock: IO[(Clock[IO], FiniteDuration => IO[Unit])] =
-    Ref.of[IO, FiniteDuration](Duration.Zero).map { now =>
-      val clock = new Clock[IO] {
-        override val applicative: cats.Applicative[IO] = IO.asyncForIO
-        override def realTime: IO[FiniteDuration] = now.get
-        override def monotonic: IO[FiniteDuration] = now.get
-      }
-      (clock, delta => now.update(_ + delta))
+  private def testTicker: IO[(Ticker, FiniteDuration => IO[Unit])] = IO.delay {
+    val now = new AtomicLong(0L)
+    val ticker = new Ticker {
+      override def read(): Long = now.get()
     }
+    (ticker, delta => IO.delay(now.addAndGet(delta.toNanos)).void)
+  }
 
   private def key(
       address: String,
@@ -53,14 +53,17 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
   test("expired windows admit a new attempt") {
     val config = AuthRateLimitConfig(windowSeconds = 1, attempts = 1, maxBuckets = 1)
     for {
-      (clock, advance) <- testClock
-      limiter <- AuthRateLimiter.create(config, clock)
+      (ticker, advance) <- testTicker
+      limiter <- AuthRateLimiter.create(config, ticker)
       first <- limiter.permit(key("203.0.113.1"))
       blocked <- limiter.permit(key("203.0.113.1"))
-      _ <- advance(1.second)
+      _ <- advance(900.millis)
+      stillBlocked <- limiter.permit(key("203.0.113.1"))
+      _ <- advance(100.millis)
       afterExpiry <- limiter.permit(key("203.0.113.1"))
     } yield {
-      assertEquals(first, Right(())); assertEquals(blocked, Left(AuthRateLimiter.RateLimited(1.second)));
+      assertEquals(first, Right(())); assertEquals(blocked, Left(AuthRateLimiter.RateLimited(1.second)))
+      assertEquals(stillBlocked, Left(AuthRateLimiter.RateLimited(1.second)))
       assertEquals(afterExpiry, Right(()))
     }
   }
@@ -81,14 +84,28 @@ final class AuthRateLimiterSpec extends CatsEffectSuite {
       assertEquals(stillLimitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
     }
   }
-  test("frequent buckets resist one-hit IPv6 flooding") {
+  test("unique IPv6 flooding stays within the bucket bound") {
     val config = AuthRateLimitConfig(windowSeconds = 60, attempts = 2, maxBuckets = 256)
-    val hot = key("2001:db8:100::1");
-    val flood = (1 to 200).toList.map(index => key(s"2001:db8:${index.toHexString}::1"))
+    val hot = key("2001:db8:ffff::1");
+    val flood = (1 to 1000).toList.map(index => key(s"2001:db8:${index.toHexString}::1"))
     for {
-      limiter <- AuthRateLimiter.create(config); _ <- (1 to 200).toList.traverse_(_ => limiter.permit(hot));
-      _ <- flood.traverse_(limiter.permit); stillLimited <- limiter.permit(hot)
-    } yield assertEquals(stillLimited, Left(AuthRateLimiter.RateLimited(60.seconds)))
+      limiter <- AuthRateLimiter.create(config)
+      _ <- (1 to 200).toList.traverse_(_ => limiter.permit(hot))
+      limitedHot <- limiter.permit(hot)
+      _ <- flood.traverse_(limiter.permit)
+      size <- limiter.cleanUpAndSize
+    } yield {
+      assertEquals(limitedHot, Left(AuthRateLimiter.RateLimited(60.seconds)))
+      assert(size <= config.maxBuckets.toLong)
+    }
+  }
+  test("cache size remains bounded while admitting unique keys") {
+    val config = AuthRateLimitConfig(windowSeconds = 60, attempts = 1, maxBuckets = 8)
+    for {
+      limiter <- AuthRateLimiter.create(config)
+      _ <- (1 to 100).toList.traverse_(index => limiter.permit(key(s"203.0.113.$index")))
+      size <- limiter.cleanUpAndSize
+    } yield assert(size <= config.maxBuckets.toLong)
   }
   test("concurrent permits for one key do not lose atomic updates") {
     val config = AuthRateLimitConfig(windowSeconds = 60, attempts = 40, maxBuckets = 10);

@@ -7,7 +7,6 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
 import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor}
-import io.circe.Json
 import sangria.schema.Context
 import java.time.Instant
 
@@ -70,7 +69,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       val input = context.arg(submitApplicationInputArgument)
       mutationResult(
         hiring.applicationService.submitApplication(
-          idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+          idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
           actor,
           input.jobId
         )
@@ -120,7 +119,10 @@ private[graphql] object HiringGraphQLApplicationResolvers {
     authenticated(context) { case (actor, hiring) =>
       mutationResult(
         hiring.applicationService.changeStatus(
-          idempotencyRequest(idempotencyKey, Json.fromString(s"$applicationId:$status:$feedback:$reason")),
+          idempotencyRequest(
+            idempotencyKey,
+            applicationStatusFingerprintInput(applicationId, status, feedback, reason)
+          ),
           actor,
           applicationId,
           status,

@@ -2,10 +2,12 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.data.NonEmptyList
 import cats.effect.IO
-import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.{DomainError, GraphQLFailure}
+import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
-import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
+import com.example.graphQL.cats.repository.protocol.{MutationReceiptFingerprint, RepositoryError}
 import com.example.graphQL.cats.service.{
   AccountError,
   AuthenticationError,
@@ -13,10 +15,99 @@ import com.example.graphQL.cats.service.{
   SearchError,
   UseCaseError
 }
-import com.example.graphQL.cats.service.protocol.UseCaseIO
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
+import io.circe.{Json, Printer}
+import io.circe.syntax.*
 import munit.CatsEffectSuite
 
+import java.util.UUID
+
 final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
+  private val canonicalJsonPrinter = Printer.noSpaces.copy(sortKeys = true)
+
+  test("encodes mutation input values and fingerprints sorted compact JSON") {
+    val idempotencyKey = UUID.fromString("00000000-0000-0000-0000-000000000001")
+    val input = SignUpGraphQLInput(
+      idempotencyKey,
+      "Candidate",
+      UserRole.Candidate,
+      "secret",
+      Some(List("Scala", "Cats Effect")),
+      None,
+      None,
+      None,
+      None
+    )
+    val expected = Json.obj(
+      "experienceSummary" -> Json.Null,
+      "idempotencyKey" -> Json.fromString(idempotencyKey.toString),
+      "jobTitle" -> Json.Null,
+      "name" -> Json.fromString("Candidate"),
+      "organizationName" -> Json.Null,
+      "password" -> Json.fromString("secret"),
+      "resumeRef" -> Json.Null,
+      "role" -> Json.fromString("CANDIDATE"),
+      "skills" -> Json.arr(Json.fromString("Scala"), Json.fromString("Cats Effect"))
+    )
+    val payload = input.idempotencyPayload
+    val request = idempotencyRequest(idempotencyKey, payload)
+    val legacyRequest = IdempotencyRequest.fromCanonicalInput(
+      idempotencyKey,
+      Json.fromString(input.toString).noSpaces
+    )
+    val jobId = JobId(UUID.fromString("00000000-0000-0000-0000-000000000002"))
+    val updateJob = UpdateJobGraphQLInput(
+      idempotencyKey,
+      jobId,
+      JobGraphQLInput("Scala Engineer", "Build systems", List("Scala"), List("Cats"), "CY", None, remote = true)
+    )
+
+    assertEquals(payload, expected)
+    assertEquals(
+      request.fingerprint,
+      MutationReceiptFingerprint.fromCanonicalInput(expected.printWith(canonicalJsonPrinter))
+    )
+    assertNotEquals(request, legacyRequest)
+    assertEquals(updateJob.asJson.hcursor.get[String]("id"), Right(jobId.value.toString))
+    assertEquals(updateJob.asJson.hcursor.downField("patch").get[Option[String]]("city"), Right(None))
+
+    val firstObject = Json.obj(
+      "z" -> Json.obj("second" -> Json.fromInt(2), "first" -> Json.fromInt(1)),
+      "a" -> Json.fromInt(3)
+    )
+    val reorderedObject = Json.obj(
+      "a" -> Json.fromInt(3),
+      "z" -> Json.obj("first" -> Json.fromInt(1), "second" -> Json.fromInt(2))
+    )
+    assertEquals(
+      idempotencyRequest(idempotencyKey, firstObject).fingerprint,
+      idempotencyRequest(idempotencyKey, reorderedObject).fingerprint
+    )
+  }
+
+  test("encodes application status actions as structured canonical JSON") {
+    val idempotencyKey = UUID.fromString("00000000-0000-0000-0000-000000000003")
+    val applicationId = ApplicationId(UUID.fromString("00000000-0000-0000-0000-000000000004"))
+    val action = applicationStatusFingerprintInput(
+      applicationId,
+      ApplicationStatus.Rejected,
+      Some("Insufficient experience"),
+      None
+    )
+    val expected = Json.obj(
+      "applicationId" -> Json.fromString(applicationId.value.toString),
+      "feedback" -> Json.fromString("Insufficient experience"),
+      "reason" -> Json.Null,
+      "status" -> Json.fromString("REJECTED")
+    )
+
+    assertEquals(action, expected)
+    assertEquals(
+      idempotencyRequest(idempotencyKey, action).fingerprint,
+      MutationReceiptFingerprint.fromCanonicalInput(expected.printWith(canonicalJsonPrinter))
+    )
+  }
+
   test("maps every use-case error through the failure catalog") {
     final case class Scenario(name: String, error: UseCaseError, expected: GraphQLFailure)
 

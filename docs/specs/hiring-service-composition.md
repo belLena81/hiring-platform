@@ -16,14 +16,16 @@
 - `EmbeddingCapability` is a private runtime ADT. Its smart constructor does not invoke provider or adapter factories when disabled. When enabled it validates the API key before acquisition, owns a plain semantic repository, shares one durable embedding-work repository between transactional writes and the worker pipeline, and resource-manages provider/pipeline release on success, failure, and cancellation.
 - Account, hiring-read, job, application, search, interaction, and analytics ports, implementations, and test doubles return `UseCaseIO[A] = EitherT[IO, UseCaseError, A]`. Repository ports and `UserAuthenticator` retain their existing `IO[Either[RepositoryError, A]]` contracts.
 - GraphQL translates an idempotency UUID and the existing canonical fingerprint input into an opaque `IdempotencyRequest`. Services own receipt execution, actor scope, entity references, replay authorization, and the private `MutationWriteContext` callback.
-- Existing receipt operation names, scope normalization, fingerprint bytes, entity references, seven-day expiry, replay behavior, and failure mapping are compatibility invariants.
+- Existing receipt operation names, scope normalization, entity references, seven-day expiry, replay behavior, and failure mapping remain compatibility invariants. Fingerprint serialization uses the canonical JSON contract below.
 - Business timestamps and generated entity/event IDs are evaluated inside the first-write callback. Receipt replay never generates write IDs and never repeats a domain write, event, outbox insert, erasure request, or embedding-work insert.
 - Typed rejection removes the provisional receipt and remains retryable. Repository failure rolls back the receipt and every participating write. Fingerprint mismatch remains `RepositoryError.Conflict`; an in-progress receipt remains `RepositoryError.Unavailable`; every first-write repository call receives the exact context supplied by the receipt repository.
 - Public GraphQL SDL, response payloads, error codes/messages, HTTP status behavior, Mongo documents/indexes, events, configuration, and dependencies do not change.
 
 ## Mutation compatibility matrix
 
-`input-json` means the current `Json.fromString(input.toString).noSpaces` bytes. Status actions retain the current `Json.fromString(s"$applicationId:$status:$feedback:$reason").noSpaces` bytes, including JSON string quoting and escaping.
+`input-json` means compact JSON encoded by Circe from the full GraphQL mutation input, with object keys sorted recursively before hashing. Arrays retain input order and absent optional fields encode as `null`. Status actions use a JSON object containing the application ID, uppercase status, feedback, and reason, with the same canonical printer.
+
+The fingerprint format changes immediately. Existing receipts contain only the previous fingerprint hash, so replays using those keys can return a fingerprint conflict until MongoDB's TTL process removes the expired receipts. No legacy fingerprint fallback or receipt rewrite is performed.
 
 | Operation | Scope | Fingerprint source | Entity reference | Replay |
 |---|---|---|---|---|

@@ -101,7 +101,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
       Json.obj("jobId" -> Json.fromString(value.id.value.toString))
     )
 
-  test("startup backfills user and job revisions once and records the completed migration") {
+  test("startup backfills revisions and skips scans after the migration is complete") {
     replicaSet.use { instance =>
       awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         val database = client.getDatabase(s"revision_migration_${UUID.randomUUID()}")
@@ -121,14 +121,49 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
           migratedUser <- PublisherBridge.first(
             database.getCollection("users").find(Filters.eq("_id", legacyUser.getString("_id")))
           )
+          missingVersionJob = MongoHiringCodecs.job(job(JobId(UUID.randomUUID()), UserId(UUID.randomUUID())))
+          invalidVersionUser = MongoHiringCodecs.user(
+            User(
+              UserId(UUID.randomUUID()),
+              None,
+              "Recruiter",
+              UserRole.Recruiter,
+              Some(UserProfile.Recruiter(RecruiterProfile("Another Hiring Co", Some("Recruiter")))),
+              now
+            )
+          )
+          _ = missingVersionJob.remove("version")
+          _ = invalidVersionUser.put("version", "invalid")
+          _ <- PublisherBridge
+            .first(
+              database
+                .getCollection("jobs")
+                .insertOne(missingVersionJob, new InsertOneOptions().bypassDocumentValidation(true))
+            )
+            .void
+          _ <- PublisherBridge
+            .first(
+              database
+                .getCollection("users")
+                .insertOne(invalidVersionUser, new InsertOneOptions().bypassDocumentValidation(true))
+            )
+            .void
           _ <- MongoHiringSetup.initialize(database)
           completedMigration <- PublisherBridge.first(
             database.getCollection("hiring_migration_ledger").find(Filters.eq("_id", "001_user_job_revisions"))
+          )
+          skippedBackfill <- PublisherBridge.first(
+            database.getCollection("jobs").find(Filters.eq("_id", missingVersionJob.getString("_id")))
+          )
+          skippedVerification <- PublisherBridge.first(
+            database.getCollection("users").find(Filters.eq("_id", invalidVersionUser.getString("_id")))
           )
           _ <- IO {
             assertEquals(migratedJob.map(_.getLong("version").longValue()), Some(0L))
             assertEquals(migratedUser.map(_.getLong("version").longValue()), Some(0L))
             assertEquals(completedMigration.map(_.getString("state")), Some("Complete"))
+            assertEquals(skippedBackfill.map(_.containsKey("version")), Some(false))
+            assertEquals(skippedVerification.map(_.getString("version")), Some("invalid"))
           }
         } yield ()
       }
@@ -346,6 +381,36 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
           assertEquals(deletion, Left(RepositoryError.Unavailable))
           assertEquals(storedRecruiter, Some(recruiter))
           assertEquals(eventsAfterFailure.map(_.longValue), Some(0L))
+        }
+      }
+    }
+  }
+
+  test("canonical mutation fingerprints conflict with receipts from the prior input format") {
+    replicaSet.use { instance =>
+      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        val database = client.getDatabase(s"mutation_fingerprint_${UUID.randomUUID()}")
+        val receipts = MongoMutationReceiptRepository.transactional(database, client)
+        val key = MutationReceiptKey("createJob", "actor", UUID.randomUUID())
+        val legacyFingerprint = MutationReceiptFingerprint.fromCanonicalInput(
+          Json.fromString("CreateJobGraphQLInput(legacy-rendering)").noSpaces
+        )
+        val canonicalFingerprint = MutationReceiptFingerprint.fromCanonicalInput(
+          """{"idempotencyKey":"00000000-0000-0000-0000-000000000001","title":"New format"}"""
+        )
+        val entity = MutationEntityReference("job", UUID.randomUUID().toString)
+
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          oldReceipt <- receipts.execute[Unit, String](key, legacyFingerprint, now, now.plusSeconds(3600)) { _ =>
+            IO.pure(Right(MutationWriteOutcome.Applied(MutationReceiptWrite((), entity))))
+          }
+          newFormatRetry <- receipts.execute[Unit, String](key, canonicalFingerprint, now, now.plusSeconds(3600)) { _ =>
+            IO.raiseError(new AssertionError("a prior-format receipt must not replay under the new fingerprint"))
+          }
+        } yield {
+          assertEquals(oldReceipt, Right(MutationReceiptExecution.Applied((), entity)))
+          assertEquals(newFormatRetry, Right(MutationReceiptExecution.FingerprintMismatch))
         }
       }
     }

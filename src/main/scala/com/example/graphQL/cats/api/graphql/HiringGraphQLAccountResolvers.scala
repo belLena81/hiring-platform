@@ -14,7 +14,6 @@ import com.example.graphQL.cats.service.protocol.{
   SignUpInput,
   UseCaseIO
 }
-import io.circe.Json
 import sangria.schema.Context
 import java.time.Instant
 
@@ -32,7 +31,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
             mutationResult(
               hiring.accountService
                 .signUp(
-                  idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+                  idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
                   SignUpInput(input.name, input.role, input.password, profile)
                 )
                 .map(authSuccess)
@@ -48,7 +47,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
         mutationResult(
           hiring.accountService
             .bootstrapAdmin(
-              idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+              idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
               BootstrapAdminInput(input.name, input.password)
             )
             .map(authSuccess)
@@ -63,7 +62,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
         mutationResult(
           hiring.accountService
             .login(
-              idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+              idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
               LoginInput(input.name, input.password)
             )
             .map(authSuccess)
@@ -79,7 +78,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
         profile =>
           mutationResult(
             hiring.accountService.updateMyProfile(
-              idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)),
+              idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
               actor,
               profile
             )
@@ -92,7 +91,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       val input = context.arg(deleteMyAccountInputArgument)
       mutationResult(
         hiring.accountService
-          .deleteMyAccount(idempotencyRequest(input.idempotencyKey, Json.fromString(input.toString)), actor)
+          .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
           .semiflatTap(_ => context.ctx.invalidateViewer)
           .map(_ => DeletionSuccess(true))
       )

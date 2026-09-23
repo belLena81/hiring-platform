@@ -5,22 +5,26 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.given
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, ProbeResult, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import com.example.graphQL.cats.shared.pagination.*
 import com.example.graphQL.cats.shared.search.JobSearchFilter
-import io.circe.Json
+import io.circe.{Json, Printer}
+import io.circe.syntax.*
 import sangria.schema.Context
 
 import java.nio.charset.StandardCharsets
-import java.util.UUID
+import java.util.{Locale, UUID}
 import scala.concurrent.duration.*
 
 private[graphql] object HiringGraphQLResolverSupport {
+  private val CanonicalJsonPrinter = Printer.noSpaces.copy(sortKeys = true)
+
   def raiseOnUseCaseError[A](value: UseCaseIO[A]): IO[A] =
     value.value.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
 
@@ -37,8 +41,21 @@ private[graphql] object HiringGraphQLResolverSupport {
         else IO.pure(DomainError(failure.code, failure.message))
     }
 
-  def idempotencyRequest(idempotencyKey: UUID, canonicalInput: Json): IdempotencyRequest =
-    IdempotencyRequest.fromCanonicalInput(idempotencyKey, canonicalInput.noSpaces)
+  def idempotencyRequest(idempotencyKey: UUID, payload: Json): IdempotencyRequest =
+    IdempotencyRequest.fromCanonicalInput(idempotencyKey, payload.printWith(CanonicalJsonPrinter))
+
+  def applicationStatusFingerprintInput(
+      applicationId: ApplicationId,
+      status: ApplicationStatus,
+      feedback: Option[String],
+      reason: Option[String]
+  ): Json =
+    Json.obj(
+      "applicationId" -> applicationId.asJson,
+      "status" -> Json.fromString(status.toString.toUpperCase(Locale.ROOT)),
+      "feedback" -> feedback.asJson,
+      "reason" -> reason.asJson
+    )
 
   def searchEventId(searchId: UUID): UUID =
     UUID.nameUUIDFromBytes(s"search-performed:$searchId".getBytes(StandardCharsets.UTF_8))
