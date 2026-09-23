@@ -162,18 +162,40 @@ Vector / Hybrid Search
    ↓
 Event Architecture
    ↓
-Lakehouse / Spark Analytics
+Lakehouse
+   ↓
+Spark Batch Analytics
    ↓
 Structured Streaming
    ↓
-Search Evaluation & Scale
+Search Evaluation
+   ↓
+Scale
+   ↓
+Observability & Resilience
+   ↓
+Production Hardening
+   ↓
+Discovery Intelligence & Search Quality
 ```
 
-**Phase 1 — Foundation:** app skeleton, Resource lifecycle, health query, Mongo connection, basic GraphQL schema.
-**Phase 2 — Domain + MongoDB:** core domain models (User, Job, Application, ApplicationStatus, ApplicationEvent) and first use cases (job/application CRUD & lifecycle).
+Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means the capability is implemented in the local application; it does not claim production rollout or external-service certification.
+
+- `[x] Phase 1 — Foundation:` app skeleton, resource-managed runtime, health/readiness, Mongo connectivity, and basic GraphQL schema.
+- `[x] Phase 2 — Domain + MongoDB:` core hiring entities, persistence, account roles, and job/application lifecycle use cases.
+- `[x] Phase 3 — GraphQL + Performance:` hiring operations, authorization, bounded pagination, batching, and query/resource limits.
+- `[x] Phase 4 — Vector / Hybrid Search:` semantic and hybrid job/candidate search with MongoDB Vector Search integration.
+- `[x] Phase 5 — Event Architecture:` operational events, transactional outbox, Kafka publication, idempotent consumption, and quarantine.
+- `[~] Phase 6 — Lakehouse + Spark Batch Analytics:` local Bronze/Silver/Gold processing and Admin reporting; erasure, publication, retention, recovery, and full source-to-projection evidence remain open in the [lakehouse specification](docs/specs/hiring-analytics-lakehouse.md).
+- `[ ] Phase 7 — Structured Streaming:` continuous processing, checkpoint/restart behavior, late-event handling, and bounded state.
+- `[ ] Phase 8 — Search Evaluation:` reproducible relevance datasets and measured keyword/vector/hybrid search quality.
+- `[ ] Phase 9 — Scale:` workload-backed capacity, latency, throughput, and storage tuning.
+- `[~] Phase 10 — Observability & Resilience:` structured diagnostics and runtime telemetry exist; end-to-end failure, recovery, and operational evidence remain open.
+- `[ ] Phase 11 — Production Hardening:` deployment controls, security review, recovery procedures, and production readiness evidence.
+- `[ ] Phase 12 — Discovery Intelligence & Search Quality (Post-MVP):` radius discovery, richer Atlas search/facets, and evidence-backed ranking extensions.
 
 ## Future: Big Data & Analytics
-Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept separate. The local batch [analytics design](docs/big-data-architecture.md) and [implementation specification](docs/specs/hiring-analytics-lakehouse.md) describe the current Kafka-to-Delta path, retained data limits, recovery, and data-quality boundaries. Structured Streaming, cloud deployment, and search evaluation remain later work.
+Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept separate. The local batch [analytics design](docs/big-data-architecture.md) and [implementation specification](docs/specs/hiring-analytics-lakehouse.md) describe the current Kafka-to-Delta path, retained data limits, recovery, and data-quality boundaries. Structured Streaming, Search Evaluation, Scale, Production Hardening, and Discovery Intelligence & Search Quality remain later milestones. The final discovery stage requires Atlas for Atlas Search and Vector Search; local MongoDB Community remains suitable for core workflows and transaction tests. This roadmap does not provision Atlas or include its cost.
 
 ## Engineering Focus
 

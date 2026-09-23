@@ -2,6 +2,17 @@
 
 These use cases and SLOs describe target behavior; see [current implementation](../README.md).
 
+## Post-MVP Discovery Extensions
+
+The following are later extensions to structured, semantic, and hybrid discovery; they do not alter the MVP use cases above. They are sequenced after Search Evaluation & Scale. Establish relevance measures and a bounded, representative baseline before evaluating personalized ranking.
+
+- Radius-based job search combines distance with existing filters, candidate visibility, and deterministic cursor pagination. Inputs include structured coordinates; geocoding is out of scope.
+- Richer lexical search and facets use Atlas Search alongside existing vector and hybrid search. Validate lexical, vector, and hybrid behavior in an Atlas-capable environment.
+- MongoDB query plans and indexes are evaluated against representative queries and measured workloads, accounting for read gains and write/storage costs.
+- Personalized ranking is compared with the relevance baseline and is adopted only if evidence shows a quality improvement; otherwise, defer it.
+
+Atlas is required for this stage's Atlas Search and Vector Search capabilities. Local MongoDB Community remains suitable for core workflows and local transaction tests. This roadmap adds no Atlas provisioning or spend.
+
 ## Purpose
 
 Use cases are the starting point for:
