@@ -1,48 +1,61 @@
 package com.example.hiring.analytics
 
+import cats.data.ValidatedNec
+import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
+import cats.syntax.all.*
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 import io.delta.tables.DeltaTable
-import org.apache.spark.sql.{Column, DataFrame, SparkSession}
-import org.apache.spark.sql.functions.{col, lit, sha2}
+import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
+import org.apache.spark.sql.functions.{col, concat, lit, sha2, struct, to_json, when}
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
+import com.mongodb.client.{MongoClient, MongoClients}
 
 import java.time.Instant
 import java.sql.Timestamp
+import scala.concurrent.duration.FiniteDuration
+import scala.util.Try
+import scala.util.control.NonFatal
 
 /** A bounded source is intentionally separate from storage and publication. */
 trait BoundedOperationalEventSource {
-  def read(spark: SparkSession, manifest: AnalyticsRunManifest): DataFrame
+  def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[DataFrame]
 }
 
 /** Supplies only current HMAC tokens, allowing the batch to remain independent of MongoDB. */
 trait ActiveDeletionMarkerSource {
-  def activeSubjectTokens(spark: SparkSession): DataFrame
+  def activeSubjectTokens(spark: SparkSession): IO[DataFrame]
 }
 
 final case class DataFrameDeletionMarkerSource(tokens: DataFrame) extends ActiveDeletionMarkerSource {
-  override def activeSubjectTokens(spark: SparkSession): DataFrame = tokens
+  override def activeSubjectTokens(spark: SparkSession): IO[DataFrame] = IO.pure(tokens)
 }
 
-final case class KafkaConnection(bootstrapServers: String) {
-  require(bootstrapServers.trim.nonEmpty, "Kafka bootstrap servers must be non-empty")
+final case class KafkaConnection(bootstrapServers: String)
+
+object KafkaConnection {
+  def validate(connection: KafkaConnection): ValidatedNec[String, KafkaConnection] =
+    if (connection.bootstrapServers != null && connection.bootstrapServers.trim.nonEmpty) connection.validNec
+    else "Kafka bootstrap servers must be non-empty".invalidNec
 }
 
 /** Reads exactly the offsets named by a manifest; it never starts a streaming query. */
 final class KafkaOffsetRangeSource(connection: KafkaConnection) extends BoundedOperationalEventSource {
-  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): DataFrame = {
-    val topics = manifest.offsetRanges.map(_.topic).distinct
-    require(topics.size == 1, "a Kafka batch manifest must contain exactly one topic")
-
-    val startOffsets = KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset)
-    val endOffsets = KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive)
-    spark.read
-      .format("kafka")
-      .option("kafka.bootstrap.servers", connection.bootstrapServers)
-      .option("subscribe", topics.head)
-      .option("startingOffsets", startOffsets)
-      .option("endingOffsets", endOffsets)
-      .load()
-  }
+  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[DataFrame] =
+    for {
+      _ <- IO.fromEither(KafkaConnection.validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply))
+      _ <- IO.fromEither(AnalyticsRunManifest.validate(manifest).toEither.leftMap(AnalyticsError.InvalidInput.apply))
+      frame <- IO.blocking {
+        val topic = manifest.offsetRanges.head.topic
+        spark.read
+          .format("kafka")
+          .option("kafka.bootstrap.servers", connection.bootstrapServers)
+          .option("subscribe", topic)
+          .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
+          .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
+          .load()
+      }.adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
+    } yield frame
 }
 
 object KafkaOffsetRangeSource {
@@ -66,23 +79,22 @@ object KafkaOffsetRangeSource {
 
 /** Test and backfill adapter. Its frame must have Kafka's topic, partition, offset, timestamp and value columns. */
 final case class DataFrameBatchSource(records: DataFrame) extends BoundedOperationalEventSource {
-  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): DataFrame = {
-    val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
-      condition || (
-        col("topic") === lit(range.topic) &&
-          col("partition") === lit(range.partition) &&
-          col("offset") >= lit(range.startOffset) &&
-          col("offset") < lit(range.endOffsetExclusive)
-      )
-    }
-    records.filter(inManifest)
-  }
+  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[DataFrame] =
+    IO.blocking {
+      val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
+        condition || (
+          col("topic") === lit(range.topic) &&
+            col("partition") === lit(range.partition) &&
+            col("offset") >= lit(range.startOffset) &&
+            col("offset") < lit(range.endOffsetExclusive)
+        )
+      }
+      records.filter(inManifest)
+    }.adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
 }
 
 final case class AnalyticsLakehousePaths(root: String) {
-  require(root.trim.nonEmpty, "lakehouse root must be non-empty")
-
-  private val normalizedRoot = root.stripSuffix("/")
+  private val normalizedRoot = Option(root).getOrElse("").stripSuffix("/")
   val bronze: String = s"$normalizedRoot/bronze/operational_events"
   val silver: String = s"$normalizedRoot/silver/operational_events"
   val quarantine: String = s"$normalizedRoot/quarantine/operational_events"
@@ -90,6 +102,12 @@ final case class AnalyticsLakehousePaths(root: String) {
   val timeToHireGold: String = s"$normalizedRoot/gold/time_to_hire"
   val skillsGold: String = s"$normalizedRoot/gold/job_skills"
   val manifests: String = s"$normalizedRoot/control/run_manifests"
+}
+
+object AnalyticsLakehousePaths {
+  def validate(paths: AnalyticsLakehousePaths): ValidatedNec[String, AnalyticsLakehousePaths] =
+    if (paths.root != null && paths.root.trim.nonEmpty) paths.validNec
+    else "lakehouse root must be non-empty".invalidNec
 }
 
 sealed trait AnalyticsRunOutcome
@@ -100,7 +118,7 @@ object AnalyticsRunOutcome {
 }
 
 final case class AnalyticsPublication(
-    runId: String,
+    runId: RunId,
     outcome: AnalyticsRunOutcome,
     completedAt: Instant,
     funnelGoldPath: String,
@@ -145,29 +163,56 @@ final class HiringAnalyticsBatch(
     paths: AnalyticsLakehousePaths,
     pseudonymizer: SubjectPseudonymizer,
     deletionMarkers: ActiveDeletionMarkerSource,
-    clock: () => Instant = () => Instant.now()
+    clock: Clock[IO] = Clock[IO]
 ) {
+  private def now: IO[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
+
+  private def lakehouse[A](work: => A): IO[A] =
+    IO.blocking(work).adaptError {
+      case error: AnalyticsError => error
+      case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
+    }
+
+  private def cachedMarkers(spark: SparkSession): Resource[IO, DataFrame] =
+    Resource.make(
+      deletionMarkers.activeSubjectTokens(spark).flatMap(frame => lakehouse(frame.persist(StorageLevel.MEMORY_AND_DISK)))
+    )(frame => lakehouse(frame.unpersist(blocking = true)).void)
+
   def run(
       spark: SparkSession,
       source: BoundedOperationalEventSource,
       manifest: AnalyticsRunManifest
-  ): AnalyticsPublication = {
-    val markerTokens = deletionMarkers.activeSubjectTokens(spark).persist(StorageLevel.MEMORY_AND_DISK)
-    try {
-      require(markerTokens.columns.contains("subjectToken"), "deletion markers must contain a subjectToken")
-      val activeMarkerCount = markerTokens.count()
-      if (activeMarkerCount > 0L) {
-        val deletionTime = clock()
-        expire(spark, paths.silver, deletionTime)
-        purgeMarkedSilver(spark, markerTokens)
-        rebuildGoldFromStoredSilver(spark)
+  ): IO[AnalyticsPublication] =
+    for {
+      _ <- IO.fromEither(AnalyticsLakehousePaths.validate(paths).toEither.leftMap(AnalyticsError.InvalidInput.apply))
+      _ <- IO.fromEither(AnalyticsRunManifest.validate(manifest).toEither.leftMap(AnalyticsError.InvalidInput.apply))
+      publication <- cachedMarkers(spark).use { markerTokens =>
+        for {
+          _ <- validateMarkerColumns(markerTokens)
+          activeMarkerCount <- lakehouse(markerTokens.count())
+          _ <- if (activeMarkerCount > 0L) applyActiveDeletions(spark, markerTokens) else IO.unit
+          result <- runWithMarkers(spark, source, manifest, markerTokens)
+        } yield result
       }
-      runWithMarkers(spark, source, manifest, markerTokens)
-    } finally markerTokens.unpersist(blocking = true)
-  }
+    } yield publication
 
-  private def purgeMarkedSilver(spark: SparkSession, markerTokens: DataFrame): Unit =
-    if (DeltaTable.isDeltaTable(spark, paths.silver)) {
+  private def validateMarkerColumns(frame: DataFrame): IO[Unit] =
+    lakehouse(frame.columns.toVector).flatMap { columns =>
+      if (columns.contains("subjectToken")) IO.unit
+      else IO.raiseError(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
+    }
+
+  private def applyActiveDeletions(spark: SparkSession, markerTokens: DataFrame): IO[Unit] =
+    for {
+      deletionTime <- now
+      _ <- expire(spark, paths.silver, deletionTime)
+      _ <- purgeMarkedSilver(spark, markerTokens)
+      _ <- rebuildGoldFromStoredSilver(spark)
+    } yield ()
+
+  private def purgeMarkedSilver(spark: SparkSession, markerTokens: DataFrame): IO[Unit] =
+    lakehouse {
+      if (DeltaTable.isDeltaTable(spark, paths.silver)) {
       val markedSubjects = markerTokens
         .select(col("subjectToken"))
         .filter(col("subjectToken").isNotNull)
@@ -179,19 +224,30 @@ final class HiringAnalyticsBatch(
         .whenMatched()
         .delete()
         .execute()
+      }
     }
 
   /** Deletion is applied to rebuildable Gold immediately, even if the new Kafka range later quality-blocks. */
-  private def rebuildGoldFromStoredSilver(spark: SparkSession): Unit =
-    if (DeltaTable.isDeltaTable(spark, paths.silver)) {
-      val allSilver = spark.read.format("delta").load(paths.silver)
-      overwrite(HiringGoldTransforms.wideFunnelDay(allSilver), paths.funnelGold)
-      overwrite(HiringGoldTransforms.timeToHire(allSilver), paths.timeToHireGold)
-      overwrite(HiringGoldTransforms.skillPostingActivity(allSilver), paths.skillsGold)
-    } else {
-      Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
-        if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
-      }
+  private def rebuildGoldFromStoredSilver(spark: SparkSession): IO[Unit] =
+    lakehouse(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
+      case true =>
+        for {
+          allSilver <- lakehouse(spark.read.format("delta").load(paths.silver))
+          funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(allSilver))
+          _ <- overwrite(funnel, paths.funnelGold)
+          timeToHire <- HiringGoldTransforms.timeToHire(allSilver).adaptError {
+            case NonFatal(cause) => AnalyticsError.LakehouseFailure(cause)
+          }
+          _ <- overwrite(timeToHire, paths.timeToHireGold)
+          skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(allSilver))
+          _ <- overwrite(skills, paths.skillsGold)
+        } yield ()
+      case false =>
+        lakehouse {
+          Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
+            if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
+          }
+        }
     }
 
   private def runWithMarkers(
@@ -221,7 +277,7 @@ final class HiringAnalyticsBatch(
     val malformed = withExpiry(
       OperationalEventTransforms
         .malformedEvents(parsed)
-        .withColumn("quarantineId", sha2(col("rawValue"), 256))
+        .withColumn("quarantineId", quarantineId)
         .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
       startedAt,
       AnalyticsRetention.QuarantineDays
@@ -248,7 +304,7 @@ final class HiringAnalyticsBatch(
     val conflictQuarantine = withExpiry(
       valid
         .join(conflicts, Seq("eventId"), "inner")
-        .withColumn("quarantineId", sha2(col("rawValue"), 256))
+        .withColumn("quarantineId", quarantineId)
         .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
       startedAt,
       AnalyticsRetention.QuarantineDays
@@ -338,6 +394,15 @@ final class HiringAnalyticsBatch(
     frame
       .withColumn("ingestedAt", lit(Timestamp.from(now)))
       .withColumn("expiresAt", lit(Timestamp.from(now.plusSeconds(days.toLong * 24L * 60L * 60L))))
+
+  private def quarantineId: Column =
+    when(
+      col("rawValue").isNull,
+      concat(
+        lit("tombstone:"),
+        to_json(struct(col("topic").as("topic"), col("partition").as("partition"), col("offset").as("offset")))
+      )
+    ).otherwise(sha2(col("rawValue"), 256))
 
   private def expire(spark: SparkSession, path: String, now: Instant): Unit =
     if (DeltaTable.isDeltaTable(spark, path))

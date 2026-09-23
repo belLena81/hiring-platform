@@ -1,23 +1,42 @@
 package com.example.hiring.analytics
 
+import cats.effect.IO
 import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{
   col,
+  count,
   countDistinct,
   date_trunc,
   explode,
   from_json,
-  get_json_object,
   length,
   lit,
   lower,
+  min,
+  percentile_approx,
   sha2,
   to_timestamp,
-  trim
+  trim,
+  unix_timestamp,
+  when
 }
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
 
 object OperationalEventTransforms {
+  private val PayloadSchema: StructType = StructType(
+    Seq(
+      StructField("applicationId", StringType, nullable = true),
+      StructField("candidateId", StringType, nullable = true),
+      StructField("jobId", StringType, nullable = true),
+      StructField("newStatus", StringType, nullable = true),
+      StructField(
+        "job",
+        StructType(Seq(StructField("skills", ArrayType(StringType), nullable = true))),
+        nullable = true
+      )
+    )
+  )
+
   val EnvelopeSchema: StructType = StructType(
     Seq(
       StructField("eventId", StringType, nullable = true),
@@ -25,25 +44,16 @@ object OperationalEventTransforms {
       StructField("occurredAt", StringType, nullable = true),
       StructField("aggregateType", StringType, nullable = true),
       StructField("aggregateId", StringType, nullable = true),
-      StructField("actorId", StringType, nullable = true)
+      StructField("actorId", StringType, nullable = true),
+      StructField("payload", PayloadSchema, nullable = true)
     )
   )
 
-  private val EventTypes = Seq(
-    "JOB_CREATED",
-    "JOB_UPDATED",
-    "JOB_CLOSED",
-    "JOB_VIEWED",
-    "SEARCH_PERFORMED",
-    "SEARCH_RESULT_CLICKED",
-    "APPLICATION_CREATED",
-    "APPLICATION_STATUS_CHANGED",
-    "CANDIDATE_HIRED"
-  )
-  private val AggregateTypes = Seq("Job", "Application", "Search")
+  private val EventTypes = AnalyticsEventType.values.toSeq.map(_.wire)
+  private val AggregateTypes = AnalyticsAggregateType.values.toSeq.map(_.wire)
 
-  /** Parses the operational envelope using Spark's JSON support. Payload details remain in rawValue so the lakehouse
-    * never carries a second application-level JSON decoder.
+  /** Parses the operational envelope and the analytics payload fields once using Spark's JSON support. The parsed
+    * payload exists only before Silver projection; rawValue remains for Bronze, quarantine, and fingerprinting.
     */
   def parseKafkaRecords(records: DataFrame): DataFrame = {
     val parsed = records
@@ -60,7 +70,8 @@ object OperationalEventTransforms {
       to_timestamp(col("envelope.occurredAt")).as("occurredAt"),
       col("envelope.aggregateType"),
       col("envelope.aggregateId"),
-      col("envelope.actorId")
+      col("envelope.actorId"),
+      col("envelope.payload").as("payload")
     )
   }
 
@@ -105,13 +116,10 @@ object OperationalEventTransforms {
     )
     privacySafe
       .dropDuplicates("eventId")
-      .withColumn("applicationId", get_json_object(col("rawValue"), "$.payload.applicationId"))
-      .withColumn("jobId", get_json_object(col("rawValue"), "$.payload.jobId"))
-      .withColumn("newStatus", get_json_object(col("rawValue"), "$.payload.newStatus"))
-      .withColumn(
-        "jobSkills",
-        from_json(get_json_object(col("rawValue"), "$.payload.job.skills"), ArrayType(StringType))
-      )
+      .withColumn("applicationId", col("payload.applicationId"))
+      .withColumn("jobId", col("payload.jobId"))
+      .withColumn("newStatus", col("payload.newStatus"))
+      .withColumn("jobSkills", col("payload.job.skills"))
       .withColumn("eventFingerprint", sha2(col("rawValue"), 256))
       // Silver is a derived, 30-day analytics dataset: it does not retain raw envelopes,
       // candidate identifiers, or actor identifiers.
@@ -134,16 +142,25 @@ object OperationalEventTransforms {
     Seq("eventId", "eventType", "occurredAt", "aggregateType", "aggregateId", "actorId")
       .map(name => col(name).isNotNull)
       .reduce(_ && _) &&
+      Seq("eventId", "aggregateId")
+        .map(name => col(name).rlike("\\S"))
+        .reduce(_ && _) &&
       length(trim(col("actorId"))) > lit(0) &&
-      get_json_object(col("rawValue"), "$.payload").isNotNull
+      col("payload").isNotNull
 }
 
 object HiringGoldTransforms {
+  private val ApplicationCreated = AnalyticsEventType.ApplicationCreated.wire
+  private val ApplicationStatusChanged = AnalyticsEventType.ApplicationStatusChanged.wire
+  private val JobCreated = AnalyticsEventType.JobCreated.wire
+  private val Hired = AnalyticsApplicationStatus.Hired.wire
+
+  private def applicationLifecycle(silver: DataFrame): DataFrame =
+    silver.filter(col("eventType").isin(ApplicationCreated, ApplicationStatusChanged))
 
   /** The CANDIDATE_HIRED event duplicates the Hired status transition and is deliberately excluded. */
   def funnelActivity(silver: DataFrame): DataFrame =
-    silver
-      .filter(col("eventType").isin("APPLICATION_CREATED", "APPLICATION_STATUS_CHANGED"))
+    applicationLifecycle(silver)
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .groupBy("day", "eventType", "newStatus")
       .agg(
@@ -156,7 +173,7 @@ object HiringGoldTransforms {
   /** Only JOB_CREATED snapshots contribute; updates and close events never alter this metric. */
   def skillPostingActivity(silver: DataFrame): DataFrame = {
     silver
-      .filter(col("eventType") === lit("JOB_CREATED"))
+      .filter(col("eventType") === lit(JobCreated))
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .withColumn("rawSkill", explode(col("jobSkills")))
       .withColumn("skill", lower(trim(col("rawSkill"))))
@@ -176,56 +193,38 @@ object HiringGoldTransforms {
 
   /** Wide daily shape consumed by the operational AnalyticsFunnelDay projection. */
   def wideFunnelDay(silver: DataFrame): DataFrame = {
-    import org.apache.spark.sql.functions.{countDistinct, when}
-    silver
-      .filter(col("eventType").isin("APPLICATION_CREATED", "APPLICATION_STATUS_CHANGED"))
+    val statusCells = AnalyticsApplicationStatus.values.toSeq.map { status =>
+      status.wire.toLowerCase(java.util.Locale.ROOT) -> (col("newStatus") === lit(status.wire))
+    }
+    val cells = ("created" -> (col("eventType") === lit(ApplicationCreated))) +: statusCells
+    val subjectCounts = cells.map { case (name, matches) =>
+      countDistinct(when(matches, col("subjectToken"))).as(s"${name}Subjects")
+    }
+    val applicationCounts = cells.map { case (name, matches) =>
+      countDistinct(when(matches, col("applicationId"))).as(name)
+    }
+    val counts = subjectCounts ++ applicationCounts
+    val subjectColumns = cells.map { case (name, _) => s"${name}Subjects" }
+
+    applicationLifecycle(silver)
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .groupBy("day")
-      .agg(
-        countDistinct(when(col("eventType") === "APPLICATION_CREATED", col("subjectToken"))).as("createdSubjects"),
-        countDistinct(when(col("newStatus") === "Accepted", col("subjectToken"))).as("acceptedSubjects"),
-        countDistinct(when(col("newStatus") === "Declined", col("subjectToken"))).as("declinedSubjects"),
-        countDistinct(when(col("newStatus") === "Interview", col("subjectToken"))).as("interviewSubjects"),
-        countDistinct(when(col("newStatus") === "Hired", col("subjectToken"))).as("hiredSubjects"),
-        countDistinct(when(col("newStatus") === "Rejected", col("subjectToken"))).as("rejectedSubjects"),
-        countDistinct(when(col("eventType") === "APPLICATION_CREATED", col("applicationId"))).as("created"),
-        countDistinct(when(col("newStatus") === "Accepted", col("applicationId"))).as("accepted"),
-        countDistinct(when(col("newStatus") === "Declined", col("applicationId"))).as("declined"),
-        countDistinct(when(col("newStatus") === "Interview", col("applicationId"))).as("interview"),
-        countDistinct(when(col("newStatus") === "Hired", col("applicationId"))).as("hired"),
-        countDistinct(when(col("newStatus") === "Rejected", col("applicationId"))).as("rejected")
-      )
+      .agg(counts.head, counts.tail: _*)
       .filter(
-        Seq(
-          "createdSubjects",
-          "acceptedSubjects",
-          "declinedSubjects",
-          "interviewSubjects",
-          "hiredSubjects",
-          "rejectedSubjects"
-        )
+        subjectColumns
           .map(name => col(name) === lit(0) || col(name) >= lit(AnalyticsRetention.MinimumContributors))
           .reduce(_ && _)
       )
-      .drop(
-        "createdSubjects",
-        "acceptedSubjects",
-        "declinedSubjects",
-        "interviewSubjects",
-        "hiredSubjects",
-        "rejectedSubjects"
-      )
+      .drop(subjectColumns: _*)
   }
 
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
-  def timeToHire(silver: DataFrame): DataFrame = {
-    import org.apache.spark.sql.functions.{count, countDistinct, min, percentile_approx, unix_timestamp, when}
-    val lifecycle = silver
-      .filter(col("eventType").isin("APPLICATION_CREATED", "APPLICATION_STATUS_CHANGED"))
+  def timeToHire(silver: DataFrame): IO[DataFrame] = IO.blocking {
+    val lifecycle = applicationLifecycle(silver)
       .groupBy("applicationId", "subjectToken")
       .agg(
-        min(when(col("eventType") === "APPLICATION_CREATED", col("occurredAt"))).as("createdAt"),
-        min(when(col("newStatus") === "Hired", col("occurredAt"))).as("hiredAt")
+        min(when(col("eventType") === lit(ApplicationCreated), col("occurredAt"))).as("createdAt"),
+        min(when(col("newStatus") === lit(Hired), col("occurredAt"))).as("hiredAt")
       )
     val eligible = lifecycle
       .filter(col("createdAt").isNotNull && col("hiredAt").isNotNull)

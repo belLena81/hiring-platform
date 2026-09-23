@@ -1,5 +1,7 @@
 package com.example.hiring.analytics
 
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
 import org.apache.spark.sql.SparkSession
 import org.bson.Document
@@ -24,6 +26,12 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   private var mongoContainer: MongoContainer = _
   private var mongoClient: MongoClient = _
   private var spark: SparkSession = _
+
+  private def manifest(runId: String): AnalyticsRunManifest =
+    AnalyticsRunManifest
+      .validated(runId, Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+      .toEither
+      .fold(errors => fail(errors.toString), identity)
 
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -59,17 +67,14 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val requests = database.getCollection("analytics_erasure_requests")
     val source = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
     requests.insertOne(new Document("_id", UUID.randomUUID().toString).append("state", "Complete"))
-    assertEquals(source.activeSubjectTokens(spark).count(), 0L)
+    assertEquals(source.activeSubjectTokens(spark).flatMap(frame => IO.blocking(frame.count())).unsafeRunSync(), 0L)
 
     val pendingSubject = UUID.randomUUID().toString
     requests.insertOne(new Document("_id", pendingSubject).append("state", "Pending"))
 
-    val tokens = source
-      .activeSubjectTokens(spark)
-      .select("subjectToken")
-      .collect()
-      .map(_.getString(0))
-      .toSet
+    val tokens = source.activeSubjectTokens(spark).flatMap { frame =>
+      IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet)
+    }.unsafeRunSync()
 
     assertEquals(tokens, Set(pseudonymizer.token(pendingSubject)))
   }
@@ -82,13 +87,14 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       pseudonymizer,
       new MongoActiveDeletionMarkerSource(missingCollectionDatabase, pseudonymizer)
     )
-    val manifest = AnalyticsRunManifest("missing-markers", Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+    val missingManifest = manifest("missing-markers")
     val noReadSource = new BoundedOperationalEventSource {
-      override def read(spark: SparkSession, manifest: AnalyticsRunManifest): org.apache.spark.sql.DataFrame =
-        throw new AssertionError("Kafka must not be read before marker verification")
+      override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(new AssertionError("Kafka must not be read before marker verification"))
     }
 
-    intercept[IllegalStateException](missingBatch.run(spark, noReadSource, manifest))
+    val missingError = intercept[AnalyticsError](missingBatch.run(spark, noReadSource, missingManifest).unsafeRunSync())
+    assertEquals(missingError, AnalyticsError.MissingMarkerCollection)
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, missingPaths.manifests))
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, missingPaths.bronze))
 
@@ -104,9 +110,10 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       new MongoActiveDeletionMarkerSource(malformedDatabase, pseudonymizer)
     )
 
-    intercept[IllegalStateException](
-      malformedBatch.run(spark, noReadSource, manifest.copy(runId = "malformed-markers"))
+    val malformedError = intercept[AnalyticsError](
+      malformedBatch.run(spark, noReadSource, manifest("malformed-markers")).unsafeRunSync()
     )
+    assertEquals(malformedError, AnalyticsError.MalformedMarker)
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, malformedPaths.manifests))
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, malformedPaths.bronze))
   }
@@ -124,13 +131,14 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-overflow").toUri.toString)
     val markers = new MongoActiveDeletionMarkerSource(database, pseudonymizer, maximumPendingMarkers = 1)
     val batch = new HiringAnalyticsBatch(paths, pseudonymizer, markers)
-    val manifest = AnalyticsRunManifest("overflow-markers", Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+    val overflowManifest = manifest("overflow-markers")
     val noReadSource = new BoundedOperationalEventSource {
-      override def read(spark: SparkSession, manifest: AnalyticsRunManifest): org.apache.spark.sql.DataFrame =
-        throw new AssertionError("Kafka must not be read after marker overflow")
+      override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(new AssertionError("Kafka must not be read after marker overflow"))
     }
 
-    intercept[IllegalStateException](batch.run(spark, noReadSource, manifest))
+    val overflowError = intercept[AnalyticsError](batch.run(spark, noReadSource, overflowManifest).unsafeRunSync())
+    assertEquals(overflowError, AnalyticsError.MarkerLimitExceeded(1))
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.bronze))
   }
@@ -149,13 +157,16 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
           pseudonymizer
         )
       )
-      val manifest = AnalyticsRunManifest("unavailable-markers", Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+      val unavailableManifest = manifest("unavailable-markers")
       val noReadSource = new BoundedOperationalEventSource {
-        override def read(spark: SparkSession, manifest: AnalyticsRunManifest): org.apache.spark.sql.DataFrame =
-          throw new AssertionError("Kafka must not be read before marker storage is available")
+        override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+          IO.raiseError(new AssertionError("Kafka must not be read before marker storage is available"))
       }
 
-      intercept[com.mongodb.MongoException](batch.run(spark, noReadSource, manifest))
+      val storageError = intercept[AnalyticsError](
+        batch.run(spark, noReadSource, unavailableManifest).unsafeRunSync()
+      )
+      assert(storageError.isInstanceOf[AnalyticsError.MarkerStorageFailure])
       assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
       assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.bronze))
       assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.silver))

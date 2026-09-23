@@ -120,6 +120,28 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("signup replay reissues an access token for the active account") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = accountService(
+        new TestUsers(Map(recruiter.id -> recruiter)),
+        accounts,
+        idempotent = Idempotent(ReplayReceipts(MutationEntityReference("user", recruiter.id.value.toString)))
+      )
+      result <- service
+        .signUp(
+          request,
+          SignUpInput(
+            "Recruiter",
+            UserRole.Recruiter,
+            "password-password",
+            Some(UserProfile.Recruiter(RecruiterProfile("Acme", None)))
+          )
+        )
+        .value
+    } yield assertEquals(result, Right(recruiter -> AccountToken(s"token-${recruiter.id.value}", now.plusSeconds(900))))
+  }
+
   test("signup reports a blank name once while retaining other registration validation") {
     for {
       accounts <- TestAccounts.create(initialized = true)

@@ -86,6 +86,24 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(OperationalEventTransforms.malformedEvents(parsed).count(), 1L)
   }
 
+  test("blank event and aggregate identifiers are malformed") {
+    val parsed = OperationalEventTransforms.parseKafkaRecords(
+      records(
+        Seq(
+          ("hiring.operational-events", 0, 1L, event("", "APPLICATION_CREATED")),
+          ("hiring.operational-events", 0, 2L, event("   ", "APPLICATION_CREATED")),
+          ("hiring.operational-events", 0, 3L, event("event-3", "APPLICATION_CREATED", aggregateId = "")),
+          ("hiring.operational-events", 0, 4L, event("event-4", "APPLICATION_CREATED", aggregateId = "   ")),
+          ("hiring.operational-events", 0, 5L, """{"eventId":"\t","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"application-5","actorId":"actor-1","payload":{}}"""),
+          ("hiring.operational-events", 0, 6L, """{"eventId":"event-6","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"\n","actorId":"actor-1","payload":{}}""")
+        )
+      )
+    )
+
+    assertEquals(OperationalEventTransforms.validEvents(parsed).count(), 0L)
+    assertEquals(OperationalEventTransforms.malformedEvents(parsed).count(), 6L)
+  }
+
   test("funnel excludes the duplicate candidate hired event and suppresses groups below ten") {
     val events = (1 to 10).map(index =>
       (
@@ -332,6 +350,36 @@ class AnalyticsTransformsSpec extends FunSuite {
         .count(),
       1L
     )
+  }
+
+  test("tombstone quarantine rows deduplicate when a Kafka range is replayed") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-tombstone-replay").toUri.toString.stripSuffix("/")
+    val paths = AnalyticsLakehousePaths(lakehouse)
+    val input = records(Seq(("hiring.operational-events", 3, 17L, null.asInstanceOf[String])))
+    val batch = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(emptyMarkers),
+      () => Instant.parse("2026-09-22T12:00:00Z")
+    )
+    val firstManifest = AnalyticsRunManifest(
+      "tombstone-first-run",
+      Vector(PartitionOffsetRange("hiring.operational-events", 3, 17L, 18L))
+    )
+    val replayManifest = AnalyticsRunManifest(
+      "tombstone-replay-run",
+      Vector(PartitionOffsetRange("hiring.operational-events", 3, 17L, 18L))
+    )
+
+    val first = batch.run(spark, DataFrameBatchSource(input), firstManifest)
+    val replay = batch.run(spark, DataFrameBatchSource(input), replayManifest)
+    val quarantine = spark.read.format("delta").load(paths.quarantine)
+
+    assertEquals(first.quarantinedRecords, 1L)
+    assertEquals(replay.quarantinedRecords, 1L)
+    assertEquals(quarantine.count(), 1L)
+    assertEquals(quarantine.filter(col("quarantineId").isNull).count(), 0L)
+    assertEquals(quarantine.filter(col("quarantineId").like("tombstone:%")).count(), 1L)
   }
 
   test("unavailable deletion markers fail before creating a manifest or Bronze data") {

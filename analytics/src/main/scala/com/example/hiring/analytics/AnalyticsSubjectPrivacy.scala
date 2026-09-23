@@ -1,7 +1,9 @@
 package com.example.hiring.analytics
 
 import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions.{coalesce, col, get_json_object, lit, trim, udf, when}
+import org.apache.spark.sql.functions.{coalesce, col, lit, trim, udf, when}
+import org.apache.spark.sql.api.java.UDF1
+import org.apache.spark.sql.types.StringType
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
@@ -16,13 +18,17 @@ import javax.crypto.spec.SecretKeySpec
 final class SubjectPseudonymizer private (secret: Array[Byte]) extends Serializable {
   private val key = secret.clone()
 
-  def token(subjectId: String): String = {
+  def typedToken(subjectId: String): SubjectToken = {
     require(subjectId != null && subjectId.nonEmpty, "subject id must be non-empty")
     val mac = Mac.getInstance(SubjectPseudonymizer.Algorithm)
     mac.init(new SecretKeySpec(key, SubjectPseudonymizer.Algorithm))
     val digest = mac.doFinal(subjectId.getBytes(StandardCharsets.UTF_8))
-    s"${SubjectPseudonymizer.TokenVersion}_${Base64.getUrlEncoder.withoutPadding().encodeToString(digest)}"
+    SubjectToken.fromHmac(
+      s"${SubjectPseudonymizer.TokenVersion}_${Base64.getUrlEncoder.withoutPadding().encodeToString(digest)}"
+    )
   }
+
+  def token(subjectId: String): String = typedToken(subjectId).value
 }
 
 object SubjectPseudonymizer {
@@ -30,27 +36,38 @@ object SubjectPseudonymizer {
   private val TokenVersion = "hmac-v1"
 
   def fromSecret(secret: Array[Byte]): SubjectPseudonymizer = {
-    require(secret != null && secret.nonEmpty, "HMAC secret must be non-empty")
+    if (secret == null || secret.isEmpty)
+      throw AnalyticsError.InvalidConfiguration("HMAC secret must be non-empty")
     new SubjectPseudonymizer(secret)
   }
 
   def fromBase64(secret: String): SubjectPseudonymizer = {
-    require(secret != null && secret.nonEmpty, "base64 HMAC secret must be non-empty")
-    fromSecret(Base64.getDecoder.decode(secret))
+    if (secret == null || secret.isEmpty)
+      throw AnalyticsError.InvalidConfiguration("base64 HMAC secret must be non-empty")
+    val decoded = try Base64.getDecoder.decode(secret)
+    catch {
+      case _: IllegalArgumentException =>
+        throw AnalyticsError.InvalidConfiguration("base64 HMAC secret is malformed")
+    }
+    fromSecret(decoded)
   }
 }
 
 /** Spark-only privacy transforms. Raw identifiers exist only in the input frame before `silver`. */
 object AnalyticsSubjectPrivacy {
-  private val CandidateIdJsonPath = "$.payload.candidateId"
   private val SubjectTokenColumn = "subjectToken"
 
   /** Candidate identity takes precedence for application events. Events without a candidate use the authenticated actor
     * identifier, ensuring every valid operational event has one token.
     */
   def withSubjectToken(events: DataFrame, pseudonymizer: SubjectPseudonymizer): DataFrame = {
-    val tokenize = udf((value: String) => pseudonymizer.token(value))
-    val candidateId = trim(get_json_object(col("rawValue"), CandidateIdJsonPath))
+    val tokenize = udf(
+      new UDF1[String, String] {
+        override def call(value: String): String = pseudonymizer.typedToken(value).value
+      },
+      StringType
+    )
+    val candidateId = trim(col("payload.candidateId"))
     val subjectId = when(candidateId =!= lit(""), candidateId).otherwise(col("actorId"))
     events.withColumn(SubjectTokenColumn, tokenize(coalesce(subjectId, lit(""))))
   }
@@ -59,8 +76,10 @@ object AnalyticsSubjectPrivacy {
     * already-HMACed token; this transform has no persistence or Mongo dependency.
     */
   def excludeActiveDeletionMarkers(events: DataFrame, activeMarkerTokens: DataFrame): DataFrame = {
-    require(events.columns.contains(SubjectTokenColumn), "events must contain a subjectToken")
-    require(activeMarkerTokens.columns.contains(SubjectTokenColumn), "markers must contain a subjectToken")
+    if (!events.columns.contains(SubjectTokenColumn))
+      throw AnalyticsError.InvalidSourceSchema(Vector(SubjectTokenColumn))
+    if (!activeMarkerTokens.columns.contains(SubjectTokenColumn))
+      throw AnalyticsError.InvalidSourceSchema(Vector(SubjectTokenColumn))
     events.join(
       activeMarkerTokens.select(col(SubjectTokenColumn)).filter(col(SubjectTokenColumn).isNotNull).distinct(),
       Seq(SubjectTokenColumn),

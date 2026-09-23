@@ -142,7 +142,7 @@ final class UserAccountService(
     }
   }
 
-  override def issueToken(userId: UserId, now: Instant): UseCaseIO[(User, AccountToken)] =
+  private def issueToken(userId: UserId, now: Instant): UseCaseIO[(User, AccountToken)] =
     UseCaseIO
       .repository(users.find(userId))
       .subflatMap {
