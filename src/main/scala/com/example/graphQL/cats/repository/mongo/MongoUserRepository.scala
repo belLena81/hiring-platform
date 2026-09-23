@@ -39,6 +39,12 @@ final class MongoUserRepository(
       .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
+  override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
+    PublisherBridge
+      .first(collection.find(Filters.eq("_id", id.value.toString)))
+      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
+
   private def findWithSession(id: UserId, session: Option[ClientSession]): IO[Either[RepositoryError, Option[User]]] =
     findOne(session, collection, Filters.eq("_id", id.value.toString))
       .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
@@ -48,13 +54,16 @@ final class MongoUserRepository(
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
 
   override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-    find(id).flatMap {
+    findVersioned(id).flatMap {
       case Right(Some(user)) => updateEmbedding(user, embedding)
       case Right(None)       => IO.pure(Left(RepositoryError.Conflict))
       case Left(error)       => IO.pure(Left(error))
     }
 
-  override def updateEmbedding(observed: User, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(
+      observed: Versioned[User],
+      embedding: EntityEmbedding
+  ): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge
       .first(
@@ -62,7 +71,8 @@ final class MongoUserRepository(
           MongoObservedStateFilters.candidateEmbedding(observed),
           Updates.combine(
             Updates.set("embedding", encoded.get("embedding")),
-            Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
+            Updates.set("embeddingMeta", encoded.get("embeddingMeta")),
+            Updates.inc("version", 1L)
           )
         )
       )
@@ -204,10 +214,15 @@ final class MongoUserRepository(
     updateOne(
       session,
       collection,
-      Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString)),
+      Filters.and(
+        Filters.eq("_id", userId.value.toString),
+        Filters.eq("accountStatus", AccountStatus.Active.toString),
+        Filters.lt("version", Long.MaxValue)
+      ),
       Updates.combine(
         Updates.set("profile", MongoHiringCodecs.profile(profile)),
-        Updates.set("updatedAt", Date.from(now))
+        Updates.set("updatedAt", Date.from(now)),
+        Updates.inc("version", 1L)
       )
     ).flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
@@ -227,11 +242,13 @@ final class MongoUserRepository(
         val filter = Filters.and(
           Filters.eq("_id", userId.value.toString),
           Filters.eq("role", UserRole.Candidate.toString),
-          Filters.eq("accountStatus", AccountStatus.Active.toString)
+          Filters.eq("accountStatus", AccountStatus.Active.toString),
+          Filters.lt("version", Long.MaxValue)
         )
         val update = Updates.combine(
           Updates.set("profile", MongoHiringCodecs.profile(profile)),
-          Updates.set("updatedAt", Date.from(now))
+          Updates.set("updatedAt", Date.from(now)),
+          Updates.inc("version", 1L)
         )
         updateOne(session, collection, filter, update).flatMap {
           case Some(result) if result.getMatchedCount == 1L =>
@@ -280,7 +297,11 @@ final class MongoUserRepository(
       session: Option[ClientSession]
   ): IO[Either[RepositoryError, Unit]] = {
     val userFilter =
-      Filters.and(Filters.eq("_id", userId.value.toString), Filters.eq("accountStatus", AccountStatus.Active.toString))
+      Filters.and(
+        Filters.eq("_id", userId.value.toString),
+        Filters.eq("accountStatus", AccountStatus.Active.toString),
+        Filters.lt("version", Long.MaxValue)
+      )
     val userUpdate = Updates.combine(
       Updates.set("accountStatus", AccountStatus.Deleted.toString),
       Updates.set("deletedAt", Date.from(now)),
@@ -290,7 +311,8 @@ final class MongoUserRepository(
       Updates.unset("profile"),
       Updates.unset("recruiterProfile"),
       Updates.unset("email"),
-      Updates.unset("emailCanonical")
+      Updates.unset("emailCanonical"),
+      Updates.inc("version", 1L)
     )
     val userWrite = updateOne(session, collection, userFilter, userUpdate)
     userWrite.flatMap {
@@ -307,21 +329,26 @@ final class MongoUserRepository(
           )
           val findJobs = findManyById(session, jobs, batchFilter, MaxJobsClosedByAccountDeletion)
           findJobs.flatMap { documents =>
-            MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readJob)) match {
-              case Left(error)     => IO.pure(Left(error))
-              case Right(Nil)      => IO.pure(Right(()))
-              case Right(openJobs) =>
+            MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)) match {
+              case Left(error)          => IO.pure(Left(error))
+              case Right(Nil)           => IO.pure(Right(()))
+              case Right(versionedJobs) =>
+                val openJobs = versionedJobs.map(_.value)
                 val closedJobs =
                   openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
-                val closeWrites = openJobs.zip(closedJobs).traverse_ { case (job, closed) =>
-                  EitherT(
-                    replaceOne(
-                      session,
-                      jobs,
-                      MongoObservedStateFilters.jobReplacement(job),
-                      MongoHiringCodecs.job(closed)
-                    ).map(MongoUserRepository.classifyJobClose)
-                  )
+                val closeWrites = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
+                  Versioned.nextVersion(observed.version) match {
+                    case None              => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
+                    case Some(nextVersion) =>
+                      EitherT(
+                        replaceOne(
+                          session,
+                          jobs,
+                          MongoObservedStateFilters.jobReplacement(observed),
+                          MongoHiringCodecs.job(closed, nextVersion)
+                        ).map(MongoUserRepository.classifyJobClose)
+                      )
+                  }
                 }
                 val closeEvents = closedJobs.map { closed =>
                   OperationalEvents.jobEvent(

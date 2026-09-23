@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.events.*
+import com.example.graphQL.cats.repository.protocol.Versioned
 import MongoHiringPersistenceCodecs.*
 import io.circe.Json
 import io.circe.parser.parse
@@ -25,16 +26,19 @@ private[mongo] object MongoHiringCodecs {
 
   import StoredDocumentError.*
 
-  def userWithPassword(value: User, passwordHash: String): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash)))
+  def userWithPassword(value: User, passwordHash: String, version: Long = 0L): Document =
+    MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash), version))
 
-  def user(value: User): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, None))
+  def user(value: User, version: Long = 0L): Document =
+    MongoHiringPersistenceCodecs.user(storedUser(value, None, version))
 
   def readUser(document: Document): ValidatedNel[StoredDocumentError, User] =
-    decode(document, UserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen(readUser)
+    readVersionedUser(document).map(_.value)
 
-  private def readUser(value: StoredUser): ValidatedNel[StoredDocumentError, User] =
+  def readVersionedUser(document: Document): ValidatedNel[StoredDocumentError, Versioned[User]] =
+    decode(document, UserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen(readVersionedUser)
+
+  private def readVersionedUser(value: StoredUser): ValidatedNel[StoredDocumentError, Versioned[User]] =
     (
       uuid("_id", value._id).toValidatedNel.map(UserId.apply),
       value.email.validNel,
@@ -47,22 +51,31 @@ private[mongo] object MongoHiringCodecs {
       value.adminSingletonKey.map(_.contains("singleton-admin")).getOrElse(false).validNel,
       readEmbedding(value.embedding, value.embeddingMeta)
     ).mapN { (id, email, name, role, profile, createdAt, accountStatus, deletedAt, adminSingleton, embedding) =>
-      User(id, email, name, role, profile, createdAt, adminSingleton, embedding, accountStatus, deletedAt)
+      Versioned(
+        User(id, email, name, role, profile, createdAt, adminSingleton, embedding, accountStatus, deletedAt),
+        value.version
+      )
     }.andThen { user =>
-      Either.cond(user.roleProfileIsValid, user, InconsistentDocument).toValidatedNel
+      if (!user.value.roleProfileIsValid) InconsistentDocument.invalidNel
+      else Either.cond(user.version >= 0L, user, InvalidField("version")).toValidatedNel
     }
 
   def readCredentials(document: Document): ValidatedNel[StoredDocumentError, Option[AccountCredentials]] =
     decode(document, UserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen { value =>
-      value.passwordHash.fold(None.validNel)(hash => readUser(value).map(AccountCredentials(_, hash).some))
+      value.passwordHash.fold(None.validNel)(hash =>
+        readVersionedUser(value).map(v => AccountCredentials(v.value, hash).some)
+      )
     }
 
-  def job(job: Job): Document = MongoHiringPersistenceCodecs.job(storedJob(job))
+  def job(job: Job, version: Long = 0L): Document = MongoHiringPersistenceCodecs.job(storedJob(job, version))
 
   def readJob(document: Document): ValidatedNel[StoredDocumentError, Job] =
-    decode(document, JobFields)(MongoHiringPersistenceCodecs.decodeJob).andThen(readJob)
+    readVersionedJob(document).map(_.value)
 
-  private def readJob(value: StoredJob): ValidatedNel[StoredDocumentError, Job] =
+  def readVersionedJob(document: Document): ValidatedNel[StoredDocumentError, Versioned[Job]] =
+    decode(document, JobFields)(MongoHiringPersistenceCodecs.decodeJob).andThen(readVersionedJob)
+
+  private def readVersionedJob(value: StoredJob): ValidatedNel[StoredDocumentError, Versioned[Job]] =
     (
       uuid("_id", value._id).toValidatedNel.map(JobId.apply),
       uuid("recruiterId", value.recruiterId).toValidatedNel.map(UserId.apply),
@@ -76,7 +89,9 @@ private[mongo] object MongoHiringCodecs {
       value.updatedAt.toInstant.validNel,
       value.closedAt.map(_.toInstant).validNel,
       readEmbedding(value.embedding, value.embeddingMeta)
-    ).mapN(Job.apply)
+    ).mapN(Job.apply).map(Versioned(_, value.version)).andThen { job =>
+      Either.cond(job.version >= 0L, job, InvalidField("version")).toValidatedNel
+    }
 
   def application(application: Application): Document =
     MongoHiringPersistenceCodecs.application(
@@ -208,6 +223,7 @@ private[mongo] object MongoHiringCodecs {
 
   private val UserFields = Set(
     "_id",
+    "version",
     "email",
     "emailCanonical",
     "name",
@@ -225,6 +241,7 @@ private[mongo] object MongoHiringCodecs {
   )
   private val JobFields = Set(
     "_id",
+    "version",
     "recruiterId",
     "title",
     "description",
@@ -380,7 +397,7 @@ private[mongo] object MongoHiringCodecs {
     try Right(value)
     catch { case NonFatal(_) => Left(InvalidField(field)) }
 
-  private def storedUser(value: User, passwordHash: Option[String]): StoredUser = {
+  private def storedUser(value: User, passwordHash: Option[String], version: Long): StoredUser = {
     val emailCanonical = value.email.map(AccountName.canonical)
     val embedding = value.embedding.map(_.values.map(_.toDouble))
     val embeddingMeta = value.embedding.map(embedding =>
@@ -392,6 +409,7 @@ private[mongo] object MongoHiringCodecs {
     )
     StoredUser(
       value.id.value.toString,
+      version,
       value.email,
       emailCanonical,
       value.name,
@@ -427,7 +445,7 @@ private[mongo] object MongoHiringCodecs {
     )
   }
 
-  private def storedJob(value: Job): StoredJob = {
+  private def storedJob(value: Job, version: Long): StoredJob = {
     val embedding = value.embedding.map(_.values.map(_.toDouble))
     val embeddingMeta = value.embedding.map(embedding =>
       StoredEmbeddingMeta(
@@ -438,6 +456,7 @@ private[mongo] object MongoHiringCodecs {
     )
     StoredJob(
       value.id.value.toString,
+      version,
       value.recruiterId.value.toString,
       value.title,
       value.description,

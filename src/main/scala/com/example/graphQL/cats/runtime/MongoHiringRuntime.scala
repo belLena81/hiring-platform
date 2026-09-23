@@ -105,7 +105,11 @@ object MongoHiringRuntime {
       passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
       client <- MongoDatabaseProbe.clientResource(config.uri)
       database = client.getDatabase(config.databaseName)
-      capability <- embeddingCapability(database, client, config)
+      setup <- SetupLifecycle.resource(
+        setupEffect(database, config.vectorSearch, config.resetOnStart),
+        config.diagnostics
+      )
+      capability <- embeddingCapability(database, client, config, setup.await)
       users = capability.users
       applications = MongoApplicationRepository.transactional(database, client)
       searchSessions = MongoSearchSessionRepository.transactional(database, client)
@@ -129,10 +133,6 @@ object MongoHiringRuntime {
         passwordHashPermits,
         config.diagnostics
       )
-      setup <- SetupLifecycle.resource(
-        setupEffect(database, config.vectorSearch, config.resetOnStart),
-        config.diagnostics
-      )
       _ <- OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
       metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
     } yield MongoHiringRuntime(
@@ -152,7 +152,8 @@ object MongoHiringRuntime {
   private def embeddingCapability(
       database: MongoDatabase,
       client: com.mongodb.reactivestreams.client.MongoClient,
-      config: RuntimeConfig
+      config: RuntimeConfig,
+      embeddingWorkerReady: IO[Boolean]
   ): Resource[IO, RuntimeEmbeddingCapability] =
     EmbeddingCapability.resource(
       config.vectorSearch,
@@ -184,7 +185,8 @@ object MongoHiringRuntime {
             config.vectorSearch.parallelism,
             config.vectorSearch.retryAttempts,
             config.vectorSearch.retryDelayMillis.millis,
-            embeddingLease
+            embeddingLease,
+            embeddingWorkerReady
           )
           .map(publisher => publisher: EmbeddingWorkPublisher)
       }

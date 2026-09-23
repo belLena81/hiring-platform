@@ -101,7 +101,7 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   }
 
   test("repository failures remain unavailable rather than becoming an unknown actor") {
-    val unavailableUsers = new UserRepository {
+    val unavailableUsers = new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
       override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
         IO.pure(Left(RepositoryError.Unavailable))
       override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
@@ -151,11 +151,12 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
   private def users(values: Map[UserId, User]): UserAuthenticator =
     UserAuthenticationService(userRepository(values))
 
-  private def userRepository(values: Map[UserId, User]): UserRepository = new UserRepository {
-    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
-    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-      IO.pure(Right(ids.flatMap(values.get)))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Right(()))
-  }
+  private def userRepository(values: Map[UserId, User]): UserRepository =
+    new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
+      override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
+      override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
+        IO.pure(Right(ids.flatMap(values.get)))
+      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+        IO.pure(Right(()))
+    }
 }

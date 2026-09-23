@@ -4,7 +4,14 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
-import com.example.graphQL.cats.repository.protocol.{JobRepository, MutationWriteContext, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{
+  JobRepository,
+  MutationEntityReference,
+  MutationWriteContext,
+  RepositoryError,
+  UserRepository,
+  Versioned
+}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
@@ -74,13 +81,14 @@ final class JobService(
       input: UpdateJobInput
   ): UseCaseIO[Job] =
     idempotent.execute("updateJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
-      authorizedJobs.manage(actor, jobId) { job =>
+      authorizedJobs.manageVersioned(actor, jobId) { observed =>
+        val job = observed.value
         for {
           now <- UseCase.liftIO(currentTime)
           update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
           replacement <- UseCase.fromEither(JobLifecycle.update(update).run(job).map(_._1).widenUseCase)
           updated <- UseCase.fromIO(
-            persistUpdatedJob(job, Right(replacement), actor.userId, context)
+            persistUpdatedJob(observed, Right(replacement), actor.userId, context)
           )
         } yield updated
       }
@@ -88,13 +96,14 @@ final class JobService(
 
   override def publishJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
     idempotent.execute("publishJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
-      authorizedJobs.manage(actor, jobId) { job =>
+      authorizedJobs.manageVersioned(actor, jobId) { observed =>
+        val job = observed.value
         UseCase
           .liftIO(currentTime)
           .flatMap(now =>
             UseCase.fromIO(
               persistJob(
-                job,
+                observed,
                 JobLifecycle.publish(now).run(job).map(_._1).widenUseCase,
                 actor.userId,
                 OperationalEventType.JOB_UPDATED,
@@ -107,13 +116,14 @@ final class JobService(
 
   override def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
     idempotent.execute("closeJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
-      authorizedJobs.manage(actor, jobId) { job =>
+      authorizedJobs.manageVersioned(actor, jobId) { observed =>
+        val job = observed.value
         UseCase
           .liftIO(currentTime)
           .flatMap(now =>
             UseCase.fromIO(
               persistJob(
-                job,
+                observed,
                 JobLifecycle.close(now).run(job).map(_._1).widenUseCase,
                 actor.userId,
                 OperationalEventType.JOB_CLOSED,
@@ -152,19 +162,19 @@ final class JobService(
 
   private def replayJob(
       actor: ActorContext
-  )(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Job] =
+  )(reference: MutationEntityReference): UseCaseIO[Job] =
     scala.util
       .Try(JobId(UUID.fromString(reference.entityId)))
       .toEither
       .fold(
         _ =>
           UseCase
-            .left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
+            .left(UseCaseError.Repository(RepositoryError.Unavailable)),
         viewJob(actor, _)
       )
 
-  private def jobReference(job: Job): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
-    com.example.graphQL.cats.repository.protocol.MutationEntityReference("job", job.id.value.toString)
+  private def jobReference(job: Job): MutationEntityReference =
+    MutationEntityReference("job", job.id.value.toString)
 
   private def validateNewJob(
       recruiterId: UserId,
@@ -240,7 +250,7 @@ final class JobService(
     )
 
   private def persistUpdatedJob(
-      expected: Job,
+      expected: Versioned[Job],
       result: Either[UseCaseError, Job],
       actorId: UserId,
       context: MutationWriteContext
@@ -248,7 +258,7 @@ final class JobService(
     persistJob(expected, result, actorId, OperationalEventType.JOB_UPDATED, context)
 
   private def persistJob(
-      expected: Job,
+      expected: Versioned[Job],
       result: Either[UseCaseError, Job],
       actorId: UserId,
       eventType: OperationalEventType,
@@ -259,7 +269,9 @@ final class JobService(
       job => {
         val event =
           OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
-        notifyAfterCommit(jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).map(_.widenUseCase))
+        notifyAfterCommit(
+          jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).map(_.map(_.value).widenUseCase)
+        )
       }
     )
 
@@ -273,13 +285,6 @@ final class JobService(
 object JobService {
   def apply(users: UserRepository, jobs: JobRepository): JobService =
     new JobService(users, jobs, EmbeddingWorkPublisher.noop)
-
-  def apply(
-      users: UserRepository,
-      jobs: JobRepository,
-      embeddingWork: EmbeddingWorkPublisher
-  ): JobService =
-    new JobService(users, jobs, embeddingWork)
 
   def live(
       users: UserRepository,

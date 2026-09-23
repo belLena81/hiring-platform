@@ -5,7 +5,13 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.service.HiringReadService
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
-import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
+import com.example.graphQL.cats.repository.protocol.{
+  ApplicationRepository,
+  JobRepository,
+  MutationEntityReference,
+  RepositoryError,
+  UserRepository
+}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, UserRole}
@@ -56,12 +62,14 @@ final class ApplicationService(
           Either.cond(candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
         )
         job <- UseCase
-          .repository(jobs.find(jobId))
+          .repository(jobs.findVersioned(jobId))
           .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
         now <- UseCase.liftIO(currentTime)
         applicationId <- UseCase.liftIO(randomId.map(uuid => ApplicationId(uuid)))
         eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
-        application <- UseCase.fromEither(ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase)
+        application <- UseCase.fromEither(
+          ApplicationSubmission.create(candidate, job.value, applicationId, now).widenUseCase
+        )
         initialEvent = ApplicationEvent(
           eventId,
           application.id,
@@ -124,7 +132,11 @@ final class ApplicationService(
           .repository(jobs.find(application.jobId))
           .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
         _ <- UseCase.fromEither(
-          Either.cond(authorization.canManage(actorUser, job), (), UseCaseError.Domain(DomainError.Forbidden))
+          Either.cond(
+            authorization.canManage(actorUser, job),
+            (),
+            UseCaseError.Domain(DomainError.Forbidden)
+          )
         )
         now <- UseCase.liftIO(currentTime)
         eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
@@ -141,14 +153,14 @@ final class ApplicationService(
 
   private def replayApplication(
       actor: ActorContext
-  )(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Application] =
+  )(reference: MutationEntityReference): UseCaseIO[Application] =
     scala.util
       .Try(ApplicationId(UUID.fromString(reference.entityId)))
       .toEither
       .fold(
         _ =>
           UseCase
-            .left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)),
+            .left(UseCaseError.Repository(RepositoryError.Unavailable)),
         id =>
           readModel.canViewApplication(actor, id) *> readModel
             .application(id)
@@ -157,8 +169,8 @@ final class ApplicationService(
 
   private def applicationReference(
       application: Application
-  ): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
-    com.example.graphQL.cats.repository.protocol.MutationEntityReference("application", application.id.value.toString)
+  ): MutationEntityReference =
+    MutationEntityReference("application", application.id.value.toString)
 
   private def statusOperation(status: ApplicationStatus): String =
     status match {

@@ -12,8 +12,7 @@ import com.example.graphQL.cats.repository.protocol.{
   EmbeddingVector,
   MutationWriteContext,
   SearchSessionRepository,
-  SemanticSearchRepository,
-  UserRepository
+  SemanticSearchRepository
 }
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
@@ -1026,7 +1025,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   private final class RecordingUsers(
       ref: Ref[IO, Map[UserId, User]],
       batches: Ref[IO, Vector[List[UserId]]]
-  ) extends UserRepository {
+  ) extends com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
       ref.get.map(_.get(id)).map(Right(_))
 

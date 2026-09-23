@@ -17,7 +17,7 @@ import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 import com.example.graphQL.cats.shared.events.{OperationalAggregateType, OperationalEventEnvelope, OperationalEventType}
-import com.mongodb.client.model.Filters
+import com.mongodb.client.model.{Filters, InsertOneOptions}
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.bson.Document
@@ -100,6 +100,73 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
       actorId,
       Json.obj("jobId" -> Json.fromString(value.id.value.toString))
     )
+
+  test("startup backfills user and job revisions once and records the completed migration") {
+    replicaSet.use { instance =>
+      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        val database = client.getDatabase(s"revision_migration_${UUID.randomUUID()}")
+        val legacyJob = MongoHiringCodecs.job(job(JobId(UUID.randomUUID()), UserId(UUID.randomUUID())))
+        val legacyUser = MongoHiringCodecs.user(
+          User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+        )
+        val _ = legacyJob.remove("version")
+        val _ = legacyUser.remove("version")
+        for {
+          _ <- PublisherBridge.first(database.getCollection("jobs").insertOne(legacyJob)).void
+          _ <- PublisherBridge.first(database.getCollection("users").insertOne(legacyUser)).void
+          _ <- MongoHiringSetup.initialize(database)
+          migratedJob <- PublisherBridge.first(
+            database.getCollection("jobs").find(Filters.eq("_id", legacyJob.getString("_id")))
+          )
+          migratedUser <- PublisherBridge.first(
+            database.getCollection("users").find(Filters.eq("_id", legacyUser.getString("_id")))
+          )
+          _ <- MongoHiringSetup.initialize(database)
+          completedMigration <- PublisherBridge.first(
+            database.getCollection("hiring_migration_ledger").find(Filters.eq("_id", "001_user_job_revisions"))
+          )
+          _ <- IO {
+            assertEquals(migratedJob.map(_.getLong("version").longValue()), Some(0L))
+            assertEquals(migratedUser.map(_.getLong("version").longValue()), Some(0L))
+            assertEquals(completedMigration.map(_.getString("state")), Some("Complete"))
+          }
+        } yield ()
+      }
+    }
+  }
+
+  test("a stale backfill batch cannot reset a revision advanced by a repository write") {
+    replicaSet.use { instance =>
+      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        val database = client.getDatabase(s"revision_race_${UUID.randomUUID()}")
+        val jobs = MongoJobRepository.transactional(database, client)
+        val original = job(JobId(UUID.randomUUID()), UserId(UUID.randomUUID()))
+        val legacyDocument = MongoHiringCodecs.job(original)
+        val ids = List(original.id.value.toString)
+        val _ = legacyDocument.remove("version")
+        for {
+          _ <- MongoHiringSetup.initialize(database)
+          _ <- PublisherBridge.first(
+            database
+              .getCollection("jobs")
+              .insertOne(legacyDocument, new InsertOneOptions().bypassDocumentValidation(true))
+          )
+          // Both migrators selected this ID while its version was missing.
+          _ <- MongoHiringSetup.backfillVersionBatch(database.getCollection("jobs"), ids)
+          advanced <- jobs.update(Versioned(original, 0L), original.copy(title = "Updated title"), now)
+          // Replay the second migrator's stale selection after the repository write advanced the version.
+          _ <- MongoHiringSetup.backfillVersionBatch(database.getCollection("jobs"), ids)
+          stale <- jobs.update(Versioned(original, 0L), original.copy(description = "Stale update"), now)
+          stored <- jobs.findVersioned(original.id)
+        } yield {
+          assertEquals(advanced.map(_.version), Right(1L))
+          assertEquals(stale, Left(RepositoryError.Conflict))
+          assertEquals(stored.map(_.map(_.version)), Right(Some(1L)))
+          assertEquals(stored.map(_.map(_.value.title)), Right(Some("Updated title")))
+        }
+      }
+    }
+  }
 
   test("repository-owned and receipt-owned job writes atomically persist all follow-ups") {
     replicaSet.use { instance =>
@@ -268,7 +335,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
                 new Document("_id", UUID.randomUUID().toString)
                   .append("recruiterId", recruiterId.value.toString)
                   .append("status", JobStatus.Open.toString)
-                  .append("createdAt", Date.from(now.plusSeconds(1)))
+                  .append("createdAt", Date.from(now.plusSeconds(1))),
+                new InsertOneOptions().bypassDocumentValidation(true)
               )
           )
           deletion <- users.deleteAccount(recruiterId, now.plusSeconds(2), "deleted-account")

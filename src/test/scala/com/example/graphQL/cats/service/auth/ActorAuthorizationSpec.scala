@@ -28,7 +28,7 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
   }
 
   private def repository(values: Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]): UserRepository =
-    new UserRepository {
+    new ServiceFixtures.VersionedUserRepositoryTestAdapter {
       override def find(
           id: com.example.graphQL.cats.domain.model.Identifiers.UserId
       ): IO[Either[RepositoryError, Option[User]]] =

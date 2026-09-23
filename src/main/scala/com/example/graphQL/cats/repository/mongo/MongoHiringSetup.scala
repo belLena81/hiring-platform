@@ -14,6 +14,7 @@ import com.mongodb.client.model.{
 import com.mongodb.MongoCommandException
 import com.mongodb.reactivestreams.client.{MongoCollection, MongoDatabase}
 import org.bson.Document
+import org.bson.BsonType
 import org.bson.conversions.Bson
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
@@ -30,6 +31,8 @@ final case class AtlasSearchIndexConfig(
 /** Creates the pre-MVP Mongo shape and only removes prior hiring data when explicitly requested. */
 object MongoHiringSetup {
   private val CollectionLimit = 128
+  private val RevisionMigrationId = "001_user_job_revisions"
+  private val RevisionMigrationBatchSize = 500
   private val ownedCollections = Set(
     "users",
     "jobs",
@@ -88,8 +91,79 @@ object MongoHiringSetup {
     initialize(database, atlas, resetOnStart = false)
   def initialize(database: MongoDatabase, atlas: Option[AtlasSearchIndexConfig], resetOnStart: Boolean): IO[Unit] =
     Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
-      createAccountRegistry(database) *> createUserValidator(database) *> createIndexes(database) *>
+      migrateAggregateVersions(database) *> createAccountRegistry(database) *> createUserValidator(database) *>
+      createJobValidator(database) *> createIndexes(database) *>
       atlas.traverse_(provisionAtlasIndexes(database, _))
+
+  private def migrateAggregateVersions(database: MongoDatabase): IO[Unit] = {
+    val ledger = database.getCollection("hiring_migration_ledger")
+    val started = Updates.combine(
+      Updates.setOnInsert("_id", RevisionMigrationId),
+      Updates.set("version", 1L),
+      Updates.set("state", "Running")
+    )
+    PublisherBridge
+      .first(ledger.updateOne(Filters.eq("_id", RevisionMigrationId), started, new UpdateOptions().upsert(true)))
+      .void *> List(database.getCollection("users"), database.getCollection("jobs")).traverse_(backfillVersions) *>
+      verifyAggregateVersions(database) *>
+      PublisherBridge
+        .first(
+          ledger.updateOne(
+            Filters.eq("_id", RevisionMigrationId),
+            Updates.combine(Updates.set("version", 1L), Updates.set("state", "Complete"))
+          )
+        )
+        .void
+  }
+
+  private def backfillVersions(collection: MongoCollection[Document]): IO[Unit] = {
+    val missingVersion = Filters.exists("version", false)
+    def nextBatch: IO[Unit] =
+      PublisherBridge
+        .collectWithin(
+          collection.find(missingVersion).sort(Indexes.ascending("_id")).limit(RevisionMigrationBatchSize),
+          RevisionMigrationBatchSize
+        )
+        .flatMap { documents =>
+          val ids = documents.flatMap(document => Option(document.getString("_id")))
+          if (documents.isEmpty) IO.unit
+          else if (ids.size != documents.size)
+            IO.raiseError(new IllegalStateException("Mongo revision backfill found a document without a string _id"))
+          else backfillVersionBatch(collection, ids) *> nextBatch
+        }
+    nextBatch
+  }
+
+  private[mongo] def backfillVersionBatch(collection: MongoCollection[Document], ids: List[String]): IO[Unit] =
+    PublisherBridge
+      .first(
+        collection.updateMany(
+          Filters.and(Filters.in("_id", ids*), Filters.exists("version", false)),
+          Updates.set("version", Long.box(0L))
+        )
+      )
+      .flatMap {
+        // Another startup may have migrated some of these documents first. The missing-version
+        // predicate keeps a concurrent aggregate write from being reset to revision zero.
+        case Some(result) if result.getMatchedCount <= ids.size.toLong => IO.unit
+        case Some(_)                                                   =>
+          IO.raiseError(new IllegalStateException("Mongo revision backfill updated an unexpected row count"))
+        case None => IO.raiseError(new IllegalStateException("Mongo revision backfill returned no update result"))
+      }
+
+  private def verifyAggregateVersions(database: MongoDatabase): IO[Unit] =
+    List(database.getCollection("users"), database.getCollection("jobs")).traverse_ { collection =>
+      val invalidVersion = Filters.or(
+        Filters.exists("version", false),
+        Filters.lt("version", 0L),
+        Filters.not(Filters.`type`("version", BsonType.INT64))
+      )
+      PublisherBridge.first(collection.countDocuments(invalidVersion)).flatMap {
+        case Some(count) if count.longValue() == 0L => IO.unit
+        case Some(_) => IO.raiseError(new IllegalStateException("Mongo contains an invalid aggregate revision"))
+        case None    => IO.raiseError(new IllegalStateException("Mongo revision verification returned no count"))
+      }
+    }
 
   private def resetOwnedCollections(database: MongoDatabase): IO[Unit] =
     PublisherBridge.collectWithin(database.listCollectionNames(), CollectionLimit).flatMap { names =>
@@ -308,7 +382,8 @@ object MongoHiringSetup {
     val schema = new Document(
       "$jsonSchema",
       new Document("bsonType", "object")
-        .append("required", List("role", "accountStatus").asJava)
+        .append("required", List("role", "accountStatus", "version").asJava)
+        .append("properties", new Document("version", new Document("bsonType", "long").append("minimum", 0L)))
         .append(
           "oneOf",
           List(
@@ -325,6 +400,27 @@ object MongoHiringSetup {
       .first(
         database.runCommand(
           new Document("collMod", "users")
+            .append("validator", schema)
+            .append("validationLevel", "strict")
+            .append("validationAction", "error")
+        )
+      )
+      .void
+  }
+
+  private def createJobValidator(database: MongoDatabase): IO[Unit] = {
+    val schema = new Document(
+      "$jsonSchema",
+      new Document("bsonType", "object")
+        .append("required", List("version").asJava)
+        .append("properties", new Document("version", new Document("bsonType", "long").append("minimum", 0L)))
+    )
+    PublisherBridge.first(database.createCollection("jobs")).void.recoverWith {
+      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
+    } *> PublisherBridge
+      .first(
+        database.runCommand(
+          new Document("collMod", "jobs")
             .append("validator", schema)
             .append("validationLevel", "strict")
             .append("validationAction", "error")

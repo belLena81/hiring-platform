@@ -67,7 +67,7 @@ final class MongoSearchSessionRepository(
       event: OperationalEventEnvelope,
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Boolean]] =
-    recordInteractionWithSession(event, MongoMutationWriteContext.session(context))
+    MongoMutationWriteContext.session(context).flatMap(recordInteractionWithSession(event, _))
 
   private def recordInteractionWithSession(
       event: OperationalEventEnvelope,

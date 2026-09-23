@@ -14,9 +14,10 @@ import java.util.{Date, UUID}
 private[mongo] final case class MongoMutationWriteContext(session: Option[ClientSession]) extends MutationWriteContext
 
 private[mongo] object MongoMutationWriteContext {
-  def session(context: MutationWriteContext): Option[ClientSession] = context match {
-    case MongoMutationWriteContext(value) => value
-    case _ => throw new IllegalArgumentException("Mutation write context belongs to another repository adapter")
+  def session(context: MutationWriteContext): IO[Option[ClientSession]] = context match {
+    case MongoMutationWriteContext(value) => IO.pure(value)
+    case _                                =>
+      IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
   }
 
   def run[A](

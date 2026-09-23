@@ -49,7 +49,7 @@ final class MongoApplicationRepository private (
     )
 
   override def createForOpenJob(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent
   ): IO[Either[RepositoryError, Unit]] =
@@ -57,7 +57,7 @@ final class MongoApplicationRepository private (
     else submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2)
 
   def createForOpenJobWithEvents(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
@@ -66,7 +66,7 @@ final class MongoApplicationRepository private (
     else submitWithRetry(observedJob, application, initialEvent, operationalEvents, remainingRetries = 2)
 
   override def createForOpenJobWithEvents(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
@@ -74,13 +74,10 @@ final class MongoApplicationRepository private (
   ): IO[Either[RepositoryError, Unit]] =
     if (!isConsistentSubmit(observedJob, application, initialEvent)) IO.pure(Left(RepositoryError.Conflict))
     else
-      submitOnceWithSession(
-        observedJob,
-        application,
-        initialEvent,
-        operationalEvents,
-        MongoMutationWriteContext.session(context)
-      ).handleError(mapWrite)
+      MongoMutationWriteContext
+        .session(context)
+        .flatMap(session => submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session))
+        .handleError(mapWrite)
 
   override def updateStatus(application: Application, event: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
     updateStatusWithEvents(application, event, Nil)
@@ -100,7 +97,9 @@ final class MongoApplicationRepository private (
       operationalEvents: List[OperationalEventEnvelope],
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Unit]] =
-    updateStatusWithSession(application, event, operationalEvents, MongoMutationWriteContext.session(context))
+    MongoMutationWriteContext
+      .session(context)
+      .flatMap(session => updateStatusWithSession(application, event, operationalEvents, session))
       .handleError(mapWrite)
 
   private def updateStatusWithSession(
@@ -145,7 +144,7 @@ final class MongoApplicationRepository private (
   }
 
   private def submitWithRetry(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       remainingRetries: Int
@@ -153,7 +152,7 @@ final class MongoApplicationRepository private (
     submitWithRetry(observedJob, application, initialEvent, Nil, remainingRetries)
 
   private def submitWithRetry(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
@@ -161,7 +160,7 @@ final class MongoApplicationRepository private (
   ): IO[Either[RepositoryError, Unit]] =
     submitOnce(observedJob, application, initialEvent, operationalEvents).flatMap {
       case Left(RepositoryError.Conflict) if remainingRetries > 0 =>
-        currentOpenJob(observedJob.id).flatMap {
+        currentOpenJob(observedJob.value.id).flatMap {
           case Right(Some(current)) =>
             submitWithRetry(current, application, initialEvent, operationalEvents, remainingRetries - 1)
           case Right(None) => IO.pure(Left(RepositoryError.Conflict))
@@ -170,15 +169,19 @@ final class MongoApplicationRepository private (
       case result => IO.pure(result)
     }
 
-  private def isConsistentSubmit(observedJob: Job, application: Application, initialEvent: ApplicationEvent): Boolean =
-    observedJob.id == application.jobId &&
+  private def isConsistentSubmit(
+      observedJob: Versioned[Job],
+      application: Application,
+      initialEvent: ApplicationEvent
+  ): Boolean =
+    observedJob.value.id == application.jobId &&
       initialEvent.applicationId == application.id &&
       initialEvent.previousStatus.isEmpty &&
       initialEvent.newStatus == ApplicationStatus.Created &&
       initialEvent.actorId == application.candidateId
 
   private def submitOnce(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
@@ -188,22 +191,26 @@ final class MongoApplicationRepository private (
       .handleError(mapWrite)
 
   private def submitOnceWithSession(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession]
   ): IO[Either[RepositoryError, Unit]] =
     val guardFilter = Filters.and(
-      Filters.eq("_id", observedJob.id.value.toString),
+      Filters.eq("_id", observedJob.value.id.value.toString),
+      Filters.eq("version", observedJob.version),
+      Filters.lt("version", Long.MaxValue),
       Filters.eq("status", JobStatus.Open.toString)
     )
+    val update = Updates.combine(
+      Updates.set("updatedAt", Date.from(application.createdAt)),
+      Updates.inc("version", 1L)
+    )
     val guard = session.fold(
-      PublisherBridge.first(jobs.updateOne(guardFilter, Updates.set("updatedAt", Date.from(application.createdAt))))
+      PublisherBridge.first(jobs.updateOne(guardFilter, update))
     ) { active =>
-      PublisherBridge.first(
-        jobs.updateOne(active, guardFilter, Updates.set("updatedAt", Date.from(application.createdAt)))
-      )
+      PublisherBridge.first(jobs.updateOne(active, guardFilter, update))
     }
     guard.flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
@@ -234,13 +241,13 @@ final class MongoApplicationRepository private (
     }
   }
 
-  private def currentOpenJob(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
+  private def currentOpenJob(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
     PublisherBridge
       .first(jobs.find(Filters.eq("_id", id.value.toString)))
       .map(document =>
         MongoStoredDocumentDecoding
-          .repository(document.traverse(MongoHiringCodecs.readJob))
-          .map(_.filter(_.status == JobStatus.Open))
+          .repository(document.traverse(MongoHiringCodecs.readVersionedJob))
+          .map(_.filter(_.value.status == JobStatus.Open))
       )
       .handleError(_ => Left(RepositoryError.Unavailable))
 

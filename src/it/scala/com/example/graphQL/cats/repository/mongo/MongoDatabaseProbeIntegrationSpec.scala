@@ -115,11 +115,11 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- requireIO(jobs.create(job, fixtureTime))
           observed <- jobs
-            .find(job.id)
+            .findVersioned(job.id)
             .flatMap(requireResult)
             .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
-          first = observed.copy(title = "First concurrent update", updatedAt = fixtureTime.plusSeconds(1))
-          second = observed.copy(title = "Second concurrent update", updatedAt = fixtureTime.plusSeconds(2))
+          first = observed.value.copy(title = "First concurrent update", updatedAt = fixtureTime.plusSeconds(1))
+          second = observed.value.copy(title = "Second concurrent update", updatedAt = fixtureTime.plusSeconds(2))
           outcomes <- IO.both(
             jobs.update(observed, first, first.updatedAt),
             jobs.update(observed, second, second.updatedAt)
@@ -150,20 +150,20 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- requireIO(jobs.create(job, fixtureTime))
           observedJob <- jobs
-            .find(job.id)
+            .findVersioned(job.id)
             .flatMap(requireResult)
             .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
           _ <- requireIO(
             jobs.update(
               observedJob,
-              observedJob.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)),
+              observedJob.value.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)),
               fixtureTime.plusSeconds(1)
             )
           )
           staleJobWrite <- jobs.updateEmbedding(observedJob, embedding)
           _ <- requireIO(users.insert(candidate))
           observedCandidate <- users
-            .find(candidate.id)
+            .findVersioned(candidate.id)
             .flatMap(requireResult)
             .flatMap(IO.fromOption(_)(new AssertionError("candidate was not created")))
           changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated backend engineer"), None)
@@ -172,19 +172,21 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           )
           staleCandidateWrite <- users.updateEmbedding(observedCandidate, embedding)
           currentJob <- jobs
-            .find(job.id)
+            .findVersioned(job.id)
             .flatMap(requireResult)
             .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
           currentCandidate <- users
-            .find(candidate.id)
+            .findVersioned(candidate.id)
             .flatMap(requireResult)
             .flatMap(IO.fromOption(_)(new AssertionError("candidate disappeared")))
         } yield {
           assertEquals(staleJobWrite, Left(RepositoryError.Conflict))
           assertEquals(staleCandidateWrite, Left(RepositoryError.Conflict))
-          assertEquals(currentJob.embedding, None)
-          assertEquals(currentCandidate.candidateProfile, Some(changedProfile))
-          assertEquals(currentCandidate.embedding, None)
+          assertEquals(currentJob.value.embedding, None)
+          assertEquals(currentJob.version, 1L)
+          assertEquals(currentCandidate.value.candidateProfile, Some(changedProfile))
+          assertEquals(currentCandidate.value.embedding, None)
+          assertEquals(currentCandidate.version, 1L)
         }
       }
     }

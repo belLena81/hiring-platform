@@ -17,7 +17,7 @@ import com.example.graphQL.cats.domain.model.{
   UserProfile,
   UserRole
 }
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.repository.protocol.{RepositoryError, Versioned}
 import com.example.graphQL.cats.shared.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
@@ -160,28 +160,22 @@ class MongoHiringCodecsSpec extends FunSuite {
     assertEquals(result.map(_.embedding).toEither, Right(Some(embedding)))
   }
 
-  test("job codec rejects removed revision fields") {
-    val document = MongoHiringCodecs
-      .job(
-        Job(
-          jobId,
-          recruiterId,
-          "Senior Scala Developer",
-          "Build services",
-          List("Scala"),
-          Set("Cats Effect"),
-          Location("Cyprus", "Nicosia", remote = true),
-          JobStatus.Open,
-          now,
-          later
-        )
-      )
-      .append("version", Long.box(1L))
-
-    assertEquals(
-      MongoHiringCodecs.readJob(document).toEither,
-      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("version")))
+  test("job codec preserves the storage revision without adding it to the domain value") {
+    val job = Job(
+      jobId,
+      recruiterId,
+      "Senior Scala Developer",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect"),
+      Location("Cyprus", "Nicosia", remote = true),
+      JobStatus.Open,
+      now,
+      later
     )
+
+    assertEquals(MongoHiringCodecs.readVersionedJob(MongoHiringCodecs.job(job, 7L)).toEither, Right(Versioned(job, 7L)))
+    assertEquals(MongoHiringCodecs.readJob(MongoHiringCodecs.job(job, 7L)).toEither, Right(job))
   }
 
   test("malformed stored documents decode to non-sensitive typed errors") {

@@ -31,16 +31,28 @@ final class MongoJobRepository(
       .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
+  override def findVersioned(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
+    PublisherBridge
+      .first(collection.find(Filters.eq("_id", id.value.toString)))
+      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedJob)))
+      .handleError(_ => Left(RepositoryError.Unavailable))
+
   override def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)
 
-  override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
+  override def findOpen(
+      filter: JobSearchFilter,
+      page: JobPageRequest
+  ): IO[Either[RepositoryError, List[Job]]] =
     findMany(baseSearchFilter(filter, page), page)
 
   override def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
     findMany(baseJobFilter(List(page.status.map(status => Filters.eq("status", status.toString))), page), page)
 
-  override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
+  override def findByRecruiter(
+      recruiterId: UserId,
+      page: JobPageRequest
+  ): IO[Either[RepositoryError, List[Job]]] =
     findMany(
       baseJobFilter(
         List(
@@ -90,7 +102,11 @@ final class MongoJobRepository(
       case None => IO.pure(Left(RepositoryError.Unavailable))
     }
 
-  override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+  override def update(
+      expected: Versioned[Job],
+      replacement: Job,
+      now: Instant
+  ): IO[Either[RepositoryError, Versioned[Job]]] =
     if (embeddingWork.nonEmpty) {
       transactionRunner
         .run(session => writeJobUpdateSession(expected, replacement, now, Nil, session))
@@ -98,12 +114,12 @@ final class MongoJobRepository(
     } else writeJobUpdateSession(expected, replacement, now, Nil, None).handleError(mapWrite)
 
   override def updateWithEvents(
-      expected: Job,
+      expected: Versioned[Job],
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, Job]] =
+  ): IO[Either[RepositoryError, Versioned[Job]]] =
     MongoMutationWriteContext
       .run(
         context,
@@ -113,38 +129,46 @@ final class MongoJobRepository(
       .handleError(mapWrite)
 
   private def writeJobUpdateSession(
-      expected: Job,
+      expected: Versioned[Job],
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       session: Option[ClientSession]
-  ): IO[Either[RepositoryError, Job]] =
-    replaceOne(
-      session,
-      MongoObservedStateFilters.jobReplacement(expected),
-      MongoHiringCodecs.job(replacement)
-    ).flatMap {
-      case Some(result) if result.getMatchedCount == 1L =>
-        embeddingWork
-          .fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
-            _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
-          )
-          .flatMap {
-            case Right(())   => insertOperationalEvents(outbox, session, events, now).map(_.as(replacement))
-            case Left(error) => IO.pure(Left(error))
-          }
-      case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None    => IO.pure(Left(RepositoryError.Unavailable))
+  ): IO[Either[RepositoryError, Versioned[Job]]] =
+    Versioned.nextVersion(expected.version) match {
+      case None              => IO.pure(Left(RepositoryError.Conflict))
+      case Some(nextVersion) =>
+        replaceOne(
+          session,
+          MongoObservedStateFilters.jobReplacement(expected),
+          MongoHiringCodecs.job(replacement, nextVersion)
+        ).flatMap {
+          case Some(result) if result.getMatchedCount == 1L =>
+            embeddingWork
+              .fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
+                _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
+              )
+              .flatMap {
+                case Right(()) =>
+                  insertOperationalEvents(outbox, session, events, now).map(_.as(Versioned(replacement, nextVersion)))
+                case Left(error) => IO.pure(Left(error))
+              }
+          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+          case None    => IO.pure(Left(RepositoryError.Unavailable))
+        }
     }
 
   override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-    find(id).flatMap {
+    findVersioned(id).flatMap {
       case Right(Some(job)) => updateEmbedding(job, embedding)
       case Right(None)      => IO.pure(Left(RepositoryError.Conflict))
       case Left(error)      => IO.pure(Left(error))
     }
 
-  override def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] = {
+  override def updateEmbedding(
+      observed: Versioned[Job],
+      embedding: EntityEmbedding
+  ): IO[Either[RepositoryError, Unit]] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
     PublisherBridge
       .first(
@@ -152,7 +176,8 @@ final class MongoJobRepository(
           MongoObservedStateFilters.jobEmbedding(observed),
           Updates.combine(
             Updates.set("embedding", encoded.get("embedding")),
-            Updates.set("embeddingMeta", encoded.get("embeddingMeta"))
+            Updates.set("embeddingMeta", encoded.get("embeddingMeta")),
+            Updates.inc("version", 1L)
           )
         )
       )

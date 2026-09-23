@@ -26,6 +26,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
 
   final case class StoredUser(
       _id: String,
+      version: Long,
       email: Option[String],
       emailCanonical: Option[String],
       name: String,
@@ -43,6 +44,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
 
   final case class StoredJob(
       _id: String,
+      version: Long,
       recruiterId: String,
       title: String,
       description: String,

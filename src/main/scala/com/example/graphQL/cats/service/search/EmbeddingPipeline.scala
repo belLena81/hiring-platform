@@ -136,14 +136,15 @@ final class EmbeddingPipeline(
     }
 
   private def processJob(id: JobId): IO[ProcessingOutcome] =
-    jobs.find(id).flatMap {
-      case Right(Some(job)) =>
+    jobs.findVersioned(id).flatMap {
+      case Right(Some(observed)) =>
+        val job = observed.value
         val text = SearchableText.job(job)
         val hash = SourceHash.sha256(text)
         if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
         else
           embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(job, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(observed, embedding).map(writeOutcome)
             case EmbeddingOutcome.Retry               => IO.pure(ProcessingOutcome.Retry)
             case EmbeddingOutcome.Discarded           =>
               IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
@@ -153,8 +154,9 @@ final class EmbeddingPipeline(
     }
 
   private def processCandidate(id: UserId): IO[ProcessingOutcome] =
-    users.find(id).flatMap {
-      case Right(Some(user)) =>
+    users.findVersioned(id).flatMap {
+      case Right(Some(observed)) =>
+        val user = observed.value
         user.candidateProfile match {
           case Some(profile) =>
             val text = SearchableText.candidate(profile)
@@ -162,9 +164,10 @@ final class EmbeddingPipeline(
             if (user.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
             else
               embedDocument(text).flatMap {
-                case EmbeddingOutcome.Embedded(embedding) => users.updateEmbedding(user, embedding).map(writeOutcome)
-                case EmbeddingOutcome.Retry               => IO.pure(ProcessingOutcome.Retry)
-                case EmbeddingOutcome.Discarded           =>
+                case EmbeddingOutcome.Embedded(embedding) =>
+                  users.updateEmbedding(observed, embedding).map(writeOutcome)
+                case EmbeddingOutcome.Retry     => IO.pure(ProcessingOutcome.Retry)
+                case EmbeddingOutcome.Discarded =>
                   IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
               }
           case None => IO.pure(ProcessingOutcome.Completed)
@@ -206,7 +209,8 @@ object EmbeddingPipeline {
       parallelism: Int,
       retryAttempts: Int,
       retryDelay: FiniteDuration,
-      leaseDuration: FiniteDuration
+      leaseDuration: FiniteDuration,
+      workerReady: IO[Boolean] = IO.pure(true)
   ): Resource[IO, DurableEmbeddingWorkPublisher] =
     Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
       for {
@@ -226,7 +230,9 @@ object EmbeddingPipeline {
           IO.realTimeInstant,
           workerId
         )
-        _ <- Resource.make(pipeline.stream.compile.drain.start)(_.cancel)
+        _ <- Resource.make(
+          workerReady.flatMap(ready => if (ready) pipeline.stream.compile.drain else IO.unit).start
+        )(_.cancel)
       } yield publisher
     }
 }

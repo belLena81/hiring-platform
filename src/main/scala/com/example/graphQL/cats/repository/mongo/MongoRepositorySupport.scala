@@ -4,7 +4,7 @@ import cats.data.ValidatedNel
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{ApplicationEvent, Job, User}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.repository.protocol.{RepositoryError, Versioned}
 import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
 import com.example.graphQL.cats.shared.pagination.PageSize
 import com.mongodb.MongoWriteException
@@ -59,42 +59,21 @@ private[mongo] trait MongoOperationalEventInsertion {
 }
 
 private[mongo] object MongoObservedStateFilters {
-  private val JobFields = List(
-    "_id",
-    "recruiterId",
-    "title",
-    "description",
-    "requirements",
-    "skills",
-    "location",
-    "status",
-    "createdAt",
-    "updatedAt",
-    "closedAt",
-    "embedding",
-    "embeddingMeta"
-  )
+  def jobReplacement(job: Versioned[Job]): Bson =
+    Filters.and(Filters.eq("_id", job.value.id.value.toString), Filters.eq("version", job.version))
 
-  private val JobSearchFields = List("_id", "title", "description", "requirements", "skills")
-
-  private def exactField(document: Document, field: String): Bson =
-    Option(document.get(field)).fold[Bson](Filters.exists(field, false))(value => Filters.eq(field, value))
-
-  private def exactDocument(document: Document, fields: List[String]): Bson =
-    Filters.and(fields.map(field => exactField(document, field))*)
-
-  def jobReplacement(job: Job): Bson =
-    exactDocument(MongoHiringCodecs.job(job), JobFields)
-
-  def jobEmbedding(job: Job): Bson =
-    exactDocument(MongoHiringCodecs.job(job), JobSearchFields)
-
-  def candidateEmbedding(user: User): Bson =
+  def jobEmbedding(job: Versioned[Job]): Bson =
     Filters.and(
-      Filters.eq("_id", user.id.value.toString),
-      Filters.eq("role", user.role.toString),
-      Filters.eq("accountStatus", user.accountStatus.toString),
-      exactField(MongoHiringCodecs.user(user), "profile")
+      Filters.eq("_id", job.value.id.value.toString),
+      Filters.eq("version", job.version),
+      Filters.lt("version", Long.MaxValue)
+    )
+
+  def candidateEmbedding(user: Versioned[User]): Bson =
+    Filters.and(
+      Filters.eq("_id", user.value.id.value.toString),
+      Filters.eq("version", user.version),
+      Filters.lt("version", Long.MaxValue)
     )
 }
 

@@ -17,7 +17,7 @@ import com.example.graphQL.cats.repository.protocol.{
   UserRepository
 }
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.{AccountError, ActorContext, AnalyticsError, UseCaseError}
+import com.example.graphQL.cats.service.{AccountError, ActorContext, AnalyticsError, ServiceFixtures, UseCaseError}
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.*
 import munit.CatsEffectSuite
@@ -391,7 +391,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     }
   }
 
-  private final class TestUsers(values: Map[UserId, User]) extends UserRepository {
+  private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =

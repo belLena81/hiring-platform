@@ -1,17 +1,18 @@
-# Pre-MVP Contract Reset
+# Pre-MVP Hiring Contract and Aggregate Revisions
 
 ## Identity and scope
 
-- Status: in review
-- User outcome: one current, unversioned hiring contract before MVP, with no compatibility code; local state is retained unless an explicit reset is enabled.
-- Authorized scope: GraphQL, cursors, Mongo documents/setup, events/Kafka, embedding metadata, documentation, fixtures, and tests.
+- Status: in progress
+- User outcome: one active public/API and event contract before MVP, with local operational data retained unless an explicit reset is enabled; Mongo user/job writes reject stale snapshots through internal revisions.
+- Authorized scope: GraphQL, cursors, Mongo documents/setup and migration, events/Kafka, embedding metadata, documentation, fixtures, and tests.
 - Non-goals: Git-history rewriting, dependency/toolchain protocol changes, production deployment.
 
 ## Decisions
 
-- Startup drops every hiring-owned Mongo collection and recreates only the active shape. No migration ledger, backfill, legacy read, or compatibility window remains.
-- API, document, cursor, event, entity, embedding, and search-model version fields are removed. Scala/JDK/dependency versions and required third-party protocol paths remain.
-- Concurrent writes use transactions and conditional identity/ownership/status predicates, never stored revisions.
+- Startup preserves hiring data by default. Explicit reset drops every hiring-owned Mongo collection; normal startup runs a restartable, versioned migration before strict user/job decoding.
+- User and job documents carry a non-negative Long version. New documents start at 0; every user/job write increments it atomically, while guarded writes compare _id and expected version. This is storage concurrency metadata, not a schema/API/event version.
+- Concurrent writes use transactions and conditional identity/ownership/status predicates together with aggregate revisions where snapshots are written back.
+- Migration 001_user_job_revisions backfills missing user/job revisions in bounded _id batches, verifies BSON type and non-negative value, then records completion in hiring_migration_ledger. A partial or concurrent run is safe to repeat and cannot reset an advanced revision; failed verification aborts startup. The durable embedding worker waits for setup completion before claiming work. Old binaries must be stopped before migration because strict old codecs reject the added field.
 - Events use the unversioned topic and envelope; timestamp plus event ID is their only ordering key.
 - The existing uncommitted GraphQL restructuring is the target API and must be reconciled, not discarded. The operational contract remains the active compatibility boundary; the [Hiring Analytics Lakehouse](hiring-analytics-lakehouse.md) spec owns derived analytics behavior and evidence.
 - Authentication rate limits are enforced by the `login`, `signUp`, and `bootstrapAdmin` field resolvers for each executed field, including aliases and fragments. Exhaustion is a sanitized HTTP 200 GraphQL error with `RATE_LIMITED` and positive `retryAfter` seconds extensions.
@@ -23,11 +24,11 @@
 
 | ID | Given / When / Then | Evidence | Actual outcome |
 |---|---|---|---|
-| PCR-01 | Startup runs against any existing hiring database | Owned collections are empty then recreated without a migration ledger | Implemented; integration source compiles |
+| PCR-01 | Startup runs against existing user/job documents without revisions | Revisions are backfilled without deleting data; rerunning or racing startup preserves completed state and worker claims wait for setup | Implemented; replica-set backfill/CAS race and setup-gated worker tests |
 | PCR-02 | Clients use GraphQL, cursors, or events | Only one unversioned contract is emitted and accepted | Implemented; unit contract tests pass |
-| PCR-03 | Concurrent lifecycle writes occur | Conditional transactional writes preserve authorization, transitions, and duplicate/closed-job rules without revisions | Implemented; clean unit suite and targeted Mongo observed-state CAS integration tests pass |
-| PCR-04 | Repository docs and fixtures are inspected | No historic migration/version compatibility material remains | Implemented; retired specs, plans, and fixtures removed |
-| PCR-05 | Unit and disposable integration checks run | Compile, test, integration, and static checks pass | Unit suite and integration compilation pass; live Docker execution pending |
+| PCR-03 | Concurrent lifecycle, embedding, or submission writes use an observed aggregate | One write from a given revision succeeds; every user/job write advances the revision once and preserves transaction behavior | Implemented; replica-set CAS and migration integration tests |
+| PCR-04 | Repository docs and fixtures are inspected | Public contracts remain unversioned; internal revisions and migration recovery are documented | Implemented; SDL and codec checks |
+| PCR-05 | Unit and disposable integration checks run | Compile, test, integration, and static checks pass | Unit suite passes (352/352); Mongo replica-set specs pass (9/9); full integration is partial (28/29) because `MainProcessSpec.P1-AC09` observed 17 `RUNTIME_FAILED` records where it expects 1 |
 | PCR-06 | A client executes multiple public account fields or uses aliases/fragments | Each field consumes the address/operation bucket independently and limited fields return GraphQL retry metadata | Implemented; HTTP route and rate-limiter unit tests pass |
 | PCR-07 | An authenticated operation contains multiple roots or nested user emails | The viewer is loaded once, service authorization remains enforced, and deletion prevents later authenticated fields in that request | In progress; focused unit and GraphQL checks pending |
 | PCR-08 | Repeated valid GraphQL documents execute within the cache window | The second execution reuses the document with static validation skipped, while invalid documents are not cached and complexity/authentication still run | In progress; focused cache and HTTP checks pending |
@@ -35,6 +36,6 @@
 
 ## Review
 
-- Code Reviewer: pending final implementation review
-- Security Engineer: pending final implementation review
-- QA: pending final implementation validation
+- Code Reviewer: PASS; revision writer inventory, CAS behavior, migration race protection, and setup-gated embedding worker reviewed
+- Security Engineer: PASS; no remaining security defects in the versioned write and migration changes
+- QA: BLOCKED; full integration is 28/29 because `MainProcessSpec.P1-AC09` observed 17 `RUNTIME_FAILED` records instead of 1; the change is outside this refactor, but no clean baseline comparison was run

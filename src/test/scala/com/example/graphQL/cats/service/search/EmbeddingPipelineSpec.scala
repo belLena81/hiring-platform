@@ -18,6 +18,42 @@ import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 final class EmbeddingPipelineSpec extends CatsEffectSuite {
+  test("embedding worker waits for database setup before claiming durable work") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      setup <- Deferred[IO, Boolean]
+      work <- InMemoryEmbeddingWorkRepository.create
+      users = InMemoryUsers(usersRef)
+      jobs = InMemoryJobs(jobsRef)
+      embeddings = CountingEmbeddingService(calls)
+      _ <- EmbeddingPipeline
+        .resource(
+          work,
+          users,
+          jobs,
+          embeddings,
+          "voyage-4-lite",
+          queueSize = 8,
+          parallelism = 1,
+          retryAttempts = 3,
+          retryDelay = 10.millis,
+          leaseDuration = 1.second,
+          workerReady = setup.get
+        )
+        .use { publisher =>
+          for {
+            _ <- publisher.offer(EmbeddingWork.JobChanged(jobId))
+            _ <- IO.sleep(100.millis)
+            beforeSetup <- calls.get
+            _ <- setup.complete(true)
+            _ <- waitFor(calls.get.map(_ == 1))
+          } yield assertEquals(beforeSetup, 0)
+        }
+    } yield ()
+  }
+
   test("VHS-AC05 VHS-AC06 embedding pipeline updates changed jobs and skips unchanged source hashes") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
@@ -181,7 +217,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- started.get
-          updated <- jobs.update(openJob, openJob.copy(title = "Staff Scala Developer"), now)
+          updated <- jobs.update(Versioned(openJob, 0L), openJob.copy(title = "Staff Scala Developer"), now)
           _ = assert(updated.isRight)
           _ <- release.complete(()).void
           staleResult <- writeResult.get
@@ -444,6 +480,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def find(id: Identifiers.JobId): IO[Either[RepositoryError, Option[Job]]] =
       delegate.find(id)
 
+    override def findVersioned(
+        id: Identifiers.JobId
+    ): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
+      delegate.findVersioned(id)
+
     override def findMany(ids: List[Identifiers.JobId]): IO[Either[RepositoryError, List[Job]]] =
       delegate.findMany(ids)
 
@@ -470,16 +511,20 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     ): IO[Either[RepositoryError, Unit]] =
       delegate.createWithEvents(job, now, events)
 
-    override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+    override def update(
+        expected: Versioned[Job],
+        replacement: Job,
+        now: Instant
+    ): IO[Either[RepositoryError, Versioned[Job]]] =
       delegate.update(expected, replacement, now)
 
     override def updateWithEvents(
-        expected: Job,
+        expected: Versioned[Job],
         replacement: Job,
         now: Instant,
         events: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Job]] =
+    ): IO[Either[RepositoryError, Versioned[Job]]] =
       delegate.updateWithEvents(expected, replacement, now, events, context)
 
     override def updateEmbedding(
@@ -489,7 +534,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       delegate.updateEmbedding(id, embedding).flatTap(result => writeResult.complete(result).void)
 
     override def updateEmbedding(
-        observed: Job,
+        observed: Versioned[Job],
         embedding: EntityEmbedding
     ): IO[Either[RepositoryError, Unit]] =
       delegate.updateEmbedding(observed, embedding).flatTap(result => writeResult.complete(result).void)

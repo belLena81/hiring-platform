@@ -6,7 +6,8 @@ import com.example.graphQL.cats.repository.protocol.{
   ApplicationRepository,
   JobRepository,
   MutationWriteContext,
-  UserRepository
+  UserRepository,
+  Versioned
 }
 import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
@@ -72,6 +73,18 @@ private[cats] object ServiceFixtures {
 
   val createdApplication: Application = Application.create(applicationId, candidateId, jobId, now)
 
+  private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository {
+    override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
+      find(id).map(_.map(_.map(Versioned(_, 0L))))
+
+    override def updateEmbedding(
+        observed: Versioned[User],
+        embedding: EntityEmbedding
+    ): IO[Either[RepositoryError, Unit]] =
+      if (observed.version == 0L) updateEmbedding(observed.value.id, embedding)
+      else IO.pure(Left(RepositoryError.Conflict))
+  }
+
   private[cats] trait RefBackedLookup[Id, Value] {
     protected def ref: Ref[IO, Map[Id, Value]]
 
@@ -88,6 +101,9 @@ private[cats] object ServiceFixtures {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
       findOne(id).map(Right(_))
 
+    override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
+      findOne(id).map(value => Right(value.map(Versioned(_, 0L))))
+
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
       findAll(ids).map(Right(_))
 
@@ -99,13 +115,16 @@ private[cats] object ServiceFixtures {
         }
       }
 
-    override def updateEmbedding(observed: User, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(
+        observed: Versioned[User],
+        embedding: EntityEmbedding
+    ): IO[Either[RepositoryError, Unit]] =
       ref.modify { users =>
-        users.get(observed.id) match {
+        users.get(observed.value.id) match {
           case Some(current)
-              if current.candidateProfile == observed.candidateProfile && current.role == observed.role &&
-                current.accountStatus == observed.accountStatus =>
-            (users.updated(observed.id, current.copy(embedding = Some(embedding))), Right(()))
+              if observed.version == 0L && current.candidateProfile == observed.value.candidateProfile &&
+                current.role == observed.value.role && current.accountStatus == observed.value.accountStatus =>
+            (users.updated(observed.value.id, current.copy(embedding = Some(embedding))), Right(()))
           case _ => (users, Left(RepositoryError.Conflict))
         }
       }
@@ -119,6 +138,9 @@ private[cats] object ServiceFixtures {
       with RefBackedLookup[JobId, Job] {
     override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
       findOne(id).map(Right(_))
+
+    override def findVersioned(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
+      findOne(id).map(value => Right(value.map(Versioned(_, 0L))))
 
     override def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]] =
       findAll(ids).map(Right(_))
@@ -190,21 +212,26 @@ private[cats] object ServiceFixtures {
         case Left(_)   => IO.unit
       }
 
-    override def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]] =
+    override def update(
+        expected: Versioned[Job],
+        replacement: Job,
+        now: Instant
+    ): IO[Either[RepositoryError, Versioned[Job]]] =
       ref.modify { jobs =>
-        jobs.get(expected.id) match {
-          case Some(current) if current == expected => (jobs.updated(replacement.id, replacement), Right(replacement))
-          case _                                    => (jobs, Left(RepositoryError.Conflict))
+        jobs.get(expected.value.id) match {
+          case Some(current) if expected.version == 0L && current == expected.value =>
+            (jobs.updated(replacement.id, replacement), Right(Versioned(replacement, expected.version + 1L)))
+          case _ => (jobs, Left(RepositoryError.Conflict))
         }
       }
 
     override def updateWithEvents(
-        expected: Job,
+        expected: Versioned[Job],
         replacement: Job,
         now: Instant,
         events: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Job]] =
+    ): IO[Either[RepositoryError, Versioned[Job]]] =
       update(expected, replacement, now).flatTap {
         case Right(_) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
         case Left(_)  => IO.unit
@@ -222,11 +249,15 @@ private[cats] object ServiceFixtures {
         }
       }
 
-    override def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(
+        observed: Versioned[Job],
+        embedding: EntityEmbedding
+    ): IO[Either[RepositoryError, Unit]] =
       ref.modify { jobs =>
-        jobs.get(observed.id) match {
-          case Some(current) if SearchableText.job(current) == SearchableText.job(observed) =>
-            (jobs.updated(observed.id, current.copy(embedding = Some(embedding))), Right(()))
+        jobs.get(observed.value.id) match {
+          case Some(current)
+              if observed.version == 0L && SearchableText.job(current) == SearchableText.job(observed.value) =>
+            (jobs.updated(observed.value.id, current.copy(embedding = Some(embedding))), Right(()))
           case _ => (jobs, Left(RepositoryError.Conflict))
         }
       }
@@ -319,21 +350,21 @@ private[cats] object ServiceFixtures {
         }
 
     override def createForOpenJob(
-        observedJob: Job,
+        observedJob: Versioned[Job],
         application: Application,
         initialEvent: ApplicationEvent
     ): IO[Either[RepositoryError, Unit]] =
       nextCreateError.modify(error => (None, error)) flatMap {
         case Some(error) => IO.pure(Left(error))
         case None
-            if observedJob.status == JobStatus.Open && observedJob.id == application.jobId &&
+            if observedJob.value.status == JobStatus.Open && observedJob.value.id == application.jobId &&
               initialEvent.applicationId == application.id =>
           create(application, initialEvent)
         case None => IO.pure(Left(RepositoryError.Conflict))
       }
 
     override def createForOpenJobWithEvents(
-        observedJob: Job,
+        observedJob: Versioned[Job],
         application: Application,
         initialEvent: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],

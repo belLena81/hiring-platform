@@ -6,8 +6,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{
   AnalyticsReportRepository,
   AnalyticsReportSnapshot,
-  RepositoryError,
-  UserRepository
+  RepositoryError
 }
 import munit.CatsEffectSuite
 
@@ -65,7 +64,7 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
     override def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]] = IO.pure(Right(value))
   }
 
-  private final class TestUsers(values: Map[UserId, User]) extends UserRepository {
+  private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
     override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
     override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
       IO.pure(Right(ids.flatMap(values.get)))

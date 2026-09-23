@@ -102,6 +102,24 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
     }
   }
 
+  test("foreign adapter contexts fail as effects for session extraction and execution") {
+    val foreign = new MutationWriteContext {}
+    for {
+      runs <- Ref.of[IO, Int](0)
+      sessionFailure <- MongoMutationWriteContext.session(foreign).attempt
+      runFailure <- MongoMutationWriteContext
+        .run(foreign, recordingRunner(runs), transactionRequired = false)(_ =>
+          IO.pure(Right("unused"): Either[RepositoryError, String])
+        )
+        .attempt
+      runCount <- runs.get
+    } yield {
+      assert(sessionFailure.swap.exists(_.isInstanceOf[IllegalArgumentException]))
+      assert(runFailure.swap.exists(_.isInstanceOf[IllegalArgumentException]))
+      assertEquals(runCount, 0)
+    }
+  }
+
   test("account deletion classifies a job replacement zero-match as conflict") {
     val zeroMatch = UpdateResult.acknowledged(0L, 0L, null)
     assertEquals(MongoUserRepository.classifyJobClose(Some(zeroMatch)), Left(RepositoryError.Conflict))

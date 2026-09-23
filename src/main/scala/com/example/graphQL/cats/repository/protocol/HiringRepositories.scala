@@ -35,6 +35,13 @@ object MutationReceiptFingerprint {
 /** A non-sensitive reference from a completed receipt to its authoritative result. */
 final case class MutationEntityReference(entityType: String, entityId: String)
 
+/** A repository snapshot paired with the revision required for compare-and-set writes. */
+final case class Versioned[+A](value: A, version: Long)
+
+object Versioned {
+  def nextVersion(version: Long): Option[Long] = Option.when(version >= 0L && version < Long.MaxValue)(version + 1L)
+}
+
 enum MutationReceiptState {
   case InProgress, Completed
 }
@@ -106,10 +113,10 @@ object MutationReceiptRepository {
 
 trait UserRepository {
   def find(id: UserId): IO[Either[RepositoryError, Option[User]]]
+  def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]]
   def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]]
   def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
-  def updateEmbedding(observed: User, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-    updateEmbedding(observed.id, embedding)
+  def updateEmbedding(observed: Versioned[User], embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
 }
 
 trait UserAccountRepository {
@@ -209,6 +216,7 @@ final case class AnalyticsSkillPostingDay(day: Instant, skill: String, postings:
 
 trait JobRepository {
   def find(id: JobId): IO[Either[RepositoryError, Option[Job]]]
+  def findVersioned(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]]
   def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
   def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
@@ -220,17 +228,16 @@ trait JobRepository {
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext = MutationWriteContext.noop
   ): IO[Either[RepositoryError, Unit]]
-  def update(expected: Job, replacement: Job, now: Instant): IO[Either[RepositoryError, Job]]
+  def update(expected: Versioned[Job], replacement: Job, now: Instant): IO[Either[RepositoryError, Versioned[Job]]]
   def updateWithEvents(
-      expected: Job,
+      expected: Versioned[Job],
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Job]]
+  ): IO[Either[RepositoryError, Versioned[Job]]]
   def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
-  def updateEmbedding(observed: Job, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-    updateEmbedding(observed.id, embedding)
+  def updateEmbedding(observed: Versioned[Job], embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
 }
 
 trait EmbeddingService {
@@ -382,12 +389,12 @@ trait ApplicationRepository {
       page: ApplicationEventPageRequest
   ): IO[Either[RepositoryError, List[ApplicationEvent]]]
   def createForOpenJob(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent
   ): IO[Either[RepositoryError, Unit]]
   def createForOpenJobWithEvents(
-      observedJob: Job,
+      observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       events: List[OperationalEventEnvelope],
