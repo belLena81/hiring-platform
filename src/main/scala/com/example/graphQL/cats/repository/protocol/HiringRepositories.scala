@@ -58,6 +58,11 @@ object MutationWriteContext {
 
 final case class MutationReceiptWrite[+A](value: A, entity: MutationEntityReference)
 
+enum MutationWriteOutcome[+A, +E] {
+  case Applied(write: MutationReceiptWrite[A])
+  case Rejected(error: E)
+}
+
 enum MutationReceiptExecution[+A, +E] {
   case Applied(value: A, entity: MutationEntityReference)
   case Replay(entity: MutationEntityReference)
@@ -76,7 +81,7 @@ trait MutationReceiptRepository {
       now: Instant,
       expiresAt: Instant
   )(
-      write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+      write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
   ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]]
 }
 
@@ -88,15 +93,13 @@ object MutationReceiptRepository {
         now: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
     ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
       write(MutationWriteContext.noop).map(
-        _.map(
-          _.fold(
-            MutationReceiptExecution.Rejected(_),
-            value => MutationReceiptExecution.Applied(value.value, value.entity)
-          )
-        )
+        _.map {
+          case MutationWriteOutcome.Rejected(error) => MutationReceiptExecution.Rejected(error)
+          case MutationWriteOutcome.Applied(value)  => MutationReceiptExecution.Applied(value.value, value.entity)
+        }
       )
   }
 }

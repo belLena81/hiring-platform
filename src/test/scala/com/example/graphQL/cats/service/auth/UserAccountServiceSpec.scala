@@ -11,7 +11,7 @@ import com.example.graphQL.cats.repository.protocol.{
   MutationReceiptFingerprint,
   MutationReceiptKey,
   MutationReceiptRepository,
-  MutationReceiptWrite,
+  MutationWriteOutcome,
   MutationWriteContext,
   UserAccountRepository,
   UserRepository
@@ -365,16 +365,14 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         now: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
     ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, now, expiresAt)
       write(context).map(
-        _.map(
-          _.fold(
-            MutationReceiptExecution.Rejected(_),
-            value => MutationReceiptExecution.Applied(value.value, value.entity)
-          )
-        )
+        _.map {
+          case MutationWriteOutcome.Rejected(error) => MutationReceiptExecution.Rejected(error)
+          case MutationWriteOutcome.Applied(value)  => MutationReceiptExecution.Applied(value.value, value.entity)
+        }
       )
     }
   }
@@ -386,7 +384,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         now: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
     ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, now, expiresAt, write)
       IO.pure(Right(MutationReceiptExecution.Replay(reference)))

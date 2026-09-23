@@ -241,6 +241,24 @@ class JobServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("publishJob opens a draft and records a job update event") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob.copy(status = JobStatus.Draft)))
+      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
+      jobRepository = InMemoryJobs(jobs, Some(outbox))
+      service <- deterministicService(InMemoryUsers(users), jobRepository, List(later), Nil)
+      result <- service.publishJob(request("publish"), ActorContext(recruiterId, UserRole.Recruiter), jobId).value
+      stored <- jobs.get.map(_.get(jobId))
+      events <- jobRepository.allOperationalEvents
+    } yield {
+      assertEquals(result.map(_.status), Right(JobStatus.Open))
+      assertEquals(result.map(_.updatedAt), Right(later))
+      assertEquals(stored.map(_.status), Some(JobStatus.Open))
+      assertEquals(events.map(_.eventType), Vector(OperationalEventType.JOB_UPDATED))
+    }
+  }
+
   test("candidate can view only open jobs") {
     for {
       users <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](

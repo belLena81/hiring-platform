@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.domain.policy
 
-import com.example.graphQL.cats.domain.error.DomainError
+import cats.data.StateT
 import com.example.graphQL.cats.domain.error.DomainError.{
   DeclineReasonRequired,
   InvalidStatusTransition,
@@ -17,30 +17,34 @@ object ApplicationLifecycle {
     permitted.get(from).exists(_.contains(to))
 
   def changeStatus(
-      application: Application,
       target: ApplicationStatus,
       actorId: UserId,
       now: Instant,
       feedback: Option[String],
       reason: Option[String]
-  ): Either[DomainError, StatusChange] =
-    for {
-      _ <- Either.cond(
-        canTransition(application.status, target),
-        (),
-        InvalidStatusTransition(application.status, target)
+  ): LifecycleProgram[Application, StatusChange] =
+    StateT { application =>
+      for {
+        _ <- Either.cond(
+          canTransition(application.status, target),
+          (),
+          InvalidStatusTransition(application.status, target)
+        )
+        _ <- Either.cond(target != Rejected || feedback.exists(_.trim.nonEmpty), (), RejectionFeedbackRequired)
+        _ <- Either.cond(target != Declined || reason.exists(_.trim.nonEmpty), (), DeclineReasonRequired)
+        updated = application.copy(status = target, updatedAt = now)
+      } yield (
+        updated,
+        StatusChange(
+          previousStatus = application.status,
+          newStatus = target,
+          actorId = actorId,
+          occurredAt = now,
+          feedback = feedback.map(_.trim).filter(_.nonEmpty),
+          reason = reason.map(_.trim).filter(_.nonEmpty)
+        )
       )
-      _ <- Either.cond(target != Rejected || feedback.exists(_.trim.nonEmpty), (), RejectionFeedbackRequired)
-      _ <- Either.cond(target != Declined || reason.exists(_.trim.nonEmpty), (), DeclineReasonRequired)
-    } yield StatusChange(
-      application.copy(status = target, updatedAt = now),
-      previousStatus = application.status,
-      newStatus = target,
-      actorId = actorId,
-      occurredAt = now,
-      feedback = feedback.map(_.trim).filter(_.nonEmpty),
-      reason = reason.map(_.trim).filter(_.nonEmpty)
-    )
+    }
 
   private val permitted: Map[ApplicationStatus, Set[ApplicationStatus]] = Map(
     Created -> Set(Accepted, Declined, Rejected),
@@ -53,7 +57,6 @@ object ApplicationLifecycle {
 }
 
 final case class StatusChange(
-    application: Application,
     previousStatus: ApplicationStatus,
     newStatus: ApplicationStatus,
     actorId: UserId,

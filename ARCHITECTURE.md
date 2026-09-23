@@ -161,7 +161,7 @@ enum ApplicationStatus:
 
 Business transitions belong in the domain/application layer rather than GraphQL resolvers or MongoDB repositories.
 
-Job aggregate state changes must be modeled as pure `cats.data.State` programs over the `Job` aggregate. This applies to create/publish/update/close style transitions and any later job lifecycle expansion. `State` is for deterministic in-memory transition logic only; application services remain responsible for authorization, time/ID inputs, repository effects, atomic persistence, and event handoff.
+Job transitions over an existing aggregate (publish/update/close and later lifecycle expansions) must be modeled as pure `LifecycleProgram` (`StateT` over `Either[DomainError, *]`) programs over the `Job` aggregate. Initial-job validation remains a direct typed check because creation has no existing aggregate state to thread. Application lifecycle transitions use the same program type. These programs are for deterministic in-memory transition logic only; application services remain responsible for authorization, time/ID inputs, repository effects, atomic persistence, and event handoff.
 
 ---
 

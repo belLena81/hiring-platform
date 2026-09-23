@@ -20,12 +20,12 @@ class ApplicationLifecycleSpec extends FunSuite {
   private val application = Application.create(applicationId, candidateId, jobId, now)
 
   test("permitted status changes update the application and keep change metadata") {
-    val result = ApplicationLifecycle.changeStatus(application, Accepted, recruiterId, later, None, None)
+    val result = ApplicationLifecycle.changeStatus(Accepted, recruiterId, later, None, None).run(application)
 
-    assertEquals(result.map(_.application.status), Right(Accepted))
-    assertEquals(result.map(_.previousStatus), Right(Created))
-    assertEquals(result.map(_.newStatus), Right(Accepted))
-    assertEquals(result.map(_.actorId), Right(recruiterId))
+    assertEquals(result.map(_._1.status), Right(Accepted))
+    assertEquals(result.map(_._2.previousStatus), Right(Created))
+    assertEquals(result.map(_._2.newStatus), Right(Accepted))
+    assertEquals(result.map(_._2.actorId), Right(recruiterId))
   }
 
   test("transition matrix allows exactly the documented lifecycle edges") {
@@ -48,30 +48,55 @@ class ApplicationLifecycleSpec extends FunSuite {
   }
 
   test("invalid status transition is a typed domain error") {
-    val result =
-      ApplicationLifecycle.changeStatus(application.copy(status = Created), Hired, recruiterId, later, None, None)
+    val result = ApplicationLifecycle.changeStatus(Hired, recruiterId, later, None, None).run(application)
 
     assertEquals(result, Left(DomainError.InvalidStatusTransition(Created, Hired)))
   }
 
   test("rejection requires feedback and trims accepted feedback") {
-    val missing = ApplicationLifecycle.changeStatus(application, Rejected, recruiterId, later, Some(" "), None)
+    val missing = ApplicationLifecycle.changeStatus(Rejected, recruiterId, later, Some(" "), None).run(application)
     val accepted =
-      ApplicationLifecycle.changeStatus(application, Rejected, recruiterId, later, Some(" Not enough Scala "), None)
+      ApplicationLifecycle
+        .changeStatus(Rejected, recruiterId, later, Some(" Not enough Scala "), None)
+        .run(application)
 
     assertEquals(missing, Left(DomainError.RejectionFeedbackRequired))
-    assertEquals(accepted.map(_.feedback), Right(Some("Not enough Scala")))
+    assertEquals(accepted.map(_._2.feedback), Right(Some("Not enough Scala")))
   }
 
   test("decline requires reason and terminal statuses cannot move again") {
-    val missing = ApplicationLifecycle.changeStatus(application, Declined, recruiterId, later, None, Some(""))
+    val missing = ApplicationLifecycle.changeStatus(Declined, recruiterId, later, None, Some("")).run(application)
     val declined =
-      ApplicationLifecycle.changeStatus(application, Declined, recruiterId, later, None, Some("Candidate withdrew"))
-    val terminal =
-      ApplicationLifecycle.changeStatus(application.copy(status = Declined), Interview, recruiterId, later, None, None)
+      ApplicationLifecycle
+        .changeStatus(Declined, recruiterId, later, None, Some("Candidate withdrew"))
+        .run(application)
+    val terminal = ApplicationLifecycle
+      .changeStatus(Interview, recruiterId, later, None, None)
+      .run(application.copy(status = Declined))
 
     assertEquals(missing, Left(DomainError.DeclineReasonRequired))
-    assertEquals(declined.map(_.reason), Right(Some("Candidate withdrew")))
+    assertEquals(declined.map(_._2.reason), Right(Some("Candidate withdrew")))
     assertEquals(terminal, Left(DomainError.InvalidStatusTransition(Declined, Interview)))
+  }
+
+  test("composed status changes thread application state in order") {
+    val result = for {
+      accepted <- ApplicationLifecycle.changeStatus(Accepted, recruiterId, now, None, None)
+      interview <- ApplicationLifecycle.changeStatus(Interview, recruiterId, later, None, None)
+    } yield List(accepted, interview)
+
+    assertEquals(
+      result.run(application).map { case (updated, changes) => (updated.status, changes.map(_.previousStatus)) },
+      Right((Interview, List(Created, Accepted)))
+    )
+  }
+
+  test("a failed later status change short-circuits without returning partial state") {
+    val result = for {
+      _ <- ApplicationLifecycle.changeStatus(Accepted, recruiterId, now, None, None)
+      _ <- ApplicationLifecycle.changeStatus(Hired, recruiterId, later, None, None)
+    } yield ()
+
+    assertEquals(result.run(application), Left(DomainError.InvalidStatusTransition(Accepted, Hired)))
   }
 }

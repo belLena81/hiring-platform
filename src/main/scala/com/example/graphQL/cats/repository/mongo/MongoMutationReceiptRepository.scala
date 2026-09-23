@@ -48,7 +48,7 @@ final class MongoMutationReceiptRepository(
       now: Instant,
       expiresAt: Instant
   )(
-      write: MutationWriteContext => IO[Either[RepositoryError, Either[E, MutationReceiptWrite[A]]]]
+      write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
   ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
     transactionRunner.run { session =>
       find(session, key).flatMap {
@@ -67,9 +67,10 @@ final class MongoMutationReceiptRepository(
             case Left(error) => IO.pure(Left(error))
             case Right(())   =>
               write(MongoMutationWriteContext(session)).flatMap {
-                case Left(error)             => remove(session, key).as(Left(error))
-                case Right(Left(error))      => remove(session, key).as(Right(MutationReceiptExecution.Rejected(error)))
-                case Right(Right(completed)) =>
+                case Left(error)                                 => remove(session, key).as(Left(error))
+                case Right(MutationWriteOutcome.Rejected(error)) =>
+                  remove(session, key).as(Right(MutationReceiptExecution.Rejected(error)))
+                case Right(MutationWriteOutcome.Applied(completed)) =>
                   complete(session, key, fingerprint, completed.entity, now, expiresAt).map(_.map { _ =>
                     MutationReceiptExecution.Applied(completed.value, completed.entity)
                   })

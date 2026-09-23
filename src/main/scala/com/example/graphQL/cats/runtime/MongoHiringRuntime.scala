@@ -101,52 +101,46 @@ object MongoHiringRuntime {
   )
 
   def resource(config: RuntimeConfig): Resource[IO, MongoHiringRuntime] =
-    Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong)).flatMap { passwordHashPermits =>
-      MongoDatabaseProbe.clientResource(config.uri).flatMap { client =>
-        val database = client.getDatabase(config.databaseName)
-        embeddingCapability(database, client, config).flatMap { capability =>
-          val users = capability.users
-          val applications = MongoApplicationRepository.transactional(database, client)
-          val searchSessions = MongoSearchSessionRepository.transactional(database, client)
-          val searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
-          val outbox = new MongoOperationalEventOutboxRepository(database)
-          val receipts = new MongoConsumerReceiptRepository(database)
-          val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
-          val erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-          val analyticsReports = new MongoAnalyticsReportRepository(database)
-          val quarantine = new MongoEventQuarantineRepository(database)
-          hiringServices(
-            capability,
-            applications,
-            searchSessions,
-            searchSessionWork,
-            mutationReceipts,
-            erasureRequests,
-            analyticsReports,
-            config.jwtAuth,
-            config.passwordHash,
-            passwordHashPermits,
-            config.diagnostics
-          ).flatMap { services =>
-            SetupLifecycle
-              .resource(setupEffect(database, config.vectorSearch, config.resetOnStart), config.diagnostics)
-              .flatMap { setup =>
-                OperationalEventKafkaRuntime
-                  .resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
-                  .as {
-                    val metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
-                    MongoHiringRuntime(
-                      probe(database, metadata, config.diagnostics, setup.ready),
-                      services,
-                      UserAuthenticationService(users),
-                      setup.ready.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
-                    )
-                  }
-              }
-          }
-        }
-      }
-    }
+    for {
+      passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
+      client <- MongoDatabaseProbe.clientResource(config.uri)
+      database = client.getDatabase(config.databaseName)
+      capability <- embeddingCapability(database, client, config)
+      users = capability.users
+      applications = MongoApplicationRepository.transactional(database, client)
+      searchSessions = MongoSearchSessionRepository.transactional(database, client)
+      searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
+      outbox = new MongoOperationalEventOutboxRepository(database)
+      receipts = new MongoConsumerReceiptRepository(database)
+      mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
+      erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
+      analyticsReports = new MongoAnalyticsReportRepository(database)
+      quarantine = new MongoEventQuarantineRepository(database)
+      services <- hiringServices(
+        capability,
+        applications,
+        searchSessions,
+        searchSessionWork,
+        mutationReceipts,
+        erasureRequests,
+        analyticsReports,
+        config.jwtAuth,
+        config.passwordHash,
+        passwordHashPermits,
+        config.diagnostics
+      )
+      setup <- SetupLifecycle.resource(
+        setupEffect(database, config.vectorSearch, config.resetOnStart),
+        config.diagnostics
+      )
+      _ <- OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
+      metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
+    } yield MongoHiringRuntime(
+      probe(database, metadata, config.diagnostics, setup.ready),
+      services,
+      UserAuthenticationService(users),
+      setup.ready.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
+    )
 
   private type RuntimeEmbeddingCapability = EmbeddingCapability[
     MongoEmbeddingWorkRepository,

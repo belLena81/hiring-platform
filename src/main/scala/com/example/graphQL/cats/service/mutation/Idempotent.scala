@@ -29,8 +29,9 @@ final class Idempotent private (
           .execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
             write(context).value.map {
               case Left(UseCaseError.Repository(error)) => Left(error)
-              case Left(error)                          => Right(Left(error))
-              case Right(value)                         => Right(Right(MutationReceiptWrite(value, entity(value))))
+              case Left(error)                          => Right(MutationWriteOutcome.Rejected(error))
+              case Right(value)                         =>
+                Right(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value))))
             }
           }
           .flatMap {

@@ -9,6 +9,7 @@ import com.example.graphQL.cats.repository.protocol.{
   MutationReceiptFingerprint,
   MutationReceiptKey,
   MutationReceiptRepository,
+  MutationWriteOutcome,
   MutationWriteContext,
   SearchSessionRepository,
   SearchSessionWorkRepository
@@ -180,9 +181,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         now: java.time.Instant,
         expiresAt: java.time.Instant
     )(
-        write: MutationWriteContext => IO[
-          Either[RepositoryError, Either[E, com.example.graphQL.cats.repository.protocol.MutationReceiptWrite[A]]]
-        ]
+        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
     ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
       val _ = (key, fingerprint, now, expiresAt, write)
       IO.pure(Right(MutationReceiptExecution.Replay(reference)))

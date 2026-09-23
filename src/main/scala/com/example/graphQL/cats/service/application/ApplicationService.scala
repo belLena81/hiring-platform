@@ -11,7 +11,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, Ap
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, UserRole}
 import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
 import com.example.graphQL.cats.shared.events.OperationalEvents
-import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, ApplicationSubmission}
+import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, ApplicationSubmission, StatusChange}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.job.AuthorizedJobAccess
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -128,26 +128,13 @@ final class ApplicationService(
         )
         now <- UseCase.liftIO(currentTime)
         eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
-        change <- UseCase.fromEither(
-          ApplicationLifecycle.changeStatus(application, target, actorUser.id, now, feedback, reason).widenUseCase
-        )
-        persistedApplication = change.application
-        event <- UseCase.fromEither(
-          ApplicationEvent
-            .validate(
-              eventId,
-              application.id,
-              Some(change.previousStatus),
-              change.newStatus,
-              actorUser.id,
-              now,
-              change.feedback,
-              change.reason
-            )
-            .toEither
+        (persistedApplication, change) <- UseCase.fromEither(
+          ApplicationLifecycle
+            .changeStatus(target, actorUser.id, now, feedback, reason)
+            .run(application)
             .widenUseCase
         )
-        events = applicationEvents(persistedApplication, event)
+        (event, events) <- UseCase.fromEither(statusEvents(persistedApplication, change, eventId))
         _ <- UseCase.repository(applications.updateStatusWithEvents(persistedApplication, event, events, context))
       } yield persistedApplication
     }
@@ -189,6 +176,26 @@ final class ApplicationService(
       List(statusChanged, OperationalEvents.candidateHired(candidateHiredEventId(event), application, event))
     else List(statusChanged)
   }
+
+  private def statusEvents(
+      application: Application,
+      change: StatusChange,
+      eventId: ApplicationEventId
+  ): Either[UseCaseError, (ApplicationEvent, List[OperationalEventEnvelope])] =
+    ApplicationEvent
+      .validate(
+        eventId,
+        application.id,
+        Some(change.previousStatus),
+        change.newStatus,
+        change.actorId,
+        change.occurredAt,
+        change.feedback,
+        change.reason
+      )
+      .toEither
+      .widenUseCase
+      .map(event => event -> applicationEvents(application, event))
 
   private def candidateHiredEventId(event: ApplicationEvent): UUID =
     UUID.nameUUIDFromBytes(s"candidate-hired:${event.id.value}".getBytes(StandardCharsets.UTF_8))

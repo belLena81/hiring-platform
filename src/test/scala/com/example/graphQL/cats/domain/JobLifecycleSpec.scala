@@ -27,10 +27,10 @@ class JobLifecycleSpec extends FunSuite {
   )
 
   test("publish moves Draft to Open") {
-    val result = JobLifecycle.publish(draftJob, updatedAt)
+    val result = JobLifecycle.publish(updatedAt).run(draftJob)
 
-    assertEquals(result.map(_.status), Right(JobStatus.Open))
-    assertEquals(result.map(_.updatedAt), Right(updatedAt))
+    assertEquals(result.map(_._1.status), Right(JobStatus.Open))
+    assertEquals(result.map(_._1.updatedAt), Right(updatedAt))
   }
 
   test("create rejects Closed as an initial status") {
@@ -42,7 +42,7 @@ class JobLifecycleSpec extends FunSuite {
 
   test("rejected publish retains the original aggregate value") {
     val closed = draftJob.copy(status = JobStatus.Closed)
-    val result = JobLifecycle.publish(closed, updatedAt)
+    val result = JobLifecycle.publish(updatedAt).run(closed)
 
     assertEquals(result, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Open)))
     assertEquals(closed.status, JobStatus.Closed)
@@ -57,7 +57,7 @@ class JobLifecycleSpec extends FunSuite {
       location = Location("Poland", "Warsaw", remote = true),
       updatedAt = updatedAt
     )
-    val updated = JobLifecycle.update(draftJob, input)
+    val updated = JobLifecycle.update(input).run(draftJob).map(_._1).toOption.getOrElse(fail("expected job update"))
 
     assertEquals(updated.title, "Lead Scala Developer")
     assertEquals(updated.recruiterId, recruiterId)
@@ -66,13 +66,33 @@ class JobLifecycleSpec extends FunSuite {
   }
 
   test("close moves Draft or Open to Closed and rejects already closed jobs") {
-    val closedResult = JobLifecycle.close(draftJob.copy(status = JobStatus.Open), updatedAt)
-    val closedState = closedResult.toOption.getOrElse(fail("expected job to close"))
-    val rejectedResult = JobLifecycle.close(closedState, updatedAt)
+    val closedResult = JobLifecycle.close(updatedAt).run(draftJob.copy(status = JobStatus.Open))
+    val closedState = closedResult.map(_._1).toOption.getOrElse(fail("expected job to close"))
+    val rejectedResult = JobLifecycle.close(updatedAt).run(closedState)
 
-    assertEquals(closedResult.map(_.status), Right(JobStatus.Closed))
+    assertEquals(closedResult.map(_._1.status), Right(JobStatus.Closed))
     assertEquals(closedState.status, JobStatus.Closed)
     assertEquals(closedState.closedAt, Some(updatedAt))
     assertEquals(rejectedResult, Left(DomainError.InvalidJobTransition(JobStatus.Closed, JobStatus.Closed)))
+  }
+
+  test("composed transitions thread Job state through publish and close") {
+    val program = for {
+      _ <- JobLifecycle.publish(updatedAt)
+      _ <- JobLifecycle.close(updatedAt.plusSeconds(60))
+    } yield ()
+
+    val result = program.run(draftJob).map(_._1)
+    assertEquals(result.map(_.status), Right(JobStatus.Closed))
+    assertEquals(result.map(_.closedAt), Right(Some(updatedAt.plusSeconds(60))))
+  }
+
+  test("a failed later Job transition short-circuits without returning partial state") {
+    val program = for {
+      _ <- JobLifecycle.publish(updatedAt)
+      _ <- JobLifecycle.publish(updatedAt.plusSeconds(60))
+    } yield ()
+
+    assertEquals(program.run(draftJob), Left(DomainError.InvalidJobTransition(JobStatus.Open, JobStatus.Open)))
   }
 }

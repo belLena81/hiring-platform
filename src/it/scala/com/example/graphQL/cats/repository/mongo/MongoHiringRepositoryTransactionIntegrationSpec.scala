@@ -129,10 +129,20 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
                 .createWithEvents(receiptJob, now, List(receiptEvent), context)
                 .map(
                   _.map(_ =>
-                    Right(MutationReceiptWrite((), MutationEntityReference("Job", receiptJob.id.value.toString)))
+                    MutationWriteOutcome.Applied(
+                      MutationReceiptWrite((), MutationEntityReference("Job", receiptJob.id.value.toString))
+                    )
                   )
                 )
             }
+            .flatMap(requireResult)
+          rejectedReceipt <- receipts
+            .execute[Unit, String](
+              MutationReceiptKey("createJob", recruiterId.value.toString, UUID.randomUUID()),
+              MutationReceiptFingerprint.fromCanonicalInput("rejected-write"),
+              now,
+              now.plusSeconds(3600)
+            )(_ => IO.pure(Right(MutationWriteOutcome.Rejected("business rejection"))))
             .flatMap(requireResult)
           receiptRollback <- Idempotent(receipts)
             .execute[Job](
@@ -163,6 +173,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
                 assertEquals(entity, MutationEntityReference("Job", receiptJob.id.value.toString))
               case other => fail(s"Expected an applied receipt, received $other")
             }
+            assertEquals(rejectedReceipt, MutationReceiptExecution.Rejected("business rejection"))
             assertEquals(storedJobs.map(_.longValue), Some(2L))
             assertEquals(storedEvents.map(_.longValue), Some(2L))
             assertEquals(storedEmbeddingWork.map(_.longValue), Some(2L))

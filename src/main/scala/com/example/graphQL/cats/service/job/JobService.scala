@@ -78,8 +78,9 @@ final class JobService(
         for {
           now <- UseCase.liftIO(currentTime)
           update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
+          replacement <- UseCase.fromEither(JobLifecycle.update(update).run(job).map(_._1).widenUseCase)
           updated <- UseCase.fromIO(
-            persistUpdatedJob(job, Right(JobLifecycle.update(job, update)), actor.userId, context)
+            persistUpdatedJob(job, Right(replacement), actor.userId, context)
           )
         } yield updated
       }
@@ -94,7 +95,7 @@ final class JobService(
             UseCase.fromIO(
               persistJob(
                 job,
-                JobLifecycle.publish(job, now).widenUseCase,
+                JobLifecycle.publish(now).run(job).map(_._1).widenUseCase,
                 actor.userId,
                 OperationalEventType.JOB_UPDATED,
                 context
@@ -113,7 +114,7 @@ final class JobService(
             UseCase.fromIO(
               persistJob(
                 job,
-                JobLifecycle.close(job, now).widenUseCase,
+                JobLifecycle.close(now).run(job).map(_._1).widenUseCase,
                 actor.userId,
                 OperationalEventType.JOB_CLOSED,
                 context
