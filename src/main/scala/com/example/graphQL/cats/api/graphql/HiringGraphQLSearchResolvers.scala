@@ -5,6 +5,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.shared.search.{RankedCandidate, RankedJob}
+import com.example.graphQL.cats.shared.search.CandidateMatchFilters
 import io.circe.Json
 import sangria.schema.Context
 
@@ -49,10 +50,26 @@ private[graphql] object HiringGraphQLSearchResolvers {
   def candidateMatches(context: Context[RequestContext, Unit]): IO[RankedCandidateResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       val jobId = context.arg(jobIdArgument)
+      val matchFilter = context.arg(candidateMatchFilterArgument)
+      val candidateFilters = CandidateMatchFilters(
+        matchFilter.flatMap(_.requiredSkills).getOrElse(Nil),
+        matchFilter.flatMap(_.country).map(_.trim.toLowerCase(java.util.Locale.ROOT)),
+        matchFilter.flatMap(_.city).map(_.trim.toLowerCase(java.util.Locale.ROOT)),
+        matchFilter.flatMap(_.availabilityStatus).map(_.toString)
+      )
       for {
         size <- inputResult(pageSize(context.arg(firstArgument)))
         searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
-        results <- raiseOnUseCaseError(service.candidateMatches(actor, jobId, size, searchId))
+        results <- raiseOnUseCaseError(
+          service.candidateMatches(
+            actor,
+            jobId,
+            context.arg(candidateSearchQueryArgument),
+            candidateFilters,
+            size,
+            searchId
+          )
+        )
         _ <- saveSearchSession(
           hiring,
           actor.userId,
@@ -67,7 +84,15 @@ private[graphql] object HiringGraphQLSearchResolvers {
   private def rankedJobResults(values: List[RankedJob]): RankedJobResults =
     RankedJobResults(
       values.map(value =>
-        RankedJobPayload(value.job, value.score, value.mode, value.meta.model, value.searchId.toString)
+        RankedJobPayload(
+          value.job,
+          value.score,
+          value.mode,
+          value.meta.model,
+          value.searchId.toString,
+          value.matchedSkills,
+          value.retrievalScore
+        )
       )
     )
 
@@ -78,14 +103,14 @@ private[graphql] object HiringGraphQLSearchResolvers {
           CandidateMatchCandidate(
             value.candidate.id.value.toString,
             value.candidate.name,
-            value.candidate.candidateProfile.map(profile =>
-              CandidateMatchProfile(profile.skills, profile.experienceSummary)
-            )
+            Some(CandidateMatchProfile(value.candidate.skills, value.candidate.experienceSummary))
           ),
           value.score,
           value.mode,
           value.meta.model,
-          value.searchId.toString
+          value.searchId.toString,
+          value.matchedSkills,
+          value.retrievalScore
         )
       )
     )

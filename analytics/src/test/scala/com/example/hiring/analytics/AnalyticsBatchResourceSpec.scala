@@ -1,6 +1,7 @@
 package com.example.hiring.analytics
 
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
+import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
@@ -8,8 +9,28 @@ import munit.FunSuite
 import org.apache.spark.sql.SparkSession
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.concurrent.duration.*
 
 class AnalyticsBatchResourceSpec extends FunSuite {
+  test("lakehouse lock serializes cross-resource batch and erasure access") {
+    val root = java.nio.file.Files.createTempDirectory("analytics-lock").toUri.toString
+    val result = (for {
+      firstEntered <- Deferred[IO, Unit]
+      releaseFirst <- Deferred[IO, Unit]
+      secondEntered <- Deferred[IO, Unit]
+      first <- AnalyticsLakehouseLock.resource(root).use(_ => firstEntered.complete(()) *> releaseFirst.get).start
+      _ <- firstEntered.get
+      second <- AnalyticsLakehouseLock.resource(root).use(_ => secondEntered.complete(())).start
+      beforeRelease <- secondEntered.tryGet
+      _ <- releaseFirst.complete(())
+      _ <- secondEntered.get.timeout(5.seconds)
+      _ <- first.joinWithNever
+      _ <- second.joinWithNever
+    } yield beforeRelease).unsafeRunSync()
+
+    assertEquals(result, None)
+  }
+
   test("batch entry point closes Spark and Mongo after a failed run") {
     val acquired = new AtomicReference[Option[(SparkSession, MongoClient)]](None)
     val resources = HiringAnalyticsBatchMain.managedResources(

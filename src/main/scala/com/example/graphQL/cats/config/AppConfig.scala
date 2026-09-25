@@ -5,6 +5,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.comcast.ip4s.{Cidr, Host, IpAddress, Port as Ip4sPort}
 import com.example.graphQL.cats.shared.pagination.PageSize
+import com.example.graphQL.cats.shared.search.SearchFusionStrategy
 import com.mongodb.ConnectionString
 import com.typesafe.config.{ConfigFactory, ConfigParseOptions, ConfigResolveOptions}
 import io.github.iltotore.iron.*
@@ -55,6 +56,8 @@ enum ConfigError(val key: String) {
   case InvalidSearchIndexReadyTimeout extends ConfigError("SEARCH_INDEX_READY_TIMEOUT_MS")
   case InvalidSearchIndexPollInterval extends ConfigError("SEARCH_INDEX_POLL_INTERVAL_MS")
   case InvalidVectorNumCandidates extends ConfigError("VECTOR_NUM_CANDIDATES")
+  case InvalidVectorFusionStrategy extends ConfigError("VECTOR_FUSION_STRATEGY")
+  case InvalidRerankModel extends ConfigError("VECTOR_RERANK_MODEL")
   case InvalidKafkaEnabled extends ConfigError("KAFKA_ENABLED")
   case InvalidKafkaBootstrapServers extends ConfigError("KAFKA_BOOTSTRAP_SERVERS")
   case InvalidKafkaTopic extends ConfigError("KAFKA_TOPIC")
@@ -66,6 +69,7 @@ enum ConfigError(val key: String) {
   case InvalidKafkaPollInterval extends ConfigError("KAFKA_POLL_INTERVAL_MS")
   case InvalidKafkaReceiptTtl extends ConfigError("KAFKA_RECEIPT_TTL_DAYS")
   case InvalidKafkaQuarantineTtl extends ConfigError("KAFKA_QUARANTINE_TTL_DAYS")
+  case InvalidKafkaCredentials extends ConfigError("KAFKA_CREDENTIALS")
 }
 
 object ConfigError {
@@ -105,6 +109,8 @@ object ConfigError {
     InvalidSearchIndexReadyTimeout,
     InvalidSearchIndexPollInterval,
     InvalidVectorNumCandidates,
+    InvalidVectorFusionStrategy,
+    InvalidRerankModel,
     InvalidKafkaEnabled,
     InvalidKafkaBootstrapServers,
     InvalidKafkaTopic,
@@ -115,7 +121,8 @@ object ConfigError {
     InvalidKafkaMaxAttempts,
     InvalidKafkaPollInterval,
     InvalidKafkaReceiptTtl,
-    InvalidKafkaQuarantineTtl
+    InvalidKafkaQuarantineTtl,
+    InvalidKafkaCredentials
   ).map(_.key).toSet
 }
 
@@ -133,6 +140,10 @@ final case class VectorSearchConfig(
     jobVectorIndex: String,
     candidateVectorIndex: String,
     jobLexicalIndex: String,
+    candidateLexicalIndex: String,
+    fusionStrategy: SearchFusionStrategy,
+    rerankEnabled: Boolean,
+    rerankModel: String,
     indexReadyTimeoutMillis: Int,
     indexPollIntervalMillis: Int,
     numCandidates: Int
@@ -154,9 +165,17 @@ final case class KafkaPublisherConfig(
     leaseSeconds: Int,
     retryDelaySeconds: Int,
     maxAttempts: Int,
-    pollIntervalMillis: Int
+    pollIntervalMillis: Int,
+    saslUsername: Option[String] = None,
+    saslPassword: Option[String] = None
 )
-final case class KafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int)
+final case class KafkaConsumerConfig(
+    enabled: Boolean,
+    receiptTtlDays: Int,
+    quarantineTtlDays: Int,
+    saslUsername: Option[String] = None,
+    saslPassword: Option[String] = None
+)
 final case class KafkaConfig(
     enabled: Boolean,
     bootstrapServers: String,
@@ -268,7 +287,13 @@ object AppConfig {
         validKafkaMaxAttempts(kafka.publisher.maxAttempts),
         validKafkaPollInterval(kafka.publisher.pollIntervalMs),
         validKafkaReceiptTtl(kafka.consumer.receiptTtlDays),
-        validKafkaQuarantineTtl(kafka.consumer.quarantineTtlDays)
+        validKafkaQuarantineTtl(kafka.consumer.quarantineTtlDays),
+        validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
+        validKafkaCredentials(
+          kafka.enabled && kafka.consumer.enabled,
+          kafka.consumer.saslUsername,
+          kafka.consumer.saslPassword
+        )
       ).mapN {
         (
             bootstrapServers,
@@ -280,7 +305,9 @@ object AppConfig {
             maxAttempts,
             kafkaPollInterval,
             receiptTtl,
-            quarantineTtl
+            quarantineTtl,
+            _,
+            _
         ) =>
           KafkaConfig(
             kafka.enabled,
@@ -293,9 +320,17 @@ object AppConfig {
               leaseSeconds,
               retryDelaySeconds,
               maxAttempts,
-              kafkaPollInterval
+              kafkaPollInterval,
+              kafka.publisher.saslUsername,
+              kafka.publisher.saslPassword
             ),
-            KafkaConsumerConfig(kafka.consumer.enabled, receiptTtl, quarantineTtl)
+            KafkaConsumerConfig(
+              kafka.consumer.enabled,
+              receiptTtl,
+              quarantineTtl,
+              kafka.consumer.saslUsername,
+              kafka.consumer.saslPassword
+            )
           )
       }
 
@@ -305,28 +340,52 @@ object AppConfig {
         validIndexReadyTimeout(vector.indexes.readyTimeoutMs),
         validIndexPollInterval(vector.indexes.pollIntervalMs),
         validNumCandidates(vector.numCandidates),
+        validFusionStrategy(vector.fusionStrategy),
+        validRerankModel(vector.rerank.model),
         validEmbeddingRetryAttempts(embedding.retryAttempts),
         validEmbeddingRetryDelay(embedding.retryDelayMs)
-      ).mapN { (apiKey, readyTimeout, searchIndexPollInterval, numCandidates, retryAttempts, retryDelay) =>
-        VectorSearchConfig(
-          vector.enabled,
-          apiKey,
-          voyage.endpoint,
-          voyage.model,
-          voyage.dimension,
-          embedding.queueSize,
-          embedding.parallelism,
-          embedding.timeoutMs,
-          retryAttempts,
-          retryDelay,
-          indexes.jobs,
-          indexes.candidates,
-          indexes.lexical,
-          readyTimeout,
-          searchIndexPollInterval,
-          numCandidates
-        )
-      }
+      ).mapN {
+        (
+            apiKey,
+            readyTimeout,
+            searchIndexPollInterval,
+            numCandidates,
+            fusionStrategy,
+            rerankModel,
+            retryAttempts,
+            retryDelay
+        ) =>
+          VectorSearchConfig(
+            vector.enabled,
+            apiKey,
+            voyage.endpoint,
+            voyage.model,
+            voyage.dimension,
+            embedding.queueSize,
+            embedding.parallelism,
+            embedding.timeoutMs,
+            retryAttempts,
+            retryDelay,
+            indexes.jobs,
+            indexes.candidates,
+            indexes.lexical,
+            indexes.candidateLexical,
+            fusionStrategy,
+            vector.rerank.enabled,
+            rerankModel,
+            readyTimeout,
+            searchIndexPollInterval,
+            numCandidates
+          )
+      }.andThen(config =>
+        Either
+          .cond(
+            !config.rerankEnabled || config.fusionStrategy != SearchFusionStrategy.ApplicationRrf,
+            config,
+            ConfigError.InvalidVectorFusionStrategy
+          )
+          .toValidatedNel
+      )
 
     (transport, authConfig, kafkaConfig, vectorConfig).mapN {
       case (
@@ -417,6 +476,23 @@ object AppConfig {
       .toValidatedNel
   private def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates)(value)
+
+  private def validFusionStrategy(value: String): ValidatedNel[ConfigError, SearchFusionStrategy] =
+    value match {
+      case "applicationRrf"   => SearchFusionStrategy.ApplicationRrf.validNel
+      case "mongoRankFusion"  => SearchFusionStrategy.MongoRankFusion.validNel
+      case "mongoScoreFusion" => SearchFusionStrategy.MongoScoreFusion.validNel
+      case _                  => ConfigError.InvalidVectorFusionStrategy.invalidNel
+    }
+
+  private def validRerankModel(value: String): ValidatedNel[ConfigError, String] =
+    Either
+      .cond(
+        Set("rerank-2.5", "rerank-2.5-lite", "rerank-2", "rerank-2-lite").contains(value),
+        value,
+        ConfigError.InvalidRerankModel
+      )
+      .toValidatedNel
   private def validIndexReadyTimeout(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(1000, 600000, ConfigError.InvalidSearchIndexReadyTimeout)(value)
   private def validIndexPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
@@ -447,6 +523,23 @@ object AppConfig {
     bounded(1, 365, ConfigError.InvalidKafkaReceiptTtl)(value)
   private def validKafkaQuarantineTtl(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(1, 365, ConfigError.InvalidKafkaQuarantineTtl)(value)
+
+  private def validKafkaCredentials(
+      required: Boolean,
+      username: Option[String],
+      password: Option[String]
+  ): ValidatedNel[ConfigError, Unit] =
+    Either
+      .cond(
+        (username, password) match {
+          case (None, None)               => !required
+          case (Some(user), Some(secret)) => user.trim.nonEmpty && secret.nonEmpty
+          case _                          => false
+        },
+        (),
+        ConfigError.InvalidKafkaCredentials
+      )
+      .toValidatedNel
 
   private def readError(failures: ConfigReaderFailures): NonEmptyList[ConfigError] = {
     val errors = failures.toList.flatMap {
@@ -501,6 +594,8 @@ object AppConfig {
     case "vector-search.indexes.ready-timeout-ms" => Some(ConfigError.InvalidSearchIndexReadyTimeout)
     case "vector-search.indexes.poll-interval-ms" => Some(ConfigError.InvalidSearchIndexPollInterval)
     case "vector-search.num-candidates"           => Some(ConfigError.InvalidVectorNumCandidates)
+    case "vector-search.fusion-strategy"          => Some(ConfigError.InvalidVectorFusionStrategy)
+    case "vector-search.rerank.model"             => Some(ConfigError.InvalidRerankModel)
     case "kafka.enabled"                          => Some(ConfigError.InvalidKafkaEnabled)
     case "kafka.bootstrap-servers"                => Some(ConfigError.InvalidKafkaBootstrapServers)
     case "kafka.topic"                            => Some(ConfigError.InvalidKafkaTopic)
@@ -563,17 +658,27 @@ object AppConfig {
       leaseSeconds: Int,
       retryDelaySeconds: Int,
       maxAttempts: Int,
-      pollIntervalMs: Int
+      pollIntervalMs: Int,
+      saslUsername: Option[String],
+      saslPassword: Option[String]
   ) derives ConfigReader
-  private final case class RawKafkaConsumerConfig(enabled: Boolean, receiptTtlDays: Int, quarantineTtlDays: Int)
-      derives ConfigReader
+  private final case class RawKafkaConsumerConfig(
+      enabled: Boolean,
+      receiptTtlDays: Int,
+      quarantineTtlDays: Int,
+      saslUsername: Option[String],
+      saslPassword: Option[String]
+  ) derives ConfigReader
   private final case class RawVectorSearchConfig(
       enabled: Boolean,
       voyage: RawVoyageConfig,
       embedding: RawEmbeddingConfig,
       indexes: RawVectorIndexesConfig,
-      numCandidates: Int
+      numCandidates: Int,
+      fusionStrategy: String,
+      rerank: RawRerankConfig
   ) derives ConfigReader
+  private final case class RawRerankConfig(enabled: Boolean, model: NonBlankStr) derives ConfigReader
   private final case class RawVoyageConfig(
       apiKey: Option[String],
       endpoint: HttpsUrl,
@@ -591,6 +696,7 @@ object AppConfig {
       jobs: NonBlankStr,
       candidates: NonBlankStr,
       lexical: NonBlankStr,
+      candidateLexical: NonBlankStr,
       readyTimeoutMs: Int,
       pollIntervalMs: Int
   ) derives ConfigReader

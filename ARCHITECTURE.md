@@ -1125,3 +1125,9 @@ recruiterId
 ```
 
 should remain structured fields rather than being encoded only into embeddings.
+
+## Candidate matching search
+
+Recruiter candidate matches are authorized against an owned open job before embedding-provider or search work. The existing job-vector branch remains the baseline. An optional recruiter query adds a query-vector branch and a lexical branch, fused with deterministic application-side reciprocal-rank fusion by default. Required skills, candidate role, active-account status, and consent-aware private predicates are applied before each branch limit.
+
+Candidate residence and availability stay out of embedding text. Only opted-in candidate profiles are constrained by supplied residence/availability filters; missing consent is treated as opted out. Candidate profile API fields are visible only to the authenticated profile owner, and recruiter match results use a reduced candidate shape. Atlas index readiness must be verified before query use; experimental Mongo fusion and reranking require explicit opt-in and version support.

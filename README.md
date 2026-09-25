@@ -43,7 +43,20 @@ ANALYTICS_RUN_ID=local-001 \
   docker compose --profile analytics run --rm analytics-batch
 ```
 
-The profile uses Kafka's internal `kafka:9092` listener and reads up to 100,000 pending account-erasure requests from the `hiring` Mongo database before it mutates Delta data. Mongo marker read/UUID validation failures and larger marker backlogs stop the run. Local host Kafka clients continue to use `127.0.0.1:9092`. Choose a range that exists in the local broker. This batch purges marked subjects from existing Silver and rebuilds local Gold, but it does not publish or hide the GraphQL Mongo snapshot or complete the full account-erasure workflow. See the [analytics specification](docs/specs/hiring-analytics-lakehouse.md) for the retention and release boundaries.
+The batch reads up to 100,000 pending account-erasure markers before it mutates Delta data. With active markers it purges marked Delta rows, rebuilds Gold, and leaves the report hidden until the erasure worker completes the full lifecycle.
+
+### Local analytics erasure worker
+
+Run the API at least once so MongoDB migrations and analytics control collections are initialized. Keep the API process running, then start the worker in another terminal:
+
+```bash
+docker compose up -d mongodb kafka
+# In one terminal, start the API with `sbt run`.
+docker compose --profile analytics-erasure up -d --build analytics-erasure-worker
+docker compose logs -f analytics-erasure-worker
+```
+
+The worker shares `.local/data/analytics/` with batch runs. It requires the same HMAC secret and Kafka reader credentials as the batch, plus `KAFKA_FENCER_PASSWORD` in the ignored root `.env` for a principal scoped to the publisher transactional-ID prefix. `deleteMyAccount` commits the deletion and returns a durable receipt with `PENDING`; query `accountDeletionStatus(receiptId: "<receipt-id>")` to check for `COMPLETE`. The worker fences every publisher process recorded by the deletion transaction before it captures the Kafka barrier or purges outbox rows. It may then wait through Kafka retention and Delta's seven-day vacuum safety horizon before verifying snapshots, rebuilding the report, and atomically publishing the snapshot and completion ledger. A completed receipt remains queryable after the request marker expires. The current transactional publisher uses `hiring_publisher_v2` with `KAFKA_PUBLISHER_V2_PASSWORD`; the pre-transactional `publisher` identity has its topic, cluster-idempotence, and transactional-ID ACLs removed by ACL initialization. The regular local broker was cut over on 2026-09-25: its KRaft data was preserved in `.local/data/kafka`, its legacy PLAIN login was removed, and its stale ACL grants were revoked. The scoped regular-broker check verifies v2 publisher writes and fencing, legacy authentication rejection, and reader denials. Full worker-to-deletion composition and key retirement remain open. See the [analytics specification](docs/specs/hiring-analytics-lakehouse.md).
 
 `GET /health` reports application liveness; `GET /ready` reports MongoDB connectivity. `POST /graphql` accepts `{"query":"{ health { status } readiness { status } }"}`. MongoDB outages leave HTTP running and readiness reports `NOT_READY`. `GET /schema.graphql` exports the current schema; GraphQL introspection supports API documentation/testing clients. See the [API reference](docs/api.md).
 
@@ -63,7 +76,7 @@ The command validates local skills and runs the Docker-independent MUnit suite. 
 
 ## Documentation
 
-- [Architecture](ARCHITECTURE.md) and [use cases](docs/use-cases.md)
+- [Architecture](ARCHITECTURE.md), [MongoDB design](docs/mongodb-design.md), and [use cases](docs/use-cases.md)
 - [Agent workflow](docs/agent-development.md) and [project rules](AGENTS.md)
 - [Spec-driven development](docs/spec-driven-development.md), [spec template](docs/templates/feature-spec.md), and [worked draft](docs/examples/submit-application-spec.md)
 - [Pure FP and local quality checks](docs/engineering-quality.md) and [data/API/schema evolution](docs/schema-evolution.md)
@@ -102,11 +115,10 @@ Collections modeled around GraphQL access patterns, not relational normalization
 - Query analysis via `explain()` and index tuning
 
 ### AI & Vector Search
-- Semantic job search (natural language) + hybrid filter/vector search
-- Candidate ↔ Job recommendations, resume/profile semantic matching
-- Similar job detection, AI-assisted job description analysis
-- Explainable matching, RAG-based recruiter assistant over authorized hiring data
-- Embeddings generated asynchronously alongside domain data
+- Semantic job search combines the current vector and lexical retrieval paths
+- Recruiter candidate matching supports natural-language and structured filters with explicit candidate consent for residence/availability filters
+- Deterministic `matchedSkills` evidence is derived from candidate/job skill sets
+- Candidate/job embeddings are generated asynchronously; MongoDB fusion, reranking, and Automated Embedding remain isolated opt-in experiments
 
 ## Tech Stack
 

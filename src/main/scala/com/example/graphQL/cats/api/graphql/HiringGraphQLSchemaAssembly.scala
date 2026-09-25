@@ -41,6 +41,9 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       ioField("analyticsReport", analyticsReportType, analyticsFromArgument :: analyticsToArgument :: Nil)(
         analyticsReport
       ),
+      ioField("accountDeletionStatus", accountDeletionStatusType, deletionReceiptIdArgument :: Nil)(
+        accountDeletionStatus
+      ),
       ioField(
         "users",
         userConnectionType,
@@ -62,7 +65,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       ioField(
         "candidateMatches",
         rankedCandidateResultsType,
-        jobIdArgument :: firstArgument :: searchIdArgument :: Nil
+        jobIdArgument :: candidateSearchQueryArgument :: candidateMatchFilterArgument :: firstArgument :: searchIdArgument :: Nil
       )(candidateMatches),
       ioField("job", OptionType(jobType), idArgument :: Nil)(job),
       ioField(

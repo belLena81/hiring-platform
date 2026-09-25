@@ -29,6 +29,13 @@ object OperationalEventTransforms {
       StructField("candidateId", StringType, nullable = true),
       StructField("jobId", StringType, nullable = true),
       StructField("newStatus", StringType, nullable = true),
+      StructField("searchKind", StringType, nullable = true),
+      StructField(
+        "results",
+        ArrayType(StructType(Seq(StructField("resultId", StringType, nullable = true)))),
+        nullable = true
+      ),
+      StructField("resultId", StringType, nullable = true),
       StructField(
         "job",
         StructType(Seq(StructField("skills", ArrayType(StringType), nullable = true))),
@@ -134,6 +141,7 @@ object OperationalEventTransforms {
         "newStatus",
         "jobSkills",
         "subjectToken",
+        "subjectTokens",
         "eventFingerprint"
       )
   }

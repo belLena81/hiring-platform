@@ -1,5 +1,11 @@
 union AcceptApplicationResult = Application | ValidationError | DomainError
 
+enum AccountDeletionStatus {
+  PENDING
+  COMPLETE
+  NOT_FOUND
+}
+
 type AnalyticsFunnelDay {
   day: Instant!
   created: Long!
@@ -103,10 +109,22 @@ input BootstrapAdminInput {
 
 union BootstrapAdminResult = AuthSuccess | ValidationError | DomainError
 
+enum CandidateAvailabilityStatus {
+  AVAILABLE_NOW
+  UNAVAILABLE
+}
+
 type CandidateMatchCandidate {
   id: ID!
   name: String!
   profile: CandidateMatchProfile
+}
+
+input CandidateMatchFilter {
+  requiredSkills: [String!]
+  country: String
+  city: String
+  availabilityStatus: CandidateAvailabilityStatus
 }
 
 type CandidateMatchProfile {
@@ -118,6 +136,14 @@ type CandidateProfile {
   skills: [String!]!
   experienceSummary: String
   resumeRef: String
+  currentResidence: CandidateResidence
+  availabilityStatus: CandidateAvailabilityStatus
+  recruiterSearchOptIn: Boolean!
+}
+
+type CandidateResidence {
+  country: String!
+  city: String
 }
 
 union CloseJobResult = Job | ValidationError | DomainError
@@ -147,10 +173,11 @@ input DeleteMyAccountInput {
   idempotencyKey: UUID!
 }
 
-union DeleteMyAccountResult = DeletionSuccess | ValidationError | DomainError
+union DeleteMyAccountResult = DeletionReceipt | ValidationError | DomainError
 
-type DeletionSuccess {
-  deleted: Boolean!
+type DeletionReceipt {
+  receiptId: ID!
+  status: AccountDeletionStatus!
 }
 
 type DomainError implements UserError {
@@ -275,11 +302,12 @@ type Query {
   readiness: Readiness!
   me: User
   analyticsReport(from: Instant!, to: Instant!): AnalyticsReport!
+  accountDeletionStatus(receiptId: ID!): AccountDeletionStatus!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!
   recommendedJobs(first: Int!, searchId: UUID): RankedJobResults!
-  candidateMatches(jobId: JobID!, first: Int!, searchId: UUID): RankedCandidateResults!
+  candidateMatches(jobId: JobID!, query: String, filter: CandidateMatchFilter, first: Int!, searchId: UUID): RankedCandidateResults!
   job(id: JobID!): Job
   myJobs(first: Int!, after: String, status: JobStatus): JobConnection!
   myApplications(first: Int!, after: String, status: ApplicationStatus): ApplicationConnection!
@@ -293,6 +321,8 @@ type RankedCandidate {
   searchMode: SearchMode!
   model: String!
   searchId: ID!
+  matchedSkills: [String!]!
+  retrievalScore: Float
 }
 
 type RankedCandidateResults {
@@ -305,6 +335,8 @@ type RankedJob {
   searchMode: SearchMode!
   model: String!
   searchId: ID!
+  matchedSkills: [String!]!
+  retrievalScore: Float
 }
 
 type RankedJobResults {
@@ -365,6 +397,10 @@ input SignUpInput {
   skills: [String!]
   experienceSummary: String
   resumeRef: String
+  currentResidenceCountry: String
+  currentResidenceCity: String
+  availabilityStatus: CandidateAvailabilityStatus
+  recruiterSearchOptIn: Boolean
   organizationName: String
   jobTitle: String
 }
@@ -393,6 +429,10 @@ input UpdateMyProfileInput {
   skills: [String!]
   experienceSummary: String
   resumeRef: String
+  currentResidenceCountry: String
+  currentResidenceCity: String
+  availabilityStatus: CandidateAvailabilityStatus
+  recruiterSearchOptIn: Boolean
   organizationName: String
   jobTitle: String
 }

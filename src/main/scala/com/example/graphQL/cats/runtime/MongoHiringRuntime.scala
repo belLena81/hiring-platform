@@ -63,6 +63,8 @@ private[runtime] final class SetupLifecycle private (
 ) {
   def await: IO[Boolean] = completion.get.map(_.isRight)
 
+  def awaitSuccessful: IO[Unit] = completion.get.flatMap(IO.fromEither)
+
   def ready: IO[Boolean] = completion.tryGet.map(_.exists(_.isRight))
 }
 
@@ -114,11 +116,11 @@ object MongoHiringRuntime {
       applications = MongoApplicationRepository.transactional(database, client)
       searchSessions = MongoSearchSessionRepository.transactional(database, client)
       searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
-      outbox = new MongoOperationalEventOutboxRepository(database)
+      outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
       receipts = new MongoConsumerReceiptRepository(database)
       mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
       erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-      analyticsReports = new MongoAnalyticsReportRepository(database)
+      analyticsReports = MongoAnalyticsReportRepository.transactional(database, client)
       quarantine = new MongoEventQuarantineRepository(database)
       services <- hiringServices(
         capability,
@@ -133,6 +135,7 @@ object MongoHiringRuntime {
         passwordHashPermits,
         config.diagnostics
       )
+      _ <- Resource.eval(setup.awaitSuccessful)
       _ <- OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
       metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
     } yield MongoHiringRuntime(
@@ -166,7 +169,11 @@ object MongoHiringRuntime {
           config.vectorSearch.jobVectorIndex,
           config.vectorSearch.candidateVectorIndex,
           config.vectorSearch.jobLexicalIndex,
-          config.vectorSearch.numCandidates
+          config.vectorSearch.candidateLexicalIndex,
+          config.vectorSearch.numCandidates,
+          config.vectorSearch.fusionStrategy,
+          config.vectorSearch.rerankEnabled,
+          config.vectorSearch.rerankModel
         )
       ),
       config.embeddingService,
@@ -302,6 +309,7 @@ object MongoHiringRuntime {
           vectorSearch.jobVectorIndex,
           vectorSearch.candidateVectorIndex,
           vectorSearch.jobLexicalIndex,
+          vectorSearch.candidateLexicalIndex,
           vectorSearch.voyageDimension,
           vectorSearch.indexReadyTimeoutMillis,
           vectorSearch.indexPollIntervalMillis

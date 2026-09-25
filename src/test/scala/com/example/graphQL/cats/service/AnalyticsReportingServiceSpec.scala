@@ -1,11 +1,13 @@
 package com.example.graphQL.cats.service
 
 import cats.effect.IO
-import com.example.graphQL.cats.domain.model.{EntityEmbedding, User, UserRole}
+import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{
+  AnalyticsFunnelDay,
   AnalyticsReportRepository,
   AnalyticsReportSnapshot,
+  AnalyticsSkillPostingDay,
   RepositoryError
 }
 import munit.CatsEffectSuite
@@ -39,6 +41,39 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
       }
   }
 
+  test("analytics accepts the exact 30-day inclusive period") {
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
+    val from = now.minusSeconds(30L * 24L * 60L * 60L)
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(from, now)).value.map { result =>
+      assertEquals(result, Right(snapshot))
+    }
+  }
+
+  test("analytics returns only daily rows inside the requested inclusive period and preserves asOf") {
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val before = now.minusSeconds(2L * 24L * 60L * 60L)
+    val from = now.minusSeconds(24L * 60L * 60L)
+    val after = now.plusSeconds(24L * 60L * 60L)
+    val rows = List(before, from, now, after).map(day => AnalyticsFunnelDay(day, 1, 0, 0, 0, 0, 0))
+    val skills = List(before, from, now, after).map(day => AnalyticsSkillPostingDay(day, "scala", 1))
+    val report = AnalyticsReportSnapshot(now, rows, None, skills)
+    val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(report)))
+
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(from, now)).value.map { result =>
+      assertEquals(result, Right(report.copy(funnel = rows.slice(1, 3), skillPostingActivity = skills.slice(1, 3))))
+    }
+  }
+
+  test("analytics rejects a reversed period") {
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now, now.minusSeconds(1))).value.map {
+      result =>
+        assertEquals(result, Left(UseCaseError.Analytics(AnalyticsError.InvalidPeriod)))
+    }
+  }
+
   test("analytics rejects an extreme period without epoch arithmetic overflow") {
     val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
     val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(Some(snapshot)))
@@ -60,8 +95,48 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
       }
   }
 
-  private final class TestReports(value: Option[AnalyticsReportSnapshot]) extends AnalyticsReportRepository {
-    override def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]] = IO.pure(Right(value))
+  test("a deleted Admin cannot read aggregate analytics") {
+    val deletedAdmin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true).copy(
+      accountStatus = AccountStatus.Deleted,
+      deletedAt = Some(now)
+    )
+    val service =
+      new AnalyticsReportingService(new TestUsers(Map(adminId -> deletedAdmin)), new TestReports(Some(snapshot)))
+    service
+      .report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now))
+      .value
+      .map { result =>
+        assertEquals(result, Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+      }
+  }
+
+  test("analytics reports a typed unavailable outcome when no published snapshot exists") {
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val service = new AnalyticsReportingService(new TestUsers(Map(adminId -> admin)), new TestReports(None))
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now)).value.map {
+      result =>
+        assertEquals(result, Left(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable)))
+    }
+  }
+
+  test("analytics reports a typed unavailable outcome when the report store fails") {
+    val admin = User(adminId, None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    val service = new AnalyticsReportingService(
+      new TestUsers(Map(adminId -> admin)),
+      new TestReports(None, Some(RepositoryError.Unavailable))
+    )
+    service.report(ActorContext(adminId, UserRole.Admin), AnalyticsPeriod(now.minusSeconds(60), now)).value.map {
+      result =>
+        assertEquals(result, Left(UseCaseError.Repository(RepositoryError.Unavailable)))
+    }
+  }
+
+  private final class TestReports(
+      value: Option[AnalyticsReportSnapshot],
+      failure: Option[RepositoryError] = None
+  ) extends AnalyticsReportRepository {
+    override def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]] =
+      IO.pure(failure.toLeft(value))
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {

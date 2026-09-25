@@ -198,22 +198,25 @@ final class UserAccountService(
             )
     }
 
-  override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[Unit] =
-    idempotent.execute[Unit](
+  override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
+    idempotent.execute[String](
       "deleteMyAccount",
       Idempotent.actorScope(actor),
       request,
-      _ => userReference(actor.userId),
+      receiptReference,
       replayDeletion(actor)
     ) { context =>
       UseCaseIO.liftIO(currentTime).flatMap(now => UseCaseIO.fromIO(deleteMyAccountOnce(actor, now, context)))
     }
 
+  override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    UseCaseIO.fromIO(erasureRequests.status(receiptId).map(_.leftMap(UseCaseError.Repository.apply)))
+
   private def deleteMyAccountOnce(
       actor: ActorContext,
       now: Instant,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, Unit]] =
+  ): IO[Either[UseCaseError, String]] =
     if (context eq MutationWriteContext.noop)
       IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired)))
     else
@@ -221,14 +224,19 @@ final class UserAccountService(
         case Left(error)                                => IO.pure(Left(error))
         case Right(user) if user.role == UserRole.Admin =>
           IO.pure(Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
-        case Right(user) if user.accountStatus == AccountStatus.Deleted => IO.pure(Right(()))
-        case Right(user)                                                =>
-          erasureRequests.enqueue(user.id, now, context).flatMap {
-            case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
-            case Right(())   =>
-              accounts
-                .deleteAccount(user.id, now, s"deleted-${user.id.value}", context)
-                .map(_.leftMap(UseCaseError.Repository.apply))
+        case Right(user) if user.accountStatus == AccountStatus.Deleted =>
+          erasureRequests.enqueue(user.id, now, context).map(_.leftMap(UseCaseError.Repository.apply))
+        case Right(user) =>
+          erasureRequests.workerReady(now).flatMap {
+            case Left(_) => IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable)))
+            case Right(()) =>
+              erasureRequests.enqueue(user.id, now, context).flatMap {
+                case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
+                case Right(receiptId) =>
+                  accounts
+                    .deleteAccount(user.id, now, s"deleted-${user.id.value}", context)
+                    .map(_.bimap(UseCaseError.Repository.apply, _ => receiptId))
+              }
           }
       }
 
@@ -255,12 +263,10 @@ final class UserAccountService(
 
   private def replayDeletion(
       actor: ActorContext
-  )(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[Unit] =
-    parseUserId(reference).flatMap { userId =>
-      if (reference.entityType == "user" && userId == actor.userId)
-        authorization.resolve(actor, allowDeleted = true).void
-      else UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
-    }
+  )(reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference): UseCaseIO[String] =
+    if (reference.entityType == "analytics-erasure-receipt" && validReceiptId(reference.entityId))
+      authorization.resolve(actor, allowDeleted = true).map(_ => reference.entityId)
+    else UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
 
   private def parseUserId(
       reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference
@@ -283,6 +289,12 @@ final class UserAccountService(
 
   private def userReference(userId: UserId): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
     com.example.graphQL.cats.repository.protocol.MutationEntityReference("user", userId.value.toString)
+
+  private def receiptReference(value: String): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
+    com.example.graphQL.cats.repository.protocol.MutationEntityReference("analytics-erasure-receipt", value)
+
+  private def validReceiptId(value: String): Boolean =
+    scala.util.Try(UUID.fromString(value)).exists(_.toString == value)
 
   private def token(user: User, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
     tokenIssuer

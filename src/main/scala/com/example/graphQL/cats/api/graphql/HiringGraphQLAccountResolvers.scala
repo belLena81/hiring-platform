@@ -6,6 +6,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
+import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.service.{AccountError, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{
   AccountProfileInput,
@@ -86,15 +87,26 @@ private[graphql] object HiringGraphQLAccountResolvers {
       )
     }
 
-  def deleteMyAccount(context: Context[RequestContext, Unit]): IO[MutationOutcome[DeletionSuccess]] =
-    authenticated(context) { case (actor, hiring) =>
-      val input = context.arg(deleteMyAccountInputArgument)
-      mutationResult(
-        hiring.accountService
-          .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
-          .semiflatTap(_ => context.ctx.invalidateViewer)
-          .map(_ => DeletionSuccess(true))
-      )
+  def deleteMyAccount(context: Context[RequestContext, Unit]): IO[MutationOutcome[DeletionReceipt]] =
+    context.ctx.hiringAvailable.flatMap {
+      case com.example.graphQL.cats.service.ProbeResult.Ready =>
+        context.ctx.deletionActor.flatMap { actor =>
+          val input = context.arg(deleteMyAccountInputArgument)
+          mutationResult(
+            context.ctx.hiring.accountService
+              .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
+              .semiflatTap(_ => context.ctx.invalidateViewer)
+              .map(receiptId => DeletionReceipt(receiptId, AccountDeletionStatus.Pending))
+          )
+        }
+      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
+    }
+
+  def accountDeletionStatus(context: Context[RequestContext, Unit]): IO[AccountDeletionStatus] =
+    context.ctx.hiringAvailable.flatMap {
+      case com.example.graphQL.cats.service.ProbeResult.Ready =>
+        raiseOnUseCaseError(context.ctx.hiring.accountService.accountDeletionStatus(context.arg(deletionReceiptIdArgument)))
+      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
     }
 
   def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =
@@ -123,7 +135,18 @@ private[graphql] object HiringGraphQLAccountResolvers {
       role: UserRole,
       input: UpdateProfileGraphQLInput
   ): Either[UseCaseError, AccountProfileInput] =
-    profileFor(role, input.skills, input.experienceSummary, input.resumeRef, input.organizationName, input.jobTitle)
+    profileFor(
+      role,
+      input.skills,
+      input.experienceSummary,
+      input.resumeRef,
+      input.currentResidenceCountry,
+      input.currentResidenceCity,
+      input.availabilityStatus,
+      input.recruiterSearchOptIn,
+      input.organizationName,
+      input.jobTitle
+    )
       .map(AccountProfileInput.apply)
 
   private def signUpProfile(input: SignUpGraphQLInput): Either[UseCaseError, Option[UserProfile]] =
@@ -135,6 +158,10 @@ private[graphql] object HiringGraphQLAccountResolvers {
           input.skills,
           input.experienceSummary,
           input.resumeRef,
+          input.currentResidenceCountry,
+          input.currentResidenceCity,
+          input.availabilityStatus,
+          input.recruiterSearchOptIn,
           input.organizationName,
           input.jobTitle
         ).map(Some(_))
@@ -145,12 +172,37 @@ private[graphql] object HiringGraphQLAccountResolvers {
       skills: Option[List[String]],
       experienceSummary: Option[String],
       resumeRef: Option[String],
+      currentResidenceCountry: Option[String],
+      currentResidenceCity: Option[String],
+      availabilityStatus: Option[CandidateAvailabilityStatus],
+      recruiterSearchOptIn: Option[Boolean],
       organizationName: Option[String],
       jobTitle: Option[String]
   ): Either[UseCaseError, UserProfile] =
     role match {
       case UserRole.Candidate =>
-        Right(UserProfile.Candidate(CandidateProfile(skills.getOrElse(Nil).toSet, experienceSummary, resumeRef)))
+        val residence = currentResidenceCountry.map(country => CandidateResidence(country, currentResidenceCity))
+        if (currentResidenceCountry.isEmpty && currentResidenceCity.nonEmpty)
+          Left(
+            UseCaseError.ValidationFailed(
+              cats.data.NonEmptyList.one(
+                DomainValidationError.BlankField("currentResidence.country")
+              )
+            )
+          )
+        else
+          Right(
+            UserProfile.Candidate(
+              CandidateProfile(
+                skills.getOrElse(Nil).toSet,
+                experienceSummary,
+                resumeRef,
+                residence,
+                availabilityStatus,
+                recruiterSearchOptIn.getOrElse(false)
+              )
+            )
+          )
       case UserRole.Recruiter =>
         Right(UserProfile.Recruiter(RecruiterProfile(organizationName.getOrElse(""), jobTitle)))
       case UserRole.Admin =>

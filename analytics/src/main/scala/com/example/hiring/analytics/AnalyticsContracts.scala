@@ -11,6 +11,8 @@ object AnalyticsRetention {
   val GoldDays: Int = 30
   val PublishedSnapshotDays: Int = 30
   val DeletionMarkerDays: Int = 31
+  val DeltaVacuumSafetyDays: Int = 7
+  val DeltaLogRetentionDays: Int = 30
   val MinimumContributors: Long = 10L
 }
 
@@ -22,8 +24,26 @@ object AnalyticsError {
   final case class InvalidConfiguration(detail: String) extends AnalyticsError(detail)
   final case class InvalidSourceSchema(missing: Vector[String])
       extends AnalyticsError(s"Kafka batch records are missing required columns: ${missing.mkString(", ")}")
+  final case class EmptyRequestedRange(topic: String, partition: Int, offset: Long)
+      extends AnalyticsError(s"requested analytics range is empty: $topic partition $partition at offset $offset")
+  final case class ExpiredOffsetRange(topic: String, partition: Int, requestedStart: Long, earliestAvailable: Long)
+      extends AnalyticsError(
+        s"requested analytics offset expired: $topic partition $partition starts at $requestedStart; earliest available is $earliestAvailable"
+      )
+  final case class MissingOffsetRange(topic: String, partition: Int, requested: Long, observed: Long)
+      extends AnalyticsError(
+        s"requested analytics range is incomplete: $topic partition $partition has $observed of $requested offsets"
+      )
+  final case class UnexpectedOffsetPartition(topic: String, partition: Int)
+      extends AnalyticsError(s"analytics source returned an unrequested partition: $topic partition $partition")
+  final case class RunIdRangeConflict(runId: String)
+      extends AnalyticsError(s"analytics run ID '$runId' was already used with different offset ranges")
   case object MissingMarkerCollection extends AnalyticsError("analytics erasure request collection is unavailable")
   case object MalformedMarker extends AnalyticsError("pending analytics erasure request has an invalid subject id")
+  case object ErasureNotReady extends AnalyticsError("analytics erasure is not ready for guarded publication")
+  case object ErasureDeferred extends AnalyticsError("analytics erasure was durably deferred for a later retry")
+  case object PhysicalReclamationUnverified
+      extends AnalyticsError("analytics erasure could not verify retention-safe physical Delta reclamation")
   final case class MarkerLimitExceeded(limit: Int)
       extends AnalyticsError(s"pending analytics erasure marker limit exceeded ($limit)")
   final case class MarkerStorageFailure(underlying: Throwable)

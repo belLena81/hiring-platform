@@ -36,15 +36,23 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
       None,
       None,
       None,
+      None,
+      None,
+      None,
+      None,
       None
     )
     val expected = Json.obj(
+      "availabilityStatus" -> Json.Null,
+      "currentResidenceCity" -> Json.Null,
+      "currentResidenceCountry" -> Json.Null,
       "experienceSummary" -> Json.Null,
       "idempotencyKey" -> Json.fromString(idempotencyKey.toString),
       "jobTitle" -> Json.Null,
       "name" -> Json.fromString("Candidate"),
       "organizationName" -> Json.Null,
       "password" -> Json.fromString("secret"),
+      "recruiterSearchOptIn" -> Json.Null,
       "resumeRef" -> Json.Null,
       "role" -> Json.fromString("CANDIDATE"),
       "skills" -> Json.arr(Json.fromString("Scala"), Json.fromString("Cats Effect"))

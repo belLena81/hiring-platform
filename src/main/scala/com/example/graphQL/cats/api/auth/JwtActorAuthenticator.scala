@@ -30,7 +30,7 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
           )
           actor <- EitherT(
             users
-              .actorFor(userId)
+              .actorForVerifiedToken(userId)
               .map(
                 _.leftMap(_ => AuthFailure.Unavailable)
                   .flatMap(_.toRight(AuthFailure.UnknownActor))

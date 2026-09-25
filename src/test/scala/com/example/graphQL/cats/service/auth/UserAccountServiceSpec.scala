@@ -312,7 +312,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         idempotent = Idempotent(TransactionalReceipts)
       )
       result <- service.deleteMyAccount(request, ActorContext(deletedRecruiter.id, UserRole.Recruiter)).value
-    } yield assertEquals(result, Right(()))
+    } yield assert(result.exists(_.matches("[0-9a-f-]{36}")))
   }
 
   test("account deletion replay rejects a forged actor role") {
@@ -322,7 +322,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)),
         accounts,
         erasureRequests = TestErasureRequests,
-        idempotent = Idempotent(ReplayReceipts(MutationEntityReference("user", deletedRecruiter.id.value.toString)))
+        idempotent = Idempotent(ReplayReceipts(MutationEntityReference("analytics-erasure-receipt", "00000000-0000-0000-0000-000000000123")))
       )
       result <- service.deleteMyAccount(request, ActorContext(deletedRecruiter.id, UserRole.Admin)).value
     } yield assertEquals(result, Left(UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.Forbidden)))
@@ -338,6 +338,39 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       )
       result <- service.deleteMyAccount(request, ActorContext(recruiter.id, UserRole.Recruiter)).value
     } yield assertEquals(result, Left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired)))
+  }
+
+  test("account deletion fails closed when the erasure worker is not ready") {
+    val unavailableWorker = new AnalyticsErasureRequestRepository {
+      override def workerReady(now: Instant): IO[Either[RepositoryError, Unit]] =
+        IO.pure(Left(RepositoryError.Unavailable))
+
+      override def enqueue(
+          userId: UserId,
+          now: Instant,
+          context: MutationWriteContext
+      ): IO[Either[RepositoryError, String]] =
+        IO.raiseError(new AssertionError("deletion must not enqueue when worker preflight fails"))
+
+      override def status(receiptId: String): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
+        IO.pure(Left(RepositoryError.Unavailable))
+
+      override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
+        IO.pure(Left(RepositoryError.Unavailable))
+
+      override def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]] =
+        IO.pure(Left(RepositoryError.Unavailable))
+    }
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = accountService(
+        new TestUsers(Map(recruiter.id -> recruiter)),
+        accounts,
+        erasureRequests = unavailableWorker,
+        idempotent = Idempotent(TransactionalReceipts)
+      )
+      result <- service.deleteMyAccount(request, ActorContext(recruiter.id, UserRole.Recruiter)).value
+    } yield assertEquals(result, Left(UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable)))
   }
 
   private def accountService(
@@ -371,11 +404,20 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   }
 
   private object TestErasureRequests extends AnalyticsErasureRequestRepository {
+    override def workerReady(now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+
     override def enqueue(
         userId: UserId,
         now: Instant,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    ): IO[Either[RepositoryError, String]] = IO.pure(Right("00000000-0000-0000-0000-000000000123"))
+
+    override def status(receiptId: String): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
+      IO.pure(Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
+
+    override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+
+    override def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
   }
 
   private object TransactionalReceipts extends MutationReceiptRepository {

@@ -46,10 +46,15 @@ private[mongo] trait MongoOperationalEventInsertion {
   ): IO[Either[RepositoryError, Unit]] =
     events
       .traverse_ { event =>
-        val document = MongoHiringCodecs.outboxRecord(event, now)
-        session.fold(PublisherBridge.first(outbox.insertOne(document)))(active =>
-          PublisherBridge.first(outbox.insertOne(active, document))
-        )
+        IO.fromEither(
+          MongoHiringCodecs
+            .outboxRecord(event, now)
+            .leftMap(message => new IllegalArgumentException(message))
+        ).flatMap { document =>
+          session.fold(PublisherBridge.first(outbox.insertOne(document)))(active =>
+            PublisherBridge.first(outbox.insertOne(active, document))
+          )
+        }
       }
       .as(Right(()))
       .handleError {

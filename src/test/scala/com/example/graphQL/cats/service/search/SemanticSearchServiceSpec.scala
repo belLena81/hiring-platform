@@ -10,7 +10,13 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.shared.pagination.PageSize
-import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
+import com.example.graphQL.cats.shared.search.{
+  CandidateMatchFilters,
+  JobSearchFilter,
+  RankedCandidate,
+  RankedJob,
+  VectorSearchQuery
+}
 import munit.CatsEffectSuite
 import java.util.UUID
 
@@ -60,6 +66,38 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     } yield {
       assertEquals(accepted.map(_.map(_.job.id)), Right(List(jobId)))
       assertEquals(rejected.left.toOption, Some(UseCaseError.Domain(DomainError.CandidateRequired)))
+    }
+  }
+
+  test("recruiter candidate matching embeds trimmed query text and forwards structured filters") {
+    val filters =
+      CandidateMatchFilters(List("Scala", "MongoDB"), Some("cyprus"), Some("nicosia"), Some("AVAILABLE_NOW"))
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(jobEmbedding))))
+      queries <- Ref.of[IO, Vector[VectorSearchQuery]](Vector.empty)
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService(Right(EmbeddingVector(List(0.3f, 0.4f), configuredModel, 2))),
+        RecordingSearchRepository(queries)
+      )
+      result <- service
+        .candidateMatches(
+          ActorContext(recruiterId, UserRole.Recruiter),
+          jobId,
+          Some("  Scala backend  "),
+          filters,
+          pageSize,
+          searchId
+        )
+        .value
+      recorded <- queries.get
+    } yield {
+      assertEquals(result, Right(Nil))
+      assertEquals(recorded.map(_.lexicalQuery), Vector(Some("Scala backend")))
+      assertEquals(recorded.map(_.candidateQueryVector), Vector(Some(List(0.3f, 0.4f))))
+      assertEquals(recorded.map(_.candidateFilters), Vector(filters))
     }
   }
 
@@ -221,7 +259,12 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         FakeSearchRepository(candidates =
           List(
             RankedCandidate(
-              candidateWithProfile.copy(embedding = Some(embedding)),
+              com.example.graphQL.cats.shared.search.CandidateSearchHit(
+                candidateWithProfile.id,
+                candidateWithProfile.name,
+                candidateWithProfile.candidateProfile.get.skills,
+                candidateWithProfile.candidateProfile.get.experienceSummary
+              ),
               0.90,
               SearchMode.VECTOR,
               meta,

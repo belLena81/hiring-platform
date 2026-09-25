@@ -242,6 +242,7 @@ object OperationalEvents {
       jobId.value.toString,
       actorId,
       searchId,
+      None,
       jobId.value.toString,
       rank,
       occurredAt
@@ -251,6 +252,7 @@ object OperationalEvents {
       eventId: UUID,
       searchId: UUID,
       resultId: String,
+      searchKind: String,
       actorId: UserId,
       rank: Int,
       occurredAt: Instant
@@ -261,6 +263,7 @@ object OperationalEvents {
       searchId.toString,
       actorId,
       Some(searchId),
+      Some(searchKind),
       resultId,
       Some(rank),
       occurredAt
@@ -272,6 +275,7 @@ object OperationalEvents {
       aggregateId: String,
       actorId: UserId,
       searchId: Option[UUID],
+      searchKind: Option[String],
       resultId: String,
       rank: Option[Int],
       occurredAt: Instant
@@ -286,6 +290,7 @@ object OperationalEvents {
       Json.obj(
         "searchId" -> searchId.fold(Json.Null)(id => Json.fromString(id.toString)),
         "resultId" -> Json.fromString(resultId),
+        "searchKind" -> searchKind.fold(Json.Null)(Json.fromString),
         "rank" -> rank.fold(Json.Null)(Json.fromInt)
       )
     )

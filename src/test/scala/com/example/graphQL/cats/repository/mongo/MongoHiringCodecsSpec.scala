@@ -6,7 +6,9 @@ import com.example.graphQL.cats.domain.model.{
   Application,
   ApplicationEvent,
   ApplicationStatus,
+  CandidateAvailabilityStatus,
   CandidateProfile,
+  CandidateResidence,
   EmbeddingMeta,
   EntityEmbedding,
   Job,
@@ -77,6 +79,25 @@ class MongoHiringCodecsSpec extends FunSuite {
     assertEquals(MongoHiringCodecs.readUser(document).toEither, Right(user))
     assertEquals(document.get("profile", classOf[Document]).getString("kind"), "Recruiter")
     assert(!document.containsKey("recruiterProfile"))
+  }
+
+  test("candidate private search profile round-trips with canonical location sidecars") {
+    val profile = CandidateProfile(
+      Set("Scala"),
+      Some("Builds backend services"),
+      None,
+      Some(CandidateResidence("Cyprus", Some("Nicosia"))),
+      Some(CandidateAvailabilityStatus.AVAILABLE_NOW),
+      recruiterSearchOptIn = true
+    )
+    val user = User(candidateId, None, "Candidate", UserRole.Candidate, Some(UserProfile.Candidate(profile)), now)
+    val document = MongoHiringCodecs.user(user)
+    val storedProfile = document.get("profile", classOf[Document])
+    val residence = storedProfile.get("currentResidence", classOf[Document])
+
+    assertEquals(MongoHiringCodecs.readUser(document).toEither, Right(user))
+    assertEquals(residence.getString("countryCanonical"), "cyprus")
+    assertEquals(residence.getString("cityCanonical"), "nicosia")
   }
 
   test("user codec keeps legacy untagged profiles as candidate profiles") {
@@ -300,7 +321,11 @@ class MongoHiringCodecsSpec extends FunSuite {
       OperationalAggregateType.Search,
       "search-205",
       candidateId,
-      Json.obj("query" -> Json.fromString("Scala"))
+      Json.obj(
+        "searchKind" -> Json.fromString("semanticJobSearch"),
+        "query" -> Json.fromString("Scala"),
+        "results" -> Json.arr(Json.obj("resultId" -> Json.fromString("job-203")))
+      )
     )
     val search = SearchSession(
       UUID.fromString("00000000-0000-0000-0000-000000000208"),
@@ -324,8 +349,13 @@ class MongoHiringCodecsSpec extends FunSuite {
       Right(operational)
     )
     assertEquals(
-      MongoHiringCodecs.readOperationalEvent(MongoHiringCodecs.outboxRecord(operational, now)).toEither,
-      Right(operational)
+      MongoHiringCodecs.outboxRecord(operational, now).map { outbox =>
+        (
+          MongoHiringCodecs.readOperationalEvent(outbox).toEither,
+          outbox.getList("subjectIds", classOf[String]).toArray.toList
+        )
+      },
+      Right((Right(operational), List(candidateId.value.toString)))
     )
     assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
   }

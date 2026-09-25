@@ -2,7 +2,7 @@
 
 ## Hiring Analytics Lakehouse
 
-The current analytics milestone is documented in [Hiring Analytics Lakehouse](specs/hiring-analytics-lakehouse.md). It introduces a local batch-only Bronze/Silver/Gold pipeline and bounded Admin reporting. The roadmap continues through Structured Streaming, then Search Evaluation & Scale, then the post-MVP Discovery Intelligence & Search Quality stage. These are separate milestones; this addition does not change the analytics or event milestones.
+The current analytics milestone is documented in [Hiring Analytics Lakehouse](specs/hiring-analytics-lakehouse.md). It introduces a local bounded Bronze/Silver/Gold batch pipeline, guarded Admin reporting, and a retention-aware erasure worker. Remaining acceptance and runtime gates are tracked in the spec. The roadmap continues through Structured Streaming, then Search Evaluation & Scale, then the post-MVP Discovery Intelligence & Search Quality stage. These are separate milestones; this addition does not change the analytics or event milestones.
 
 Completion requires local source-to-projection evidence, data-quality and retention checks, independent code/security reviews, and final QA. Delayed and in-flight outbox replay must be denied by implementation and independently verified; it is not an accepted residual risk.
 

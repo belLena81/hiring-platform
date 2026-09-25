@@ -32,11 +32,24 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
   test("fresh job vector hit is returned with score and metadata") {
     val job = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite")))
-    val ranked = MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(job)), query)
+    val ranked = MongoSemanticSearchResult.rankedJob(
+      scored(MongoHiringCodecs.job(job)).append("retrievalScore", java.lang.Double.valueOf(0.88d)),
+      query
+    )
 
     assertEquals(ranked.map(_.map(_.job.id)), Right(Some(job.id)))
     assertEquals(ranked.map(_.map(_.score)), Right(Some(0.91d)))
+    assertEquals(ranked.map(_.map(_.retrievalScore)), Right(Some(Some(0.88d))))
     assertEquals(ranked.map(_.map(_.meta.sourceHash)), Right(Some(SourceHash.sha256(SearchableText.job(job)))))
+  }
+
+  test("malformed native-fusion job results map to sanitized search unavailability") {
+    val malformed = new Document("_id", "unexpected").append("unsupported", true).append("score", "invalid")
+
+    assertEquals(
+      MongoSemanticSearchResult.rankedJobs(List(malformed), query),
+      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)
+    )
   }
 
   test("stale job vector hit is omitted") {
@@ -65,14 +78,25 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
     assert(
       MongoSemanticSearchResult
-        .rankedCandidate(scored(MongoHiringCodecs.user(fresh)), query)
+        .rankedCandidate(
+          scored(MongoHiringCodecs.user(fresh)).append("retrievalScore", java.lang.Double.valueOf(0.87d)),
+          query
+        )
         .exists(_.exists {
-          case RankedCandidate(candidate, 0.91d, SearchMode.VECTOR, meta, `searchId`) =>
-            candidate.id == fresh.id && meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
+          case RankedCandidate(candidate, 0.91d, SearchMode.VECTOR, meta, `searchId`, _, Some(0.87d)) =>
+            candidate.id == fresh.id && candidate.skills == profile.skills &&
+            meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
           case _ => false
         })
     )
     assertEquals(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(stale)), query), Right(None))
+  }
+
+  test("malformed native-fusion candidate results map to sanitized search unavailability") {
+    assertEquals(
+      MongoSemanticSearchResult.rankedCandidates(List(new Document("_id", "invalid")), query),
+      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)
+    )
   }
 
   private def jobEmbedding(

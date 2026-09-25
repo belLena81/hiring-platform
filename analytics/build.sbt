@@ -31,6 +31,7 @@ lazy val analytics = (project in file("."))
       "org.typelevel" %% "log4cats-slf4j" % "2.8.0",
       "org.mongodb" % "mongodb-driver-sync" % "5.12.0",
       "org.testcontainers" % "testcontainers" % "2.0.5" % Test,
+      "org.testcontainers" % "testcontainers-kafka" % "2.0.5" % Test,
       "org.scalameta" %% "munit" % munitVersion % Test,
       "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test
     )

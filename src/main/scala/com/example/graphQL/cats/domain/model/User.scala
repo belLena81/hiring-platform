@@ -15,23 +15,43 @@ enum AccountStatus {
   case Active, Deleted
 }
 
+enum CandidateAvailabilityStatus {
+  case AVAILABLE_NOW, UNAVAILABLE
+}
+
+final case class CandidateResidence(country: String, city: Option[String])
+
 final case class CandidateProfile(
     skills: Set[String],
     experienceSummary: Option[String],
-    resumeRef: Option[String]
+    resumeRef: Option[String],
+    currentResidence: Option[CandidateResidence] = None,
+    availabilityStatus: Option[CandidateAvailabilityStatus] = None,
+    recruiterSearchOptIn: Boolean = false
 )
 
 object CandidateProfile {
   def validate(
       skills: Set[String],
       experienceSummary: Option[String],
-      resumeRef: Option[String]
+      resumeRef: Option[String],
+      currentResidence: Option[CandidateResidence] = None,
+      availabilityStatus: Option[CandidateAvailabilityStatus] = None,
+      recruiterSearchOptIn: Boolean = false
   ): ValidatedNel[DomainValidationError, CandidateProfile] =
     (
       validateNonEmptyValues("skills", skills),
       validateOptionalText("experienceSummary", experienceSummary, FieldLimits.LongTextMaxChars),
-      validateOptionalText("resumeRef", resumeRef, FieldLimits.ResumeRefMaxChars)
-    ).mapN(CandidateProfile.apply)
+      validateOptionalText("resumeRef", resumeRef, FieldLimits.ResumeRefMaxChars),
+      currentResidence.traverse(residence =>
+        (
+          validateText("currentResidence.country", residence.country),
+          residence.city.traverse(validateText("currentResidence.city", _))
+        ).mapN(CandidateResidence.apply)
+      )
+    ).mapN((cleanSkills, summary, resume, residence) =>
+      CandidateProfile(cleanSkills, summary, resume, residence, availabilityStatus, recruiterSearchOptIn)
+    )
 }
 
 final case class RecruiterProfile(organizationName: String, jobTitle: Option[String])
@@ -64,7 +84,16 @@ object UserProfile {
   def validateFor(role: UserRole, profile: Option[UserProfile]): ValidatedNel[DomainValidationError, Unit] =
     (role, profile) match {
       case (UserRole.Candidate, Some(UserProfile.Candidate(value))) =>
-        CandidateProfile.validate(value.skills, value.experienceSummary, value.resumeRef).void
+        CandidateProfile
+          .validate(
+            value.skills,
+            value.experienceSummary,
+            value.resumeRef,
+            value.currentResidence,
+            value.availabilityStatus,
+            value.recruiterSearchOptIn
+          )
+          .void
       case (UserRole.Recruiter, Some(UserProfile.Recruiter(value))) =>
         RecruiterProfile.validate(value.organizationName, value.jobTitle).void
       case _ => DomainValidationError.BlankField("profile").invalidNel

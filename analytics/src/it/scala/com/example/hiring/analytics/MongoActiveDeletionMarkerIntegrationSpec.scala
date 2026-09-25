@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
 import org.apache.spark.sql.SparkSession
@@ -11,7 +11,8 @@ import org.testcontainers.utility.DockerImageName
 import munit.FunSuite
 
 import java.nio.file.Files
-import java.time.Duration
+import java.time.{Duration, Instant}
+import java.util.Date
 import java.util.UUID
 import scala.concurrent.duration._
 import scala.jdk.CollectionConverters._
@@ -22,7 +23,9 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
   private final class MongoContainer extends GenericContainer[MongoContainer](DockerImageName.parse(image))
 
-  private val pseudonymizer = SubjectPseudonymizer.fromSecret("analytics-integration-secret".getBytes("UTF-8"))
+  private val pseudonymizer =
+    SubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8"))
+  private val markerClock = fixedClock(Instant.parse("2026-09-24T12:00:00Z"))
   private var mongoContainer: MongoContainer = scala.compiletime.uninitialized
   private var mongoClient: MongoClient = scala.compiletime.uninitialized
   private var spark: SparkSession = scala.compiletime.uninitialized
@@ -32,6 +35,12 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       .validated(runId, Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
+
+  private def fixedClock(at: Instant): Clock[IO] = new Clock[IO] {
+    override val applicative: cats.Applicative[IO] = summon[cats.Applicative[IO]]
+    override def realTime: IO[FiniteDuration] = IO.pure(at.toEpochMilli.millis)
+    override def monotonic: IO[FiniteDuration] = IO.pure(0.nanos)
+  }
 
   override def beforeAll(): Unit = {
     super.beforeAll()
@@ -62,15 +71,31 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     super.afterAll()
   }
 
-  test("Mongo marker source reads pending UUIDs and ignores completed requests") {
+  test("Mongo marker source keeps unexpired completed markers active and ignores expired ones") {
     val database = mongoClient.getDatabase(s"markers_${UUID.randomUUID()}")
     val requests = database.getCollection("analytics_erasure_requests")
-    val source = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
-    requests.insertOne(new Document("_id", UUID.randomUUID().toString).append("state", "Complete"))
-    assertEquals(source.activeSubjectTokens(spark).flatMap(frame => IO.blocking(frame.count())).unsafeRunSync(), 0L)
+    val source = new MongoActiveDeletionMarkerSource(database, pseudonymizer, clock = markerClock)
+    val retainedSubject = UUID.randomUUID().toString
+    requests.insertOne(
+      new Document("_id", retainedSubject)
+        .append("state", "Complete")
+        .append("expiresAt", Date.from(Instant.parse("2026-10-25T12:00:00Z")))
+    )
+    requests.insertOne(
+      new Document("_id", UUID.randomUUID().toString)
+        .append("state", "Complete")
+        .append("expiresAt", Date.from(Instant.parse("2026-09-23T12:00:00Z")))
+    )
+    val retainedOnly = source
+      .activeSubjectTokens(spark)
+      .flatMap(frame => IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet))
+      .unsafeRunSync()
+    assertEquals(retainedOnly, Set(pseudonymizer.token(retainedSubject)))
 
     val pendingSubject = UUID.randomUUID().toString
     requests.insertOne(new Document("_id", pendingSubject).append("state", "Pending"))
+    val processingSubject = UUID.randomUUID().toString
+    requests.insertOne(new Document("_id", processingSubject).append("state", "Processing"))
 
     val tokens = source
       .activeSubjectTokens(spark)
@@ -79,7 +104,14 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       }
       .unsafeRunSync()
 
-    assertEquals(tokens, Set(pseudonymizer.token(pendingSubject)))
+    assertEquals(
+      tokens,
+      Set(
+        pseudonymizer.token(retainedSubject),
+        pseudonymizer.token(pendingSubject),
+        pseudonymizer.token(processingSubject)
+      )
+    )
   }
 
   test("missing or malformed Mongo marker data fails before any Delta mutation") {

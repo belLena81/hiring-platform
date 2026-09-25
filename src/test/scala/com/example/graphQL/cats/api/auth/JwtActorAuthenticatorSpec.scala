@@ -11,7 +11,7 @@ import com.example.graphQL.cats.service.protocol.UserAuthenticator
 import com.example.graphQL.cats.repository.protocol.UserRepository
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.domain.model.{CandidateProfile, EntityEmbedding, User, UserProfile, UserRole}
+import com.example.graphQL.cats.domain.model.{AccountStatus, CandidateProfile, EntityEmbedding, User, UserProfile, UserRole}
 import io.circe.Json
 
 import java.time.Instant
@@ -46,6 +46,19 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
     )
     authenticator.authenticate(request(Some(token))).map { actor =>
       assertEquals(actor, Right(Some(ActorContext(candidateId, UserRole.Recruiter))))
+    }
+  }
+
+  test("verified deleted-account token remains usable for idempotent deletion receipt recovery") {
+    val deleted = candidate.copy(profile = None, accountStatus = AccountStatus.Deleted)
+    val authenticator = new JwtActorAuthenticator(
+      JwtAuthConfig(secret, issuer, audience),
+      users(Map(candidateId -> deleted)),
+      FixedTestClock.at(now)
+    )
+
+    authenticator.authenticate(request(Some(signedToken(candidateId)))).map { actor =>
+      assertEquals(actor, Right(Some(ActorContext(candidateId, UserRole.Candidate))))
     }
   }
 

@@ -34,6 +34,10 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       jobVectorIndex = "job-vector",
       candidateVectorIndex = "candidate-vector",
       jobLexicalIndex = "job-lexical",
+      candidateLexicalIndex = "candidate-lexical",
+      fusionStrategy = com.example.graphQL.cats.shared.search.SearchFusionStrategy.ApplicationRrf,
+      rerankEnabled = false,
+      rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 1000,
       indexPollIntervalMillis = 10,
       numCandidates = 20
@@ -276,12 +280,17 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
         for {
           first <- lifecycle.await
           second <- lifecycle.await
+          startupBarrier <- lifecycle.awaitSuccessful.attempt
           ready <- lifecycle.ready
           calls <- setupCalls.get
-        } yield (first, second, ready, calls)
+        } yield (first, second, startupBarrier, ready, calls)
       }
     } yield {
-      assertEquals(result, (false, false, false, 1))
+      assertEquals(result._1, false)
+      assertEquals(result._2, false)
+      assert(result._3.isLeft)
+      assertEquals(result._4, false)
+      assertEquals(result._5, 1)
     }
   }
 

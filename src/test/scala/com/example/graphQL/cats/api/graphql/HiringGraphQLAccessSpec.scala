@@ -4,7 +4,15 @@ import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema, HiringGraphQLServices}
-import com.example.graphQL.cats.service.{ActorContext, HiringReadService, ProbeResult, UseCaseError}
+import com.example.graphQL.cats.service.{
+  ActorContext,
+  AnalyticsError,
+  AnalyticsReportingUseCases,
+  HiringReadService,
+  ProbeResult,
+  UseCaseError
+}
+import com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot
 import com.example.graphQL.cats.repository.protocol.{
   EmbeddingError,
   EmbeddingInput,
@@ -53,7 +61,18 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     Some("candidate@example.com"),
     "Candidate",
     UserRole.Candidate,
-    Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+    Some(
+      UserProfile.Candidate(
+        CandidateProfile(
+          Set("Scala"),
+          None,
+          None,
+          Some(CandidateResidence("Cyprus", Some("Nicosia"))),
+          Some(CandidateAvailabilityStatus.AVAILABLE_NOW),
+          recruiterSearchOptIn = true
+        )
+      )
+    ),
     now
   )
   private val recruiter = User(
@@ -94,7 +113,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val update =
       """mutation { updateMyProfile(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", skills: ["Scala"] }) { __typename } }"""
     val delete =
-      """mutation { deleteMyAccount(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001" }) { __typename ... on DeletionSuccess { deleted } } }"""
+      """mutation { deleteMyAccount(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001" }) { __typename ... on DeletionReceipt { receiptId status } } }"""
 
     (execute(me, None), execute(users, None), execute(update, None), execute(delete, None)).mapN {
       (meJson, usersJson, updateJson, deleteJson) =>
@@ -103,6 +122,66 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         assertEquals(errorCode(updateJson), Right("UNAUTHORIZED"))
         assertEquals(errorCode(deleteJson), Right("UNAUTHORIZED"))
     }
+  }
+
+  test("deletion receipt status is queryable without an active login") {
+    execute(
+      """query { accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") }""",
+      None
+    ).map { json =>
+      assertEquals(json.hcursor.downField("data").get[String]("accountDeletionStatus"), Right("NOT_FOUND"))
+    }
+  }
+
+  test("analytics report requires authentication") {
+    execute(
+      """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }""",
+      None
+    ).map { json =>
+      assertEquals(errorCode(json), Right("UNAUTHORIZED"))
+    }
+  }
+
+  test("analytics report failures use a sanitized analytics error") {
+    val reporting = new AnalyticsReportingUseCases {
+      override def report(
+          actor: ActorContext,
+          period: com.example.graphQL.cats.service.AnalyticsPeriod
+      ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
+        UseCaseIO.left(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
+    }
+    val query =
+      """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }"""
+
+    executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), analyticsReporting = reporting)
+      .map { json =>
+        assertEquals(errorCode(json), Right("ANALYTICS_UNAVAILABLE"))
+        assertEquals(
+          json.hcursor.downField("errors").downArray.get[String]("message"),
+          Right("Analytics reports are unavailable")
+        )
+      }
+  }
+
+  test("an active Admin can read a published report with its asOf timestamp") {
+    val asOf = Instant.parse("2026-09-17T08:00:00Z")
+    val snapshot = AnalyticsReportSnapshot(asOf, Nil, None, Nil)
+    val reporting = new AnalyticsReportingUseCases {
+      override def report(
+          actor: ActorContext,
+          period: com.example.graphQL.cats.service.AnalyticsPeriod
+      ): UseCaseIO[AnalyticsReportSnapshot] = UseCaseIO.pure(snapshot)
+    }
+    val query =
+      """query { analyticsReport(from: "2026-09-16T00:00:00Z", to: "2026-09-17T00:00:00Z") { asOf } }"""
+
+    executeWithUsers(query, Some(ActorContext(adminId, UserRole.Admin)), List(admin), analyticsReporting = reporting)
+      .map { json =>
+        assertEquals(
+          json.hcursor.downField("data").downField("analyticsReport").get[String]("asOf"),
+          Right(asOf.toString)
+        )
+      }
   }
 
   test("public account mutations are unavailable until hiring setup is ready") {
@@ -251,6 +330,41 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         .get[Option[String]]("email")
       assertEquals(candidateEmail, Right("candidate@example.com"))
       assertEquals(recruiterEmail, Right(None))
+    }
+  }
+
+  test("candidate private matching fields are visible to their owner and hidden from recruiters") {
+    val ownerQuery =
+      """query { myApplications(first: 10) { edges { node { candidate { profile { ... on CandidateProfile { currentResidence { country city } availabilityStatus recruiterSearchOptIn } } } } } } }"""
+    val recruiterQuery =
+      s"""query { jobApplications(jobId: "${jobId.value}", first: 10) { edges { node { candidate { profile { ... on CandidateProfile { currentResidence { country } availabilityStatus recruiterSearchOptIn } } } } } } }"""
+    (
+      execute(ownerQuery, Some(ActorContext(candidateId, UserRole.Candidate))),
+      execute(recruiterQuery, Some(ActorContext(recruiterId, UserRole.Recruiter)))
+    ).mapN { (owner, recruiterView) =>
+      val ownerProfile = owner.hcursor
+        .downField("data")
+        .downField("myApplications")
+        .downField("edges")
+        .downArray
+        .downField("node")
+        .downField("candidate")
+        .downField("profile")
+      assert(ownerProfile.succeeded, owner.noSpaces)
+      assertEquals(ownerProfile.downField("currentResidence").get[String]("country"), Right("Cyprus"))
+      assertEquals(ownerProfile.get[String]("availabilityStatus"), Right("AVAILABLE_NOW"))
+      assertEquals(ownerProfile.get[Boolean]("recruiterSearchOptIn"), Right(true))
+      val privateView = recruiterView.hcursor
+        .downField("data")
+        .downField("jobApplications")
+        .downField("edges")
+        .downArray
+        .downField("node")
+        .downField("candidate")
+        .downField("profile")
+      assertEquals(privateView.get[Option[Json]]("currentResidence"), Right(None))
+      assertEquals(privateView.get[Option[Json]]("availabilityStatus"), Right(None))
+      assertEquals(privateView.get[Boolean]("recruiterSearchOptIn"), Right(false))
     }
   }
 
@@ -993,7 +1107,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService: AccountUseCases = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      searchSessions: SearchSessionRepository = SearchSessionRepository.noop
+      searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
+      analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
   ): IO[Json] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
@@ -1010,7 +1125,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         ApplicationService(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         accountService = accountService,
-        searchSessions = searchSessions
+        searchSessions = searchSessions,
+        analyticsReporting = analyticsReporting
       )
       request <- parseRequest(query, variables)
       result <- TestGraphQLSupport
@@ -1110,8 +1226,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         )
       )
 
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[Unit] =
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
       UseCaseIO.left(unsupported)
+
+    override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+      UseCaseIO.pure(AccountDeletionStatus.NotFound)
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
       UseCaseIO.left(unsupported)
@@ -1139,7 +1258,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         actor: ActorContext,
         input: AccountProfileInput
     ): UseCaseIO[User] = unavailable
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[Unit] = unavailable
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unavailable
+    override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+      UseCaseIO.pure(AccountDeletionStatus.NotFound)
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unavailable
   }
 
@@ -1169,8 +1290,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     ): UseCaseIO[User] =
       UseCaseIO.left(unsupported)
 
-    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[Unit] =
+    override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
       UseCaseIO.left(unsupported)
+
+    override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+      UseCaseIO.pure(AccountDeletionStatus.NotFound)
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
       UseCaseIO.left(unsupported)

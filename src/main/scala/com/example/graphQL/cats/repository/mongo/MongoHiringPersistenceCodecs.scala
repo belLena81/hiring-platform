@@ -13,13 +13,23 @@ import scala.util.control.NonFatal
 /** Persistence-shaped records used by the generated BSON codecs. */
 private[mongo] object MongoHiringPersistenceCodecs {
   final case class StoredLocation(country: String, city: String, remote: Boolean)
+  final case class StoredCandidateResidence(
+      country: String,
+      city: Option[String],
+      countryCanonical: String,
+      cityCanonical: Option[String]
+  )
   final case class StoredProfile(
       kind: String = "",
       skills: Option[List[String]],
       experienceSummary: Option[String],
       resumeRef: Option[String],
       organizationName: Option[String],
-      jobTitle: Option[String]
+      jobTitle: Option[String],
+      currentResidence: Option[StoredCandidateResidence] = None,
+      availabilityStatus: Option[String] = None,
+      recruiterSearchOptIn: Option[Boolean] = None,
+      skillsCanonical: Option[List[String]] = None
   )
   final case class StoredEmbeddingMeta(model: String, sourceHash: String, updatedAt: Date)
   final case class StoredEmbeddingFields(embedding: List[Double], embeddingMeta: StoredEmbeddingMeta)
@@ -100,6 +110,8 @@ private[mongo] object MongoHiringPersistenceCodecs {
       aggregateType: String,
       aggregateId: String,
       actorId: String,
+      subjectIds: Option[List[String]],
+      subjectRefsVersion: Option[Int],
       payload: String,
       envelopeBytes: Array[Byte],
       partitionKey: String,
@@ -128,6 +140,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
   private val providers = CodecRegistries.fromProviders(
     IterableCodecProvider.apply(),
     ScalaMacros.createCodecProviderIgnoreNone[StoredLocation](),
+    ScalaMacros.createCodecProviderIgnoreNone[StoredCandidateResidence](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredProfile](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredEmbeddingMeta](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredEmbeddingFields](),

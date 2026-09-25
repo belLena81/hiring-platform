@@ -1,4 +1,4 @@
-FROM sbtscala/scala-sbt:eclipse-temurin-17.0.13_11_1.11.7_2.13.16
+FROM sbtscala/scala-sbt:eclipse-temurin-17.0.20_8_1.13.0_2.13.18
 
 WORKDIR /workspace/analytics
 

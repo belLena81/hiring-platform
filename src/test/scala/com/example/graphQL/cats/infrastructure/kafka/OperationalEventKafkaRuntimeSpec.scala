@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
-import cats.effect.{Deferred, IO, Ref}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.*
@@ -8,7 +8,9 @@ import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.shared.events.*
 import io.circe.Json
+import fs2.Stream
 import munit.CatsEffectSuite
+import org.apache.kafka.common.errors.ProducerFencedException
 
 import java.time.Instant
 import java.util.UUID
@@ -25,6 +27,15 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     publisher = KafkaPublisherConfig("test", 10, 30, 1, 3, 100),
     consumer = KafkaConsumerConfig(enabled = true, receiptTtlDays = 8, quarantineTtlDays = 7)
   )
+
+  test("publisher and reader use independent SASL principals") {
+    val publisher = OperationalEventKafkaRuntime.saslProperties(Some("publisher"), Some("publish-secret"))
+    val reader = OperationalEventKafkaRuntime.saslProperties(Some("analytics_reader"), Some("read-secret"))
+    assertEquals(publisher.get("security.protocol"), Some("SASL_PLAINTEXT"))
+    assert(publisher.getOrElse("sasl.jaas.config", "").contains("username=\"publisher\""))
+    assert(reader.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
+    assert(!publisher.getOrElse("sasl.jaas.config", "").contains("read-secret"))
+  }
 
   private def event(
       eventType: OperationalEventType,
@@ -204,6 +215,63 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       _ <- stream.compile.drain
       result <- attempts.get
     } yield assertEquals(result, 3)
+  }
+
+  test("producer fencing is detected through wrapped Kafka errors") {
+    assert(
+      OperationalEventKafkaRuntime.isProducerFenced(
+        new IllegalStateException("send failed", new ProducerFencedException("producer fenced"))
+      )
+    )
+    assert(!OperationalEventKafkaRuntime.isProducerFenced(new IllegalStateException("ordinary send failure")))
+  }
+
+  test("a fenced producer generation is released before the next generation starts") {
+    for {
+      acquired <- Ref.of[IO, Int](0)
+      released <- Ref.of[IO, Int](0)
+      transactionalIds <- Ref.of[IO, Vector[String]](Vector.empty)
+      secondGeneration <- Deferred[IO, Unit]
+      generation = Stream.suspend {
+        Stream.eval(IO.delay(s"hiring-publisher-${UUID.randomUUID()}")).flatMap { transactionalId =>
+          Stream.eval(transactionalIds.update(_ :+ transactionalId)) >>
+            Stream
+              .resource(Resource.make(acquired.update(_ + 1))(_ => released.update(_ + 1)))
+              .flatMap { _ =>
+                Stream.eval(acquired.get.flatMap {
+                  case 1 =>
+                    IO.raiseError[Unit](
+                      new IllegalStateException("wrapped fence", new ProducerFencedException("fenced"))
+                    )
+                  case _ => secondGeneration.complete(()).void *> IO.never[Unit]
+                })
+              }
+        }
+      }
+      supervised = Stream.suspend(
+        OperationalEventKafkaRuntime.resilientStream(
+          Diagnostics.noop,
+          generation,
+          1.millis,
+          OperationalEventKafkaRuntime.isProducerFenced
+        )
+          .handleErrorWith {
+            case error if OperationalEventKafkaRuntime.isProducerFenced(error) => Stream.empty
+            case error => Stream.raiseError[IO](error)
+          }
+      ).repeat
+      fiber <- supervised.compile.drain.start
+      _ <- secondGeneration.get
+      _ <- fiber.cancel
+      observedAcquired <- acquired.get
+      observedReleased <- released.get
+      observedTransactionalIds <- transactionalIds.get
+    } yield {
+      assertEquals(observedAcquired, 2)
+      assertEquals(observedReleased, 2)
+      assertEquals(observedTransactionalIds.size, 2)
+      assertEquals(observedTransactionalIds.distinct.size, 2)
+    }
   }
 
   test("resilient stream emits sanitized runtime failure diagnostics") {

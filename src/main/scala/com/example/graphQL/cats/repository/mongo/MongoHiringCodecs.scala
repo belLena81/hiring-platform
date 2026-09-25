@@ -13,6 +13,7 @@ import org.bson.Document
 
 import java.time.Instant
 import java.util.{Date, UUID}
+import scala.util.Try
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
@@ -149,9 +150,17 @@ private[mongo] object MongoHiringCodecs {
     MongoHiringPersistenceCodecs.operationalEvent(storedOperationalEvent(value))
 
   def readOperationalEvent(document: Document): ValidatedNel[StoredDocumentError, OperationalEventEnvelope] = {
+    val eventDocument = if (isOutbox(document)) projectOperationalEvent(document) else document
     val fields = if (isOutbox(document)) OutboxFields else OperationalEventFields
-    decode(document, fields)(MongoHiringPersistenceCodecs.decodeOperationalEvent).andThen(readOperationalEvent)
+    noUnexpectedFields(document, fields)
+      .andThen(_ => decode(eventDocument, OperationalEventFields)(MongoHiringPersistenceCodecs.decodeOperationalEvent))
+      .andThen(readOperationalEvent)
   }
+
+  private def projectOperationalEvent(document: Document): Document =
+    val event = new Document()
+    OperationalEventFields.foreach(field => Option(document.get(field)).foreach(value => event.put(field, value)))
+    event
 
   private def readOperationalEvent(
       value: StoredOperationalEvent
@@ -166,7 +175,13 @@ private[mongo] object MongoHiringCodecs {
       parseJson("payload", value.payload).toValidatedNel
     ).mapN(OperationalEventEnvelope.apply)
 
-  def outboxRecord(value: OperationalEventEnvelope, now: Instant): Document = {
+  def outboxRecord(value: OperationalEventEnvelope, now: Instant): Either[String, Document] =
+    for {
+      subjectIds <- outboxSubjectIds(value)
+      document = outboxDocument(value, now, subjectIds)
+    } yield document
+
+  private def outboxDocument(value: OperationalEventEnvelope, now: Instant, subjectIds: List[String]): Document = {
     val event = storedOperationalEvent(value)
     MongoHiringPersistenceCodecs.outbox(
       StoredOutboxRecord(
@@ -177,6 +192,8 @@ private[mongo] object MongoHiringCodecs {
         event.aggregateType,
         event.aggregateId,
         event.actorId,
+        Some(subjectIds),
+        Some(1),
         event.payload,
         event.envelopeBytes,
         event.partitionKey,
@@ -189,6 +206,41 @@ private[mongo] object MongoHiringCodecs {
         Date.from(now)
       )
     )
+  }
+
+  private def outboxSubjectIds(value: OperationalEventEnvelope): Either[String, List[String]] = {
+    val payload = value.payload.hcursor
+    def requiredUuid(field: String): Either[String, String] =
+      payload.get[String](field).leftMap(_ => s"missing outbox subject field: $field").flatMap(parseSubjectId)
+
+    def parseSubjectId(raw: String): Either[String, String] =
+      Try(UUID.fromString(raw)).toEither.leftMap(_ => "invalid outbox subject id").map(_.toString)
+
+    val candidates: Either[String, List[String]] = value.eventType match {
+      case OperationalEventType.APPLICATION_CREATED | OperationalEventType.APPLICATION_STATUS_CHANGED |
+          OperationalEventType.CANDIDATE_HIRED =>
+        requiredUuid("candidateId").map(List(_))
+      case OperationalEventType.SEARCH_PERFORMED =>
+        payload.get[String]("searchKind").leftMap(_ => "search event has no search kind").flatMap {
+          case "candidateMatches" =>
+            payload
+              .get[List[io.circe.Json]]("results")
+              .leftMap(_ => "candidate search event has malformed results")
+              .flatMap(_.traverse(_.hcursor.get[String]("resultId").leftMap(_ => "candidate result has no id")))
+              .flatMap(_.traverse(parseSubjectId))
+          case "jobs" | "recommendedJobs" | "semanticJobSearch" => Right(Nil)
+          case _                                                => Left("search event has an unknown search kind")
+        }
+      case OperationalEventType.SEARCH_RESULT_CLICKED =>
+        payload.get[String]("searchKind").leftMap(_ => "search click has no search kind").flatMap {
+          case "candidateMatches"                               => requiredUuid("resultId").map(List(_))
+          case "jobs" | "recommendedJobs" | "semanticJobSearch" => Right(Nil)
+          case _                                                => Left("search click has an unknown search kind")
+        }
+      case _ => Right(Nil)
+    }
+
+    candidates.map(values => (value.actorId.value.toString :: values).distinct.sorted)
   }
 
   def searchSession(value: SearchSession): Document =
@@ -276,8 +328,11 @@ private[mongo] object MongoHiringCodecs {
     "availableAt",
     "leaseOwner",
     "leaseToken",
+    "leaseUntil",
     "createdAt",
-    "updatedAt"
+    "updatedAt",
+    "subjectIds",
+    "subjectRefsVersion"
   )
   private val SearchSessionFields =
     Set("_id", "actorId", "searchKind", "query", "filter", "model", "results", "occurredAt", "expiresAt")
@@ -315,7 +370,18 @@ private[mongo] object MongoHiringCodecs {
           profile.experienceSummary,
           profile.resumeRef,
           None,
-          None
+          None,
+          profile.currentResidence.map(residence =>
+            MongoHiringPersistenceCodecs.StoredCandidateResidence(
+              residence.country,
+              residence.city,
+              residence.country.trim.toLowerCase(java.util.Locale.ROOT),
+              residence.city.map(_.trim.toLowerCase(java.util.Locale.ROOT))
+            )
+          ),
+          profile.availabilityStatus.map(_.toString),
+          Some(profile.recruiterSearchOptIn),
+          Some(profile.skills.toList.map(_.trim.toLowerCase(java.util.Locale.ROOT)).sorted)
         )
       )
     case UserProfile.Recruiter(profile) =>
@@ -326,7 +392,10 @@ private[mongo] object MongoHiringCodecs {
           None,
           None,
           Some(profile.organizationName),
-          profile.jobTitle
+          profile.jobTitle,
+          None,
+          None,
+          None
         )
       )
   }
@@ -337,7 +406,14 @@ private[mongo] object MongoHiringCodecs {
         (
           required(profile.skills, "profile.skills").map(_.toSet),
           profile.experienceSummary.validNel,
-          profile.resumeRef.validNel
+          profile.resumeRef.validNel,
+          profile.currentResidence.traverse(residence =>
+            (residence.country.validNel, residence.city.validNel).mapN(CandidateResidence.apply)
+          ),
+          profile.availabilityStatus.traverse(value =>
+            enumValue("profile.availabilityStatus", value, CandidateAvailabilityStatus.values).toValidatedNel
+          ),
+          profile.recruiterSearchOptIn.getOrElse(false).validNel
         ).mapN(CandidateProfile.apply).map(UserProfile.Candidate.apply)
       case "Recruiter" =>
         (
@@ -423,7 +499,18 @@ private[mongo] object MongoHiringCodecs {
             candidate.experienceSummary,
             candidate.resumeRef,
             None,
-            None
+            None,
+            candidate.currentResidence.map(residence =>
+              MongoHiringPersistenceCodecs.StoredCandidateResidence(
+                residence.country,
+                residence.city,
+                residence.country.trim.toLowerCase(java.util.Locale.ROOT),
+                residence.city.map(_.trim.toLowerCase(java.util.Locale.ROOT))
+              )
+            ),
+            candidate.availabilityStatus.map(_.toString),
+            Some(candidate.recruiterSearchOptIn),
+            Some(candidate.skills.toList.map(_.trim.toLowerCase(java.util.Locale.ROOT)).sorted)
           )
         case UserProfile.Recruiter(recruiter) =>
           StoredProfile(
@@ -432,7 +519,10 @@ private[mongo] object MongoHiringCodecs {
             None,
             None,
             Some(recruiter.organizationName),
-            recruiter.jobTitle
+            recruiter.jobTitle,
+            None,
+            None,
+            None
           )
       },
       Date.from(value.createdAt),

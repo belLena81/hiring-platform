@@ -17,6 +17,7 @@ import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.events.OperationalEventJson
 import fs2.Stream
 import fs2.kafka.*
+import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
 import retry.{HandlerDecision, RetryPolicies, retryingOnErrors}
@@ -46,7 +47,7 @@ object OperationalEventKafkaRuntime {
       outbox: OperationalEventOutboxRepository,
       diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
-    val settings =
+    val baseSettings =
       ProducerSettings(
         keySerializer = Serializer[IO, String],
         valueSerializer = Serializer[IO, Array[Byte]]
@@ -54,56 +55,117 @@ object OperationalEventKafkaRuntime {
         .withBootstrapServers(config.bootstrapServers)
         .withProperty(ProducerConfig.ACKS_CONFIG, "all")
         .withProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
+        .withProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000")
+        .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
+    val settings = saslProperties(config.publisher.saslUsername, config.publisher.saslPassword)
+      .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
 
-    KafkaProducer.resource(settings).flatMap { producer =>
-      background(
-        resilientStream(
-          diagnostics,
-          Stream
-            .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
-            .evalMap(_ => publishBatch(config, outbox, producer)),
-          config.publisher.retryDelaySeconds.seconds
-        )
-      )
+    def generation: Stream[IO, Unit] = {
+      val transactionalId = "hiring-publisher-" + java.util.UUID.randomUUID().toString
+      Stream
+        .resource(TransactionalKafkaProducer.resource(TransactionalProducerSettings(transactionalId, settings)))
+        .flatMap { producer =>
+          resilientStream(
+            diagnostics,
+            Stream
+              .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
+              .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer)),
+            config.publisher.retryDelaySeconds.seconds,
+            stopRetrying = isProducerFenced
+          )
+        }
+        .handleErrorWith {
+          case _: ProducerGenerationFenced => Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed))
+          case error =>
+            Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))) ++
+              Stream.sleep_[IO](config.publisher.retryDelaySeconds.seconds)
+        }
     }
+
+    background(Stream.suspend(generation).repeat)
   }
 
   private def publishBatch(
       config: KafkaConfig,
       outbox: OperationalEventOutboxRepository,
-      producer: KafkaProducer[IO, String, Array[Byte]]
+      diagnostics: Diagnostics,
+      transactionalId: String,
+      producer: TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]]
   ): IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
       val leaseUntil = now.plusSeconds(config.publisher.leaseSeconds.toLong)
-      outbox.claim(config.publisher.workerId, now, leaseUntil, config.publisher.batchSize).flatMap {
-        case Left(_)       => IO.unit
+      outbox.claim(config.publisher.workerId, transactionalId, now, leaseUntil, config.publisher.batchSize).flatMap {
+        case Left(error) =>
+          IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
         case Right(claims) =>
           publishClaims(claims) { claim =>
             val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
-            producer.produce(ProducerRecords.one(record)).flatten.attempt.flatMap {
-              case Right(_) =>
-                IO.realTimeInstant.flatMap(done =>
-                  outbox
-                    .markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds))
-                    .void
-                )
-              case Left(error) =>
-                IO.realTimeInstant.flatMap { failedAt =>
-                  if (claim.attempts >= config.publisher.maxAttempts)
-                    outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error)).void
-                  else
-                    outbox
-                      .releaseForRetry(
+            val send = producer.produceWithoutOffsets(ProducerRecords.one(record)).void
+            val renewEvery = (config.publisher.leaseSeconds.seconds / 3).max(1.second)
+            def renewalStream: Stream[IO, Unit] =
+              Stream
+                .awakeEvery[IO](renewEvery)
+                .evalMap { _ =>
+                  IO.realTimeInstant.flatMap(now =>
+                    requireOutboxSuccess(
+                      outbox.renewLease(
                         claim.event.eventId,
                         claim.leaseToken,
-                        failedAt,
-                        failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+                        claim.subjectIds,
+                        now.plusSeconds(config.publisher.leaseSeconds.toLong)
                       )
-                      .void
+                    )
+                  )
                 }
-            }
+            val heartbeat = renewalStream.compile.drain
+            IO.race(send.attempt, heartbeat)
+              .flatMap {
+                case Left(outcome) => IO.pure(outcome)
+                case Right(_)      =>
+                  IO.raiseError[Either[Throwable, Unit]](
+                    new IllegalStateException("outbox lease heartbeat stopped before Kafka send completed")
+                  )
+              }
+              .flatMap {
+                case Right(_) =>
+                  IO.realTimeInstant.flatMap(done =>
+                    requireOutboxSuccess(
+                      outbox.markPublished(
+                        claim.event.eventId,
+                        claim.leaseToken,
+                        done,
+                        done.plusSeconds(7.days.toSeconds)
+                      )
+                    )
+                  )
+                case Left(error) =>
+                  if (isProducerFenced(error)) IO.raiseError(ProducerGenerationFenced(error))
+                  else
+                    diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> IO.realTimeInstant.flatMap {
+                      failedAt =>
+                        if (claim.attempts >= config.publisher.maxAttempts)
+                          requireOutboxSuccess(
+                            outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error))
+                          )
+                        else
+                          requireOutboxSuccess(
+                            outbox.releaseForRetry(
+                              claim.event.eventId,
+                              claim.leaseToken,
+                              failedAt,
+                              failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+                            )
+                          )
+                    }
+              }
           }
       }
+    }
+
+  private def requireOutboxSuccess(result: IO[Either[RepositoryError, Unit]]): IO[Unit] =
+    result.flatMap {
+      case Right(())   => IO.unit
+      case Left(error) => IO.raiseError(new IllegalStateException(s"outbox operation failed: $error"))
     }
 
   /** Preserve ordering for one Kafka key while overlapping independent keys. */
@@ -118,7 +180,7 @@ object OperationalEventKafkaRuntime {
       quarantine: EventQuarantineRepository,
       diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
-    val settings =
+    val baseSettings =
       ConsumerSettings(
         keyDeserializer = Deserializer[IO, String],
         valueDeserializer = Deserializer[IO, Array[Byte]]
@@ -128,6 +190,8 @@ object OperationalEventKafkaRuntime {
         .withAutoOffsetReset(AutoOffsetReset.Earliest)
         .withEnableAutoCommit(false)
         .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
+    val settings = saslProperties(config.consumer.saslUsername, config.consumer.saslPassword)
+      .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
 
     background(
       resilientStream(
@@ -145,6 +209,20 @@ object OperationalEventKafkaRuntime {
       )
     )
   }
+
+  private[kafka] def saslProperties(username: Option[String], password: Option[String]): Map[String, String] =
+    (username, password) match {
+      case (Some(user), Some(secret)) =>
+        Map(
+          "security.protocol" -> "SASL_PLAINTEXT",
+          "sasl.mechanism" -> "PLAIN",
+          "sasl.jaas.config" ->
+            s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${jaasEscape(user)}\" password=\"${jaasEscape(secret)}\";"
+        )
+      case _ => Map.empty
+    }
+
+  private def jaasEscape(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
 
   private[kafka] def handleRecord(
       config: KafkaConfig,
@@ -217,13 +295,16 @@ object OperationalEventKafkaRuntime {
   private[kafka] def resilientStream(
       diagnostics: Diagnostics,
       stream: Stream[IO, Unit],
-      baseDelay: FiniteDuration
+      baseDelay: FiniteDuration,
+      stopRetrying: Throwable => Boolean = _ => false
   ): Stream[IO, Unit] =
     Stream.eval(
       retryingOnErrors(stream.compile.drain)(
         policy = RetryPolicies.fullJitter[IO](baseDelay),
         errorHandler = (error, _) =>
-          diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)).as(HandlerDecision.Continue)
+          diagnostics
+            .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+            .as(if (stopRetrying(error)) HandlerDecision.Stop else HandlerDecision.Continue)
       )
     )
 
@@ -232,4 +313,11 @@ object OperationalEventKafkaRuntime {
 
   private def sanitized(error: Throwable): String =
     Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
+
+  private[kafka] def isProducerFenced(error: Throwable): Boolean =
+    Iterator.iterate(Option(error))(_.flatMap(value => Option(value.getCause))).takeWhile(_.nonEmpty).flatten
+      .exists(value => value.isInstanceOf[ProducerFencedException] || value.isInstanceOf[InvalidProducerEpochException])
+
+  private final case class ProducerGenerationFenced(cause: Throwable)
+      extends RuntimeException("transactional producer generation was fenced", cause)
 }

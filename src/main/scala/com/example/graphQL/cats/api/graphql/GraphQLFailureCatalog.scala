@@ -46,6 +46,7 @@ private[graphql] object GraphQLFailureCatalog {
     case MissingEmbedding extends FailureMetadata("MISSING_EMBEDDING", exceptional = true)
     case StaleEmbedding extends FailureMetadata("STALE_EMBEDDING", exceptional = true)
     case InputTooLarge extends FailureMetadata("INPUT_TOO_LARGE", exceptional = true)
+    case InvalidSearchFilter extends FailureMetadata("INVALID_SEARCH_FILTER", exceptional = false)
     case ProviderUnavailable extends FailureMetadata("PROVIDER_UNAVAILABLE", exceptional = true)
     case VectorSearchUnavailable extends FailureMetadata("VECTOR_SEARCH_UNAVAILABLE", exceptional = true)
     case ValidationFailed extends FailureMetadata("VALIDATION_FAILED", exceptional = false)
@@ -108,6 +109,8 @@ private[graphql] object GraphQLFailureCatalog {
         failure(FailureMetadata.AnalyticsInvalidPeriod, "Analytics period must be ordered and at most 30 days")
       case AnalyticsError.ErasureContextRequired =>
         failure(FailureMetadata.AnalyticsContextRequired, "Account deletion is unavailable")
+      case AnalyticsError.ErasureWorkerUnavailable | AnalyticsError.ErasureNotCompleted =>
+        failure(FailureMetadata.AnalyticsUnavailable, "Account deletion is not available right now")
     }
 
   private def classifyDomain(error: DomainError): GraphQLFailure =
@@ -150,6 +153,8 @@ private[graphql] object GraphQLFailureCatalog {
       case SearchError.StaleEmbedding(entity) => failure(FailureMetadata.StaleEmbedding, s"$entity embedding is stale")
       case SearchError.InputTooLarge(field, maximum) =>
         failure(FailureMetadata.InputTooLarge, s"$field must be at most $maximum characters")
+      case SearchError.InvalidFilter(field) =>
+        failure(FailureMetadata.InvalidSearchFilter, s"Invalid $field filter")
       case SearchError.ProviderUnavailable =>
         failure(FailureMetadata.ProviderUnavailable, "Embedding provider unavailable")
       case SearchError.VectorSearchUnavailable =>

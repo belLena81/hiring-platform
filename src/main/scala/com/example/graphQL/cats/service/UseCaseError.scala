@@ -27,6 +27,7 @@ enum SearchError {
   case MissingEmbedding(entity: String)
   case StaleEmbedding(entity: String)
   case InputTooLarge(field: String, maximum: Int)
+  case InvalidFilter(field: String)
   case ProviderUnavailable
   case VectorSearchUnavailable
 }
@@ -37,6 +38,8 @@ enum AvailabilityError {
 
 enum AnalyticsError {
   case ErasureContextRequired
+  case ErasureWorkerUnavailable
+  case ErasureNotCompleted
   case ReportsUnavailable
   case InvalidPeriod
 }

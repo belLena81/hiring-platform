@@ -4,6 +4,7 @@ import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   AccountCredentials,
+  AccountDeletionStatus,
   Application,
   ApplicationEvent,
   EntityEmbedding,
@@ -153,19 +154,43 @@ final case class AnalyticsErasureRequest(userId: UserId, requestedAt: Instant)
 
 trait AnalyticsErasureRequestRepository {
 
+  /** Confirms an erasure worker is live before a new account deletion can mutate Mongo. */
+  def workerReady(now: Instant): IO[Either[RepositoryError, Unit]]
+
   /** Records the request in the caller's mutation transaction. Repeating the same request is intentionally idempotent
     * so receipt replay cannot create work twice.
     */
-  def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, Unit]]
+  def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, String]]
+
+  /** Returns only lifecycle state; the random receipt ID is a bearer capability. */
+  def status(receiptId: String): IO[Either[RepositoryError, AccountDeletionStatus]]
+
+  /** Removes durable outbox rows attributed to the subject after producer drain has been proven. */
+  def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]]
+
+  /** Retains a completed tombstone through the replay horizon before TTL cleanup. */
+  def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]]
 }
 
 object AnalyticsErasureRequestRepository {
   val unavailable: AnalyticsErasureRequestRepository = new AnalyticsErasureRequestRepository {
+    override def workerReady(now: Instant): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+
     override def enqueue(
         userId: UserId,
         now: Instant,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] =
+    ): IO[Either[RepositoryError, String]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+
+    override def status(receiptId: String): IO[Either[RepositoryError, AccountDeletionStatus]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+
+    override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+
+    override def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]] =
       IO.pure(Left(RepositoryError.Unavailable))
   }
 }
@@ -174,16 +199,47 @@ trait AnalyticsReportRepository {
   def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]]
 }
 
+/** Stable publication epoch and ordering token reserved before a batch starts doing expensive work. */
+final case class AnalyticsReportRunReservation(
+    runId: String,
+    rangeFingerprint: String,
+    generation: Long,
+    revision: Long
+)
+
 /** Publishes a complete, immutable analytical snapshot. The analytics batch owns expiry calculation; the operational
   * API only owns the read model contract.
   */
 trait AnalyticsReportSnapshotPublisher {
-  def publish(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): IO[Either[RepositoryError, Unit]]
+  def reserve(
+      runId: String,
+      rangeFingerprint: String,
+      now: Instant,
+      reservationExpiresAt: Instant
+  ): IO[Either[RepositoryError, AnalyticsReportRunReservation]]
+
+  def publish(
+      reservation: AnalyticsReportRunReservation,
+      snapshot: AnalyticsReportSnapshot,
+      expiresAt: Instant
+  ): IO[Either[RepositoryError, Unit]]
 }
 
 object AnalyticsReportSnapshotPublisher {
   val unavailable: AnalyticsReportSnapshotPublisher = new AnalyticsReportSnapshotPublisher {
-    override def publish(snapshot: AnalyticsReportSnapshot, expiresAt: Instant): IO[Either[RepositoryError, Unit]] =
+    override def reserve(
+        runId: String,
+        rangeFingerprint: String,
+        now: Instant,
+        reservationExpiresAt: Instant
+    ): IO[Either[RepositoryError, AnalyticsReportRunReservation]] =
+      IO.pure(Left(RepositoryError.Unavailable))
+
+    override def publish(
+      reservation: AnalyticsReportRunReservation,
+      snapshot: AnalyticsReportSnapshot,
+      expiresAt: Instant
+    ): IO[Either[RepositoryError, Unit]] =
       IO.pure(Left(RepositoryError.Unavailable))
   }
 }
@@ -307,7 +363,8 @@ final case class ClaimedOperationalEvent(
     envelopeBytes: Array[Byte],
     partitionKey: String,
     leaseToken: String,
-    attempts: Int
+    attempts: Int,
+    subjectIds: List[String] = Nil
 )
 
 enum OperationalEventFailureCategory {
@@ -317,10 +374,17 @@ enum OperationalEventFailureCategory {
 trait OperationalEventOutboxRepository {
   def claim(
       workerId: String,
+      transactionalId: String,
       now: Instant,
       leaseUntil: Instant,
       limit: Int
   ): IO[Either[RepositoryError, List[ClaimedOperationalEvent]]]
+  def renewLease(
+      eventId: java.util.UUID,
+      leaseToken: String,
+      subjectIds: List[String],
+      leaseUntil: Instant
+  ): IO[Either[RepositoryError, Unit]]
   def markPublished(
       eventId: java.util.UUID,
       leaseToken: String,

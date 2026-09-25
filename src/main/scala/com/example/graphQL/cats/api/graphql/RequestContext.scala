@@ -95,6 +95,16 @@ final class RequestContext private (
         )
     }
 
+  /** Deletion replay is authorized by the already verified bearer claims and resolved with allowDeleted=true. */
+  private[graphql] def deletionActor: IO[ActorContext] =
+    parameters.actor.fold[IO[ActorContext]](
+      IO.raiseError(
+        RequestContext.ReadFailure(
+          UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)
+        )
+      )
+    )(IO.pure)
+
   private[graphql] def invalidateViewer: IO[Unit] = viewerInvalidated.set(true)
 
   private[graphql] def rateLimited(operation: AuthRateLimiter.Operation): IO[Unit] =

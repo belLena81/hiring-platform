@@ -27,6 +27,8 @@ private[graphql] object HiringGraphQLInputs {
   lazy val userRole: EnumType[UserRole] = enumType("UserRole", UserRole.values.toList)
   lazy val userStatus: EnumType[AccountStatus] = enumType("UserStatus", AccountStatus.values.toList)
   lazy val searchMode: EnumType[SearchMode] = enumType("SearchMode", SearchMode.values.toList)
+  lazy val candidateAvailabilityStatus: EnumType[CandidateAvailabilityStatus] =
+    enumType("CandidateAvailabilityStatus", CandidateAvailabilityStatus.values.toList)
 
   private def enumType[A](name: String, values: List[A]): EnumType[A] =
     EnumType(name, values = values.map(value => EnumValue(value.toString.toUpperCase(Locale.ROOT), value = value)))
@@ -69,6 +71,7 @@ private[graphql] object HiringGraphQLInputs {
   given ScalarType[JobId] = jobIdType
   given ScalarType[ApplicationId] = applicationIdType
   given EnumType[UserRole] = userRole
+  given InputType[CandidateAvailabilityStatus] = candidateAvailabilityStatus
 
   lazy val idArgument: Argument[JobId] = Argument("id", jobIdType)
   lazy val jobIdArgument: Argument[JobId] = Argument("jobId", jobIdType)
@@ -81,8 +84,15 @@ private[graphql] object HiringGraphQLInputs {
     Argument("skills", OptionInputType(ListInputType(StringType)))
   lazy val createdAfterArgument: Argument[Option[Instant]] = Argument("createdAfter", OptionInputType(instantType))
   lazy val analyticsFromArgument: Argument[Instant] = Argument("from", instantType)
+  lazy val deletionReceiptIdArgument: Argument[String] = Argument("receiptId", IDType)
   lazy val analyticsToArgument: Argument[Instant] = Argument("to", instantType)
   lazy val searchIdArgument: Argument[Option[UUID]] = Argument("searchId", OptionInputType(uuidType))
+  lazy val candidateSearchQueryArgument: Argument[Option[String]] =
+    Argument("query", OptionInputType(StringType))
+  lazy val candidateMatchFilterInputType: InputObjectType[CandidateMatchFilter] =
+    deriveInputObjectType[CandidateMatchFilter](InputObjectTypeName("CandidateMatchFilter"))
+  lazy val candidateMatchFilterArgument: Argument[Option[CandidateMatchFilter]] =
+    Argument("filter", OptionInputType(candidateMatchFilterInputType))
   lazy val jobStatusArgument: Argument[Option[JobStatus]] = Argument("status", OptionInputType(jobStatus))
   lazy val applicationStatusArgument: Argument[Option[ApplicationStatus]] =
     Argument("status", OptionInputType(applicationStatus))

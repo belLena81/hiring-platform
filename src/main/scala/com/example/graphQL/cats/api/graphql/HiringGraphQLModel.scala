@@ -14,9 +14,14 @@ private[graphql] object HiringGraphQLModel {
   private given Decoder[UserRole] = Decoder.decodeString.emap { value =>
     UserRole.values.find(_.toString.equalsIgnoreCase(value)).toRight(s"Unknown user role: $value")
   }
+  private given Decoder[CandidateAvailabilityStatus] = Decoder.decodeString.emap { value =>
+    CandidateAvailabilityStatus.values.find(_.toString.equalsIgnoreCase(value)).toRight("Unknown availability status")
+  }
   given Encoder[JobId] = Encoder.encodeUUID.contramap(_.value)
   given Encoder[ApplicationId] = Encoder.encodeUUID.contramap(_.value)
   given Encoder[UserRole] = Encoder.encodeString.contramap(_.toString.toUpperCase(Locale.ROOT))
+  given Encoder[CandidateAvailabilityStatus] =
+    Encoder.encodeString.contramap(_.toString.toUpperCase(Locale.ROOT))
 
   extension [A: Encoder](input: A) def idempotencyPayload: Json = input.asJson
 
@@ -30,7 +35,7 @@ private[graphql] object HiringGraphQLModel {
   final case class DomainError(code: String, message: String) extends UserError
   type MutationOutcome[+A] = A | ValidationError | DomainError
   final case class AuthSuccess(user: User, accessToken: String, expiresAt: Instant)
-  final case class DeletionSuccess(deleted: Boolean)
+  final case class DeletionReceipt(receiptId: String, status: AccountDeletionStatus)
   final case class InteractionSuccess(recorded: Boolean)
   final case class PageInfo(hasNextPage: Boolean, endCursor: Option[String])
   final case class Edge[A](node: A, cursor: String)
@@ -42,19 +47,35 @@ private[graphql] object HiringGraphQLModel {
   ) derives Decoder
   final case class CandidateMatchProfile(skills: Set[String], experienceSummary: Option[String])
   final case class CandidateMatchCandidate(id: String, name: String, profile: Option[CandidateMatchProfile])
+  final case class CandidateMatchFilter(
+      requiredSkills: Option[List[String]],
+      country: Option[String],
+      city: Option[String],
+      availabilityStatus: Option[CandidateAvailabilityStatus]
+  ) derives Decoder
 
   enum GraphQLUserProfile {
-    case Candidate(value: CandidateProfile)
+    case Candidate(ownerId: com.example.graphQL.cats.domain.model.Identifiers.UserId, value: CandidateProfile)
     case Recruiter(value: RecruiterProfile)
   }
 
-  final case class RankedJobPayload(job: Job, score: Double, searchMode: SearchMode, model: String, searchId: String)
+  final case class RankedJobPayload(
+      job: Job,
+      score: Double,
+      searchMode: SearchMode,
+      model: String,
+      searchId: String,
+      matchedSkills: List[String],
+      retrievalScore: Option[Double]
+  )
   final case class RankedCandidatePayload(
       candidate: CandidateMatchCandidate,
       score: Double,
       searchMode: SearchMode,
       model: String,
-      searchId: String
+      searchId: String,
+      matchedSkills: List[String],
+      retrievalScore: Option[Double]
   )
   final case class RankedJobResults(results: List[RankedJobPayload])
   final case class RankedCandidateResults(results: List[RankedCandidatePayload])
@@ -111,6 +132,10 @@ private[graphql] object HiringGraphQLModel {
       skills: Option[List[String]],
       experienceSummary: Option[String],
       resumeRef: Option[String],
+      currentResidenceCountry: Option[String],
+      currentResidenceCity: Option[String],
+      availabilityStatus: Option[CandidateAvailabilityStatus],
+      recruiterSearchOptIn: Option[Boolean],
       organizationName: Option[String],
       jobTitle: Option[String]
   ) derives Decoder,
@@ -124,6 +149,10 @@ private[graphql] object HiringGraphQLModel {
       skills: Option[List[String]],
       experienceSummary: Option[String],
       resumeRef: Option[String],
+      currentResidenceCountry: Option[String],
+      currentResidenceCity: Option[String],
+      availabilityStatus: Option[CandidateAvailabilityStatus],
+      recruiterSearchOptIn: Option[Boolean],
       organizationName: Option[String],
       jobTitle: Option[String]
   ) derives Decoder,

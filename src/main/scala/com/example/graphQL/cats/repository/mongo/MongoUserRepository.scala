@@ -7,7 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents}
-import com.mongodb.client.model.{Filters, Sorts, Updates}
+import com.mongodb.client.model.{Filters, Sorts, UpdateOptions, Updates}
 import com.mongodb.client.result.UpdateResult
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
 import org.bson.Document
@@ -27,6 +27,7 @@ final class MongoUserRepository(
   private val collection = database.getCollection("users")
   private val registry = database.getCollection("account_registry")
   private val outbox = database.getCollection("event_outbox")
+  private val subjectFences = database.getCollection("outbox_subject_fences")
   private val MaxJobsClosedByAccountDeletion = 1000
 
   def insert(user: User): IO[Either[RepositoryError, Unit]] =
@@ -317,63 +318,98 @@ final class MongoUserRepository(
     val userWrite = updateOne(session, collection, userFilter, userUpdate)
     userWrite.flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
-        val jobFilter =
-          Filters.and(Filters.eq("recruiterId", userId.value.toString), Filters.eq("status", JobStatus.Open.toString))
-        val jobs = database.getCollection("jobs")
-        def closeJobs(afterId: Option[String]): IO[Either[RepositoryError, Unit]] = {
-          val batchFilter = Filters.and(
-            List(
-              Some(jobFilter),
-              afterId.map(id => Filters.gt("_id", id))
-            ).flatten*
-          )
-          val findJobs = findManyById(session, jobs, batchFilter, MaxJobsClosedByAccountDeletion)
-          findJobs.flatMap { documents =>
-            MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)) match {
-              case Left(error)          => IO.pure(Left(error))
-              case Right(Nil)           => IO.pure(Right(()))
-              case Right(versionedJobs) =>
-                val openJobs = versionedJobs.map(_.value)
-                val closedJobs =
-                  openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
-                val closeWrites = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
-                  Versioned.nextVersion(observed.version) match {
-                    case None              => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
-                    case Some(nextVersion) =>
-                      EitherT(
-                        replaceOne(
-                          session,
-                          jobs,
-                          MongoObservedStateFilters.jobReplacement(observed),
-                          MongoHiringCodecs.job(closed, nextVersion)
-                        ).map(MongoUserRepository.classifyJobClose)
-                      )
-                  }
-                }
-                val closeEvents = closedJobs.map { closed =>
-                  OperationalEvents.jobEvent(
-                    OperationalEventType.JOB_CLOSED,
-                    java.util.UUID.nameUUIDFromBytes(
-                      s"job:${closed.id.value}:JOB_CLOSED:${closed.updatedAt.toEpochMilli}"
-                        .getBytes(java.nio.charset.StandardCharsets.UTF_8)
-                    ),
-                    closed,
-                    userId,
-                    now
-                  )
-                }
-                (for {
-                  _ <- closeWrites
-                  _ <- EitherT(insertOperationalEvents(outbox, session, closeEvents, now))
-                  _ <- EitherT(closeJobs(Some(openJobs.last.id.value.toString)))
-                } yield ()).value
-            }
-          }
+        markSubjectFenceDeleted(session, userId, now).flatMap {
+          case Left(error) => IO.pure(Left(error))
+          case Right(())   => closeRecruiterJobs(userId, now, session)
         }
-        closeJobs(None)
       case Some(_) => IO.pure(Left(RepositoryError.Conflict))
       case None    => IO.pure(Left(RepositoryError.Unavailable))
     }
+  }
+
+  private def markSubjectFenceDeleted(
+      session: Option[ClientSession],
+      userId: UserId,
+      now: Instant
+  ): IO[Either[RepositoryError, Unit]] = {
+    val filter = Filters.eq("_id", userId.value.toString)
+    val update = Updates.combine(
+      Updates.setOnInsert("_id", userId.value.toString),
+      Updates.set("deleted", true),
+      Updates.set("deletedAt", Date.from(now))
+    )
+    val operation = session.fold(
+      PublisherBridge.first(subjectFences.updateOne(filter, update, new UpdateOptions().upsert(true)))
+    )(active =>
+      PublisherBridge.first(subjectFences.updateOne(active, filter, update, new UpdateOptions().upsert(true)))
+    )
+    operation
+      .map {
+        case Some(_) => Right(())
+        case None    => Left(RepositoryError.Unavailable)
+      }
+      .handleError(_ => Left(RepositoryError.Unavailable))
+  }
+
+  private def closeRecruiterJobs(
+      userId: UserId,
+      now: Instant,
+      session: Option[ClientSession]
+  ): IO[Either[RepositoryError, Unit]] = {
+    val jobFilter =
+      Filters.and(Filters.eq("recruiterId", userId.value.toString), Filters.eq("status", JobStatus.Open.toString))
+    val jobs = database.getCollection("jobs")
+    def closeJobs(afterId: Option[String]): IO[Either[RepositoryError, Unit]] = {
+      val batchFilter = Filters.and(
+        List(
+          Some(jobFilter),
+          afterId.map(id => Filters.gt("_id", id))
+        ).flatten*
+      )
+      val findJobs = findManyById(session, jobs, batchFilter, MaxJobsClosedByAccountDeletion)
+      findJobs.flatMap { documents =>
+        MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)) match {
+          case Left(error)          => IO.pure(Left(error))
+          case Right(Nil)           => IO.pure(Right(()))
+          case Right(versionedJobs) =>
+            val openJobs = versionedJobs.map(_.value)
+            val closedJobs =
+              openJobs.map(job => job.copy(status = JobStatus.Closed, closedAt = Some(now), updatedAt = now))
+            val closeWrites = versionedJobs.zip(closedJobs).traverse_ { case (observed, closed) =>
+              Versioned.nextVersion(observed.version) match {
+                case None              => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
+                case Some(nextVersion) =>
+                  EitherT(
+                    replaceOne(
+                      session,
+                      jobs,
+                      MongoObservedStateFilters.jobReplacement(observed),
+                      MongoHiringCodecs.job(closed, nextVersion)
+                    ).map(MongoUserRepository.classifyJobClose)
+                  )
+              }
+            }
+            val closeEvents = closedJobs.map { closed =>
+              OperationalEvents.jobEvent(
+                OperationalEventType.JOB_CLOSED,
+                java.util.UUID.nameUUIDFromBytes(
+                  s"job:${closed.id.value}:JOB_CLOSED:${closed.updatedAt.toEpochMilli}"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+                ),
+                closed,
+                userId,
+                now
+              )
+            }
+            (for {
+              _ <- closeWrites
+              _ <- EitherT(insertOperationalEvents(outbox, session, closeEvents, now))
+              _ <- EitherT(closeJobs(Some(openJobs.last.id.value.toString)))
+            } yield ()).value
+        }
+      }
+    }
+    closeJobs(None)
   }
 
   private def findOne(

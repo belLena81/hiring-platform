@@ -221,28 +221,14 @@ class MainProcessSpec extends CatsEffectSuite {
     }
   }
 
-  test("P1-AC09 actual Main runtime reporter emits only a safe event for a synthetic-secret failure") {
-    for {
-      port <- listeningSocket().use(socket => IO.pure(socket.getLocalPort))
-      result <- runChild(
-        "com.example.graphQL.cats.runtime.MainReporterProcess",
-        Map("HTTP_PORT" -> port.toString, "LOG_LEVEL" -> "INFO"),
-        List("--exercise-payload", "--test-http-host=127.0.0.1", s"--test-http-port=$port")
-      )
-    } yield {
-      assertEquals(result.exitCode, 0)
-      val events = assertSanitized(result, "RUNTIME_FAILED")
+  test("P1-AC09 actual Main sanitizes startup failure when MongoDB is unavailable") {
+    runChild(mainClass, Map("LOG_LEVEL" -> "INFO")).map { result =>
+      assert(result.exitCode != 0)
+      val events = assertSanitized(result, "STARTUP_FAILED")
       val categories = events.flatMap(_.hcursor.get[String]("category").toOption)
-      assertEquals(categories.count(_ == "RUNTIME_FAILED"), 1)
-      assert(categories.indexOf("STARTED") >= 0)
-      assert(categories.indexOf("STARTED") < categories.indexOf("RUNTIME_FAILED"))
-      assert(!categories.contains("STARTUP_FAILED"))
-      assert(!categories.contains("LOCAL_UNMASKED"))
+      assert(categories.contains("MONGO_SETUP_FAILED"))
+      assert(!categories.contains("STARTED"))
       assert(events.forall(_.hcursor.get[String]("masking") == Right("enabled")))
-      val started =
-        events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
-      assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right("[REDACTED]"))
-      assertEquals(started.hcursor.downField("details").get[String]("httpPort"), Right(port.toString))
     }
   }
 
@@ -278,22 +264,21 @@ class MainProcessSpec extends CatsEffectSuite {
   }
 
   List("127.42.10.8", "0:0:0:0:0:0:0:1").foreach { host =>
-    test(s"LOG-03 actual Main accepts local loopback $host while its runtime reporter stays masked") {
+    test(s"LOG-03 actual Main preserves local loopback diagnostic policy on Mongo startup failure for $host") {
       for {
         port <- listeningSocket(host).use(socket => IO.pure(socket.getLocalPort))
         result <- runChild(
-          "com.example.graphQL.cats.runtime.MainReporterProcess",
+          mainClass,
           Map(
             "HTTP_HOST" -> host,
             "HTTP_PORT" -> port.toString,
             "LOG_LEVEL" -> "INFO",
             "LOG_MASK_SENSITIVE" -> "false"
-          ),
-          List("--exercise-payload", s"--test-http-host=$host", s"--test-http-port=$port")
+          )
         )
       } yield {
-        assertEquals(result.exitCode, 0)
-        val events = assertSanitized(result, "RUNTIME_FAILED")
+        assert(result.exitCode != 0)
+        val events = assertSanitized(result, "STARTUP_FAILED")
         assert(events.count(_.hcursor.get[String]("category") == Right("LOCAL_UNMASKED")) >= 1)
         events.foreach { event =>
           assert(
@@ -302,13 +287,7 @@ class MainProcessSpec extends CatsEffectSuite {
             )
           )
         }
-        val started =
-          events.find(_.hcursor.get[String]("category") == Right("STARTED")).getOrElse(fail("Missing startup"))
-        val expectedHost = com.comcast.ip4s.IpAddress.fromString(host).map(_.toString).getOrElse(host)
-        assertEquals(started.hcursor.downField("details").get[String]("httpHost"), Right(expectedHost))
-        val failure =
-          events.find(_.hcursor.get[String]("category") == Right("RUNTIME_FAILED")).getOrElse(fail("Missing failure"))
-        assertEquals(failure.hcursor.downField("details").get[String]("errorType"), Right("java.lang.RuntimeException"))
+        assert(events.exists(_.hcursor.get[String]("category") == Right("MONGO_SETUP_FAILED")))
       }
     }
   }

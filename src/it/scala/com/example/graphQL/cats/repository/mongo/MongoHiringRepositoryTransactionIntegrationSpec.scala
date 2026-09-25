@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   AccountStatus,
+  CandidateProfile,
   Job,
   JobStatus,
   Location,
@@ -109,11 +110,25 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
         val legacyUser = MongoHiringCodecs.user(
           User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
         )
+        val legacyCandidate = MongoHiringCodecs.user(
+          User(
+            UserId(UUID.randomUUID()),
+            None,
+            "Legacy Candidate",
+            UserRole.Candidate,
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Engineer"), None))),
+            now
+          )
+        )
         val _ = legacyJob.remove("version")
         val _ = legacyUser.remove("version")
+        val _ = legacyCandidate.remove("version")
+        val legacyProfile = legacyCandidate.get("profile", classOf[Document])
+        val _ = legacyProfile.remove("recruiterSearchOptIn")
         for {
           _ <- PublisherBridge.first(database.getCollection("jobs").insertOne(legacyJob)).void
           _ <- PublisherBridge.first(database.getCollection("users").insertOne(legacyUser)).void
+          _ <- PublisherBridge.first(database.getCollection("users").insertOne(legacyCandidate)).void
           _ <- MongoHiringSetup.initialize(database)
           migratedJob <- PublisherBridge.first(
             database.getCollection("jobs").find(Filters.eq("_id", legacyJob.getString("_id")))
@@ -152,6 +167,14 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
           completedMigration <- PublisherBridge.first(
             database.getCollection("hiring_migration_ledger").find(Filters.eq("_id", "001_user_job_revisions"))
           )
+          completedCandidateProfileMigration <- PublisherBridge.first(
+            database
+              .getCollection("hiring_migration_ledger")
+              .find(Filters.eq("_id", "002_candidate_search_profile_verification"))
+          )
+          storedLegacyCandidate <- PublisherBridge.first(
+            database.getCollection("users").find(Filters.eq("_id", legacyCandidate.getString("_id")))
+          )
           skippedBackfill <- PublisherBridge.first(
             database.getCollection("jobs").find(Filters.eq("_id", missingVersionJob.getString("_id")))
           )
@@ -162,6 +185,14 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
             assertEquals(migratedJob.map(_.getLong("version").longValue()), Some(0L))
             assertEquals(migratedUser.map(_.getLong("version").longValue()), Some(0L))
             assertEquals(completedMigration.map(_.getString("state")), Some("Complete"))
+            assertEquals(completedCandidateProfileMigration.map(_.getString("state")), Some("Complete"))
+            assertEquals(
+              storedLegacyCandidate
+                .flatMap(document => MongoHiringCodecs.readUser(document).toOption)
+                .flatMap(_.candidateProfile)
+                .map(_.recruiterSearchOptIn),
+              Some(false)
+            )
             assertEquals(skippedBackfill.map(_.containsKey("version")), Some(false))
             assertEquals(skippedVerification.map(_.getString("version")), Some("invalid"))
           }

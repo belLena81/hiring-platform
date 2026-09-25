@@ -564,6 +564,16 @@ p95 < 300 ms
 
 ---
 
+# Recruiter candidate matching
+
+Recruiters search only candidates for jobs they own while the job is open. Matching can combine the owned job's embedding with an optional recruiter query and candidate-profile lexical search. Required skills are ANDed across the candidate's skills.
+
+Current residence and availability are private profile data. Filters on either field apply only to candidates who set `recruiterSearchOptIn`; opted-out or legacy profiles retain their normal vector-search inclusion. Candidates read these fields only in their own profile. Recruiter match results contain name, skills, experience summary, deterministic `matchedSkills`, and score; they do not include residence, availability, email, resume reference, or consent.
+
+Candidate location/status are structured retrieval filters and are excluded from embedding text. The default ranking remains application-side reciprocal-rank fusion. Native MongoDB fusion and reranking require explicit experimental configuration. Automated Embedding is an isolated synthetic-data comparison, not an application write path.
+
+---
+
 # UC07 — Manage Job
 
 **Actor:** Recruiter

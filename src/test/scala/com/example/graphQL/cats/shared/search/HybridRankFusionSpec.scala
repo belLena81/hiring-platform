@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.shared.search
 
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, SearchMode}
-import com.example.graphQL.cats.domain.model.Identifiers.JobId
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.service.ServiceFixtures
 import munit.FunSuite
 
@@ -37,5 +37,30 @@ final class HybridRankFusionSpec extends FunSuite {
     }
 
     assertEquals(HybridRankFusion.jobs(jobs, Nil, limit = 2).size, 2)
+  }
+
+  test("candidate fusion combines three ranks deterministically and matched skills preserve job spelling") {
+    def candidate(id: Int): RankedCandidate = RankedCandidate(
+      CandidateSearchHit(
+        UserId(UUID.fromString(f"00000000-0000-0000-0000-0000000009${id}%02d")),
+        s"Candidate $id",
+        Set("scala"),
+        None
+      ),
+      0.5,
+      SearchMode.VECTOR,
+      meta,
+      UUID.randomUUID()
+    )
+    val first = candidate(1)
+    val second = candidate(2)
+    val fused = HybridRankFusion.candidates(List(first, second), List(second, first), List(first), limit = 2)
+
+    assertEquals(fused.map(_.candidate.id), List(first.candidate.id, second.candidate.id))
+    assert(math.abs(fused.head.score - (2.0 / 61.0 + 1.0 / 62.0)) < 1e-12)
+    assertEquals(
+      SkillMatching.matched(Set(" scala ", "JAVA"), Set("Scala", "JavaScript", "java")),
+      List("java", "Scala")
+    )
   }
 }

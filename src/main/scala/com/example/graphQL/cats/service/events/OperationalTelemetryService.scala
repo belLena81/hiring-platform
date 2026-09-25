@@ -58,7 +58,7 @@ final class OperationalTelemetryService(
           Either.cond(authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
         )
         rank <- searchId.fold(UseCase.pure(Option.empty[Int]))(id =>
-          verifiedSearchResult(actor, id, jobId.value.toString).map(Some(_))
+          verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )
         now <- UseCase.liftIO(currentTime)
         event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
@@ -81,9 +81,17 @@ final class OperationalTelemetryService(
       replayInteraction(actor, eventId)
     ) { context =>
       for {
-        rank <- verifiedSearchResult(actor, searchId, resultId)
+        verified <- verifiedSearchResult(actor, searchId, resultId)
         now <- UseCase.liftIO(currentTime)
-        event = OperationalEvents.searchResultClicked(eventId, searchId, resultId, actor.userId, rank, now)
+        event = OperationalEvents.searchResultClicked(
+          eventId,
+          searchId,
+          resultId,
+          verified._2,
+          actor.userId,
+          verified._1,
+          now
+        )
         _ <- UseCase.repository(searchSessions.recordInteraction(event, context))
       } yield ()
     }
@@ -92,23 +100,23 @@ final class OperationalTelemetryService(
       actor: ActorContext,
       searchId: UUID,
       resultId: String
-  ): UseCaseIO[Int] =
+  ): UseCaseIO[(Int, String)] =
     UseCase.fromIO(
       searchSessions
         .find(searchId)
         .flatMap(
           _.widenUseCase.fold(
-            error => IO.pure(error.asLeft[Int]),
+            error => IO.pure(error.asLeft[(Int, String)]),
             session =>
               session match {
-                case None => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[Int]
+                case None => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[(Int, String)]
                 case Some(session) if session.actorId != actor.userId =>
-                  UseCaseError.Domain(DomainError.Forbidden).asLeft[Int]
+                  UseCaseError.Domain(DomainError.Forbidden).asLeft[(Int, String)]
                 case Some(session) =>
                   session.results
                     .find(_.resultId == resultId)
-                    .map(result => result.rank.asRight[UseCaseError])
-                    .getOrElse(UseCaseError.Domain(DomainError.Forbidden).asLeft[Int])
+                    .map(result => (result.rank, session.searchKind).asRight[UseCaseError])
+                    .getOrElse(UseCaseError.Domain(DomainError.Forbidden).asLeft[(Int, String)])
               } match {
                 case value @ Right(_)                                                  => IO.pure(value)
                 case Left(UseCaseError.Domain(DomainError.NotFound("search session"))) =>
@@ -116,10 +124,10 @@ final class OperationalTelemetryService(
                     .findForActor(actor.userId, searchId)
                     .map(_.widenUseCase.flatMap {
                       case Some(SearchSessionLookup.Pending) =>
-                        UseCaseError.Domain(DomainError.SearchSessionPending).asLeft[Int]
+                        UseCaseError.Domain(DomainError.SearchSessionPending).asLeft[(Int, String)]
                       case Some(SearchSessionLookup.Failed) =>
-                        UseCaseError.Domain(DomainError.SearchSessionUnavailable).asLeft[Int]
-                      case _ => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[Int]
+                        UseCaseError.Domain(DomainError.SearchSessionUnavailable).asLeft[(Int, String)]
+                      case _ => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[(Int, String)]
                     })
                 case value => IO.pure(value)
               }

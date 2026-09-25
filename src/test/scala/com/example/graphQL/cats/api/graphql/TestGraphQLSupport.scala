@@ -6,7 +6,7 @@ import com.example.graphQL.cats.api.admission.AuthRateLimiter
 import com.example.graphQL.cats.api.auth.AuthFailure
 import com.example.graphQL.cats.api.http.{ClientAddressResolver, HiringApiRoutes}
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, TrustedProxyConfig}
-import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserPageRequest}
+import com.example.graphQL.cats.domain.model.{AccountDeletionStatus, ApplicationStatus, UserPageRequest}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, ProbeResult}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
@@ -41,6 +41,7 @@ object TestGraphQLSupport {
     def me(actor: ActorContext) = unsupported
     def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput) = unsupported
     def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext) = unsupported
+    def accountDeletionStatus(receiptId: String) = UseCaseIO.pure(AccountDeletionStatus.NotFound)
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }
 

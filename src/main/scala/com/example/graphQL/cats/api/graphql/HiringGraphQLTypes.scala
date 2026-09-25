@@ -63,14 +63,52 @@ private[graphql] object HiringGraphQLTypes {
       simple("remote", BooleanType)(_.remote)
     )
   )
-  lazy val candidateProfileType: ObjectType[RequestContext, CandidateProfile] = ObjectType(
+  lazy val candidateProfileType: ObjectType[RequestContext, CandidateProfileView] = ObjectType(
     "CandidateProfile",
-    fields[RequestContext, CandidateProfile](
-      Field("skills", ListType(StringType), resolve = _.value.skills.toList.sorted),
-      simple("experienceSummary", OptionType(StringType))(_.experienceSummary),
-      simple("resumeRef", OptionType(StringType))(_.resumeRef)
+    fields[RequestContext, CandidateProfileView](
+      Field("skills", ListType(StringType), resolve = _.value.value.skills.toList.sorted),
+      Field("experienceSummary", OptionType(StringType), resolve = _.value.value.experienceSummary),
+      Field("resumeRef", OptionType(StringType), resolve = _.value.value.resumeRef),
+      Field(
+        "currentResidence",
+        OptionType(candidateResidenceType),
+        resolve = context =>
+          context.ctx.unsafeToFuture(
+            context.ctx.authenticatedActor.map(actor =>
+              Option.when(actor.userId == context.value.ownerId)(context.value.value.currentResidence).flatten
+            )
+          )
+      ),
+      Field(
+        "availabilityStatus",
+        OptionType(candidateAvailabilityStatus),
+        resolve = context =>
+          context.ctx.unsafeToFuture(
+            context.ctx.authenticatedActor.map(actor =>
+              Option.when(actor.userId == context.value.ownerId)(context.value.value.availabilityStatus).flatten
+            )
+          )
+      ),
+      Field(
+        "recruiterSearchOptIn",
+        BooleanType,
+        resolve = context =>
+          context.ctx.unsafeToFuture(
+            context.ctx.authenticatedActor.map(actor =>
+              actor.userId == context.value.ownerId && context.value.value.recruiterSearchOptIn
+            )
+          )
+      )
     )
   )
+  lazy val candidateResidenceType: ObjectType[RequestContext, CandidateResidence] = ObjectType(
+    "CandidateResidence",
+    fields[RequestContext, CandidateResidence](
+      simple("country", StringType)(_.country),
+      simple("city", OptionType(StringType))(_.city)
+    )
+  )
+  lazy val candidateAvailabilityStatus = HiringGraphQLInputs.candidateAvailabilityStatus
   lazy val candidateMatchProfileType: ObjectType[RequestContext, CandidateMatchProfile] =
     ObjectType(
       "CandidateMatchProfile",
@@ -91,9 +129,13 @@ private[graphql] object HiringGraphQLTypes {
   lazy val userProfileType: OutputType[GraphQLUserProfile] =
     UnionType[RequestContext]("UserProfile", List(candidateProfileType, recruiterProfileType))
       .mapValue[GraphQLUserProfile] {
-        case GraphQLUserProfile.Candidate(profile) => profile
-        case GraphQLUserProfile.Recruiter(profile) => profile
+        case GraphQLUserProfile.Candidate(ownerId, profile) => CandidateProfileView(ownerId, profile)
+        case GraphQLUserProfile.Recruiter(profile)          => profile
       }
+  final case class CandidateProfileView(
+      ownerId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+      value: CandidateProfile
+  )
   lazy val userType: ObjectType[RequestContext, User] = ObjectType(
     "User",
     fields[RequestContext, User](
@@ -113,10 +155,11 @@ private[graphql] object HiringGraphQLTypes {
       Field(
         "profile",
         OptionType(userProfileType),
-        resolve = _.value.profile.map {
-          case UserProfile.Candidate(profile) => GraphQLUserProfile.Candidate(profile)
-          case UserProfile.Recruiter(profile) => GraphQLUserProfile.Recruiter(profile)
-        }
+        resolve = context =>
+          context.value.profile.map {
+            case UserProfile.Candidate(profile) => GraphQLUserProfile.Candidate(context.value.id, profile)
+            case UserProfile.Recruiter(profile) => GraphQLUserProfile.Recruiter(profile)
+          }
       ),
       instantField("createdAt", _.createdAt)
     )
@@ -190,10 +233,21 @@ private[graphql] object HiringGraphQLTypes {
       simple("expiresAt", instantType)(_.expiresAt)
     )
   )
-  lazy val deletionSuccessType: ObjectType[RequestContext, DeletionSuccess] =
+  lazy val accountDeletionStatusType: EnumType[AccountDeletionStatus] = EnumType(
+    "AccountDeletionStatus",
+    values = List(
+      EnumValue("PENDING", value = AccountDeletionStatus.Pending),
+      EnumValue("COMPLETE", value = AccountDeletionStatus.Complete),
+      EnumValue("NOT_FOUND", value = AccountDeletionStatus.NotFound)
+    )
+  )
+  lazy val deletionReceiptType: ObjectType[RequestContext, DeletionReceipt] =
     ObjectType(
-      "DeletionSuccess",
-      fields[RequestContext, DeletionSuccess](simple("deleted", BooleanType)(_.deleted))
+      "DeletionReceipt",
+      fields[RequestContext, DeletionReceipt](
+        simple("receiptId", IDType)(_.receiptId),
+        simple("status", accountDeletionStatusType)(_.status)
+      )
     )
   lazy val interactionSuccessType: ObjectType[RequestContext, InteractionSuccess] =
     ObjectType(
@@ -207,7 +261,9 @@ private[graphql] object HiringGraphQLTypes {
       simple("score", FloatType)(_.score),
       simple("searchMode", searchMode)(_.searchMode),
       simple("model", StringType)(_.model),
-      simple("searchId", IDType)(_.searchId)
+      simple("searchId", IDType)(_.searchId),
+      Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
+      simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
     )
   )
   lazy val rankedCandidateType: ObjectType[RequestContext, RankedCandidatePayload] =
@@ -218,7 +274,9 @@ private[graphql] object HiringGraphQLTypes {
         simple("score", FloatType)(_.score),
         simple("searchMode", searchMode)(_.searchMode),
         simple("model", StringType)(_.model),
-        simple("searchId", IDType)(_.searchId)
+        simple("searchId", IDType)(_.searchId),
+        Field("matchedSkills", ListType(StringType), resolve = _.value.matchedSkills),
+        simple("retrievalScore", OptionType(FloatType))(_.retrievalScore)
       )
     )
   lazy val rankedJobResultsType: ObjectType[RequestContext, RankedJobResults] =
@@ -305,8 +363,8 @@ private[graphql] object HiringGraphQLTypes {
     mutationResultType("BootstrapAdminResult", authSuccessType)
   lazy val updateMyProfileResultType: OutputType[MutationOutcome[User]] =
     mutationResultType("UpdateMyProfileResult", userType)
-  lazy val deleteMyAccountResultType: OutputType[MutationOutcome[DeletionSuccess]] =
-    mutationResultType("DeleteMyAccountResult", deletionSuccessType)
+  lazy val deleteMyAccountResultType: OutputType[MutationOutcome[DeletionReceipt]] =
+    mutationResultType("DeleteMyAccountResult", deletionReceiptType)
   lazy val recordJobViewResultType: OutputType[MutationOutcome[InteractionSuccess]] =
     mutationResultType("RecordJobViewResult", interactionSuccessType)
   lazy val recordSearchResultClickResultType: OutputType[MutationOutcome[InteractionSuccess]] =

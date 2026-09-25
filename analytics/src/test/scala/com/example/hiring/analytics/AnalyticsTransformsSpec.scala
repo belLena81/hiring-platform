@@ -3,19 +3,24 @@ package com.example.hiring.analytics
 import cats.effect.{Clock, IO}
 import cats.effect.unsafe.implicits.global
 import munit.FunSuite
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.storage.StorageLevel
-import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, IntegerType, LongType, StringType, StructField, StructType, TimestampType}
 
 import java.nio.file.Files
 import java.sql.Timestamp
 import java.time.Instant
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 class AnalyticsTransformsSpec extends FunSuite {
-  private val pseudonymizer = SubjectPseudonymizer.fromSecret("analytics-test-secret".getBytes("UTF-8"))
+  override val munitTimeout: FiniteDuration = 5.minutes
+
+  private def hmacKey(seed: String): Array[Byte] = seed.padTo(32, 'x').getBytes("UTF-8")
+  private val pseudonymizer = SubjectPseudonymizer.fromSecret(hmacKey("analytics-test-secret"))
   private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
     .builder()
     .master("local[2]")
@@ -359,11 +364,25 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("Kafka offset bounds are valid JSON without escaped structural quotes") {
     val ranges = Vector(PartitionOffsetRange("hiring.operational-events", 0, 3L, 8L))
+    assertEquals(KafkaOffsetRangeSource.assignJson(ranges), "{\"hiring.operational-events\":[0]}")
     assertEquals(KafkaOffsetRangeSource.offsetJson(ranges, _.startOffset), "{\"hiring.operational-events\":{\"0\":3}}")
     assertEquals(
       KafkaOffsetRangeSource.offsetJson(ranges, _.endOffsetExclusive),
       "{\"hiring.operational-events\":{\"0\":8}}"
     )
+  }
+
+  test("Kafka range reader builds SASL settings for both metadata and Spark reads") {
+    val authenticated = KafkaConnection("kafka:9092", Some("analytics_reader"), Some("local-secret"))
+    val client = KafkaConnection.clientProperties(authenticated)
+    val spark = KafkaConnection.sparkOptions(authenticated)
+    assertEquals(client.get("security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(client.get("sasl.mechanism"), Some("PLAIN"))
+    assert(client.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
+    assertEquals(spark.get("kafka.security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(spark.get("kafka.group.id"), Some("hiring-analytics-batch"))
+    assertEquals(spark.get("kafka.isolation.level"), Some("read_committed"))
+    assertEquals(KafkaConnection.validate(KafkaConnection("kafka:9092", Some("reader"), None)).isInvalid, true)
   }
 
   test("bounded batch persists replayable layers and quality-blocks Gold on malformed or conflicting records") {
@@ -503,6 +522,246 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
+  test("new raw Delta tables retain replay bytes without copying raw values into transaction log statistics") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-private-delta-stats").toUri.toString.stripSuffix("/")
+    val paths = AnalyticsLakehousePaths(lakehouse)
+    val sensitiveMarker = "raw-log-personal-sentinel-8f17c2"
+    val input = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          0L,
+          event(
+            "private-stats-event",
+            "APPLICATION_CREATED",
+            aggregateId = "private-stats-application",
+            payload = Some(s"""{"applicationId":"private-stats-application","candidateId":"$sensitiveMarker"}""")
+          )
+        )
+      )
+    )
+    val manifest =
+      validatedManifest("run-private-delta-stats", Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L)))
+
+    new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
+      .run(spark, DataFrameBatchSource(input), manifest)
+      .unsafeRunSync()
+
+    val rawBronze = spark.read.format("delta").load(paths.bronze).select("rawValue").head().getString(0)
+    assert(rawBronze.contains(sensitiveMarker), "Bronze must retain bounded replay bytes")
+    val logDirectory = new org.apache.hadoop.fs.Path(s"${paths.bronze}/_delta_log")
+    val fileSystem = logDirectory.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val jsonLogs =
+      fileSystem.listStatus(logDirectory).filter(status => status.isFile && status.getPath.getName.endsWith(".json"))
+    assert(jsonLogs.nonEmpty, "Delta should have transaction log commits")
+    val logContents = jsonLogs.map { status =>
+      val stream = fileSystem.open(status.getPath)
+      try new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+      finally stream.close()
+    }
+    val mapper = new ObjectMapper()
+    def addFileActions(contents: Vector[String]): Vector[com.fasterxml.jackson.databind.JsonNode] =
+      contents.flatMap { content =>
+        content.linesIterator.flatMap(line => Option(mapper.readTree(line).get("add"))).toVector
+      }
+    def rawValueStats(
+        actions: Vector[com.fasterxml.jackson.databind.JsonNode]
+    ): Vector[com.fasterxml.jackson.databind.JsonNode] =
+      actions.flatMap(action => Option(action.get("stats")).filterNot(_.isNull)).map { statsNode =>
+        if (statsNode.isTextual) mapper.readTree(statsNode.asText()) else statsNode
+      }
+    val addActions = addFileActions(logContents.toVector)
+    assert(addActions.nonEmpty, "the log fixture must contain AddFile actions")
+    val statistics = rawValueStats(addActions)
+    assert(
+      statistics.forall(stats => !stats.path("minValues").has("rawValue") && !stats.path("maxValues").has("rawValue")),
+      "rawValue statistics must be disabled"
+    )
+    val properties = io.delta.tables.DeltaTable
+      .forPath(spark, paths.bronze)
+      .detail()
+      .select("properties")
+      .head()
+      .getAs[scala.collection.Map[String, String]]("properties")
+    assertEquals(properties.get("delta.dataSkippingNumIndexedCols"), Some("0"))
+
+    val controlPath = Files.createTempDirectory("hiring-analytics-stats-control").resolve("delta").toString
+    spark.read
+      .format("delta")
+      .load(paths.bronze)
+      .write
+      .format("delta")
+      .option("delta.dataSkippingNumIndexedCols", "32")
+      .save(controlPath)
+    val controlDirectory = new org.apache.hadoop.fs.Path(s"$controlPath/_delta_log")
+    val controlFs = controlDirectory.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val controlLogs =
+      controlFs.listStatus(controlDirectory).filter(status => status.isFile && status.getPath.getName.endsWith(".json"))
+    val controlContents = controlLogs.map { status =>
+      val stream = controlFs.open(status.getPath)
+      try new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+      finally stream.close()
+    }.toVector
+    assert(rawValueStats(addFileActions(controlContents)).exists(stats => stats.path("minValues").has("rawValue")))
+  }
+
+  test("Mongo publication failure never marks the Delta manifest PUBLISHED") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-publication-failure").toUri.toString.stripSuffix("/")
+    val paths = AnalyticsLakehousePaths(lakehouse)
+    val input = records(
+      (1 to 10).map(index =>
+        (
+          "hiring.operational-events",
+          0,
+          index.toLong,
+          event(
+            s"publication-failure-$index",
+            "APPLICATION_CREATED",
+            aggregateId = s"application-$index",
+            payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
+          )
+        )
+      )
+    )
+    val reportPublisher = new AnalyticsReportPublisher {
+      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+        IO.pure(AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L))
+
+      override def publish(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant
+      ): IO[Unit] = IO.raiseError(AnalyticsError.RunIdRangeConflict(reservation.runId))
+    }
+    val batch = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(emptyMarkers),
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
+      Some(reportPublisher)
+    )
+    val manifest =
+      validatedManifest("run-publication-fails", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
+
+    val error = intercept[AnalyticsError.RunIdRangeConflict] {
+      batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+    }
+
+    assertEquals(error.runId, "run-publication-fails")
+    assertEquals(
+      spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(),
+      0L
+    )
+  }
+
+  test("same-range retry completes the manifest after Mongo publication succeeds") {
+    val lakehouse = Files.createTempDirectory("hiring-analytics-manifest-retry").toUri.toString.stripSuffix("/")
+    val paths = AnalyticsLakehousePaths(lakehouse)
+    val input = records(
+      (1 to 10).map(index =>
+        (
+          "hiring.operational-events",
+          0,
+          index.toLong,
+          event(
+            s"manifest-retry-$index",
+            "APPLICATION_CREATED",
+            aggregateId = s"application-$index",
+            payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
+          )
+        )
+      )
+    )
+    val manifest =
+      validatedManifest("run-manifest-retry", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
+    val published = new AtomicInteger(0)
+    val failPublishedManifestOnce = new AtomicBoolean(true)
+    val publisher = new AnalyticsReportPublisher {
+      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+        IO.pure(AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L))
+
+      override def publish(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant
+      ): IO[Unit] = IO.delay { published.incrementAndGet(); () }
+    }
+    val defaultManifestWriter = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(emptyMarkers),
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
+    )
+    val writer: (SparkSession, AnalyticsRunManifest, String, String) => IO[Unit] =
+      (session, run, status, at) =>
+        if (status == "PUBLISHED" && failPublishedManifestOnce.compareAndSet(true, false))
+          IO.raiseError(AnalyticsError.LakehouseFailure(new IllegalStateException("injected manifest failure")))
+        else defaultManifestWriter.writeManifest(session, run, status, at)
+    val batch = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(emptyMarkers),
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
+      Some(publisher),
+      Some(writer)
+    )
+
+    intercept[AnalyticsError.LakehouseFailure] {
+      batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+    }
+    assertEquals(published.get(), 1)
+    assertEquals(spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(), 0L)
+
+    val retry = batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+
+    assertEquals(retry.outcome, AnalyticsRunOutcome.Published)
+    assertEquals(published.get(), 2)
+    assertEquals(spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(), 1L)
+    assertEquals(spark.read.format("delta").load(paths.silver).count(), 10L)
+  }
+
+  test("batch reads deletion markers before reserving its publication generation") {
+    val reserved = new AtomicBoolean(false)
+    val markers = new ActiveDeletionMarkerSource {
+      override def activeSubjectTokens(session: SparkSession): IO[org.apache.spark.sql.DataFrame] = IO.delay {
+        assert(!reserved.get(), "the marker snapshot must be read before publication is reserved")
+        emptyMarkers
+      }
+    }
+    val publisher = new AnalyticsReportPublisher {
+      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+        IO.delay {
+          reserved.set(true)
+          AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L)
+        }
+
+      override def publish(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant
+      ): IO[Unit] = IO.raiseError(new AssertionError("the test source fails before publication"))
+    }
+    val source = new BoundedOperationalEventSource {
+      override def read(session: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(AnalyticsError.SourceReadFailure(new IllegalStateException("injected source failure")))
+    }
+    val batch = new HiringAnalyticsBatch(
+      AnalyticsLakehousePaths(Files.createTempDirectory("analytics-reserve-order").toUri.toString),
+      pseudonymizer,
+      markers,
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
+      Some(publisher)
+    )
+    val manifest =
+      validatedManifest("reserve-before-markers", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+
+    val error = intercept[AnalyticsError.SourceReadFailure](batch.run(spark, source, manifest).unsafeRunSync())
+
+    assertEquals(error.getMessage, "analytics source read failed")
+    assert(reserved.get())
+  }
+
   test("active deletion markers purge stored Silver and rebuild Gold before a quality-blocked range") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-silver-erasure").toUri.toString.stripSuffix("/")
     val paths = AnalyticsLakehousePaths(lakehouse)
@@ -525,6 +784,9 @@ class AnalyticsTransformsSpec extends FunSuite {
       .silver(OperationalEventTransforms.validEvents(seedParsed), pseudonymizer, emptyMarkers)
       .withColumn("ingestedAt", lit(Timestamp.from(seedAt)))
       .withColumn("expiresAt", lit(Timestamp.from(seedAt.plusSeconds(30L * 24L * 60L * 60L))))
+    new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+      .validateKeyMaterialContinuity(spark)
+      .unsafeRunSync()
     seedSilver.write.format("delta").save(paths.silver)
     HiringGoldTransforms.wideFunnelDay(seedSilver).write.format("delta").save(paths.funnelGold)
     assertEquals(spark.read.format("delta").load(paths.silver).count(), 10L)
@@ -553,17 +815,21 @@ class AnalyticsTransformsSpec extends FunSuite {
       DataFrameDeletionMarkerSource(markers),
       fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
     )
+    intercept[AnalyticsError.LakehouseFailure] {
+      deletionBatch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
+    }
     val deletionRun = validatedManifest(
       "erasure-with-bad-range",
       Vector(PartitionOffsetRange("hiring.operational-events", 0, 11L, 13L))
     )
 
-    assertEquals(
-      deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).unsafeRunSync().outcome,
-      AnalyticsRunOutcome.QualityBlocked
-    )
+    val publication = deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).unsafeRunSync()
+    assertEquals(publication.outcome, AnalyticsRunOutcome.QualityBlocked)
+    assertEquals(publication.suppressedRecords, 1L)
     assertEquals(spark.read.format("delta").load(paths.silver).count(), 9L)
+    assertEquals(spark.read.format("delta").load(paths.quarantine).count(), 0L)
     assertEquals(spark.read.format("delta").load(paths.funnelGold).count(), 0L)
+    deletionBatch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
   }
 
   test("data frame source honors the manifest offset boundary") {
@@ -587,12 +853,90 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(failure.missing, Vector("offset", "partition"))
   }
 
+  test("empty requested ranges fail before reading or writing a manifest") {
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-empty-offset-range").toUri.toString)
+    val source = DataFrameBatchSource(records(Seq.empty))
+    val manifest = validatedManifest("empty-offset-range", Vector(PartitionOffsetRange("topic", 0, 4L, 4L)))
+    val failure = intercept[AnalyticsError.EmptyRequestedRange] {
+      new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
+        .run(spark, source, manifest)
+        .unsafeRunSync()
+    }
+    assertEquals(failure, AnalyticsError.EmptyRequestedRange("topic", 0, 4L))
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
+  }
+
+  test("missing partition and interior offset gaps fail before a manifest is written") {
+    val input = records(
+      Seq(
+        ("topic", 0, 1L, event("first", "APPLICATION_CREATED")),
+        ("topic", 0, 3L, event("third", "APPLICATION_CREATED"))
+      )
+    )
+    val scenarios = Vector(
+      ("missing-partition", PartitionOffsetRange("topic", 1, 5L, 6L), 1L, 0L),
+      ("missing-interior", PartitionOffsetRange("topic", 0, 1L, 4L), 3L, 2L)
+    )
+    scenarios.foreach { case (runId, range, requested, observed) =>
+      val paths = AnalyticsLakehousePaths(Files.createTempDirectory(s"analytics-$runId").toUri.toString)
+      val failure = intercept[AnalyticsError.MissingOffsetRange] {
+        new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
+          .run(spark, DataFrameBatchSource(input), validatedManifest(runId, Vector(range)))
+          .unsafeRunSync()
+      }
+      assertEquals(failure, AnalyticsError.MissingOffsetRange(range.topic, range.partition, requested, observed))
+      assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
+      assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.bronze))
+    }
+  }
+
+  test("broker retention bounds distinguish expired from not yet available offsets") {
+    val range = PartitionOffsetRange("topic", 0, 3L, 8L)
+    assertEquals(
+      AnalyticsOffsetRanges.available(range, earliestAvailable = 4L, latestExclusive = 10L),
+      Left(AnalyticsError.ExpiredOffsetRange("topic", 0, 3L, 4L))
+    )
+    assertEquals(
+      AnalyticsOffsetRanges.available(range, earliestAvailable = 0L, latestExclusive = 7L),
+      Left(AnalyticsError.MissingOffsetRange("topic", 0, 5L, 4L))
+    )
+    assertEquals(AnalyticsOffsetRanges.available(range, earliestAvailable = 0L, latestExclusive = 8L), Right(()))
+  }
+
   test("subject tokens are deterministic opaque HMAC values") {
     val token = pseudonymizer.token("candidate-1")
     assertEquals(token, pseudonymizer.token("candidate-1"))
     assertNotEquals(token, pseudonymizer.token("candidate-2"))
     assert(!token.contains("candidate-1"))
     assert(token.startsWith("hmac-v1_"))
+  }
+
+  test("HMAC secrets shorter than 256 bits are rejected") {
+    val error = intercept[AnalyticsError.InvalidConfiguration] {
+      SubjectPseudonymizer.fromSecret("short-secret".getBytes("UTF-8"))
+    }
+    assert(error.getMessage.contains("32 bytes"))
+    val encoded = java.util.Base64.getEncoder.encodeToString("short-secret".getBytes("UTF-8"))
+    intercept[AnalyticsError.InvalidConfiguration](SubjectPseudonymizer.fromBase64(encoded))
+  }
+
+  test("versioned HMAC key rings preserve retiring tokens for deletion markers") {
+    val oldSecret = hmacKey("old-analytics-key")
+    val newSecret = hmacKey("new-analytics-key")
+    val oldKey = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
+    val rotating = SubjectPseudonymizer.fromKeyRing("hmac-v2", newSecret, Vector("hmac-v1" -> oldSecret))
+    assertNotEquals(rotating.token("candidate-1"), oldKey.token("candidate-1"))
+    assertEquals(
+      rotating.matchingTokens("candidate-1").toSet,
+      Set(rotating.token("candidate-1"), oldKey.token("candidate-1"))
+    )
+    val subjectId = java.util.UUID.fromString("d31d0f7b-0abf-4e47-94da-b2f52cb5dd2e").toString
+    assertEquals(
+      MongoActiveDeletionMarkerSource
+        .tokensFor(new org.bson.Document("_id", subjectId), rotating)
+        .map(_.map(_.value).toSet),
+      Right(rotating.matchingTokens(subjectId).toSet)
+    )
   }
 
   test("Mongo erasure request subject IDs map to HMAC tokens and malformed IDs fail closed") {
@@ -649,6 +993,382 @@ class AnalyticsTransformsSpec extends FunSuite {
     assert(!silver.columns.contains("candidateId"))
   }
 
+  test("attributable actor and candidate search result identities are both marker-filtered") {
+    val source = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          1L,
+          event(
+            "application-event",
+            "APPLICATION_CREATED",
+            payload = Some("""{"applicationId":"application-1","candidateId":"candidate-2"}""")
+          )
+        ),
+        (
+          "hiring.operational-events",
+          0,
+          2L,
+          event(
+            "candidate-search",
+            "SEARCH_PERFORMED",
+            aggregateType = "Search",
+            aggregateId = "search-1",
+            payload = Some("""{"searchKind":"candidateMatches","results":[{"resultId":"candidate-3"}]}""")
+          )
+        )
+      )
+    )
+    val valid = OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(source))
+    val withTokens = AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer)
+    val tokenRows = withTokens
+      .select("eventId", "subjectTokens")
+      .collect()
+      .map { row =>
+        row.getString(0) -> row.getSeq[String](1).toList
+      }
+      .toMap
+
+    assertEquals(
+      tokenRows("application-event").toSet,
+      Set(pseudonymizer.token("actor-1"), pseudonymizer.token("candidate-2"))
+    )
+    assertEquals(
+      tokenRows("candidate-search").toSet,
+      Set(pseudonymizer.token("actor-1"), pseudonymizer.token("candidate-3"))
+    )
+    assertEquals(
+      OperationalEventTransforms
+        .silver(
+          valid,
+          pseudonymizer,
+          markerFrame(Seq(pseudonymizer.token("actor-1")))
+        )
+        .count(),
+      0L
+    )
+    assertEquals(
+      OperationalEventTransforms
+        .silver(
+          valid,
+          pseudonymizer,
+          markerFrame(Seq(pseudonymizer.token("candidate-3")))
+        )
+        .select("eventId")
+        .collect()
+        .map(_.getString(0))
+        .toSet,
+      Set("application-event")
+    )
+  }
+
+  test("new event attribution emits only the primary token while deletion matching retains previous keys") {
+    val oldSecret = hmacKey("old-search-key")
+    val current = SubjectPseudonymizer.fromKeyRing(
+      "hmac-v2",
+      hmacKey("new-search-key"),
+      Vector("hmac-v1" -> oldSecret)
+    )
+    val source = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          1L,
+          event(
+            "rotation-application",
+            "APPLICATION_CREATED",
+            payload = Some("""{"applicationId":"rotation-app","candidateId":"rotation-candidate"}""")
+          )
+        )
+      )
+    )
+    val valid = OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(source))
+    val attributed = AnalyticsSubjectPrivacy.withSubjectToken(valid, current).first()
+    val tokens = attributed.getAs[Seq[String]]("subjectTokens").toSet
+    assertEquals(attributed.getAs[String]("subjectToken"), current.token("rotation-candidate"))
+    assertEquals(tokens, Set(current.token("actor-1"), current.token("rotation-candidate")))
+    assertEquals(
+      current.matchingTokens("rotation-candidate").toSet,
+      Set(current.token("rotation-candidate"), SubjectPseudonymizer.fromSecret(oldSecret).token("rotation-candidate"))
+    )
+  }
+
+  test("batch refuses an HMAC primary key cutover while unexpired Silver rows use the retiring key") {
+    val oldSecret = hmacKey("old-cutover-key")
+    val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
+    val rotating = SubjectPseudonymizer.fromKeyRing(
+      "hmac-v2",
+      hmacKey("new-cutover-key"),
+      Vector("hmac-v1" -> oldSecret)
+    )
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-cutover").toUri.toString)
+    new HiringAnalyticsBatch(paths, old, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+      .validateKeyMaterialContinuity(spark)
+      .unsafeRunSync()
+    val schema = StructType(
+      Seq(
+        StructField("subjectToken", StringType, nullable = false),
+        StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false),
+        StructField("expiresAt", TimestampType, nullable = false)
+      )
+    )
+    spark
+      .createDataFrame(
+        Seq(
+          Row(old.token("candidate-1"), Seq(old.token("candidate-1")), Timestamp.from(Instant.now().plusSeconds(3600L)))
+        ).asJava,
+        schema
+      )
+      .write
+      .format("delta")
+      .save(paths.silver)
+    val markerSchema = StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
+    val markers = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], markerSchema)
+    val batch = new HiringAnalyticsBatch(paths, rotating, DataFrameDeletionMarkerSource(markers))
+    val source = new BoundedOperationalEventSource {
+      override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(new AssertionError("Kafka must not be read after an unsafe HMAC cutover"))
+    }
+    val error = intercept[AnalyticsError.InvalidConfiguration] {
+      batch
+        .run(
+          spark,
+          source,
+          validatedManifest(
+            "key-cutover",
+            Vector(
+              PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L)
+            )
+          )
+        )
+        .unsafeRunSync()
+    }
+    assert(error.getMessage.contains("retain the old primary"))
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
+  }
+
+  test("stored retiring-key tokens are accepted while configured and block key removal while rows remain") {
+    val oldSecret = hmacKey("old-stored-key")
+    val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
+    val rotating = SubjectPseudonymizer.fromKeyRing(
+      "hmac-v2",
+      hmacKey("new-stored-key"),
+      Vector("hmac-v1" -> oldSecret)
+    )
+    val removed = SubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("new-stored-key"), Vector.empty)
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-retirement").toUri.toString)
+    val stored = spark.createDataFrame(
+      Seq(Row(old.token("candidate-1"), Seq(rotating.token("candidate-1")))).asJava,
+      StructType(
+        Seq(
+          StructField("subjectToken", StringType, nullable = false),
+          StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false)
+        )
+      )
+    )
+    stored.write.format("delta").save(paths.silver)
+    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
+
+    new HiringAnalyticsBatch(paths, rotating, markers).validateStoredTokenKeys(spark).unsafeRunSync()
+    val error = intercept[AnalyticsError.InvalidConfiguration] {
+      new HiringAnalyticsBatch(paths, removed, markers).validateStoredTokenKeys(spark).unsafeRunSync()
+    }
+    assert(error.getMessage.contains("not configured"))
+    io.delta.tables.DeltaTable.forPath(spark, paths.silver).delete()
+    new HiringAnalyticsBatch(paths, removed, markers).validateStoredTokenKeys(spark).unsafeRunSync()
+  }
+
+  test("HMAC key continuity rejects changed material under the same key ID") {
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-continuity").toUri.toString)
+    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
+    val original = SubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("original-continuity-key"), Vector.empty)
+    val changed = SubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("changed-continuity-key"), Vector.empty)
+    new HiringAnalyticsBatch(paths, original, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    new HiringAnalyticsBatch(paths, original, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    val error = intercept[AnalyticsError.InvalidConfiguration] {
+      new HiringAnalyticsBatch(paths, changed, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    }
+    assert(error.getMessage.contains("changed without a new key ID"))
+  }
+
+  test("legacy lakehouse data without HMAC provenance is not silently anchored") {
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-unanchored-key").toUri.toString)
+    val pseudonymizer = SubjectPseudonymizer.fromSecret(hmacKey("legacy-key-material"))
+    spark
+      .createDataFrame(
+        Seq(Row(pseudonymizer.token("candidate-1"))).asJava,
+        StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
+      )
+      .write
+      .format("delta")
+      .save(paths.silver)
+    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
+    val error = intercept[AnalyticsError.InvalidConfiguration] {
+      new HiringAnalyticsBatch(paths, pseudonymizer, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    }
+    assert(error.getMessage.contains("no HMAC key continuity registry"))
+  }
+
+  test("a configured key ID with stored rows but no registry anchor fails closed") {
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-partial-key-registry").toUri.toString)
+    val current = SubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("current-registry-key"), Vector.empty)
+    new HiringAnalyticsBatch(paths, current, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+      .validateKeyMaterialContinuity(spark)
+      .unsafeRunSync()
+    val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("old-unanchored-key"), Vector.empty)
+    spark
+      .createDataFrame(
+        Seq(Row(old.token("candidate-1"))).asJava,
+        StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
+      )
+      .write
+      .format("delta")
+      .save(paths.silver)
+    val rotating = SubjectPseudonymizer.fromKeyRing(
+      "hmac-v2",
+      hmacKey("current-registry-key"),
+      Vector("hmac-v1" -> hmacKey("old-unanchored-key"))
+    )
+    val error = intercept[AnalyticsError.InvalidConfiguration] {
+      new HiringAnalyticsBatch(paths, rotating, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+        .validateKeyMaterialContinuity(spark)
+        .unsafeRunSync()
+    }
+    assert(error.getMessage.contains("without a continuity anchor"))
+  }
+
+  test("unavailable deletion markers do not create key registry or manifests") {
+    val paths =
+      AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-before-key-registry").toUri.toString)
+    val unavailableMarkers = new ActiveDeletionMarkerSource {
+      override def activeSubjectTokens(spark: SparkSession): IO[org.apache.spark.sql.DataFrame] =
+        IO.raiseError(AnalyticsError.MissingMarkerCollection)
+    }
+    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, unavailableMarkers)
+    val source =
+      DataFrameBatchSource(records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED")))))
+    intercept[AnalyticsError.MissingMarkerCollection.type] {
+      batch
+        .run(
+          spark,
+          source,
+          validatedManifest(
+            "marker-before-key-registry",
+            Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L))
+          )
+        )
+        .unsafeRunSync()
+    }
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry))
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
+  }
+
+  test("lazy marker evaluation failure does not create key registry or reserve publication") {
+    val paths =
+      AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-action-before-write").toUri.toString)
+    val reserved = new AtomicBoolean(false)
+    val failingMarkers = spark
+      .range(1L)
+      .select(org.apache.spark.sql.functions.expr("raise_error('marker evaluation failed')").as("subjectToken"))
+    val publisher = new AnalyticsReportPublisher {
+      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+        IO.delay {
+          reserved.set(true)
+          AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L)
+        }
+
+      override def publish(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant
+      ): IO[Unit] = IO.unit
+    }
+    val batch = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(failingMarkers),
+      fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
+      Some(publisher)
+    )
+    val source =
+      DataFrameBatchSource(records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED")))))
+    intercept[AnalyticsError.LakehouseFailure] {
+      batch
+        .run(
+          spark,
+          source,
+          validatedManifest(
+            "marker-action-before-key-registry",
+            Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L))
+          )
+        )
+        .unsafeRunSync()
+    }
+    assert(!reserved.get())
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry))
+    assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
+  }
+
+  test("batch filters marked subjects before Bronze and does not persist unattributable malformed quarantine") {
+    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-erasure-before-bronze").toUri.toString)
+    val batch = new HiringAnalyticsBatch(
+      paths,
+      pseudonymizer,
+      DataFrameDeletionMarkerSource(markerFrame(Seq(pseudonymizer.token("candidate-1"))))
+    )
+    val source = DataFrameBatchSource(
+      records(
+        Seq(
+          ("hiring.operational-events", 0, 0L, event("deleted", "APPLICATION_CREATED")),
+          (
+            "hiring.operational-events",
+            0,
+            1L,
+            event(
+              "retained",
+              "APPLICATION_CREATED",
+              aggregateId = "application-retained",
+              payload = Some("""{"applicationId":"application-retained","candidateId":"candidate-2"}""")
+            )
+          ),
+          ("hiring.operational-events", 0, 2L, "{\"eventId\":\"malformed\"}")
+        )
+      )
+    )
+    val manifest =
+      validatedManifest("erasure-before-bronze", Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 3L)))
+
+    val publication = batch.run(spark, source, manifest).unsafeRunSync()
+    val bronze = spark.read.format("delta").load(paths.bronze)
+    val quarantine = spark.read.format("delta").load(paths.quarantine)
+
+    assertEquals(publication.outcome, AnalyticsRunOutcome.QualityBlocked)
+    assertEquals(bronze.count(), 1L)
+    assertEquals(bronze.select("eventId").head().getString(0), "retained")
+    assert(!quarantine.columns.contains("rawValue"))
+    assert(!quarantine.columns.contains("actorId"))
+    assert(
+      quarantine.columns.toSet.subsetOf(
+        Set(
+          "topic",
+          "partition",
+          "offset",
+          "payloadHash",
+          "subjectTokens",
+          "quarantineId",
+          "quarantineReason",
+          "expiresAt"
+        )
+      )
+    )
+    // With an active deletion marker, an unattributable malformed row cannot safely be retained even as metadata.
+    // The run still counts it and remains quality-blocked, but no row is written to the quarantine table.
+    assertEquals(publication.quarantinedRecords, 1L)
+    assertEquals(quarantine.count(), 0L)
+  }
+
   test("cached deletion markers are released when the source fails") {
     val markers = markerFrame(Seq.empty)
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-cleanup").toUri.toString)
@@ -662,5 +1382,161 @@ class AnalyticsTransformsSpec extends FunSuite {
     intercept[AnalyticsError.SourceReadFailure](batch.run(spark, source, manifest).unsafeRunSync())
     assertEquals(markers.storageLevel, StorageLevel.NONE)
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
+  }
+
+  test("physical erasure verification is tied to captured Delta file paths") {
+    val root = Files.createTempDirectory("analytics-erasure-files")
+    val paths = AnalyticsLakehousePaths(root.toString)
+    val schema = StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
+    spark
+      .createDataFrame(Vector(Row("subject-deleted"), Row("subject-retained")).asJava, schema)
+      .coalesce(1)
+      .write
+      .format("delta")
+      .save(paths.silver)
+    val batch =
+      new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerFrame(Seq("subject-deleted"))))
+
+    val affectedFiles = batch.captureMarkedFiles(spark, markerFrame(Seq("subject-deleted"))).unsafeRunSync()
+    assertEquals(affectedFiles.size, 1)
+    val affectedPath = new org.apache.hadoop.fs.Path(affectedFiles.head)
+    val fileSystem = affectedPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    assert(fileSystem.exists(affectedPath))
+    intercept[AnalyticsError.PhysicalReclamationUnverified.type](
+      batch.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
+    )
+
+    assert(fileSystem.delete(affectedPath, false))
+    batch.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
+  }
+
+  test("no-op erasure retries advance the raw-log checkpoint boundary") {
+    val root = Files.createTempDirectory("analytics-no-op-log-checkpoint")
+    val paths = AnalyticsLakehousePaths(root.toString)
+    val rawSchema = StructType(
+      Seq(
+        StructField("rawValue", StringType, nullable = true),
+        StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = true),
+        StructField("expiresAt", TimestampType, nullable = true)
+      )
+    )
+    spark
+      .createDataFrame(
+        Vector(
+          Row("retained-event", Seq("subject-retained"), Timestamp.from(Instant.parse("2026-09-24T12:00:00Z")))
+        ).asJava,
+        rawSchema
+      )
+      .write
+      .format("delta")
+      .save(paths.bronze)
+    val markerRows = markerFrame(Seq("subject-not-present"))
+    val initialBatch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerRows))
+    val firstVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
+    assertEquals(initialBatch.countMarkedRows(spark, markerRows).unsafeRunSync(), 0L)
+
+    val initialEvidence =
+      initialBatch.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
+    assert(initialEvidence.nonEmpty)
+    initialBatch.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
+    val firstRetired = initialBatch.checkpointPurgedRawLogs(spark).unsafeRunSync()
+    val firstCheckpointVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
+    assert(
+      firstCheckpointVersion > firstVersion,
+      "checkpoint boundary must advance even when the deletion matched no rows"
+    )
+    assert(
+      initialEvidence.forall(firstRetired.contains),
+      "all pre-purge raw log paths must be retired by a newer boundary"
+    )
+
+    // Model worker reconstruction and exact retry after a crash following checkpointing.
+    val restartedBatch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerRows))
+    val retryEvidence =
+      restartedBatch.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
+    val retryJson = retryEvidence.filter(_.endsWith(".json"))
+    assert(retryJson.nonEmpty, "retry capture should include the current baseline commit")
+    restartedBatch.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
+    val retryRetired = restartedBatch.checkpointPurgedRawLogs(spark).unsafeRunSync()
+    val retryCheckpointVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
+    assert(retryCheckpointVersion > firstCheckpointVersion, "a restarted retry must establish a later boundary")
+    assert(retryJson.forall(retryRetired.contains), "retry baseline JSON must be older than the new clean checkpoint")
+  }
+
+  test("legacy raw log paths are checkpointed and removed once they age beyond log retention") {
+    val root = Files.createTempDirectory("analytics-legacy-log-cleanup")
+    val paths = AnalyticsLakehousePaths(root.toString)
+    val rawSchema = StructType(
+      Seq(
+        StructField("rawValue", StringType, nullable = true),
+        StructField("expiresAt", TimestampType, nullable = true)
+      )
+    )
+    val rawPath = paths.bronze
+    val privateValue = "legacy-raw-stats-sentinel"
+    spark
+      .createDataFrame(
+        Vector(Row(privateValue, Timestamp.from(Instant.parse("2026-09-24T12:00:00Z")))).asJava,
+        rawSchema
+      )
+      .write
+      .format("delta")
+      .option("delta.dataSkippingNumIndexedCols", "32")
+      .save(rawPath)
+    val markerRows = markerFrame(Seq("subject-deleted"))
+    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerRows))
+
+    val beforePurge = batch.captureMarkedFiles(spark, markerRows).unsafeRunSync()
+    val legacyLogs = beforePurge.filter(_.contains("/_delta_log/"))
+    assert(legacyLogs.nonEmpty)
+    val jsonLogs = legacyLogs.filter(_.endsWith(".json"))
+    val fileSystem = new org.apache.hadoop.fs.Path(rawPath).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    def readLog(path: String): String = {
+      val input = fileSystem.open(new org.apache.hadoop.fs.Path(path))
+      try new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+      finally input.close()
+    }
+    val legacyMapper = new ObjectMapper()
+    val legacyEntry = jsonLogs
+      .map(path => path -> readLog(path))
+      .flatMap { case (path, contents) =>
+        contents.linesIterator.map(line => path -> legacyMapper.readTree(line)).find(_._2.has("add"))
+      }
+      .headOption
+      .getOrElse(fail("legacy raw table should contain an AddFile action"))
+    val legacyJson = legacyEntry._1
+    val legacyAdd = legacyEntry._2.get("add")
+    val legacyStats = legacyMapper.readTree(legacyAdd.get("stats").asText())
+    assert(legacyStats.path("minValues").has("rawValue"), "legacy AddFile stats must include rawValue")
+
+    batch.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
+    val retiredLogs = batch.checkpointPurgedRawLogs(spark).unsafeRunSync()
+    assert(retiredLogs.contains(legacyJson))
+    val baselineVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, rawPath).update().version
+    val baselineFiles = fileSystem
+      .listStatus(new org.apache.hadoop.fs.Path(s"$rawPath/_delta_log"))
+      .filter(status => status.getPath.getName.startsWith(f"$baselineVersion%020d"))
+    assert(
+      baselineFiles.exists(_.getPath.getName.contains("checkpoint")),
+      "purge must establish a clean checkpoint baseline"
+    )
+    val oldTimestamp = System.currentTimeMillis() - 3L * 24L * 60L * 60L * 1000L
+    (legacyLogs ++ retiredLogs ++ baselineFiles.map(_.getPath.toString)).distinct.foreach { value =>
+      val logPath = new org.apache.hadoop.fs.Path(value)
+      fileSystem.setTimes(logPath, oldTimestamp, -1L)
+    }
+    spark.sql(s"ALTER TABLE delta.`$rawPath` SET TBLPROPERTIES ('delta.logRetentionDuration' = 'interval 1 day')")
+    spark
+      .createDataFrame(
+        Vector(Row("retained-after-erasure", Timestamp.from(Instant.parse("2026-09-24T12:00:00Z")))).asJava,
+        rawSchema
+      )
+      .write
+      .format("delta")
+      .mode("append")
+      .save(rawPath)
+    batch.checkpointRawTableLogs(spark).unsafeRunSync()
+    batch.verifyFilesAbsent(spark, retiredLogs).unsafeRunSync()
+    assert(fileSystem.exists(new org.apache.hadoop.fs.Path(legacyJson)) == false)
   }
 }

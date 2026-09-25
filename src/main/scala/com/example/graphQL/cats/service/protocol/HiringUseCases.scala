@@ -12,7 +12,7 @@ import com.example.graphQL.cats.shared.pagination.{
 }
 import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
-import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor}
+import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.util.UUID
 
@@ -34,6 +34,11 @@ trait HiringReadModel {
 
 trait UserAuthenticator {
   def actorFor(userId: UserId): IO[Either[RepositoryError, Option[ActorContext]]]
+
+  /** Resolves a cryptographically verified principal, including a deleted account for idempotent deletion replay.
+    * Operations still resolve active ownership through their service authorization boundary.
+    */
+  def actorForVerifiedToken(userId: UserId): IO[Either[RepositoryError, Option[ActorContext]]] = actorFor(userId)
 }
 
 trait JobUseCases {
@@ -83,6 +88,18 @@ trait SearchUseCases {
       first: PageSize,
       searchId: UUID
   ): UseCaseIO[List[RankedCandidate]]
+
+  def candidateMatches(
+      actor: ActorContext,
+      jobId: JobId,
+      query: Option[String],
+      filters: com.example.graphQL.cats.shared.search.CandidateMatchFilters,
+      first: PageSize,
+      searchId: UUID
+  ): UseCaseIO[List[RankedCandidate]] =
+    if (query.isEmpty && filters == com.example.graphQL.cats.shared.search.CandidateMatchFilters.empty)
+      candidateMatches(actor, jobId, first, searchId)
+    else UseCaseIO.left(UseCaseError.Search(SearchError.VectorSearchUnavailable))
 }
 
 trait InteractionUseCases {

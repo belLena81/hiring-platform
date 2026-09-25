@@ -58,11 +58,15 @@ class AppConfigSpec extends FunSuite {
       |    retry-delay-seconds = 5
       |    max-attempts = 10
       |    poll-interval-ms = 500
+      |    sasl-username = ${?KAFKA_PUBLISHER_USERNAME}
+      |    sasl-password = ${?KAFKA_PUBLISHER_V2_PASSWORD}
       |  }
       |  consumer {
       |    enabled = false
       |    receipt-ttl-days = 8
       |    quarantine-ttl-days = 7
+      |    sasl-username = ${?KAFKA_READER_USERNAME}
+      |    sasl-password = ${?KAFKA_READER_PASSWORD}
       |  }
       |}
       |vector-search {
@@ -82,12 +86,18 @@ class AppConfigSpec extends FunSuite {
       |  }
       |  indexes {
       |    jobs = "jobs_embedding_vector"
-      |    candidates = "candidates_embedding_vector"
+      |    candidates = "candidates_embedding_vector_match_v1"
       |    lexical = "jobs_text_search"
+      |    candidate-lexical = "candidates_text_search"
       |    ready-timeout-ms = 120000
       |    poll-interval-ms = 1000
       |  }
       |  num-candidates = 100
+      |  fusion-strategy = "applicationRrf"
+      |  rerank {
+      |    enabled = false
+      |    model = "rerank-2.5-lite"
+      |  }
       |}
       |""".stripMargin
 
@@ -104,8 +114,12 @@ class AppConfigSpec extends FunSuite {
       retryAttempts = 3,
       retryDelayMillis = 250,
       jobVectorIndex = "jobs_embedding_vector",
-      candidateVectorIndex = "candidates_embedding_vector",
+      candidateVectorIndex = "candidates_embedding_vector_match_v1",
       jobLexicalIndex = "jobs_text_search",
+      candidateLexicalIndex = "candidates_text_search",
+      fusionStrategy = com.example.graphQL.cats.shared.search.SearchFusionStrategy.ApplicationRrf,
+      rerankEnabled = false,
+      rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 120000,
       indexPollIntervalMillis = 1000,
       numCandidates = 100
@@ -132,6 +146,28 @@ class AppConfigSpec extends FunSuite {
       ),
       consumer = KafkaConsumerConfig(enabled = false, receiptTtlDays = 8, quarantineTtlDays = 7)
     )
+
+  test("Kafka publisher and reader credentials are resolved independently") {
+    val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
+    val parsed = AppConfig.fromConfig(
+      enabled,
+      Map(
+        "KAFKA_PUBLISHER_USERNAME" -> "hiring_publisher_v2",
+        "KAFKA_PUBLISHER_V2_PASSWORD" -> "publisher-v2-secret",
+        "KAFKA_READER_USERNAME" -> "analytics_reader",
+        "KAFKA_READER_PASSWORD" -> "reader-secret"
+      )
+    )
+    assertEquals(parsed.map(_.kafka.publisher.saslUsername), Right(Some("hiring_publisher_v2")))
+    assertEquals(parsed.map(_.kafka.publisher.saslPassword), Right(Some("publisher-v2-secret")))
+    assertEquals(parsed.map(_.kafka.consumer.saslUsername), Right(Some("analytics_reader")))
+    assertEquals(parsed.map(_.kafka.consumer.saslPassword), Right(Some("reader-secret")))
+  }
+
+  test("enabled Kafka rejects missing authentication credentials") {
+    val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
+    assertContainsError(AppConfig.fromConfig(enabled, Map.empty), ConfigError.InvalidKafkaCredentials)
+  }
 
   test("P1-AC01 loads grouped HOCON settings and resolves env placeholders") {
     val config =
@@ -171,13 +207,17 @@ class AppConfigSpec extends FunSuite {
         |    batch-size = 25
         |    lease-seconds = 30
         |    retry-delay-seconds = 5
-        |    max-attempts = 10
-        |    poll-interval-ms = 500
-        |  }
-        |  consumer {
+      |    max-attempts = 10
+      |    poll-interval-ms = 500
+      |    sasl-username = ${?KAFKA_PUBLISHER_USERNAME}
+      |    sasl-password = ${?KAFKA_PUBLISHER_V2_PASSWORD}
+      |  }
+      |  consumer {
         |    enabled = false
         |    receipt-ttl-days = 8
-        |    quarantine-ttl-days = 7
+      |    quarantine-ttl-days = 7
+      |    sasl-username = ${?KAFKA_READER_USERNAME}
+      |    sasl-password = ${?KAFKA_READER_PASSWORD}
         |  }
         |}
         |vector-search {
@@ -197,12 +237,18 @@ class AppConfigSpec extends FunSuite {
         |  }
         |  indexes {
         |    jobs = "jobs_embedding_vector"
-        |    candidates = "candidates_embedding_vector"
+        |    candidates = "candidates_embedding_vector_match_v1"
         |    lexical = "jobs_text_search"
+        |    candidate-lexical = "candidates_text_search"
         |    ready-timeout-ms = 120000
         |    poll-interval-ms = 1000
         |  }
         |  num-candidates = 100
+        |  fusion-strategy = "applicationRrf"
+        |  rerank {
+        |    enabled = false
+        |    model = "rerank-2.5-lite"
+        |  }
         |}
         |""".stripMargin
     assertEquals(
@@ -398,12 +444,18 @@ class AppConfigSpec extends FunSuite {
         |  }
         |  indexes {
         |    jobs = "jobs_embedding_vector"
-        |    candidates = "candidates_embedding_vector"
+        |    candidates = "candidates_embedding_vector_match_v1"
         |    lexical = "jobs_text_search"
+        |    candidate-lexical = "candidates_text_search"
         |    ready-timeout-ms = 120000
         |    poll-interval-ms = 1000
         |  }
         |  num-candidates = 100
+        |  fusion-strategy = "applicationRrf"
+        |  rerank {
+        |    enabled = false
+        |    model = "rerank-2.5-lite"
+        |  }
         |}
         |""".stripMargin
     val local =
@@ -646,6 +698,23 @@ class AppConfigSpec extends FunSuite {
     }
   }
 
+  test("experimental Mongo fusion and reranking require explicit compatible configuration") {
+    val rankFusion = defaultConfig + "vector-search.fusion-strategy = mongoRankFusion\n"
+    val scoreFusion = defaultConfig + "vector-search.fusion-strategy = mongoScoreFusion\n"
+    val invalidFusion = defaultConfig + "vector-search.fusion-strategy = unsupported\n"
+    val rerankWithoutNativeFusion = defaultConfig + "vector-search.rerank.enabled = true\n"
+    val invalidReranker = defaultConfig + "vector-search.rerank.model = unknown-model\n"
+
+    assert(AppConfig.fromConfig(rankFusion, Map.empty).isRight)
+    assert(AppConfig.fromConfig(scoreFusion, Map.empty).isRight)
+    assertContainsError(AppConfig.fromConfig(invalidFusion, Map.empty), ConfigError.InvalidVectorFusionStrategy)
+    assertContainsError(
+      AppConfig.fromConfig(rerankWithoutNativeFusion, Map.empty),
+      ConfigError.InvalidVectorFusionStrategy
+    )
+    assertContainsError(AppConfig.fromConfig(invalidReranker, Map.empty), ConfigError.InvalidRerankModel)
+  }
+
   test("request timeout is bounded") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.requestTimeout), Right(5.seconds))
     assertContainsError(
@@ -704,6 +773,7 @@ class AppConfigSpec extends FunSuite {
           Set(
             ConfigError.InvalidHost,
             ConfigError.InvalidMongoDatabase,
+            ConfigError.InvalidKafkaCredentials,
             ConfigError.InvalidVoyageApiKey
           )
         )
