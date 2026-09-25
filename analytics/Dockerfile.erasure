@@ -8,4 +8,4 @@ RUN sbt update
 
 COPY analytics/src ./src
 
-ENTRYPOINT ["/bin/sh", "-ec", "[ -n \"$MONGODB_URI\" ] && [ -n \"$ANALYTICS_LAKEHOUSE_ROOT\" ] && [ -n \"$ANALYTICS_TOPIC\" ] && [ -n \"$ANALYTICS_KAFKA_USERNAME\" ] && [ -n \"$ANALYTICS_KAFKA_PASSWORD\" ] && [ -n \"$HIRING_ANALYTICS_HMAC_SECRET_BASE64\" ] || { echo 'required analytics erasure worker configuration is missing' >&2; exit 2; }; exec sbt \"runMain com.example.hiring.analytics.AnalyticsErasureWorkerMain\""]
+ENTRYPOINT ["sbt", "runMain com.example.hiring.analytics.AnalyticsErasureWorkerMain"]

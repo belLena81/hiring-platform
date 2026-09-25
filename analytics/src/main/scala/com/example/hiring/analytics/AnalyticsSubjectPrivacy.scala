@@ -18,6 +18,9 @@ import org.apache.spark.sql.functions.{
 }
 import org.apache.spark.sql.api.java.UDF1
 import org.apache.spark.sql.types.{ArrayType, StringType}
+import cats.data.ValidatedNec
+import cats.syntax.all.*
+import io.github.iltotore.iron.*
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
@@ -75,19 +78,29 @@ object SubjectPseudonymizer {
       primaryKeyId: String,
       secret: Array[Byte],
       previousKeys: Vector[(String, Array[Byte])]
-  ): SubjectPseudonymizer = {
+  ): SubjectPseudonymizer = unsafe(validatedKeyRing(primaryKeyId, secret, previousKeys))
+
+  def validatedKeyRing(
+      primaryKeyId: String,
+      secret: Array[Byte],
+      previousKeys: Vector[(String, Array[Byte])]
+  ): ValidatedNec[String, SubjectPseudonymizer] = {
     val allKeys = (primaryKeyId -> secret) +: previousKeys
     val ids = allKeys.map(_._1)
-    if (
-      allKeys.exists { case (id, key) =>
-        id == null || !KeyIdPattern.matches(id) || key == null || key.length < MinimumKeyBytes
-      } ||
-      ids.distinct.size != ids.size
-    )
-      throw AnalyticsError.InvalidConfiguration(
-        s"HMAC key IDs are invalid or key material is shorter than $MinimumKeyBytes bytes"
-      )
-    new SubjectPseudonymizer(allKeys)
+    val idAndKeyErrors = allKeys.zipWithIndex.flatMap { case ((id, key), index) =>
+      Vector(
+        Option.when(id == null || !KeyIdPattern.matches(id))(s"HMAC key ID at index $index is invalid"),
+        Option.when(key == null || key.length < MinimumKeyBytes)(
+          s"HMAC key material at index $index must contain at least $MinimumKeyBytes bytes"
+        )
+      ).flatten
+    }
+    val duplicateIds = Option.when(ids.distinct.size != ids.size)("HMAC key IDs must be unique").toVector
+    val errors = idAndKeyErrors ++ duplicateIds
+    cats.data.NonEmptyChain.fromSeq(errors) match {
+      case Some(problems) => cats.data.Validated.Invalid(problems)
+      case None           => cats.data.Validated.Valid(new SubjectPseudonymizer(allKeys))
+    }
   }
 
   def fromBase64(secret: String): SubjectPseudonymizer =
@@ -98,22 +111,59 @@ object SubjectPseudonymizer {
       primaryKeyId: String,
       previousKeyId: Option[String],
       previousSecret: Option[String]
-  ): SubjectPseudonymizer = {
-    if (secret == null || secret.isEmpty)
-      throw AnalyticsError.InvalidConfiguration("base64 HMAC secret must be non-empty")
-    val previous = (previousKeyId, previousSecret) match {
-      case (None, None)                                                       => Vector.empty
-      case (Some(id), Some(value)) if id.trim.nonEmpty && value.trim.nonEmpty => Vector(id -> decode(value))
-      case _ => throw AnalyticsError.InvalidConfiguration("previous HMAC key ID and secret must be configured together")
+  ): SubjectPseudonymizer = unsafe(validateFromBase64(Option(secret), primaryKeyId, previousKeyId, previousSecret))
+
+  def validateFromBase64(
+      secret: Option[String],
+      primaryKeyId: String,
+      previousKeyId: Option[String],
+      previousSecret: Option[String]
+  ): ValidatedNec[String, SubjectPseudonymizer] = {
+    val primary = decode(secret, "HIRING_ANALYTICS_HMAC_SECRET_BASE64")
+    val configuredPreviousKeyId = previousKeyId.filter(_.trim.nonEmpty)
+    val configuredPreviousSecret = previousSecret.filter(_.trim.nonEmpty)
+    val previous = (configuredPreviousKeyId, configuredPreviousSecret) match {
+      case (None, None)            => Vector.empty[(String, Array[Byte])].validNec[String]
+      case (Some(id), Some(value)) =>
+        (
+          id.refineEither[io.github.iltotore.iron.constraint.any.Not[io.github.iltotore.iron.constraint.string.Blank]]
+            .leftMap(_ => "HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID must be non-empty")
+            .toValidatedNec,
+          decode(Some(value), "HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64")
+        ).mapN(_ -> _).map(Vector(_))
+      case _ => "previous HMAC key ID and secret must be configured together".invalidNec
     }
-    fromKeyRing(primaryKeyId, decode(secret), previous)
+    (
+      primaryKeyId
+        .refineEither[io.github.iltotore.iron.constraint.any.Not[io.github.iltotore.iron.constraint.string.Blank]]
+        .leftMap(_ => "HIRING_ANALYTICS_HMAC_KEY_ID must be non-empty")
+        .toValidatedNec,
+      primary,
+      previous
+    ).mapN { (id, key, oldKeys) => (id: String, key, oldKeys) }
+      .andThen { case (id, key, oldKeys) => validatedKeyRing(id, key, oldKeys) }
   }
 
-  private def decode(value: String): Array[Byte] =
-    try Base64.getDecoder.decode(value)
-    catch {
-      case _: IllegalArgumentException => throw AnalyticsError.InvalidConfiguration("base64 HMAC secret is malformed")
+  private def decode(value: Option[String], name: String): ValidatedNec[String, Array[Byte]] =
+    value.filter(_.nonEmpty) match {
+      case None          => s"$name is required".invalidNec
+      case Some(encoded) =>
+        Either
+          .catchNonFatal(Base64.getDecoder.decode(encoded))
+          .leftMap(_ => s"$name is malformed")
+          .toValidatedNec
+          .andThen { bytes =>
+            if (bytes.length < MinimumKeyBytes)
+              s"$name must decode to at least $MinimumKeyBytes bytes".invalidNec
+            else bytes.validNec
+          }
     }
+
+  private def unsafe(value: ValidatedNec[String, SubjectPseudonymizer]): SubjectPseudonymizer =
+    value.toEither.fold(
+      errors => throw AnalyticsError.InvalidConfiguration(errors.toChain.toList.mkString("; ")),
+      identity
+    )
 }
 
 /** Spark-only privacy transforms. Raw identifiers exist only in the input frame before `silver`. */

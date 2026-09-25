@@ -2,6 +2,10 @@ package com.example.hiring.analytics
 
 import cats.data.{NonEmptyChain, Validated, ValidatedNec}
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.any.Not
+import io.github.iltotore.iron.constraint.numeric.Interval
+import io.github.iltotore.iron.constraint.string.Blank
 
 /** The analytics retention policy is intentionally separate from Kafka retention. */
 object AnalyticsRetention {
@@ -62,8 +66,11 @@ opaque type RunId = String
 
 object RunId {
   def from(value: String): ValidatedNec[String, RunId] =
-    if (value != null && value.trim.nonEmpty) value.validNec
-    else "run id must be non-empty".invalidNec
+    Option(value)
+      .filter(_.trim.nonEmpty)
+      .toRight("run id must be non-empty")
+      .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "run id must be non-empty"))
+      .toValidatedNec
 
   extension (value: RunId) def value: String = value
 }
@@ -106,16 +113,29 @@ final case class PartitionOffsetRange(topic: String, partition: Int, startOffset
 
 object PartitionOffsetRange {
   def validate(range: PartitionOffsetRange): ValidatedNec[String, PartitionOffsetRange] = {
-    val errors = Vector(
-      Option.when(range.topic == null || range.topic.trim.isEmpty)("topic must be non-empty"),
-      Option.when(range.partition < 0)("partition must be non-negative"),
-      Option.when(range.startOffset < 0)("start offset must be non-negative"),
-      Option.when(range.endOffsetExclusive < range.startOffset)("end offset must not precede start offset")
-    ).flatten
-    NonEmptyChain.fromSeq(errors) match {
-      case Some(problems) => Validated.Invalid(problems)
-      case None           => Validated.Valid(range)
-    }
+    val topic = Option(range.topic)
+      .filter(_.trim.nonEmpty)
+      .toRight("topic must be non-empty")
+      .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty"))
+      .toValidatedNec
+    val partition = range.partition
+      .refineEither[Interval.Closed[0, 2147483647]]
+      .leftMap(_ => "partition must be non-negative")
+      .toValidatedNec
+    val start = range.startOffset
+      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
+      .leftMap(_ => "start offset must be non-negative")
+      .toValidatedNec
+    val end = range.endOffsetExclusive
+      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
+      .leftMap(_ => "end offset must be non-negative")
+      .toValidatedNec
+    (topic, partition, start, end)
+      .mapN { (_, _, validStart, validEnd) =>
+        if (validEnd < validStart) "end offset must not precede start offset".invalidNec
+        else range.validNec
+      }
+      .andThen(identity)
   }
 }
 

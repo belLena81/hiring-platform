@@ -4,6 +4,8 @@ lazy val sparkVersion = "4.0.1"
 lazy val deltaVersion = "4.0.0"
 lazy val munitVersion = "1.3.6"
 lazy val munitCatsEffectVersion = "2.2.1"
+lazy val pureConfigVersion = "0.17.10"
+lazy val ironVersion = "3.3.2"
 lazy val IntegrationTest = config("it") extend Test
 
 lazy val analytics = (project in file("."))
@@ -27,6 +29,8 @@ lazy val analytics = (project in file("."))
       ("io.delta" %% "delta-spark" % deltaVersion).cross(CrossVersion.for3Use2_13),
       "org.typelevel" %% "cats-core" % "2.13.0",
       "org.typelevel" %% "cats-effect" % "3.7.1",
+      "com.github.pureconfig" %% "pureconfig-core" % pureConfigVersion,
+      "io.github.iltotore" %% "iron" % ironVersion,
       "co.fs2" %% "fs2-core" % "3.14.0",
       "org.typelevel" %% "log4cats-slf4j" % "2.8.0",
       "org.mongodb" % "mongodb-driver-sync" % "5.12.0",

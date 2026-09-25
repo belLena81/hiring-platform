@@ -9,7 +9,6 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 import java.security.MessageDigest
 import java.time.Instant
 import scala.concurrent.duration.*
-import scala.util.control.NonFatal
 
 /** Resumable erasure lifecycle. A marker stays active until both replay horizons have passed. */
 final class AnalyticsErasureWorker(
@@ -316,19 +315,13 @@ final class AnalyticsErasureWorker(
 object AnalyticsErasureWorkerMain extends IOApp {
   private val logger = Slf4jLogger.getLogger[IO]
 
-  private def required(name: String): IO[String] =
-    IO.delay(sys.env.get(name).filter(_.trim.nonEmpty))
-      .flatMap(
-        _.fold[IO[String]](IO.raiseError(AnalyticsError.InvalidConfiguration(name + " is required")))(IO.pure)
-      )
-
-  private def resources(uri: String): Resource[IO, (SparkSession, MongoClient)] =
+  private def resources(uri: String, sparkMaster: String): Resource[IO, (SparkSession, MongoClient)] =
     HiringAnalyticsBatchMain.managedResources(
       IO.blocking(
         org.apache.spark.sql.classic.SparkSession
           .builder()
           .appName("hiring-analytics-erasure-worker")
-          .master(sys.env.getOrElse("SPARK_MASTER", "local[*]"))
+          .master(sparkMaster)
           .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
@@ -337,68 +330,35 @@ object AnalyticsErasureWorkerMain extends IOApp {
     )
 
   private def program: IO[Unit] =
-    for {
-      mongoUri <- required("MONGODB_URI")
-      databaseName <- IO.delay(sys.env.getOrElse("MONGODB_DATABASE", "hiring"))
-      root <- required("ANALYTICS_LAKEHOUSE_ROOT")
-      topic <- required("ANALYTICS_TOPIC")
-      brokers <- required("ANALYTICS_BOOTSTRAP_SERVERS")
-      username <- required("ANALYTICS_KAFKA_USERNAME")
-      password <- required("ANALYTICS_KAFKA_PASSWORD")
-      fencerUsername <- required("ANALYTICS_KAFKA_FENCER_USERNAME")
-      fencerPassword <- required("ANALYTICS_KAFKA_FENCER_PASSWORD")
-      secret <- required("HIRING_ANALYTICS_HMAC_SECRET_BASE64")
-      keyId <- IO.delay(sys.env.getOrElse("HIRING_ANALYTICS_HMAC_KEY_ID", "hmac-v1"))
-      previousHmac <- IO.delay(
-        sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID").filter(_.trim.nonEmpty) ->
-          sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64").filter(_.trim.nonEmpty)
-      )
-      paths <- IO.fromEither(
-        AnalyticsLakehousePaths
-          .validate(AnalyticsLakehousePaths(root))
-          .toEither
-          .leftMap(AnalyticsError.InvalidInput.apply)
-      )
-      connection <- IO.fromEither(
-        KafkaConnection
-          .validate(KafkaConnection(brokers, Some(username), Some(password)))
-          .toEither
-          .leftMap(AnalyticsError.InvalidInput.apply)
-      )
-      fencerConnection <- IO.fromEither(
-        KafkaConnection
-          .validate(KafkaConnection(brokers, Some(fencerUsername), Some(fencerPassword)))
-          .toEither
-          .leftMap(AnalyticsError.InvalidInput.apply)
-      )
-      pseudonymizer <- IO
-        .delay(
-          SubjectPseudonymizer.fromBase64(secret, keyId, previousHmac._1, previousHmac._2)
-        )
-        .adaptError { case NonFatal(_) =>
-          AnalyticsError.InvalidConfiguration("HIRING_ANALYTICS_HMAC_SECRET_BASE64 is invalid")
-        }
-      _ <- resources(mongoUri).use { case (spark, client) =>
-        IO.blocking(client.getDatabase(databaseName)).flatMap { database =>
+    AnalyticsRuntimeConfig.loadWorker.flatMap { configured =>
+      val common = configured.common
+      resources(common.mongoUri, common.sparkMaster).use { case (spark, client) =>
+        IO.blocking(client.getDatabase(common.mongoDatabase)).flatMap { database =>
           val store = new MongoAnalyticsErasureWorkerStore(client, database)
           val publisher = new MongoAnalyticsReportPublisher(client, database)
           new AnalyticsErasureWorker(
             spark,
             database,
             store,
-            connection,
-            fencerConnection,
-            topic,
-            paths,
-            pseudonymizer,
+            common.kafka,
+            configured.fencerKafka,
+            configured.topic,
+            common.lakehousePaths,
+            common.pseudonymizer,
             publisher
           ).run
         }
       }
-    } yield ()
+    }
 
   override def run(args: List[String]): IO[ExitCode] =
-    program.attempt.flatMap {
+    (if (args.nonEmpty)
+       IO.raiseError[Unit](
+         AnalyticsError.InvalidConfiguration(
+           "worker settings are loaded from HOCON; command-line arguments are not accepted"
+         )
+       )
+     else program).attempt.flatMap {
       case Right(_)                    => IO.pure(ExitCode.Success)
       case Left(error: AnalyticsError) => logger.error(error.getMessage).as(ExitCode.Error)
       case Left(error)                 =>

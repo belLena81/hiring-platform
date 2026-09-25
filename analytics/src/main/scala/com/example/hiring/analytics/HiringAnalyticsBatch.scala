@@ -1261,47 +1261,9 @@ private[analytics] object KafkaRecordColumns {
   }
 }
 
-/** Bounded batch entry point: `runId bootstrapServers lakehouseRoot topic partition startOffset endOffsetExclusive`.
-  * Publication is deliberately represented by [[AnalyticsPublication]] rather than an OLTP write.
-  */
+/** Bounded batch entry point. Runtime settings and the explicit offset range load from HOCON. */
 object HiringAnalyticsBatchMain extends IOApp {
   private val logger = Slf4jLogger.getLogger[IO]
-
-  private final case class BatchArguments(
-      manifest: AnalyticsRunManifest,
-      connection: KafkaConnection,
-      paths: AnalyticsLakehousePaths
-  )
-
-  private def number[A](raw: String, label: String, parse: String => A): ValidatedNec[String, A] =
-    Try(parse(raw)).toEither.leftMap(_ => s"$label must be numeric").toValidatedNec
-
-  private def parseArguments(args: List[String]): IO[BatchArguments] = args match {
-    case runId :: bootstrapServers :: lakehouseRoot :: topic :: partition :: start :: end :: Nil =>
-      val range = (
-        number(partition, "partition", _.toInt),
-        number(start, "start offset", _.toLong),
-        number(end, "end offset", _.toLong)
-      ).mapN((part, first, last) => PartitionOffsetRange(topic, part, first, last))
-      val manifest = range.andThen(r => AnalyticsRunManifest.validated(runId, Vector(r)))
-      val connection = KafkaConnection.validate(KafkaConnection(bootstrapServers))
-      val paths = AnalyticsLakehousePaths.validate(AnalyticsLakehousePaths(lakehouseRoot))
-      IO.fromEither(
-        (manifest, connection, paths).mapN(BatchArguments.apply).toEither.leftMap(AnalyticsError.InvalidInput.apply)
-      )
-    case _ =>
-      IO.raiseError(
-        AnalyticsError.InvalidInput(
-          cats.data.NonEmptyChain.one(
-            "usage: HiringAnalyticsBatchMain runId bootstrapServers lakehouseRoot topic partition startOffset endOffsetExclusive"
-          )
-        )
-      )
-  }
-
-  private def requiredEnvironment(name: String): IO[String] =
-    IO.delay(sys.env.get(name).filter(_.trim.nonEmpty))
-      .flatMap(_.fold[IO[String]](IO.raiseError(AnalyticsError.InvalidConfiguration(s"$name is required")))(IO.pure))
 
   private[analytics] def managedResources(
       acquireSpark: IO[SparkSession],
@@ -1325,13 +1287,13 @@ object HiringAnalyticsBatchMain extends IOApp {
       )
     } yield (spark, mongo)
 
-  private def resources(mongoUri: String): Resource[IO, (SparkSession, MongoClient)] =
+  private[analytics] def resources(mongoUri: String, sparkMaster: String): Resource[IO, (SparkSession, MongoClient)] =
     managedResources(
       IO.blocking(
         org.apache.spark.sql.classic.SparkSession
           .builder()
           .appName("hiring-analytics-batch")
-          .master(sys.env.getOrElse("SPARK_MASTER", "local[*]"))
+          .master(sparkMaster)
           .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
@@ -1339,51 +1301,37 @@ object HiringAnalyticsBatchMain extends IOApp {
       IO.blocking(MongoClients.create(mongoUri))
     )
 
-  private def program(args: List[String]): IO[AnalyticsPublication] =
-    for {
-      parsed <- parseArguments(args)
-      kafkaUsername <- requiredEnvironment("ANALYTICS_KAFKA_USERNAME")
-      kafkaPassword <- requiredEnvironment("ANALYTICS_KAFKA_PASSWORD")
-      hmacSecret <- requiredEnvironment("HIRING_ANALYTICS_HMAC_SECRET_BASE64")
-      hmacKeyId <- IO.delay(sys.env.getOrElse("HIRING_ANALYTICS_HMAC_KEY_ID", "hmac-v1"))
-      previousHmac <- IO.delay(
-        sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID").filter(_.trim.nonEmpty) ->
-          sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64").filter(_.trim.nonEmpty)
-      )
-      pseudonymizer <- IO
-        .delay(
-          SubjectPseudonymizer.fromBase64(hmacSecret, hmacKeyId, previousHmac._1, previousHmac._2)
-        )
-        .adaptError { case NonFatal(_) =>
-          AnalyticsError.InvalidConfiguration("HIRING_ANALYTICS_HMAC_SECRET_BASE64 is invalid")
-        }
-      mongoUri <- requiredEnvironment("MONGODB_URI")
-      mongoDatabase <- IO.delay(sys.env.getOrElse("MONGODB_DATABASE", "hiring"))
-      publication <- resources(mongoUri).use { case (spark, mongo) =>
-        IO.blocking(mongo.getDatabase(mongoDatabase))
+  private def program: IO[AnalyticsPublication] =
+    AnalyticsRuntimeConfig.loadBatch.flatMap { configured =>
+      val common = configured.common
+      resources(common.mongoUri, common.sparkMaster).use { case (spark, mongo) =>
+        IO.blocking(mongo.getDatabase(common.mongoDatabase))
           .adaptError {
-            case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("MONGODB_DATABASE is invalid")
-            case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
+            case _: IllegalArgumentException =>
+              AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")
+            case NonFatal(cause) => AnalyticsError.MongoConnectionFailure(cause)
           }
           .flatMap { database =>
-            val markers = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
-            val authenticatedConnection = parsed.connection.copy(
-              saslUsername = Some(kafkaUsername),
-              saslPassword = Some(kafkaPassword)
-            )
+            val markers = new MongoActiveDeletionMarkerSource(database, common.pseudonymizer)
             new HiringAnalyticsBatch(
-              parsed.paths,
-              pseudonymizer,
+              common.lakehousePaths,
+              common.pseudonymizer,
               markers,
               reportPublisher = Some(new MongoAnalyticsReportPublisher(mongo, database))
             )
-              .run(spark, new KafkaOffsetRangeSource(authenticatedConnection), parsed.manifest)
+              .run(spark, new KafkaOffsetRangeSource(common.kafka), configured.manifest)
           }
       }
-    } yield publication
+    }
 
   override def run(args: List[String]): IO[ExitCode] =
-    program(args).attempt.flatMap {
+    (if (args.nonEmpty)
+       IO.raiseError[AnalyticsPublication](
+         AnalyticsError.InvalidConfiguration(
+           "batch inputs are loaded from HOCON; command-line arguments are not accepted"
+         )
+       )
+     else program).attempt.flatMap {
       case Right(publication)          => logger.info(publication.toString).as(ExitCode.Success)
       case Left(error: AnalyticsError) => logger.error(error.getMessage).as(ExitCode.Error)
       case Left(error)                 =>
