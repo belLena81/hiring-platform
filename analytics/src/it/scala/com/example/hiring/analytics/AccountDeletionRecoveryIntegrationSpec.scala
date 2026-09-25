@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import cats.Applicative
 import cats.effect.{Clock, Deferred, IO, Ref, Resource}
 import cats.effect.unsafe.implicits.global
@@ -303,7 +307,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                 retention = new KafkaRetention {
                   override def capture(connection: KafkaConnection, name: String): IO[KafkaRetentionBarrier] =
                     KafkaRetentionBarrier.capture(connection, name)
-                  override def retentionPassed(connection: KafkaConnection, barrier: KafkaRetentionBarrier): IO[Boolean] =
+                  override def retentionPassed(
+                      connection: KafkaConnection,
+                      barrier: KafkaRetentionBarrier
+                  ): IO[Boolean] =
                     retentionReady.get
                 }
                 producerFencer = new TransactionalProducerFencer {
@@ -362,7 +369,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                     _ = assert(request.getString("receiptId") == receiptId, "deleteMyAccount receipt binding mismatch")
                     capturedIds = Option(request.getList("transactionalIds", classOf[String]))
                       .fold(Vector.empty[String])(_.asScala.toVector)
-                    _ = assert(capturedIds.contains(transactionalId), "deleteMyAccount did not capture the subject fence")
+                    _ = assert(
+                      capturedIds.contains(transactionalId),
+                      "deleteMyAccount did not capture the subject fence"
+                    )
                     subjectFence <- IO.blocking(
                       database
                         .getCollection("outbox_subject_fences")

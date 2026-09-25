@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import java.util.Base64
 import java.nio.charset.StandardCharsets
 

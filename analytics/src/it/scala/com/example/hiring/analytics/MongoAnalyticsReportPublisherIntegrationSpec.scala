@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
@@ -28,7 +32,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
     container.start()
     val initiated = container.execInContainer(
-      "mongosh", "--quiet", "--eval", "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
+      "mongosh",
+      "--quiet",
+      "--eval",
+      "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
     )
     if (initiated.getExitCode != 0) {
       container.stop()
@@ -56,14 +63,16 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     )
     try {
       val database = client.getDatabase(s"analytics_report_${UUID.randomUUID()}")
-      database.getCollection("analytics_report_control").insertOne(
-        new Document("_id", "analytics-report")
-          .append("generation", 0L)
-          .append("state", "Unpublished")
-          .append("nextRevision", 0L)
-          .append("lastPublishedRevision", 0L)
-          .append("lastRunId", "")
-      )
+      database
+        .getCollection("analytics_report_control")
+        .insertOne(
+          new Document("_id", "analytics-report")
+            .append("generation", 0L)
+            .append("state", "Unpublished")
+            .append("nextRevision", 0L)
+            .append("lastPublishedRevision", 0L)
+            .append("lastRunId", "")
+        )
       val publisher = new MongoAnalyticsReportPublisher(client, database)
       val now = Instant.now()
       val expiry = now.plusSeconds(3600L)
@@ -82,10 +91,12 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           new AssertionError("an unpublished retry did not advance past the accepted revision")
         )
         _ <- IO.blocking {
-          database.getCollection("analytics_report_control").updateOne(
-            new Document("_id", "analytics-report"),
-            Updates.combine(Updates.set("generation", 1L), Updates.set("state", "Hidden"))
-          )
+          database
+            .getCollection("analytics_report_control")
+            .updateOne(
+              new Document("_id", "analytics-report"),
+              Updates.combine(Updates.set("generation", 1L), Updates.set("state", "Hidden"))
+            )
         }
         hiddenRun <- publisher.reserve("hidden-run", "range-hidden", now)
         hidden <- publisher.publish(hiddenRun, report.copy(asOf = now.plusMillis(2)), expiry).attempt
@@ -101,19 +112,29 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           new AssertionError("an old reservation remained usable after it was refreshed")
         )
         _ <- IO.blocking {
-          database.getCollection("analytics_report_control").updateOne(
-            new Document("_id", "analytics-report"),
-            Updates.combine(Updates.set("generation", 0L), Updates.set("state", "Published"),
-              Updates.set("lastPublishedRevision", newer.revision),
-              Updates.set("lastRunId", newer.runId))
-          )
-          database.getCollection("analytics_report_snapshots").updateOne(
-            new Document("_id", "current"), Updates.set("expiresAt", Date.from(now.minusSeconds(1L)))
-          )
+          database
+            .getCollection("analytics_report_control")
+            .updateOne(
+              new Document("_id", "analytics-report"),
+              Updates.combine(
+                Updates.set("generation", 0L),
+                Updates.set("state", "Published"),
+                Updates.set("lastPublishedRevision", newer.revision),
+                Updates.set("lastRunId", newer.runId)
+              )
+            )
+          database
+            .getCollection("analytics_report_snapshots")
+            .updateOne(
+              new Document("_id", "current"),
+              Updates.set("expiresAt", Date.from(now.minusSeconds(1L)))
+            )
         }
         replay <- publisher.reserve("newer", "range-newer", now)
         _ <- publisher.publish(replay, report.copy(asOf = now.plusMillis(3)), expiry)
-        snapshot <- IO.blocking(database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first())
+        snapshot <- IO.blocking(
+          database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first()
+        )
       } yield snapshot
 
       val snapshot = result.unsafeRunSync()
@@ -138,43 +159,86 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val secondSubjectId = UUID.randomUUID().toString
       val secondToken = UUID.randomUUID().toString
       val now = Instant.now()
-      val key = ErasurePhase.ReadyToPublish.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase
-      database.getCollection("analytics_report_control").insertOne(
-        new Document("_id", "analytics-report").append("generation", 2L).append("state", "Hidden")
-          .append("nextRevision", 0L).append("lastPublishedRevision", 0L).append("lastRunId", "")
-      )
+      val key = ErasurePhase.ReadyToPublish.ordinal.toLong * ErasurePhase.ProgressPerPhase
+      database
+        .getCollection("analytics_report_control")
+        .insertOne(
+          new Document("_id", "analytics-report")
+            .append("generation", 2L)
+            .append("state", "Hidden")
+            .append("nextRevision", 0L)
+            .append("lastPublishedRevision", 0L)
+            .append("lastRunId", "")
+        )
       database.getCollection("users").insertOne(new Document("_id", subjectId).append("accountStatus", "Deleted"))
-      database.getCollection("outbox_subject_fences").insertOne(
-        new Document("_id", subjectId).append("deleted", true)
-      )
-      database.getCollection("analytics_erasure_requests").insertOne(
-        new Document("_id", subjectId).append("state", "Processing").append("leaseToken", token)
-          .append("leaseUntil", Date.from(now.plusSeconds(90))).append("phase", ErasurePhase.ReadyToPublish.toString)
-          .append("progress", 0).append("progressKey", key)
-      )
+      database
+        .getCollection("outbox_subject_fences")
+        .insertOne(
+          new Document("_id", subjectId).append("deleted", true)
+        )
+      database
+        .getCollection("analytics_erasure_requests")
+        .insertOne(
+          new Document("_id", subjectId)
+            .append("state", "Processing")
+            .append("leaseToken", token)
+            .append("leaseUntil", Date.from(now.plusSeconds(90)))
+            .append("phase", ErasurePhase.ReadyToPublish.toString)
+            .append("progress", 0)
+            .append("progressKey", key)
+        )
       database.getCollection("users").insertOne(new Document("_id", secondSubjectId).append("accountStatus", "Deleted"))
-      database.getCollection("outbox_subject_fences").insertOne(
-        new Document("_id", secondSubjectId).append("deleted", true)
-      )
-      database.getCollection("analytics_erasure_requests").insertOne(
-        new Document("_id", secondSubjectId).append("state", "Processing").append("leaseToken", secondToken)
-          .append("leaseUntil", Date.from(now.plusSeconds(90))).append("phase", ErasurePhase.ReadyToPublish.toString)
-          .append("progress", 0).append("progressKey", key)
-      )
+      database
+        .getCollection("outbox_subject_fences")
+        .insertOne(
+          new Document("_id", secondSubjectId).append("deleted", true)
+        )
+      database
+        .getCollection("analytics_erasure_requests")
+        .insertOne(
+          new Document("_id", secondSubjectId)
+            .append("state", "Processing")
+            .append("leaseToken", secondToken)
+            .append("leaseUntil", Date.from(now.plusSeconds(90)))
+            .append("phase", ErasurePhase.ReadyToPublish.toString)
+            .append("progress", 0)
+            .append("progressKey", key)
+        )
       val publisher = new MongoAnalyticsReportPublisher(client, database)
       val claim = ErasureClaim(subjectId, token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
         reservation <- publisher.reserve("analytics-erasure-" + subjectId, "fingerprint-" + subjectId, now)
         _ <- publisher.publishErasure(reservation, report, now.plusSeconds(3600), claim, now)
-        secondReservation <- publisher.reserve("analytics-erasure-" + secondSubjectId, "fingerprint-" + secondSubjectId, now)
-        secondClaim = ErasureClaim(secondSubjectId, secondToken, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
+        secondReservation <- publisher.reserve(
+          "analytics-erasure-" + secondSubjectId,
+          "fingerprint-" + secondSubjectId,
+          now
+        )
+        secondClaim = ErasureClaim(
+          secondSubjectId,
+          secondToken,
+          now.plusSeconds(90),
+          ErasurePhase.ReadyToPublish,
+          0,
+          key
+        )
         _ <- publisher.publishErasure(secondReservation, report, now.plusSeconds(3600), secondClaim, now)
-        state <- IO.blocking(database.getCollection("analytics_report_control").find(new Document("_id", "analytics-report")).first())
-        request <- IO.blocking(database.getCollection("analytics_erasure_requests").find(new Document("_id", subjectId)).first())
-        completion <- IO.blocking(database.getCollection("analytics_erasure_completions").find(new Document("_id", subjectId)).first())
-        secondCompletion <- IO.blocking(database.getCollection("analytics_erasure_completions").find(new Document("_id", secondSubjectId)).first())
-        snapshot <- IO.blocking(database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first())
+        state <- IO.blocking(
+          database.getCollection("analytics_report_control").find(new Document("_id", "analytics-report")).first()
+        )
+        request <- IO.blocking(
+          database.getCollection("analytics_erasure_requests").find(new Document("_id", subjectId)).first()
+        )
+        completion <- IO.blocking(
+          database.getCollection("analytics_erasure_completions").find(new Document("_id", subjectId)).first()
+        )
+        secondCompletion <- IO.blocking(
+          database.getCollection("analytics_erasure_completions").find(new Document("_id", secondSubjectId)).first()
+        )
+        snapshot <- IO.blocking(
+          database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first()
+        )
       } yield (state, request, completion, secondCompletion, snapshot)
       val (state, request, completion, secondCompletion, snapshot) = result.unsafeRunSync()
       assertEquals(state.getString("state"), "Published")
@@ -201,30 +265,52 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val otherId = UUID.randomUUID().toString
       val token = UUID.randomUUID().toString
       val now = Instant.now()
-      val key = ErasurePhase.ReadyToPublish.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase
-      database.getCollection("analytics_report_control").insertOne(
-        new Document("_id", "analytics-report").append("generation", 3L).append("state", "Hidden")
-          .append("nextRevision", 0L).append("lastPublishedRevision", 0L).append("lastRunId", "")
-      )
+      val key = ErasurePhase.ReadyToPublish.ordinal.toLong * ErasurePhase.ProgressPerPhase
+      database
+        .getCollection("analytics_report_control")
+        .insertOne(
+          new Document("_id", "analytics-report")
+            .append("generation", 3L)
+            .append("state", "Hidden")
+            .append("nextRevision", 0L)
+            .append("lastPublishedRevision", 0L)
+            .append("lastRunId", "")
+        )
       database.getCollection("users").insertOne(new Document("_id", subjectId).append("accountStatus", "Deleted"))
-      database.getCollection("outbox_subject_fences").insertOne(
-        new Document("_id", subjectId).append("deleted", true)
-      )
-      database.getCollection("analytics_erasure_requests").insertMany(java.util.List.of(
-        new Document("_id", subjectId).append("state", "Processing").append("leaseToken", token)
-          .append("leaseUntil", Date.from(now.plusSeconds(90))).append("phase", ErasurePhase.ReadyToPublish.toString)
-          .append("progress", 0).append("progressKey", key),
-        new Document("_id", otherId).append("state", "Pending")
-      ))
+      database
+        .getCollection("outbox_subject_fences")
+        .insertOne(
+          new Document("_id", subjectId).append("deleted", true)
+        )
+      database
+        .getCollection("analytics_erasure_requests")
+        .insertMany(
+          java.util.List.of(
+            new Document("_id", subjectId)
+              .append("state", "Processing")
+              .append("leaseToken", token)
+              .append("leaseUntil", Date.from(now.plusSeconds(90)))
+              .append("phase", ErasurePhase.ReadyToPublish.toString)
+              .append("progress", 0)
+              .append("progressKey", key),
+            new Document("_id", otherId).append("state", "Pending")
+          )
+        )
       val publisher = new MongoAnalyticsReportPublisher(client, database)
       val claim = ErasureClaim(subjectId, token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
         reservation <- publisher.reserve("analytics-erasure-" + subjectId, "fingerprint-" + subjectId, now)
         attempt <- publisher.publishErasure(reservation, report, now.plusSeconds(3600), claim, now).attempt
-        state <- IO.blocking(database.getCollection("analytics_report_control").find(new Document("_id", "analytics-report")).first())
-        request <- IO.blocking(database.getCollection("analytics_erasure_requests").find(new Document("_id", subjectId)).first())
-        snapshot <- IO.blocking(database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first())
+        state <- IO.blocking(
+          database.getCollection("analytics_report_control").find(new Document("_id", "analytics-report")).first()
+        )
+        request <- IO.blocking(
+          database.getCollection("analytics_erasure_requests").find(new Document("_id", subjectId)).first()
+        )
+        snapshot <- IO.blocking(
+          database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first()
+        )
       } yield (attempt, state, request, snapshot)
       val (attempt, state, request, snapshot) = result.unsafeRunSync()
       assert(attempt.swap.toOption.exists(_.isInstanceOf[AnalyticsError.ErasureNotReady.type]))
@@ -249,19 +335,33 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val second = "hiring-publisher-" + UUID.randomUUID().toString
       val now = Instant.now()
       val requests = database.getCollection("analytics_erasure_requests")
-      requests.insertOne(new Document("_id", subjectId).append("state", "Pending").append("requestedAt", Date.from(now))
-        .append("fencingVersion", 1).append("transactionalIds", java.util.List.of(first, second)))
-      database.getCollection("hiring_migration_ledger").insertOne(
-        new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
+      requests.insertOne(
+        new Document("_id", subjectId)
+          .append("state", "Pending")
+          .append("requestedAt", Date.from(now))
+          .append("fencingVersion", 1)
+          .append("transactionalIds", java.util.List.of(first, second))
       )
-      database.getCollection("outbox_subject_fences").insertOne(
-        new Document("_id", subjectId).append("deleted", true).append("leaseToken", "old")
-          .append("leaseUntil", Date.from(now.plusSeconds(30)))
-      )
-      database.getCollection("event_outbox").insertOne(
-        new Document("_id", UUID.randomUUID().toString).append("subjectIds", java.util.List.of(subjectId))
-          .append("subjectRefsVersion", 1)
-      )
+      database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(
+          new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
+        )
+      database
+        .getCollection("outbox_subject_fences")
+        .insertOne(
+          new Document("_id", subjectId)
+            .append("deleted", true)
+            .append("leaseToken", "old")
+            .append("leaseUntil", Date.from(now.plusSeconds(30)))
+        )
+      database
+        .getCollection("event_outbox")
+        .insertOne(
+          new Document("_id", UUID.randomUUID().toString)
+            .append("subjectIds", java.util.List.of(subjectId))
+            .append("subjectRefsVersion", 1)
+        )
       val store = new MongoAnalyticsErasureWorkerStore(client, database)
       val result = for {
         claim <- store.claim(now, now.plusSeconds(360), 1).map(_.head)
@@ -273,12 +373,15 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         advanced = claim.copy(
           phase = ErasurePhase.PublisherDrained,
           progress = 0,
-          progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase
+          progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * ErasurePhase.ProgressPerPhase
         )
-        barrier = KafkaRetentionBarrier("hiring.operational-events", Vector(
-          KafkaRetentionBarrier.Partition(0, 21L),
-          KafkaRetentionBarrier.Partition(1, 14L)
-        ))
+        barrier = KafkaRetentionBarrier(
+          "hiring.operational-events",
+          Vector(
+            KafkaRetentionBarrier.Partition(0, 21L),
+            KafkaRetentionBarrier.Partition(1, 14L)
+          )
+        )
         saved <- store.persistBarrier(advanced, barrier, now.plusSeconds(63))
         loaded <- store.readBarrier(subjectId)
         _ <- store.releaseForOtherRequests(advanced, now.plusSeconds(64))
@@ -288,9 +391,39 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         deferred <- store.defer(reclaimed, now.plusSeconds(120), now.plusSeconds(66))
         beforeResume <- store.claim(now.plusSeconds(100), now.plusSeconds(160), 1)
         resumed <- store.claim(now.plusSeconds(121), now.plusSeconds(181), 1).map(_.head)
-      } yield (claim, early, drained, purged, firstAdvance, staleAdvance, saved, loaded, reclaimed, staleRenew, currentRenew, deferred, beforeResume, resumed)
+      } yield (
+        claim,
+        early,
+        drained,
+        purged,
+        firstAdvance,
+        staleAdvance,
+        saved,
+        loaded,
+        reclaimed,
+        staleRenew,
+        currentRenew,
+        deferred,
+        beforeResume,
+        resumed
+      )
 
-      val (claim, early, drained, purged, firstAdvance, staleAdvance, saved, loaded, reclaimed, staleRenew, currentRenew, deferred, beforeResume, resumed) =
+      val (
+        claim,
+        early,
+        drained,
+        purged,
+        firstAdvance,
+        staleAdvance,
+        saved,
+        loaded,
+        reclaimed,
+        staleRenew,
+        currentRenew,
+        deferred,
+        beforeResume,
+        resumed
+      ) =
         result.unsafeRunSync()
       assertEquals(early, false)
       assertEquals(drained, true)
@@ -298,10 +431,18 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(firstAdvance, true)
       assertEquals(staleAdvance, false)
       assertEquals(saved, true)
-      assertEquals(loaded, Some(KafkaRetentionBarrier("hiring.operational-events", Vector(
-        KafkaRetentionBarrier.Partition(0, 21L),
-        KafkaRetentionBarrier.Partition(1, 14L)
-      ))))
+      assertEquals(
+        loaded,
+        Some(
+          KafkaRetentionBarrier(
+            "hiring.operational-events",
+            Vector(
+              KafkaRetentionBarrier.Partition(0, 21L),
+              KafkaRetentionBarrier.Partition(1, 14L)
+            )
+          )
+        )
+      )
       assertNotEquals(reclaimed.leaseToken, claim.leaseToken)
       assertEquals(staleRenew, false)
       assertEquals(currentRenew, true)
@@ -309,10 +450,13 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(beforeResume, Vector.empty)
       assertEquals(resumed.requestId, subjectId)
       assertNotEquals(resumed.leaseToken, reclaimed.leaseToken)
-      database.getCollection("event_outbox").insertOne(
-        new Document("_id", UUID.randomUUID().toString).append("subjectIds", "malformed")
-          .append("subjectRefsVersion", 1)
-      )
+      database
+        .getCollection("event_outbox")
+        .insertOne(
+          new Document("_id", UUID.randomUUID().toString)
+            .append("subjectIds", "malformed")
+            .append("subjectRefsVersion", 1)
+        )
       val malformedRefs = store.purgeOutbox(subjectId, now.plusSeconds(130), 30.seconds).attempt.unsafeRunSync()
       assert(malformedRefs.swap.toOption.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {

@@ -1,4 +1,8 @@
-package com.example.hiring.analytics
+package com.example.hiring.analytics.erasure
+
+import com.example.hiring.analytics.*
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.mongo.*
 
 import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
@@ -14,7 +18,7 @@ import scala.concurrent.duration.*
 final class AnalyticsErasureWorker(
     spark: SparkSession,
     database: MongoDatabase,
-    store: MongoAnalyticsErasureWorkerStore,
+    store: AnalyticsErasureStore,
     kafka: KafkaConnection,
     fencerKafka: KafkaConnection,
     topic: String,
@@ -302,7 +306,7 @@ final class AnalyticsErasureWorker(
     }
 
   private def phaseKey(phase: ErasurePhase): Long =
-    phase.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase
+    phase.ordinal.toLong * ErasurePhase.ProgressPerPhase
 
   private def sha256(value: String): String =
     MessageDigest

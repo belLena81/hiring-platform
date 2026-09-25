@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import munit.CatsEffectSuite
 import org.bson.Document
 import org.bson.conversions.Bson
@@ -12,15 +16,18 @@ import scala.jdk.CollectionConverters.*
 final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
   test("erasure phases have a stable forward-only order") {
     val phases = ErasurePhase.values.toVector
-    assertEquals(phases, Vector(
-      ErasurePhase.Requested,
-      ErasurePhase.PublisherDrained,
-      ErasurePhase.OutboxPurged,
-      ErasurePhase.DeltaPurged,
-      ErasurePhase.GoldRebuilt,
-      ErasurePhase.ReadyToPublish,
-      ErasurePhase.ReportPublished
-    ))
+    assertEquals(
+      phases,
+      Vector(
+        ErasurePhase.Requested,
+        ErasurePhase.PublisherDrained,
+        ErasurePhase.OutboxPurged,
+        ErasurePhase.DeltaPurged,
+        ErasurePhase.GoldRebuilt,
+        ErasurePhase.ReadyToPublish,
+        ErasurePhase.ReportPublished
+      )
+    )
     assert(phases.sliding(2).forall {
       case Vector(previous, next) => previous.precedes(next)
       case _                      => true
@@ -33,7 +40,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     val id = UUID.randomUUID().toString
     val token = UUID.randomUUID().toString
     val expiry = Instant.parse("2026-09-23T12:00:00Z")
-    val key = ErasurePhase.DeltaPurged.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase + 17L
+    val key = ErasurePhase.DeltaPurged.ordinal.toLong * ErasurePhase.ProgressPerPhase + 17L
     val document = new Document("_id", id)
       .append("fencingVersion", 1)
       .append("leaseToken", token)

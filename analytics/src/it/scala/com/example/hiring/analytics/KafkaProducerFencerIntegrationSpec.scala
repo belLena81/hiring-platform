@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import cats.effect.unsafe.implicits.global
 import cats.effect.IO
 import munit.FunSuite

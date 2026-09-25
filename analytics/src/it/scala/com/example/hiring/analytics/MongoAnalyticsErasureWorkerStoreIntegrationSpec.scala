@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import cats.Applicative
 import cats.effect.{Clock, Deferred, IO}
 import cats.effect.unsafe.implicits.global
@@ -135,7 +139,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         publisherDrained = initial.copy(
           phase = ErasurePhase.PublisherDrained,
           progress = 0,
-          progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase
+          progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * ErasurePhase.ProgressPerPhase
         )
         _ <- store.persistBarrier(publisherDrained, barrier, requestedAt.plusSeconds(2))
         _ <- store.persistDeltaFiles(publisherDrained, fileEvidence, requestedAt.plusSeconds(2))
@@ -144,8 +148,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         checkpoint = publisherDrained.copy(
           phase = ErasurePhase.PublisherDrained,
           progress = 17,
-          progressKey =
-            ErasurePhase.PublisherDrained.ordinal.toLong * MongoAnalyticsErasureWorkerStore.ProgressPerPhase + 17L
+          progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * ErasurePhase.ProgressPerPhase + 17L
         )
         _ <- IO.delay(pauseEvidenceWrite.set(true))
         inFlightWrite <- store.persistDeltaFiles(checkpoint, Vector(inFlightFileEvidence), staleWorkerNow).start
@@ -287,32 +290,43 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
     try {
       client = MongoClients.create(connectionString)
       val database = client.getDatabase(databaseName)
-      database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection).insertOne(
-        new Document("_id", requestId)
-          .append("state", "Pending")
-          .append("fencingVersion", 1)
-          .append("transactionalIds", java.util.Collections.emptyList[String]())
-          .append("requestedAt", Date.from(startedAt))
-          .append("receiptId", receiptId)
-      )
-      database.getCollection("outbox_subject_fences").insertOne(
-        new Document("_id", requestId).append("deleted", true)
-      )
-      database.getCollection("users").insertOne(
-        new Document("_id", requestId).append("accountStatus", "Deleted")
-      )
-      database.getCollection("hiring_migration_ledger").insertOne(
-        new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
-      )
-      database.getCollection("analytics_report_control").insertOne(
-        new Document("_id", "analytics-report")
-          .append("state", "Hidden")
-          .append("generation", 1L)
-          .append("nextRevision", 0L)
-          .append("lastPublishedRevision", 0L)
-          .append("lastRunId", "")
-      )
-      spark = SparkSession.builder()
+      database
+        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .insertOne(
+          new Document("_id", requestId)
+            .append("state", "Pending")
+            .append("fencingVersion", 1)
+            .append("transactionalIds", java.util.Collections.emptyList[String]())
+            .append("requestedAt", Date.from(startedAt))
+            .append("receiptId", receiptId)
+        )
+      database
+        .getCollection("outbox_subject_fences")
+        .insertOne(
+          new Document("_id", requestId).append("deleted", true)
+        )
+      database
+        .getCollection("users")
+        .insertOne(
+          new Document("_id", requestId).append("accountStatus", "Deleted")
+        )
+      database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(
+          new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
+        )
+      database
+        .getCollection("analytics_report_control")
+        .insertOne(
+          new Document("_id", "analytics-report")
+            .append("state", "Hidden")
+            .append("generation", 1L)
+            .append("nextRevision", 0L)
+            .append("lastPublishedRevision", 0L)
+            .append("lastRunId", "")
+        )
+      spark = SparkSession
+        .builder()
         .master("local[1]")
         .appName("MongoAnalyticsErasureWorkerRestartIntegrationSpec")
         .config("spark.ui.enabled", "false")
@@ -345,8 +359,10 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         reservation <- firstPublisher.reserve(runId, rangeFingerprint, startedAt)
         firstAttempt <- firstWorker.process(initialClaim, reservation).attempt
         checkpoint <- IO.blocking(
-          database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
-            .find(new Document("_id", requestId)).first()
+          database
+            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .find(new Document("_id", requestId))
+            .first()
         )
         _ = assertEquals(checkpoint.getString("phase"), ErasurePhase.DeltaPurged.toString)
         _ = assert(checkpoint.getDate("resumeAfter").toInstant.isAfter(startedAt))
@@ -380,15 +396,19 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         )
         _ <- restartedWorker.process(resumedClaim, resumedReservation)
         readyToPublish <- IO.blocking(
-          restartedDatabase.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
-            .find(new Document("_id", requestId)).first()
+          restartedDatabase
+            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .find(new Document("_id", requestId))
+            .first()
         )
         _ = assertEquals(readyToPublish.getString("phase"), ErasurePhase.ReadyToPublish.toString)
         _ <- IO.blocking(
-          restartedDatabase.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection).updateOne(
-            new Document("_id", requestId),
-            new Document("$set", new Document("leaseUntil", Date.from(afterRetention.minusSeconds(1L))))
-          )
+          restartedDatabase
+            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .updateOne(
+              new Document("_id", requestId),
+              new Document("$set", new Document("leaseUntil", Date.from(afterRetention.minusSeconds(1L))))
+            )
         )
         finalizerClaim <- restartedStore.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
         _ = assertEquals(finalizerClaim.phase, ErasurePhase.ReadyToPublish)
@@ -410,20 +430,28 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         )
         _ <- finalizerWorker.process(finalizerClaim, finalizerReservation)
         request <- IO.blocking(
-          restartedDatabase.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
-            .find(new Document("_id", requestId)).first()
+          restartedDatabase
+            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .find(new Document("_id", requestId))
+            .first()
         )
         completion <- IO.blocking(
-          restartedDatabase.getCollection("analytics_erasure_completions")
-            .find(new Document("_id", requestId)).first()
+          restartedDatabase
+            .getCollection("analytics_erasure_completions")
+            .find(new Document("_id", requestId))
+            .first()
         )
         control <- IO.blocking(
-          restartedDatabase.getCollection("analytics_report_control")
-            .find(new Document("_id", "analytics-report")).first()
+          restartedDatabase
+            .getCollection("analytics_report_control")
+            .find(new Document("_id", "analytics-report"))
+            .first()
         )
         snapshot <- IO.blocking(
-          restartedDatabase.getCollection("analytics_report_snapshots")
-            .find(new Document("_id", "current")).first()
+          restartedDatabase
+            .getCollection("analytics_report_snapshots")
+            .find(new Document("_id", "current"))
+            .first()
         )
       } yield (resumedClaim, request, completion, control, snapshot)
 

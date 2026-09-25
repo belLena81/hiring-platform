@@ -1,4 +1,7 @@
-package com.example.hiring.analytics
+package com.example.hiring.analytics.erasure
+
+import com.example.hiring.analytics.*
+import com.example.hiring.analytics.batch.KafkaConnection
 
 import cats.effect.{IO, Resource}
 import org.apache.kafka.clients.consumer.KafkaConsumer
@@ -9,8 +12,8 @@ import java.util.Properties
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
-/** High-water marks captured only after the deleted subject's producer fences and retryable outbox rows have drained.
-  * A barrier passes when Kafka's earliest retained offset reaches each captured exclusive offset.
+/** High-water marks captured only after the deleted subject's producer fences and retryable outbox rows have drained. A
+  * barrier passes when Kafka's earliest retained offset reaches each captured exclusive offset.
   */
 final case class KafkaRetentionBarrier(topic: String, partitions: Vector[KafkaRetentionBarrier.Partition])
 
@@ -35,7 +38,8 @@ object KafkaRetentionBarrier {
     validate(barrier).flatMap { valid =>
       if (valid.partitions.exists(partition => !earliestOffsets.contains(partition.number)))
         Left(AnalyticsError.InvalidConfiguration("Kafka erasure retention barrier references a missing partition"))
-      else Right(valid.partitions.forall(partition => earliestOffsets(partition.number) >= partition.endOffsetExclusive))
+      else
+        Right(valid.partitions.forall(partition => earliestOffsets(partition.number) >= partition.endOffsetExclusive))
     }
 
   /** Captures the topic's exclusive end offsets. Callers must first prove that no subject lease or retryable outbox
@@ -44,7 +48,8 @@ object KafkaRetentionBarrier {
   def capture(connection: KafkaConnection, topic: String): IO[KafkaRetentionBarrier] =
     consumer(connection).use { client =>
       IO.blocking {
-        val partitions = Option(client.partitionsFor(topic)).toVector.flatMap(_.asScala)
+        val partitions = Option(client.partitionsFor(topic)).toVector
+          .flatMap(_.asScala)
           .map(partition => new TopicPartition(topic, partition.partition()))
           .sortBy(_.partition())
         if (partitions.isEmpty)
@@ -57,7 +62,7 @@ object KafkaRetentionBarrier {
         validate(barrier).fold(throw _, identity)
       }.adaptError {
         case error: AnalyticsError => error
-        case NonFatal(cause)        => AnalyticsError.SourceReadFailure(cause)
+        case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
       }
     }
 
@@ -75,7 +80,7 @@ object KafkaRetentionBarrier {
           hasExpired(valid, earliest).fold(throw _, identity)
         }.adaptError {
           case error: AnalyticsError => error
-          case NonFatal(cause)        => AnalyticsError.SourceReadFailure(cause)
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
         }
       }
     }

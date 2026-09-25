@@ -1,5 +1,7 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.{AnalyticsLakehousePaths, KafkaConnection}
+
 import cats.data.ValidatedNec
 import cats.effect.IO
 import cats.syntax.all.*

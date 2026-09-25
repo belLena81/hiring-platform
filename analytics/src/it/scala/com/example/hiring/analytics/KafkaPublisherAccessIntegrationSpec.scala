@@ -1,5 +1,9 @@
 package com.example.hiring.analytics
 
+import com.example.hiring.analytics.batch.*
+import com.example.hiring.analytics.erasure.*
+import com.example.hiring.analytics.mongo.*
+
 import cats.effect.IO
 import cats.effect.syntax.all.*
 import cats.effect.unsafe.implicits.global
@@ -285,7 +289,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val database = client.getDatabase("analytics_poll_recovery_" + UUID.randomUUID().toString.replace('-', '_'))
     val requestId = UUID.randomUUID().toString
     val receiptId = UUID.randomUUID().toString
-    val transactionalId = registeredTransactionalId.getOrElse("hiring-publisher-poll-recovery-" + UUID.randomUUID().toString)
+    val transactionalId =
+      registeredTransactionalId.getOrElse("hiring-publisher-poll-recovery-" + UUID.randomUUID().toString)
     val requestedAt = Instant.now()
     try {
       database
@@ -316,50 +321,54 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       }
       val recoveringFencer = new TransactionalProducerFencer {
         override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
-          if (attempts.incrementAndGet() == 1)
-            {
-              val firstAttempt =
-                interruptedBroker match {
-                  case Some(broker) =>
-                    KafkaProducerFencer.fenceAfterSubmission(connection, transactionalIds) { future =>
-                      IO.raiseWhen(future.isDone)(new AssertionError("AdminClient fencing completed before broker outage")) *>
-                        IO.blocking(broker.stop()) *> IO.blocking {
-                          val request = database
-                            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
-                            .find(new Document("_id", requestId))
-                            .first()
-                          val phase = Option(request).flatMap(value => Option(value.getString("phase")))
-                          val hasBarrier =
-                            request != null && request.get("kafkaRetentionBarrier", classOf[Document]) != null
-                          val stillPending =
-                            request != null && request.getString("state") == "Processing" &&
-                              phase.forall(_ == ErasurePhase.Requested.toString) &&
-                              database.getCollection("event_outbox").countDocuments() == 1L &&
-                              !hasBarrier
-                          pendingWasObservedDuringOutage.set(stillPending)
-                          assert(stillPending, "the request or outbox advanced while the AdminClient request was interrupted")
-                        }
-                    }
-                  case None if transportFailure =>
-                    IO.blocking {
-                      val socket = new Socket()
-                      try socket.connect(new InetSocketAddress("127.0.0.1", unavailablePort), 1000)
-                      finally socket.close()
-                    }
-                  case None =>
-                    KafkaProducerFencer.fence(
-                      connection.copy(saslPassword = Some(fencerPassword + "-invalid")),
-                      transactionalIds
-                    )
-                }
-              firstAttempt.handleErrorWith { error =>
-                interruptedBroker.traverse_(broker => IO.blocking(broker.start())) *>
-                  IO(firstFailure.set(error)) *> IO.raiseError(error)
+          if (attempts.incrementAndGet() == 1) {
+            val firstAttempt =
+              interruptedBroker match {
+                case Some(broker) =>
+                  KafkaProducerFencer.fenceAfterSubmission(connection, transactionalIds) { future =>
+                    IO.raiseWhen(future.isDone)(
+                      new AssertionError("AdminClient fencing completed before broker outage")
+                    ) *>
+                      IO.blocking(broker.stop()) *> IO.blocking {
+                        val request = database
+                          .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+                          .find(new Document("_id", requestId))
+                          .first()
+                        val phase = Option(request).flatMap(value => Option(value.getString("phase")))
+                        val hasBarrier =
+                          request != null && request.get("kafkaRetentionBarrier", classOf[Document]) != null
+                        val stillPending =
+                          request != null && request.getString("state") == "Processing" &&
+                            phase.forall(_ == ErasurePhase.Requested.toString) &&
+                            database.getCollection("event_outbox").countDocuments() == 1L &&
+                            !hasBarrier
+                        pendingWasObservedDuringOutage.set(stillPending)
+                        assert(
+                          stillPending,
+                          "the request or outbox advanced while the AdminClient request was interrupted"
+                        )
+                      }
+                  }
+                case None if transportFailure =>
+                  IO.blocking {
+                    val socket = new Socket()
+                    try socket.connect(new InetSocketAddress("127.0.0.1", unavailablePort), 1000)
+                    finally socket.close()
+                  }
+                case None =>
+                  KafkaProducerFencer.fence(
+                    connection.copy(saslPassword = Some(fencerPassword + "-invalid")),
+                    transactionalIds
+                  )
               }
+            firstAttempt.handleErrorWith { error =>
+              interruptedBroker.traverse_(broker => IO.blocking(broker.start())) *>
+                IO(firstFailure.set(error)) *> IO.raiseError(error)
             }
-          else
+          } else
             interruptedBroker.fold(KafkaProducerFencer.fence(connection, transactionalIds))(broker =>
-              KafkaProducerFencer.fence(connection.copy(bootstrapServers = broker.getBootstrapServers), transactionalIds)
+              KafkaProducerFencer
+                .fence(connection.copy(bootstrapServers = broker.getBootstrapServers), transactionalIds)
             )
       }
       val reservation = AnalyticsReportReservation("poll-recovery-" + requestId, "poll-recovery-range", 0L, 1L)
@@ -551,7 +560,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         admin.createTopics(List(new NewTopic(topicName, 1, 1.toShort)).asJava).all().get(30, TimeUnit.SECONDS)
         producer.initTransactions()
         producer.beginTransaction()
-        producer.send(new ProducerRecord(topicName, "subject", "in-flight-admin-outage-fixture"))
+        producer
+          .send(new ProducerRecord(topicName, "subject", "in-flight-admin-outage-fixture"))
           .get(30, TimeUnit.SECONDS)
         broker.execInContainer("bash", "-ec", "kill -STOP $(pgrep -x java)")
         verifyAutomaticPollRecovery(

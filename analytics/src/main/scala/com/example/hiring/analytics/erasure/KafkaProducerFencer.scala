@@ -1,4 +1,6 @@
-package com.example.hiring.analytics
+package com.example.hiring.analytics.erasure
+
+import com.example.hiring.analytics.batch.KafkaConnection
 
 import cats.effect.{IO, Resource}
 import org.apache.kafka.clients.admin.Admin

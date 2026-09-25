@@ -18,8 +18,7 @@ services:
       MONGODB_DATABASE: ${HIRING_ACCOUNT_DELETION_PROOF_DATABASE:?Set task database}
       ANALYTICS_TOPIC: ${HIRING_ACCOUNT_DELETION_PROOF_TOPIC:?Set task topic}
     volumes: !override
-      - account-deletion-proof-analytics:/var/lib/hiring-analytics
+      - ${HIRING_ACCOUNT_DELETION_PROOF_ANALYTICS_DIR:?Set task-scoped analytics proof directory}:/var/lib/hiring-analytics
 volumes:
   account-deletion-proof-mongodb:
   account-deletion-proof-kafka:
-  account-deletion-proof-analytics:

@@ -1,4 +1,7 @@
-package com.example.hiring.analytics
+package com.example.hiring.analytics.erasure
+
+import com.example.hiring.analytics.*
+import com.example.hiring.analytics.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all._

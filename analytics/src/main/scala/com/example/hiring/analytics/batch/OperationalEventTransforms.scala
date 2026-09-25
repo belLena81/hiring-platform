@@ -1,4 +1,6 @@
-package com.example.hiring.analytics
+package com.example.hiring.analytics.batch
+
+import com.example.hiring.analytics.*
 
 import cats.effect.IO
 import org.apache.spark.sql.{Column, DataFrame}
