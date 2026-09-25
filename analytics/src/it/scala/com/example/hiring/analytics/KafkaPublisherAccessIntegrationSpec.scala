@@ -5,6 +5,7 @@ import cats.effect.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
+import org.apache.kafka.clients.admin.{Admin, NewTopic}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.errors.{
   AuthenticationException,
@@ -16,23 +17,34 @@ import org.apache.kafka.common.errors.{
 import org.apache.kafka.common.serialization.StringSerializer
 import org.bson.Document
 import munit.FunSuite
+import org.testcontainers.kafka.KafkaContainer
+import org.testcontainers.utility.DockerImageName
 
 import java.time.Instant
 import java.time.Duration
+import java.net.{InetSocketAddress, ServerSocket, Socket}
 import java.util.Properties
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Opt-in authorization proof against the authenticated local Compose Kafka broker. */
 class KafkaPublisherAccessIntegrationSpec extends FunSuite {
-  override val munitTimeout = scala.concurrent.duration.FiniteDuration(2, scala.concurrent.duration.MINUTES)
+  override val munitTimeout = scala.concurrent.duration.FiniteDuration(3, scala.concurrent.duration.MINUTES)
 
   private val enabled = sys.props.get("hiring.analytics.compose.acl-evidence").contains("true") ||
     sys.env.get("HIRING_ANALYTICS_COMPOSE_ACL_EVIDENCE").contains("true")
+  private val transportRecoveryEnabled =
+    sys.props.get("hiring.analytics.compose.transport-recovery").contains("true") ||
+      sys.env.get("HIRING_ANALYTICS_COMPOSE_TRANSPORT_RECOVERY").contains("true")
+  private val adminOutageRecoveryEnabled =
+    sys.props.get("hiring.analytics.compose.admin-outage-recovery").contains("true") ||
+      sys.env.get("HIRING_ANALYTICS_COMPOSE_ADMIN_OUTAGE_RECOVERY").contains("true")
   private val bootstrapServers = sys.props.getOrElse(
     "hiring.analytics.compose.kafka",
     sys.env.getOrElse("HIRING_ANALYTICS_COMPOSE_KAFKA", "127.0.0.1:9092")
@@ -70,6 +82,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
 
   private def hasAuthenticationFailure(error: Throwable): Boolean =
     Iterator.iterate(error)(_.getCause).takeWhile(_ != null).exists(_.isInstanceOf[AuthenticationException])
+
+  private def hasTransportFailure(error: Throwable): Boolean =
+    Iterator.iterate(error)(_.getCause).takeWhile(_ != null).exists { cause =>
+      cause.isInstanceOf[java.net.ConnectException] ||
+      cause.isInstanceOf[org.apache.kafka.common.errors.NetworkException] ||
+      cause.isInstanceOf[org.apache.kafka.common.errors.TimeoutException]
+    }
 
   private def verifyWorkerKeepsRequestPendingAfterBadFencerPassword(fencerPassword: String): Unit = {
     val mongoUri = sys.env.getOrElse(
@@ -251,7 +270,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     }
   }
 
-  private def verifyAutomaticPollRecovery(fencerPassword: String): Unit = {
+  private def verifyAutomaticPollRecovery(
+      fencerPassword: String,
+      transportFailure: Boolean,
+      workerBootstrapServers: String = bootstrapServers,
+      interruptedBroker: Option[KafkaContainer] = None,
+      registeredTransactionalId: Option[String] = None
+  ): Unit = {
     val mongoUri = sys.env.getOrElse(
       "HIRING_ANALYTICS_COMPOSE_MONGO_URI",
       "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
@@ -260,7 +285,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val database = client.getDatabase("analytics_poll_recovery_" + UUID.randomUUID().toString.replace('-', '_'))
     val requestId = UUID.randomUUID().toString
     val receiptId = UUID.randomUUID().toString
-    val transactionalId = "hiring-publisher-poll-recovery-" + UUID.randomUUID().toString
+    val transactionalId = registeredTransactionalId.getOrElse("hiring-publisher-poll-recovery-" + UUID.randomUUID().toString)
     val requestedAt = Instant.now()
     try {
       database
@@ -282,11 +307,60 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
 
       val store = new MongoAnalyticsErasureWorkerStore(client, database)
       val attempts = new AtomicInteger(0)
+      val firstFailure = new AtomicReference[Throwable](null)
+      val pendingWasObservedDuringOutage = new AtomicBoolean(false)
+      val unavailablePort = {
+        val socket = new ServerSocket(0)
+        try socket.getLocalPort
+        finally socket.close()
+      }
       val recoveringFencer = new TransactionalProducerFencer {
         override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
           if (attempts.incrementAndGet() == 1)
-            KafkaProducerFencer.fence(connection.copy(saslPassword = Some(fencerPassword + "-invalid")), transactionalIds)
-          else KafkaProducerFencer.fence(connection, transactionalIds)
+            {
+              val firstAttempt =
+                interruptedBroker match {
+                  case Some(broker) =>
+                    KafkaProducerFencer.fenceAfterSubmission(connection, transactionalIds) { future =>
+                      IO.raiseWhen(future.isDone)(new AssertionError("AdminClient fencing completed before broker outage")) *>
+                        IO.blocking(broker.stop()) *> IO.blocking {
+                          val request = database
+                            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+                            .find(new Document("_id", requestId))
+                            .first()
+                          val phase = Option(request).flatMap(value => Option(value.getString("phase")))
+                          val hasBarrier =
+                            request != null && request.get("kafkaRetentionBarrier", classOf[Document]) != null
+                          val stillPending =
+                            request != null && request.getString("state") == "Processing" &&
+                              phase.forall(_ == ErasurePhase.Requested.toString) &&
+                              database.getCollection("event_outbox").countDocuments() == 1L &&
+                              !hasBarrier
+                          pendingWasObservedDuringOutage.set(stillPending)
+                          assert(stillPending, "the request or outbox advanced while the AdminClient request was interrupted")
+                        }
+                    }
+                  case None if transportFailure =>
+                    IO.blocking {
+                      val socket = new Socket()
+                      try socket.connect(new InetSocketAddress("127.0.0.1", unavailablePort), 1000)
+                      finally socket.close()
+                    }
+                  case None =>
+                    KafkaProducerFencer.fence(
+                      connection.copy(saslPassword = Some(fencerPassword + "-invalid")),
+                      transactionalIds
+                    )
+                }
+              firstAttempt.handleErrorWith { error =>
+                interruptedBroker.traverse_(broker => IO.blocking(broker.start())) *>
+                  IO(firstFailure.set(error)) *> IO.raiseError(error)
+              }
+            }
+          else
+            interruptedBroker.fold(KafkaProducerFencer.fence(connection, transactionalIds))(broker =>
+              KafkaProducerFencer.fence(connection.copy(bootstrapServers = broker.getBootstrapServers), transactionalIds)
+            )
       }
       val reservation = AnalyticsReportReservation("poll-recovery-" + requestId, "poll-recovery-range", 0L, 1L)
       val publisher = new AnalyticsReportPublisher {
@@ -303,8 +377,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         null,
         database,
         store,
-        KafkaConnection(bootstrapServers, None, None),
-        KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
+        KafkaConnection(workerBootstrapServers, None, None),
+        if (fencerPassword.isEmpty) KafkaConnection(workerBootstrapServers, None, None)
+        else KafkaConnection(workerBootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
         topic,
         AnalyticsLakehousePaths("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
         SubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
@@ -326,8 +401,15 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             else IO.sleep(10.millis) *> awaitDurableAdvance
           }
         }
-        val request = awaitDurableAdvance.timeout(8.seconds).unsafeRunSync()
+        val request = awaitDurableAdvance.timeout(90.seconds).unsafeRunSync()
         assert(attempts.get() >= 2, s"worker poll loop did not retry the fencer; attempts=${attempts.get()}")
+        val failureWasObserved = Option(firstFailure.get()).exists { error =>
+          if (transportFailure) hasTransportFailure(error) else hasAuthenticationFailure(error)
+        }
+        val failureDetail = Option(firstFailure.get()).map(error => s"${error.getClass.getName}: ${error.getMessage}")
+        assert(failureWasObserved, s"expected the configured first-attempt failure, got $failureDetail")
+        if (interruptedBroker.nonEmpty)
+          assert(pendingWasObservedDuringOutage.get(), "the request was not observed pending during the broker outage")
         assertEquals(request.getString("state"), "Processing")
         assertEquals(request.getString("receiptId"), receiptId)
         assertEquals(store.readBarrier(requestId).unsafeRunSync(), None)
@@ -399,7 +481,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .unsafeRunSync()
       assert(badFencerCredential.swap.toOption.exists(hasAuthenticationFailure), clues(badFencerCredential))
       verifyWorkerKeepsRequestPendingAfterBadFencerPassword(fencerPassword)
-      verifyAutomaticPollRecovery(fencerPassword)
+      verifyAutomaticPollRecovery(fencerPassword, transportFailure = false)
 
       val legacyWriterProperties = properties("publisher", legacyPublisherPassword)
       legacyWriterProperties.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, java.lang.Boolean.FALSE)
@@ -438,6 +520,52 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       } finally producer.close(Duration.ofSeconds(5))
 
       assert(writeResult.swap.toOption.exists(hasTopicAuthorizationFailure), clues(writeResult))
+    }
+  }
+
+  test("the erasure worker poll loop recovers after a refused transport connection") {
+    if (transportRecoveryEnabled) {
+      val fencerPassword = sys.env.getOrElse("KAFKA_FENCER_PASSWORD", "")
+      assert(fencerPassword.nonEmpty, "Compose fencer credentials are required")
+      verifyAutomaticPollRecovery(fencerPassword, transportFailure = true)
+    }
+  }
+
+  test("the erasure worker retries after Kafka interrupts an in-flight AdminClient fencing request") {
+    if (adminOutageRecoveryEnabled) {
+      val image = DockerImageName.parse("apache/kafka:3.9.2").asCompatibleSubstituteFor("apache/kafka")
+      val broker = new KafkaContainer(image)
+      broker.start()
+      val transactionalId = "hiring-publisher-admin-outage-" + UUID.randomUUID().toString
+      val topicName = "admin-outage-" + UUID.randomUUID().toString
+      val adminProperties = new Properties()
+      adminProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBootstrapServers)
+      val admin = Admin.create(adminProperties)
+      val producerProperties = new Properties()
+      producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBootstrapServers)
+      producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
+      producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
+      producerProperties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
+      val producer = new KafkaProducer[String, String](producerProperties)
+      try {
+        admin.createTopics(List(new NewTopic(topicName, 1, 1.toShort)).asJava).all().get(30, TimeUnit.SECONDS)
+        producer.initTransactions()
+        producer.beginTransaction()
+        producer.send(new ProducerRecord(topicName, "subject", "in-flight-admin-outage-fixture"))
+          .get(30, TimeUnit.SECONDS)
+        broker.execInContainer("bash", "-ec", "kill -STOP $(pgrep -x java)")
+        verifyAutomaticPollRecovery(
+          fencerPassword = "",
+          transportFailure = true,
+          workerBootstrapServers = broker.getBootstrapServers,
+          interruptedBroker = Some(broker),
+          registeredTransactionalId = Some(transactionalId)
+        )
+      } finally {
+        producer.close(Duration.ofSeconds(5))
+        admin.close(Duration.ofSeconds(5))
+        broker.stop()
+      }
     }
   }
 }

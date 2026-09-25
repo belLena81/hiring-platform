@@ -10,9 +10,8 @@ log_dir="$repo_root/.local/logs/analytics-retention-proof"
 
 load_local_environment() {
   [[ -r .env ]] || { printf 'Ignored root .env is required for local analytics credentials.\n' >&2; exit 1; }
-  set -a
   . ./.env
-  set +a
+  export -n KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_PASSWORD KAFKA_FENCER_PASSWORD HIRING_ANALYTICS_HMAC_SECRET_BASE64
   for variable in KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_PASSWORD KAFKA_FENCER_PASSWORD HIRING_ANALYTICS_HMAC_SECRET_BASE64; do
     [[ -n "${!variable:-}" ]] || { printf 'Required local setting %s is missing from .env.\n' "$variable" >&2; exit 1; }
   done
@@ -94,6 +93,7 @@ capture_log() {
 }
 
 load_state() {
+  check_local_directory "$repo_root/.local/config"
   [[ -r "$state_file" ]] || { printf 'No retention proof state exists; start with: %s start\n' "$0" >&2; exit 1; }
   [[ -f "$state_file" && ! -L "$state_file" ]] || {
     printf 'Retention proof state must be a regular, non-symlink file.\n' >&2
@@ -149,7 +149,6 @@ load_state() {
   export HIRING_ANALYTICS_RETENTION_PROOF_NONCE
   export KAFKA_TOPIC="$HIRING_ANALYTICS_RETENTION_PROOF_TOPIC"
   chmod 600 "$state_file"
-  check_local_directory "$repo_root/.local/config"
   ensure_log_directory
   git check-ignore -q "$log_dir/probe" || {
     printf 'Retention proof log path is not ignored by Git; refusing to use it.\n' >&2
@@ -159,17 +158,25 @@ load_state() {
 
 run_fixture() {
   local mode="$1"
-  compose run --rm --no-deps \
+  local result=0
+  export KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_PASSWORD HIRING_ANALYTICS_HMAC_SECRET_BASE64
+  if compose run --rm --no-deps \
     -e HIRING_ANALYTICS_RETENTION_PROOF_ENABLED=true \
     -e HIRING_ANALYTICS_RETENTION_PROOF_MODE="$mode" \
     -e HIRING_ANALYTICS_RETENTION_PROOF_NONCE="$HIRING_ANALYTICS_RETENTION_PROOF_NONCE" \
     -e HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID" \
-    -e KAFKA_BROKER_PASSWORD="$KAFKA_BROKER_PASSWORD" \
-    -e KAFKA_PUBLISHER_V2_PASSWORD="$KAFKA_PUBLISHER_V2_PASSWORD" \
-    -e KAFKA_READER_PASSWORD="$KAFKA_READER_PASSWORD" \
-    -e HIRING_ANALYTICS_HMAC_SECRET_BASE64="$HIRING_ANALYTICS_HMAC_SECRET_BASE64" \
+    -e KAFKA_BROKER_PASSWORD \
+    -e KAFKA_PUBLISHER_V2_PASSWORD \
+    -e KAFKA_READER_PASSWORD \
+    -e HIRING_ANALYTICS_HMAC_SECRET_BASE64 \
     --entrypoint /bin/sh analytics-batch \
-    -ec 'exec sbt "IntegrationTest / testOnly *AnalyticsRetentionProofIntegrationSpec"'
+    -ec 'exec sbt "IntegrationTest / testOnly *AnalyticsRetentionProofIntegrationSpec"'; then
+    result=0
+  else
+    result=$?
+  fi
+  unset KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_PASSWORD HIRING_ANALYTICS_HMAC_SECRET_BASE64
+  return "$result"
 }
 
 wait_for_request_phase() {
@@ -233,7 +240,14 @@ EOF
   compose build analytics-batch analytics-erasure-worker
   compose up -d mongodb kafka kafka-acl-init
   compose ps -a
-  capture_log prepare.log run_fixture prepare
+  local staged_request
+  staged_request="$(compose exec -T mongodb mongosh --quiet --eval \
+    "const d=db.getSiblingDB('$database'); const f=d.analytics_retention_proof.findOne({_id:'$nonce',stage:'Prepared'}); print(f && d.analytics_erasure_requests.countDocuments({_id:'$subject_id'}) === 1 ? 'PRESENT' : 'ABSENT')" 2>/dev/null | tail -n 1 || true)"
+  if [[ "$staged_request" == PRESENT ]]; then
+    printf 'Resuming from the complete durable fixture; preparation will not be repeated.\n'
+  else
+    capture_log prepare.log run_fixture prepare
+  fi
 
   compose up -d analytics-erasure-worker
   wait_for_request_phase DeltaPurged
@@ -244,10 +258,15 @@ EOF
 
 status_proof() {
   load_state
-  if [[ -n "$(compose ps --status running --services 2>/dev/null || true)" ]]; then
+  local running_services
+  if ! running_services="$(compose ps --status running --services 2>/dev/null)"; then
+    printf 'Could not inspect the retention proof Compose project; Docker status is unavailable.\n' >&2
+    return 1
+  fi
+  if [[ -n "$running_services" ]]; then
     run_fixture inspect
   else
-    printf 'Compose services are stopped. Persistent task-scoped Docker volumes remain attached to the proof containers.\n'
+    printf 'No Compose services are running. This status check did not stop or remove proof containers or volumes.\n'
     printf 'Use %s finish after the recorded 30-day Delta horizon has elapsed.\n' "$0"
   fi
 }

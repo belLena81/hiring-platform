@@ -1,6 +1,8 @@
 # Current Contract and Persistence Evolution
 
-The GraphQL, cursor, operational-event, and embedding contracts have one active shape before MVP. User and job Mongo documents also carry an internal version: Long concurrency revision. This field is not a schema revision and is not exposed through GraphQL or events.
+The API and analytics schemas have one active shape before full MVP. Implement their schema changes directly; do not add migration, backfill, dual-read/write, or legacy-compatibility code before full MVP. If incompatible local analytics data exists, reset/rebuild only the exact local lakehouse when explicitly in scope; otherwise preserve it and fail closed. After full MVP, apply the schema evolution requirements in `AGENTS.md`.
+
+GraphQL, cursor, operational-event, and embedding contracts therefore have one active shape before MVP. User and job Mongo documents also carry an internal version: Long concurrency revision. This field is not a schema revision and is not exposed through GraphQL or events.
 
 ## Aggregate revisions
 

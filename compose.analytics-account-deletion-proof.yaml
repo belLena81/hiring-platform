@@ -1,0 +1,25 @@
+services:
+  mongodb:
+    ports: !override
+      - "127.0.0.1:${HIRING_ACCOUNT_DELETION_PROOF_MONGO_PORT:?Set Mongo proof port}:27017"
+    volumes: !override
+      - account-deletion-proof-mongodb:/data/db
+  kafka:
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:${HIRING_ACCOUNT_DELETION_PROOF_KAFKA_PORT:?Set Kafka proof port}"
+    ports: !override
+      - "127.0.0.1:${HIRING_ACCOUNT_DELETION_PROOF_KAFKA_PORT:?Set Kafka proof port}:29092"
+    volumes: !override
+      - account-deletion-proof-kafka:/var/lib/kafka/data
+  analytics-erasure-worker:
+    environment:
+      SPARK_MASTER: local[1]
+      MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+      MONGODB_DATABASE: ${HIRING_ACCOUNT_DELETION_PROOF_DATABASE:?Set task database}
+      ANALYTICS_TOPIC: ${HIRING_ACCOUNT_DELETION_PROOF_TOPIC:?Set task topic}
+    volumes: !override
+      - account-deletion-proof-analytics:/var/lib/hiring-analytics
+volumes:
+  account-deletion-proof-mongodb:
+  account-deletion-proof-kafka:
+  account-deletion-proof-analytics:

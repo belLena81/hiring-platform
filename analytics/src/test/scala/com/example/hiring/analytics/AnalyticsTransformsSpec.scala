@@ -1149,7 +1149,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
   }
 
-  test("stored retiring-key tokens are accepted while configured and block key removal while rows remain") {
+  test("key removal stays blocked by the continuity registry after current rows disappear") {
     val oldSecret = hmacKey("old-stored-key")
     val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
     val rotating = SubjectPseudonymizer.fromKeyRing(
@@ -1159,6 +1159,12 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val removed = SubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("new-stored-key"), Vector.empty)
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-retirement").toUri.toString)
+    new HiringAnalyticsBatch(paths, old, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+      .validateKeyMaterialContinuity(spark)
+      .unsafeRunSync()
+    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
+    val rotatingBatch = new HiringAnalyticsBatch(paths, rotating, markers)
+    rotatingBatch.validateKeyMaterialContinuity(spark).unsafeRunSync()
     val stored = spark.createDataFrame(
       Seq(Row(old.token("candidate-1"), Seq(rotating.token("candidate-1")))).asJava,
       StructType(
@@ -1169,15 +1175,17 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     stored.write.format("delta").save(paths.silver)
-    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
 
-    new HiringAnalyticsBatch(paths, rotating, markers).validateStoredTokenKeys(spark).unsafeRunSync()
+    rotatingBatch.validateStoredTokenKeys(spark).unsafeRunSync()
     val error = intercept[AnalyticsError.InvalidConfiguration] {
       new HiringAnalyticsBatch(paths, removed, markers).validateStoredTokenKeys(spark).unsafeRunSync()
     }
     assert(error.getMessage.contains("not configured"))
     io.delta.tables.DeltaTable.forPath(spark, paths.silver).delete()
-    new HiringAnalyticsBatch(paths, removed, markers).validateStoredTokenKeys(spark).unsafeRunSync()
+    val retirementBlocked = intercept[AnalyticsError.InvalidConfiguration] {
+      new HiringAnalyticsBatch(paths, removed, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    }
+    assert(retirementBlocked.getMessage.contains("audited historical-data cleanup"))
   }
 
   test("HMAC key continuity rejects changed material under the same key ID") {
@@ -1209,6 +1217,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       new HiringAnalyticsBatch(paths, pseudonymizer, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
     }
     assert(error.getMessage.contains("no HMAC key continuity registry"))
+    assert(error.getMessage.contains("reset or rebuild this local lakehouse explicitly"))
   }
 
   test("a configured key ID with stored rows but no registry anchor fails closed") {

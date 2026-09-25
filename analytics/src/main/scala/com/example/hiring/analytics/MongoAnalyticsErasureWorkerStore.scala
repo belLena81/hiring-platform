@@ -289,10 +289,11 @@ final class MongoAnalyticsErasureWorkerStore(
     }
 
   def preflight: IO[Unit] = mongo {
+    // Delta file evidence is empty until the first erasure reaches physical reclamation;
+    // Mongo creates the collection on its first evidence write.
     val required = Set(
       "analytics_erasure_requests",
       "analytics_erasure_completions",
-      "analytics_erasure_delta_files",
       "analytics_worker_heartbeats",
       "analytics_report_snapshots",
       "analytics_report_control",

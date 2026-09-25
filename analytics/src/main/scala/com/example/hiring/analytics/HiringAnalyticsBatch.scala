@@ -471,7 +471,7 @@ final class HiringAnalyticsBatch(
       ).exists(DeltaTable.isDeltaTable(spark, _))
       if (existingAnalyticsData)
         throw AnalyticsError.InvalidConfiguration(
-          "existing lakehouse has no HMAC key continuity registry; verify key provenance and perform the documented one-time migration"
+          "existing lakehouse has no HMAC key continuity registry; startup fails closed, reset or rebuild this local lakehouse explicitly before reuse"
         )
       val initial = spark.createDataFrame(
         pseudonymizer.keyVerifiers.map { case (keyId, verifier) => Row(keyId, verifier) }.asJava,
@@ -499,6 +499,12 @@ final class HiringAnalyticsBatch(
       if (!registryRowsAreValid || existingRows.map(_.getString(0)).distinct.size != existingRows.size)
         throw AnalyticsError.InvalidConfiguration("HMAC key continuity registry is malformed")
       val existing = existingRows.map(row => row.getString(0) -> row.getString(1)).toMap
+      val removedKey = existing.keys.find(keyId => !pseudonymizer.keyIds.contains(keyId))
+      removedKey.foreach { keyId =>
+        throw AnalyticsError.InvalidConfiguration(
+          s"HMAC key '$keyId' cannot be removed: audited historical-data cleanup and writer-exclusion verification are not implemented"
+        )
+      }
       val mismatched = pseudonymizer.keyVerifiers.find { case (keyId, verifier) =>
         existing.get(keyId).exists(_ != verifier)
       }
