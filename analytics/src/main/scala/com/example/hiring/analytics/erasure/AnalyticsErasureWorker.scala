@@ -141,28 +141,7 @@ final class AnalyticsErasureWorker(
 
       case ErasurePhase.OutboxPurged =>
         for {
-          _ <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
-            for {
-              markerFrame <- markers.activeSubjectTokens(spark)
-              affectedRows <- batch.countMarkedRows(spark, markerFrame)
-              affectedFiles <- batch.captureMarkedFiles(spark, markerFrame)
-              countedAt <- now
-              counted <- store.persistAffectedRows(claim, affectedRows, countedAt)
-              _ <- IO.raiseWhen(!counted)(AnalyticsError.ErasureNotReady)
-              filesSaved <- store.persistDeltaFiles(claim, affectedFiles, countedAt)
-              _ <- IO.raiseWhen(!filesSaved)(AnalyticsError.ErasureNotReady)
-              _ <- batch.applyDeletionMarkers(spark, markerFrame)
-              retiredLogs <- batch.checkpointPurgedRawLogs(spark)
-              checkpointedAt <- now
-              logsSaved <- store.persistDeltaFiles(claim, retiredLogs, checkpointedAt)
-              _ <- IO.raiseWhen(!logsSaved)(AnalyticsError.ErasureNotReady)
-            } yield ()
-          }
-          purgedAt <- now
-          saved <- store.persistDeltaPurgedAt(claim, purgedAt, purgedAt)
-          _ <- IO.raiseWhen(!saved)(AnalyticsError.ErasureNotReady)
-          generationSaved <- store.persistDeltaGeneration(claim, reservation.generation, purgedAt)
-          _ <- IO.raiseWhen(!generationSaved)(AnalyticsError.ErasureNotReady)
+          _ <- purgeAndRecordDelta(claim, spark, reservation.generation)
           _ <- advance(claim, ErasurePhase.DeltaPurged)
           next = claim.copy(
             phase = ErasurePhase.DeltaPurged,
@@ -239,7 +218,7 @@ final class AnalyticsErasureWorker(
       case ErasurePhase.ReportPublished => IO.unit
     }
 
-  private def refreshErasureProjection(claim: ErasureClaim, generation: Long): IO[Unit] =
+  private def purgeAndRecordDelta(claim: ErasureClaim, spark: SparkSession, generation: Long): IO[Unit] =
     for {
       _ <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
         for {
@@ -263,10 +242,22 @@ final class AnalyticsErasureWorker(
       _ <- IO.raiseWhen(!savedAt)(AnalyticsError.ErasureNotReady)
       savedGeneration <- store.persistDeltaGeneration(claim, generation, purgedAt)
       _ <- IO.raiseWhen(!savedGeneration)(AnalyticsError.ErasureNotReady)
+    } yield ()
+
+  private def refreshErasureProjection(claim: ErasureClaim, generation: Long): IO[Unit] =
+    for {
+      _ <- purgeAndRecordDelta(claim, spark, generation)
       barrier <- store
         .readBarrier(claim.requestId)
         .flatMap(
           _.fold[IO[KafkaRetentionBarrier]](
+            IO.raiseError(AnalyticsError.MalformedMarker)
+          )(IO.pure)
+        )
+      purgedAt <- store
+        .readDeltaPurgedAt(claim.requestId)
+        .flatMap(
+          _.fold[IO[Instant]](
             IO.raiseError(AnalyticsError.MalformedMarker)
           )(IO.pure)
         )

@@ -19,6 +19,7 @@ import org.apache.spark.sql.functions.{
 import org.apache.spark.sql.api.java.UDF1
 import org.apache.spark.sql.types.{ArrayType, StringType}
 import cats.data.ValidatedNec
+import cats.data.NonEmptyVector
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
 
@@ -33,11 +34,17 @@ import javax.crypto.spec.SecretKeySpec
   * The HMAC key is owned by runtime configuration and is never written to a dataframe, Delta table, log, or manifest. A
   * new key needs a new token version and a rebuild.
   */
-final class SubjectPseudonymizer private (keys: Vector[(String, Array[Byte])]) extends Serializable {
-  private val copiedKeys = keys.map { case (version, key) => version -> key.clone() }
+final class SubjectPseudonymizer private (
+    primaryKey: (String, Array[Byte]),
+    previousKeys: Vector[(String, Array[Byte])]
+) extends Serializable {
+  private val copiedKeys: NonEmptyVector[(String, Array[Byte])] = NonEmptyVector.of(
+    primaryKey._1 -> primaryKey._2.clone(),
+    previousKeys.map { case (version, key) => version -> key.clone() }*
+  )
   val primaryKeyId: String = copiedKeys.head._1
   val keyIds: Set[String] = copiedKeys.iterator.map(_._1).toSet
-  private[analytics] val keyVerifiers: Vector[(String, String)] = copiedKeys.map { key =>
+  private[analytics] val keyVerifiers: Vector[(String, String)] = copiedKeys.toVector.map { key =>
     val token = tokenFor("hiring-analytics-key-continuity-v1", key)
     key._1 -> token.substring(key._1.length + 1)
   }
@@ -55,7 +62,7 @@ final class SubjectPseudonymizer private (keys: Vector[(String, Array[Byte])]) e
   /** Tokens used to match existing rows include every configured primary/retiring key. */
   def matchingTokens(subjectId: String): Vector[String] = {
     require(subjectId != null && subjectId.nonEmpty, "subject id must be non-empty")
-    copiedKeys.map(key => tokenFor(subjectId, key))
+    copiedKeys.toVector.map(key => tokenFor(subjectId, key))
   }
 
   private def tokenFor(subjectId: String, key: (String, Array[Byte])) = {
@@ -99,7 +106,7 @@ object SubjectPseudonymizer {
     val errors = idAndKeyErrors ++ duplicateIds
     cats.data.NonEmptyChain.fromSeq(errors) match {
       case Some(problems) => cats.data.Validated.Invalid(problems)
-      case None           => cats.data.Validated.Valid(new SubjectPseudonymizer(allKeys))
+      case None           => cats.data.Validated.Valid(new SubjectPseudonymizer(primaryKeyId -> secret, previousKeys))
     }
   }
 

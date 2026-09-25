@@ -118,6 +118,21 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     )
   }
 
+  test("Mongo marker source fails closed for an array-valued completed expiry") {
+    val database = mongoClient.getDatabase(s"array_expiry_${UUID.randomUUID()}")
+    database
+      .getCollection("analytics_erasure_requests")
+      .insertOne(
+        new Document("_id", UUID.randomUUID().toString)
+          .append("state", "Complete")
+          .append("expiresAt", List(Date.from(Instant.parse("2026-09-23T12:00:00Z"))).asJava)
+      )
+    val source = new MongoActiveDeletionMarkerSource(database, pseudonymizer, clock = markerClock)
+
+    val error = intercept[AnalyticsError](source.activeSubjectTokens(spark).unsafeRunSync())
+    assertEquals(error, AnalyticsError.MalformedMarker)
+  }
+
   test("missing or malformed Mongo marker data fails before any Delta mutation") {
     val missingCollectionDatabase = mongoClient.getDatabase(s"missing_${UUID.randomUUID()}")
     val missingPaths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-missing-markers").toUri.toString)

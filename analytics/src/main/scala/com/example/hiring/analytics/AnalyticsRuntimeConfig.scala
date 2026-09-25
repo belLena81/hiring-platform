@@ -42,9 +42,9 @@ final case class AnalyticsWorkerSettings(
 
 /** Loads the runtime configuration once, validates it without effects, and only then starts Spark/Mongo resources. */
 object AnalyticsRuntimeConfig {
-  private final case class RawMongo(uri: Option[String], database: Option[String])
-  private final case class RawSpark(master: Option[String])
-  private final case class RawFencer(username: Option[String], password: Option[String])
+  import AnalyticsRawConfig.{Lakehouse as RawLakehouse, Mongo as RawMongo, Spark as RawSpark}
+
+  private final case class RawFencer(username: Option[String], password: Option[String]) derives ConfigReader
   private final case class RawKafka(
       bootstrapServers: Option[String],
       username: Option[String],
@@ -52,7 +52,6 @@ object AnalyticsRuntimeConfig {
       topic: Option[String],
       fencer: RawFencer
   )
-  private final case class RawLakehouse(root: Option[String])
   private final case class RawHmac(
       secretBase64: Option[String],
       keyId: Option[String],
@@ -72,20 +71,14 @@ object AnalyticsRuntimeConfig {
       lakehouse: RawLakehouse,
       hmac: RawHmac,
       batch: RawBatch
-  )
+  ) derives ConfigReader
 
-  private given ConfigReader[RawMongo] = ConfigReader.forProduct2("uri", "database")(RawMongo.apply)
-  private given ConfigReader[RawSpark] = ConfigReader.forProduct1("master")(RawSpark.apply)
-  private given ConfigReader[RawFencer] = ConfigReader.forProduct2("username", "password")(RawFencer.apply)
   private given ConfigReader[RawKafka] =
     ConfigReader.forProduct5("bootstrap-servers", "username", "password", "topic", "fencer")(RawKafka.apply)
-  private given ConfigReader[RawLakehouse] = ConfigReader.forProduct1("root")(RawLakehouse.apply)
   private given ConfigReader[RawHmac] =
     ConfigReader.forProduct4("secret-base64", "key-id", "previous-key-id", "previous-secret-base64")(RawHmac.apply)
   private given ConfigReader[RawBatch] =
     ConfigReader.forProduct4("run-id", "partition", "start-offset", "end-offset-exclusive")(RawBatch.apply)
-  private given ConfigReader[RawAnalytics] =
-    ConfigReader.forProduct6("mongo", "spark", "kafka", "lakehouse", "hmac", "batch")(RawAnalytics.apply)
 
   def loadBatch: IO[AnalyticsBatchSettings] = load.flatMap(raw => IO.fromEither(batch(raw)))
 

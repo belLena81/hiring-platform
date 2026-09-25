@@ -1,8 +1,10 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.batch.{AnalyticsLakehouseLock, AnalyticsLakehousePaths}
+import cats.data.Chain
 import cats.effect.IO
 import cats.syntax.all.*
+import com.example.hiring.analytics.mongo.AnalyticsCollections
 import com.mongodb.client.MongoDatabase
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.SparkSession
@@ -51,15 +53,22 @@ private[analytics] object AnalyticsKeyRetirement {
       reports: RetentionHorizon
   )
 
-  /** A clear report means repository-controlled surfaces were scanned; operator evidence is not cryptographically attested. */
-  final case class AuditSummary(checkedAt: Instant, deltaFilesScanned: Long, mongoDocumentsScanned: Long,
-      operatorEvidence: String = "DIAGNOSTIC ONLY: operator-attested; not an authorization to retire a key")
+  /** A clear report means repository-controlled surfaces were scanned; operator evidence is not cryptographically
+    * attested.
+    */
+  final case class AuditSummary(
+      checkedAt: Instant,
+      deltaFilesScanned: Long,
+      mongoDocumentsScanned: Long,
+      operatorEvidence: String = "DIAGNOSTIC ONLY: operator-attested; not an authorization to retire a key"
+  )
 
   private val RegistryIdPattern = "[A-Za-z0-9-]{1,40}".r
   private val VerifierPattern = "[A-Za-z0-9_-]{43}".r
+  private final case class ScanResult(count: Long, blockers: Chain[String] = Chain.empty)
 
-  /** Inspects current Delta snapshots, all retained physical files/logs, required Mongo collections and registry.
-    * No HMAC material is accepted by this API. Writer and retention evidence remains an explicit operator input.
+  /** Inspects current Delta snapshots, all retained physical files/logs, required Mongo collections and registry. No
+    * HMAC material is accepted by this API. Writer and retention evidence remains an explicit operator input.
     */
   def audit(
       spark: SparkSession,
@@ -70,75 +79,93 @@ private[analytics] object AnalyticsKeyRetirement {
       writers: WriterInventory,
       now: Instant
   ): IO[Either[Vector[String], AuditSummary]] =
-    AnalyticsLakehouseLock.resource(paths.root).use { _ =>
-      IO.blocking {
-        val blockers = Vector.newBuilder[String]
-        if (Option(retiringKeyId).forall(id => !RegistryIdPattern.matches(id)))
-          blockers += "retiring key ID is invalid"
-        blockers ++= validateRetention(retention, now)
-        blockers ++= validateWriters(writers, now)
-
-        val deltaCount = scanDelta(spark, paths, Option(retiringKeyId).getOrElse(""), blockers)
-        val mongoCount = scanMongo(database, Option(retiringKeyId).getOrElse(""), now, blockers)
-        validateRegistry(spark, paths, Option(retiringKeyId).getOrElse(""), blockers)
-
-        val errors = blockers.result()
-        if (errors.nonEmpty) Left(errors)
-        else Right(AuditSummary(now, deltaCount, mongoCount))
-      }.adaptError { case NonFatal(_) => AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface") }
-    }.attempt.map {
-      case Right(result) => result
-      case Left(_: AnalyticsError) => Left(Vector("key retirement audit could not acquire the lakehouse audit boundary"))
-      case Left(_) => Left(Vector("key retirement audit could not verify every required surface"))
-    }
+    AnalyticsLakehouseLock
+      .resource(paths.root)
+      .use { _ =>
+        val keyBlockers =
+          if (Option(retiringKeyId).forall(id => !RegistryIdPattern.matches(id)))
+            Chain.one("retiring key ID is invalid")
+          else Chain.empty[String]
+        val evidenceBlockers =
+          Chain.fromSeq(validateRetention(retention, now)) ++ Chain.fromSeq(validateWriters(writers, now))
+        IO.blocking {
+          val delta = scanDelta(spark, paths, Option(retiringKeyId).getOrElse(""))
+          val mongo = scanMongo(database, Option(retiringKeyId).getOrElse(""), now)
+          val registry = validateRegistry(spark, paths, Option(retiringKeyId).getOrElse(""))
+          (delta, mongo, registry)
+        }.adaptError { case NonFatal(_) =>
+          AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
+        }.map { case (delta, mongo, registryBlockers) =>
+          val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
+          val errors = blockers.toList.toVector
+          if (errors.nonEmpty) Left(errors)
+          else Right(AuditSummary(now, delta.count, mongo.count))
+        }
+      }
+      .attempt
+      .map {
+        case Right(result)           => result
+        case Left(_: AnalyticsError) =>
+          Left(Vector("key retirement audit could not acquire the lakehouse audit boundary"))
+        case Left(_) => Left(Vector("key retirement audit could not verify every required surface"))
+      }
 
   private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): Vector[String] = {
-    val reasons = Vector.newBuilder[String]
-    (evidence.kafka.barrierOffset, evidence.kafka.earliestAvailableOffset) match {
-      case (Some(barrier), Some(earliest)) if barrier >= 0L && earliest >= barrier => ()
-      case _ => reasons += "Kafka retention barrier is missing, invalid, or not yet passed"
+    val kafkaReasons = (evidence.kafka.barrierOffset, evidence.kafka.earliestAvailableOffset) match {
+      case (Some(barrier), Some(earliest)) if barrier >= 0L && earliest >= barrier => Chain.empty[String]
+      case _ => Chain.one("Kafka retention barrier is missing, invalid, or not yet passed")
     }
-    Vector(
+    val horizonReasons = Vector(
       "Delta data-file" -> evidence.deltaData,
       "Delta transaction-log" -> evidence.deltaLogs,
       "report" -> evidence.reports
-    ).foreach {
-      case (_, horizon) if horizon.retainedUntil.exists(deadline => !now.isBefore(deadline)) &&
-          Option(horizon.evidenceReference).exists(_.trim.nonEmpty) => ()
-      case (name, _) => reasons += s"$name retention horizon or its evidence reference is missing or has not elapsed"
+    ).foldLeft(Chain.empty[String]) {
+      case (reasons, (_, horizon))
+          if horizon.retainedUntil.exists(deadline => !now.isBefore(deadline)) &&
+            Option(horizon.evidenceReference).exists(_.trim.nonEmpty) =>
+        reasons
+      case (reasons, (name, _)) =>
+        reasons.append(s"$name retention horizon or its evidence reference is missing or has not elapsed")
     }
-    if (Option(evidence.kafka.evidenceReference).forall(_.trim.isEmpty))
-      reasons += "Kafka retention barrier evidence reference is missing"
-    reasons.result()
+    val evidenceReasons =
+      if (Option(evidence.kafka.evidenceReference).forall(_.trim.isEmpty))
+        Chain.one("Kafka retention barrier evidence reference is missing")
+      else Chain.empty[String]
+    (kafkaReasons ++ horizonReasons ++ evidenceReasons).toList.toVector
   }
 
   private[analytics] def validateWriters(inventory: WriterInventory, now: Instant): Vector[String] = {
-    val reasons = Vector.newBuilder[String]
-    if (inventory == null || inventory.observedAt == null || inventory.observedAt.isAfter(now) ||
+    val freshnessReasons =
+      if (
+        inventory == null || inventory.observedAt == null || inventory.observedAt.isAfter(now) ||
         inventory.observedAt.isBefore(now.minus(MaximumWriterEvidenceAge)) ||
-        Option(inventory.coverageReference).forall(_.trim.isEmpty))
-      reasons += "managed and unmanaged Delta writer inventory lacks fresh operator-attested coverage evidence"
+        Option(inventory.coverageReference).forall(_.trim.isEmpty)
+      )
+        Chain.one("managed and unmanaged Delta writer inventory lacks fresh operator-attested coverage evidence")
+      else Chain.empty[String]
     val all = Option(inventory).toVector.flatMap(i => i.managed ++ i.unmanaged)
-    if (all.isEmpty) reasons += "writer inventory contains no individually accounted writer identities"
-    all.foreach { writer =>
-      if (writer == null || Option(writer.identity).forall(_.trim.isEmpty) ||
-          Option(writer.evidenceReference).forall(_.trim.isEmpty))
-        reasons += "a Delta writer identity or evidence reference is missing"
-      Option(writer).map(_.disposition) match {
-        case Some(WriterDisposition.Stopped | WriterDisposition.AccessRevoked) => ()
-        case Some(WriterDisposition.Active) => reasons += "a Delta writer remains active"
-        case _ => reasons += "a Delta writer is not accounted for as stopped or access-revoked"
+    val identityReasons =
+      if (all.isEmpty) Chain.one("writer inventory contains no individually accounted writer identities")
+      else Chain.empty[String]
+    val writerReasons = all.foldLeft(Chain.empty[String]) { (reasons, writer) =>
+      val missing =
+        if (
+          writer == null || Option(writer.identity).forall(_.trim.isEmpty) ||
+          Option(writer.evidenceReference).forall(_.trim.isEmpty)
+        )
+          Chain.one("a Delta writer identity or evidence reference is missing")
+        else Chain.empty[String]
+      val disposition = Option(writer).map(_.disposition) match {
+        case Some(WriterDisposition.Stopped | WriterDisposition.AccessRevoked) => Chain.empty[String]
+        case Some(WriterDisposition.Active) => Chain.one("a Delta writer remains active")
+        case _ => Chain.one("a Delta writer is not accounted for as stopped or access-revoked")
       }
+      reasons ++ missing ++ disposition
     }
-    reasons.result()
+    (freshnessReasons ++ identityReasons ++ writerReasons).toList.toVector
   }
 
-  private def scanDelta(
-      spark: SparkSession,
-      paths: AnalyticsLakehousePaths,
-      keyId: String,
-      blockers: scala.collection.mutable.Builder[String, Vector[String]]
-  ): Long = {
+  private def scanDelta(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): ScanResult = {
     val tables = Vector(
       paths.bronze,
       paths.quarantine,
@@ -148,48 +175,48 @@ private[analytics] object AnalyticsKeyRetirement {
       paths.skillsGold,
       paths.manifests
     )
-    var count = 0L
-    tables.foreach { tablePath =>
-      try {
+    tables.foldLeft(ScanResult(0L)) { (total, tablePath) =>
+      val tableResult = try {
         val root = new Path(tablePath)
         val fs = root.getFileSystem(spark.sparkContext.hadoopConfiguration)
         if (fs.exists(root)) {
-          visitFiles(fs, root) { file =>
+          val files = visitFiles(fs, root) { file =>
             val pathText = file.getPath.toString
             if (pathText.contains(keyId + "_")) {
-              blockers += "a retained Delta path references the retiring key"
-              true
+              ScanResult(0L, Chain.one("a retained Delta path references the retiring key"))
             } else if (pathText.endsWith(".parquet")) {
-              count += 1L
               // Checkpoint Parquet stores add-file statistics and is scanned as checkpoint metadata,
               // separately from ordinary table data files.
               val isCheckpoint = pathText.contains("_delta_log") && pathText.contains("checkpoint")
               val frame = spark.read.parquet(pathText)
               if (containsKeyReference(frame, keyId)) {
-                blockers += (if (isCheckpoint) "a retained Delta checkpoint references the retiring key"
-                  else "a current or retained Delta data file references the retiring key")
-                true
-              } else false
+                ScanResult(
+                  1L,
+                  Chain.one(
+                    if (isCheckpoint) "a retained Delta checkpoint references the retiring key"
+                    else "a current or retained Delta data file references the retiring key"
+                  )
+                )
+              } else ScanResult(1L)
             } else if (pathText.endsWith(".json") && pathText.contains("_delta_log")) {
               val source = scala.io.Source.fromInputStream(fs.open(file.getPath), "UTF-8")
               try {
                 val found = source.getLines().exists(_.contains(keyId + "_"))
-                if (found)
-                  blockers += "a retained Delta transaction log references the retiring key"
-                found
+                if (found) ScanResult(0L, Chain.one("a retained Delta transaction log references the retiring key"))
+                else ScanResult(0L)
               } finally source.close()
-            } else false
+            } else ScanResult(0L)
           }
           if (io.delta.tables.DeltaTable.isDeltaTable(spark, tablePath)) {
             val current = spark.read.format("delta").load(tablePath)
-            if (containsKeyReference(current, keyId)) blockers += "a current Delta snapshot references the retiring key"
-          }
-        }
-      } catch {
-        case NonFatal(_) => blockers += "a current or retained Delta surface is unavailable"
-      }
+            if (containsKeyReference(current, keyId))
+              files.copy(blockers = files.blockers.append("a current Delta snapshot references the retiring key"))
+            else files
+          } else files
+        } else ScanResult(0L)
+      } catch { case NonFatal(_) => ScanResult(0L, Chain.one("a current or retained Delta surface is unavailable")) }
+      ScanResult(total.count + tableResult.count, total.blockers ++ tableResult.blockers)
     }
-    count
   }
 
   private def containsKeyReference(frame: org.apache.spark.sql.DataFrame, keyId: String): Boolean =
@@ -201,98 +228,152 @@ private[analytics] object AnalyticsKeyRetirement {
     }
 
   /** Visits files incrementally and stops the table walk as soon as a reference is proven. */
-  private def visitFiles(fs: org.apache.hadoop.fs.FileSystem, root: Path)(visit: org.apache.hadoop.fs.FileStatus => Boolean): Unit = {
-    val pending = scala.collection.mutable.Stack(root)
-    var stopped = false
-    while (pending.nonEmpty && !stopped) {
-      val statuses = fs.listStatus(pending.pop())
-      var index = 0
-      while (index < statuses.length && !stopped) {
-        val status = statuses(index)
-        if (status.isDirectory) pending.push(status.getPath)
-        else if (status.isFile) stopped = visit(status)
-        index += 1
-      }
+  private def visitFiles(fs: org.apache.hadoop.fs.FileSystem, root: Path)(
+      visit: org.apache.hadoop.fs.FileStatus => ScanResult
+  ): ScanResult = {
+    @annotation.tailrec
+    def walk(pending: List[Path], result: ScanResult): ScanResult = pending match {
+      case Nil               => result
+      case directory :: rest =>
+        val (nextDirs, nextResult, stopped) =
+          fs.listStatus(directory).iterator.foldLeft((List.empty[Path], result, false)) {
+            case ((dirs, accumulated, true), _)                             => (dirs, accumulated, true)
+            case ((dirs, accumulated, false), status) if status.isDirectory =>
+              (status.getPath :: dirs, accumulated, false)
+            case ((dirs, accumulated, false), status) if status.isFile =>
+              val found = visit(status)
+              val combined = ScanResult(accumulated.count + found.count, accumulated.blockers ++ found.blockers)
+              (dirs, combined, found.blockers.nonEmpty)
+            case (state, _) => state
+          }
+        if (stopped) nextResult else walk(nextDirs.reverse ::: rest, nextResult)
     }
+    walk(List(root), ScanResult(0L))
   }
 
   private val MongoCollections = Vector(
-    "analytics_report_snapshots",
-    "analytics_report_runs",
-    "analytics_report_control",
-    "analytics_erasure_requests",
-    "analytics_erasure_completions",
-    "analytics_erasure_delta_files",
-    "event_outbox",
-    "hiring_migration_ledger",
-    "outbox_subject_fences"
+    AnalyticsCollections.ReportSnapshots,
+    AnalyticsCollections.ReportRuns,
+    AnalyticsCollections.ReportControl,
+    AnalyticsCollections.ErasureRequests,
+    AnalyticsCollections.ErasureCompletions,
+    AnalyticsCollections.ErasureDeltaFiles,
+    AnalyticsCollections.EventOutbox,
+    AnalyticsCollections.HiringMigrationLedger,
+    AnalyticsCollections.OutboxSubjectFences
   )
 
   private val MaximumWriterEvidenceAge = java.time.Duration.ofHours(1)
 
-  private def scanMongo(database: MongoDatabase, keyId: String, now: Instant,
-      blockers: scala.collection.mutable.Builder[String, Vector[String]]): Long = {
-    var count = 0L
-    val activeSubjects = scala.collection.mutable.Set.empty[String]
+  private def scanMongo(database: MongoDatabase, keyId: String, now: Instant): ScanResult = {
+    final case class MongoScanState(count: Long, activeSubjects: Set[String], blockers: Chain[String])
     val names = database.listCollectionNames().into(new java.util.ArrayList[String]()).asScala.toSet
     val missing = MongoCollections.toSet -- names
-    if (missing.nonEmpty) blockers += "one or more required Mongo report, erasure, or replay collections are unavailable"
-    MongoCollections.filter(names.contains).foreach { collectionName =>
+    val missingBlockers =
+      if (missing.nonEmpty)
+        Chain.one("one or more required Mongo report, erasure, or replay collections are unavailable")
+      else Chain.empty[String]
+    val initial = MongoScanState(0L, Set.empty, missingBlockers)
+    val scanned = MongoCollections.filter(names.contains).foldLeft(initial) { (state, collectionName) =>
       val find = database.getCollection(collectionName, classOf[Document]).find()
-      if (collectionName == "analytics_erasure_requests") find.limit(MaximumAuditedErasureSubjects + 1)
+      if (collectionName == AnalyticsCollections.ErasureRequests) find.limit(MaximumAuditedErasureSubjects + 1)
       val cursor = find.iterator()
-      var collectionDocuments = 0
       try {
-        while (cursor.hasNext) {
-          val document = cursor.next()
-          collectionDocuments += 1
-          count += 1L
-          if (collectionName == "analytics_erasure_requests" && collectionDocuments > MaximumAuditedErasureSubjects)
-            blockers += "active erasure subject inventory exceeds its audit bound; no retirement decision is available"
-          if (containsKeyReference(document, keyId))
-            blockers += s"Mongo collection '$collectionName' contains a retiring-key reference"
-          if (collectionName == "analytics_erasure_requests") {
-            erasureRequestActivity(document, now) match {
+        Iterator
+          .continually(cursor)
+          .takeWhile(_.hasNext)
+          .map(_.next())
+          .foldLeft((state, 0)) { case ((current, collectionDocuments), document) =>
+            val collectionCount = current.count + 1L
+            val isErasure = collectionName == AnalyticsCollections.ErasureRequests
+            val nextCollectionDocuments = collectionDocuments + 1
+            val overflow =
+              if (isErasure && nextCollectionDocuments > MaximumAuditedErasureSubjects)
+                Chain.one(
+                  "active erasure subject inventory exceeds its audit bound; no retirement decision is available"
+                )
+              else Chain.empty[String]
+            val keyReference =
+              if (containsKeyReference(document, keyId))
+                Chain.one(s"Mongo collection '$collectionName' contains a retiring-key reference")
+              else Chain.empty[String]
+            val (activeSubjects, erasureBlockers) = if (isErasure) erasureRequestActivity(document, now) match {
               case Right(true) =>
-                Option(document.getString("_id")) match {
-                  case Some(subjectId) if activeSubjects.size < MaximumAuditedErasureSubjects => activeSubjects += subjectId
-                  case _ => blockers += "active erasure subject inventory is malformed or exceeds its audit bound"
+                val subject = Option(document.getString(AnalyticsCollections.Fields.Id))
+                subject match {
+                  case Some(subjectId) if current.activeSubjects.size < MaximumAuditedErasureSubjects =>
+                    (
+                      current.activeSubjects + subjectId,
+                      Chain.one("an active or unexpired erasure marker/request remains")
+                    )
+                  case _ =>
+                    (
+                      current.activeSubjects,
+                      Chain(
+                        "active erasure subject inventory is malformed or exceeds its audit bound",
+                        "an active or unexpired erasure marker/request remains"
+                      )
+                    )
                 }
-                blockers += "an active or unexpired erasure marker/request remains"
-              case Right(false) => ()
-              case Left(reason) => blockers += reason
+              case Right(false) => (current.activeSubjects, Chain.empty[String])
+              case Left(reason) => (current.activeSubjects, Chain.one(reason))
             }
+            else (current.activeSubjects, Chain.empty[String])
+            val outboxBlockers = if (collectionName == AnalyticsCollections.EventOutbox) {
+              val subjectIds =
+                Option(document.getList(AnalyticsCollections.Fields.SubjectIds, classOf[String])).map(_.asScala.toSet)
+              if (
+                subjectIds.isEmpty || Option(document.getInteger(AnalyticsCollections.Fields.SubjectRefsVersion))
+                  .forall(_ != 1)
+              )
+                Chain.one("outbox subject-reference migration or a stored row is incomplete")
+              else if (subjectIds.exists(_.exists(current.activeSubjects.contains)))
+                Chain.one("outbox contains replay work for an active or unexpired erasure subject")
+              else Chain.empty[String]
+            } else Chain.empty[String]
+            val fenceBlockers =
+              if (
+                collectionName == AnalyticsCollections.OutboxSubjectFences &&
+                Option(document.getDate(AnalyticsCollections.Fields.LeaseUntil)).exists(_.toInstant.isAfter(now))
+              )
+                Chain.one("an active operational outbox publication fence remains")
+              else Chain.empty[String]
+            (
+              current.copy(
+                count = collectionCount,
+                activeSubjects = activeSubjects,
+                blockers =
+                  current.blockers ++ overflow ++ keyReference ++ erasureBlockers ++ outboxBlockers ++ fenceBlockers
+              ),
+              nextCollectionDocuments
+            )
           }
-          if (collectionName == "event_outbox") {
-            val subjectIds = Option(document.getList("subjectIds", classOf[String])).map(_.asScala.toSet)
-            if (subjectIds.isEmpty || Option(document.getInteger("subjectRefsVersion")).forall(_ != 1))
-              blockers += "outbox subject-reference migration or a stored row is incomplete"
-            else if (subjectIds.exists(_.exists(activeSubjects.contains)))
-              blockers += "outbox contains replay work for an active or unexpired erasure subject"
-          }
-          if (collectionName == "outbox_subject_fences" &&
-              Option(document.getDate("leaseUntil")).exists(_.toInstant.isAfter(now)))
-            blockers += "an active operational outbox publication fence remains"
-        }
+          ._1
       } finally cursor.close()
     }
-    if (names.contains("hiring_migration_ledger")) {
-      val migration = database.getCollection("hiring_migration_ledger", classOf[Document])
-        .find(com.mongodb.client.model.Filters.eq("_id", "003_event_outbox_subject_references"))
+    if (names.contains(AnalyticsCollections.HiringMigrationLedger)) {
+      val migration = database
+        .getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
+        .find(
+          com.mongodb.client.model.Filters
+            .eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.OutboxSubjectReferences)
+        )
         .first()
-      if (migration == null || !Option(migration.getString("state")).contains("Complete"))
-        blockers += "outbox subject-reference migration is not complete"
-    }
-    count
+      val migrationBlockers =
+        if (migration == null || !Option(migration.getString(AnalyticsCollections.Fields.State)).contains("Complete"))
+          Chain.one("outbox subject-reference migration is not complete")
+        else Chain.empty[String]
+      ScanResult(scanned.count, scanned.blockers ++ migrationBlockers)
+    } else ScanResult(scanned.count, scanned.blockers)
   }
 
   private val MaximumAuditedErasureSubjects = 100000
 
   private[analytics] def erasureRequestActivity(document: Document, now: Instant): Either[String, Boolean] =
-    Option(document.getString("state")) match {
+    Option(document.getString(AnalyticsCollections.Fields.State)) match {
       case Some("Pending" | "Processing") => Right(true)
-      case Some("Complete") =>
-        Option(document.get("expiresAt")) match {
+      case Some("Complete")               =>
+        Option(document.get(AnalyticsCollections.Fields.ExpiresAt)) match {
           case Some(expiry: java.util.Date) => Right(expiry.toInstant.isAfter(now))
           case _ => Left("completed erasure request has a missing or invalid retention expiry")
         }
@@ -301,38 +382,42 @@ private[analytics] object AnalyticsKeyRetirement {
     }
 
   private def containsKeyReference(value: Any, keyId: String): Boolean = value match {
-    case text: String => text.contains(keyId + "_")
-    case document: Document => document.values().asScala.exists(containsKeyReference(_, keyId))
-    case map: java.util.Map[?, ?] => map.values().asScala.exists(containsKeyReference(_, keyId))
+    case text: String                  => text.contains(keyId + "_")
+    case document: Document            => document.values().asScala.exists(containsKeyReference(_, keyId))
+    case map: java.util.Map[?, ?]      => map.values().asScala.exists(containsKeyReference(_, keyId))
     case values: java.lang.Iterable[?] => values.asScala.exists(containsKeyReference(_, keyId))
-    case values: Iterable[?] => values.exists(containsKeyReference(_, keyId))
-    case values: Array[?] => values.exists(containsKeyReference(_, keyId))
-    case _ => false
+    case values: Iterable[?]           => values.exists(containsKeyReference(_, keyId))
+    case values: Array[?]              => values.exists(containsKeyReference(_, keyId))
+    case _                             => false
   }
 
-  private def validateRegistry(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String,
-      blockers: scala.collection.mutable.Builder[String, Vector[String]]): Unit =
+  private def validateRegistry(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): Chain[String] =
     try {
       if (!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)) {
-        blockers += "permanent HMAC continuity registry is missing"
+        Chain.one("permanent HMAC continuity registry is missing")
       } else {
         val registry = spark.read.format("delta").load(paths.hmacKeyRegistry)
         if (!Set("keyId", "verifier").subsetOf(registry.columns.toSet))
-          blockers += "permanent HMAC continuity registry schema is malformed"
+          Chain.one("permanent HMAC continuity registry schema is malformed")
         else {
           val rows = registry.select("keyId", "verifier").limit(1001).collect().toVector
-          if (rows.size > 1000) blockers += "permanent HMAC continuity registry exceeds the audited key limit"
+          val sizeBlockers =
+            if (rows.size > 1000) Chain.one("permanent HMAC continuity registry exceeds the audited key limit")
+            else Chain.empty[String]
           val valid = rows.nonEmpty && rows.forall { row =>
             val id = row.getString(0)
             val verifier = row.getString(1)
             id != null && RegistryIdPattern.matches(id) && verifier != null && VerifierPattern.matches(verifier)
           } && rows.map(_.getString(0)).distinct.size == rows.size
-          if (!valid) blockers += "permanent HMAC continuity registry is empty, malformed, or contains duplicate IDs"
-          else if (!rows.exists(_.getString(0) == keyId))
-            blockers += "retiring key ID is absent from the permanent continuity registry"
+          val validityBlockers =
+            if (!valid) Chain.one("permanent HMAC continuity registry is empty, malformed, or contains duplicate IDs")
+            else if (!rows.exists(_.getString(0) == keyId))
+              Chain.one("retiring key ID is absent from the permanent continuity registry")
+            else Chain.empty[String]
+          sizeBlockers ++ validityBlockers
         }
       }
     } catch {
-      case NonFatal(_) => blockers += "permanent HMAC continuity registry is unavailable"
+      case NonFatal(_) => Chain.one("permanent HMAC continuity registry is unavailable")
     }
 }

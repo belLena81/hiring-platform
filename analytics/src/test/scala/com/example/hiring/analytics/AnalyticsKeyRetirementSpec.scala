@@ -3,6 +3,8 @@ package com.example.hiring.analytics
 import munit.FunSuite
 
 import java.time.Instant
+import java.util.Date
+import org.bson.Document
 
 class AnalyticsKeyRetirementSpec extends FunSuite {
   import AnalyticsKeyRetirement.*
@@ -63,5 +65,24 @@ class AnalyticsKeyRetirementSpec extends FunSuite {
   test("writer evidence older than one hour blocks the audit") {
     val stale = completeWriterInventory.copy(observedAt = now.minusSeconds(3601))
     assert(validateWriters(stale, now).exists(_.contains("fresh operator-attested coverage evidence")))
+  }
+
+  test("erasure request states fail closed unless completion retention has elapsed") {
+    assertEquals(erasureRequestActivity(new Document("state", "Pending"), now), Right(true))
+    assertEquals(erasureRequestActivity(new Document("state", "Processing"), now), Right(true))
+    assertEquals(
+      erasureRequestActivity(
+        new Document("state", "Complete").append("expiresAt", Date.from(now.minusSeconds(1))),
+        now
+      ),
+      Right(false)
+    )
+    assertEquals(
+      erasureRequestActivity(new Document("state", "Complete").append("expiresAt", Date.from(now.plusSeconds(1))), now),
+      Right(true)
+    )
+    assert(erasureRequestActivity(new Document("state", "Complete"), now).isLeft)
+    assert(erasureRequestActivity(new Document("state", "Unknown"), now).isLeft)
+    assert(erasureRequestActivity(new Document(), now).isLeft)
   }
 }

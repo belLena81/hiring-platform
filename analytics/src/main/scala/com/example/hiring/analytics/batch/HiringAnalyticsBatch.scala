@@ -9,21 +9,8 @@ import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import io.delta.tables.DeltaTable
-import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
-import org.apache.spark.sql.functions.{
-  array_contains,
-  col,
-  concat,
-  explode,
-  input_file_name,
-  lit,
-  sha2,
-  size,
-  struct,
-  to_json,
-  when
-}
+import org.apache.spark.sql.functions.{col, concat, lit, sha2, struct, to_json, when}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
 import com.mongodb.client.{MongoClient, MongoClients}
@@ -37,7 +24,6 @@ import java.util.UUID
 import java.util.Properties
 import scala.concurrent.duration.FiniteDuration
 import scala.jdk.CollectionConverters.*
-import scala.util.Try
 import scala.util.control.NonFatal
 
 /** A bounded source is intentionally separate from storage and publication. */
@@ -306,7 +292,6 @@ final class HiringAnalyticsBatch(
     reportPublisher: Option[AnalyticsReportPublisher] = None,
     manifestWriter: Option[(SparkSession, AnalyticsRunManifest, String, String) => IO[Unit]] = None
 ) {
-  private val MaximumReportRows = 10000
   private val MaximumErasureEvidenceFiles = 100000
   private def now: IO[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
 
@@ -315,6 +300,9 @@ final class HiringAnalyticsBatch(
       case error: AnalyticsError => error
       case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
     }
+
+  private def lakehouseEither[A](work: => Either[AnalyticsError, A]): IO[A] =
+    lakehouse(work).flatMap(IO.fromEither)
 
   private def persistManifest(
       spark: SparkSession,
@@ -376,35 +364,6 @@ final class HiringAnalyticsBatch(
     }
 
   /** A new primary HMAC key cannot split contributor identity while unexpired Silver rows use an older key. */
-  private def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): IO[Unit] = lakehouse {
-    if (DeltaTable.isDeltaTable(spark, paths.silver)) {
-      val stored = spark.read.format("delta").load(paths.silver)
-      val columns = stored.columns.toSet
-      if (stored.limit(1).count() > 0L && !columns.contains("subjectToken"))
-        throw AnalyticsError.InvalidConfiguration("Silver data has no versioned subject tokens")
-      if (columns.contains("subjectToken")) {
-        val activeData =
-          if (columns.contains("expiresAt"))
-            col("expiresAt").isNull || col("expiresAt") > lit(Timestamp.from(at))
-          else lit(true)
-        val expectedPrefix = pseudonymizer.primaryKeyId + "_"
-        val incompatible =
-          stored
-            .filter(
-              activeData && (
-                col("subjectToken").isNull || !col("subjectToken").startsWith(expectedPrefix)
-              )
-            )
-            .limit(1)
-            .count()
-        if (incompatible > 0L)
-          throw AnalyticsError.InvalidConfiguration(
-            "unexpired Silver rows use a different HMAC key; retain the old primary until Silver retention expires"
-          )
-      }
-    }
-  }
-
   /** Raw Bronze and quarantine keep replay data, but their Delta logs must not index raw values. */
   private def configureRawTablePrivacy(spark: SparkSession): IO[Unit] = lakehouse {
     spark.conf.set("spark.databricks.delta.properties.defaults.dataSkippingNumIndexedCols", "0")
@@ -434,142 +393,33 @@ final class HiringAnalyticsBatch(
     }
   }
 
-  private[analytics] def validateStoredTokenKeys(spark: SparkSession): IO[Unit] = lakehouse {
-    Vector(paths.bronze, paths.quarantine, paths.silver).foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, path)) {
-        val frame = spark.read.format("delta").load(path)
-        val tokenFrames = Vector(
-          Option.when(frame.columns.contains("subjectTokens"))(
-            frame.select(explode(col("subjectTokens")).as("token"))
-          ),
-          Option.when(frame.columns.contains("subjectToken"))(
-            frame.select(col("subjectToken").as("token"))
-          )
-        ).flatten
-        val tokenValues = tokenFrames
-          .reduceOption(_.unionByName(_))
-          .getOrElse(
-            frame.limit(0).select(lit(null).cast(StringType).as("token"))
-          )
-        val allowedKeyIds = pseudonymizer.keyIds.toVector.sorted.mkString("(?:", "|", ")")
-        val tokenPattern = s"^${allowedKeyIds}_[A-Za-z0-9_-]{43}$$"
-        if (tokenValues.filter(col("token").isNotNull && !col("token").rlike(tokenPattern)).limit(1).count() > 0L)
-          throw AnalyticsError.InvalidConfiguration(
-            "stored analytical rows require an HMAC key that is not configured"
-          )
-      }
-    }
-  }
+  private val stageRuntime = AnalyticsBatchStageRuntime(
+    paths = paths,
+    pseudonymizer = pseudonymizer,
+    blocking = new AnalyticsBatchBlocking {
+      override def apply[A](work: => A): IO[A] = lakehouse(work)
+      override def either[A](work: => Either[AnalyticsError, A]): IO[A] = lakehouseEither(work)
+    },
+    currentTime = () => now,
+    persistManifest = persistManifest,
+    merge = merge,
+    readOrEmpty = readOrEmpty,
+    withExpiry = withExpiry,
+    quarantineId = () => quarantineId,
+    configureRawTablePrivacy = configureRawTablePrivacy,
+    maximumErasureEvidenceFiles = MaximumErasureEvidenceFiles
+  )
 
-  private def validateKeyMaterialContinuityLocked(spark: SparkSession): IO[Unit] = lakehouse {
-    val registryExists = DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)
-    if (!registryExists) {
-      val existingAnalyticsData = Vector(
-        paths.bronze,
-        paths.quarantine,
-        paths.silver,
-        paths.funnelGold,
-        paths.timeToHireGold,
-        paths.skillsGold,
-        paths.manifests
-      ).exists(DeltaTable.isDeltaTable(spark, _))
-      if (existingAnalyticsData)
-        throw AnalyticsError.InvalidConfiguration(
-          "existing lakehouse has no HMAC key continuity registry; startup fails closed, reset or rebuild this local lakehouse explicitly before reuse"
-        )
-      val initial = spark.createDataFrame(
-        pseudonymizer.keyVerifiers.map { case (keyId, verifier) => Row(keyId, verifier) }.asJava,
-        StructType(
-          Seq(
-            StructField("keyId", StringType, nullable = false),
-            StructField("verifier", StringType, nullable = false)
-          )
-        )
-      )
-      initial.write.format("delta").mode("errorifexists").save(paths.hmacKeyRegistry)
-    } else {
-      val existingRows = spark.read
-        .format("delta")
-        .load(paths.hmacKeyRegistry)
-        .select("keyId", "verifier")
-        .collect()
-        .toVector
-      val registryRowsAreValid = existingRows.forall { row =>
-        val keyId = row.getString(0)
-        val verifier = row.getString(1)
-        keyId != null && keyId.matches("[A-Za-z0-9-]{1,40}") &&
-        verifier != null && verifier.matches("[A-Za-z0-9_-]{43}")
-      }
-      if (!registryRowsAreValid || existingRows.map(_.getString(0)).distinct.size != existingRows.size)
-        throw AnalyticsError.InvalidConfiguration("HMAC key continuity registry is malformed")
-      val existing = existingRows.map(row => row.getString(0) -> row.getString(1)).toMap
-      val removedKey = existing.keys.find(keyId => !pseudonymizer.keyIds.contains(keyId))
-      removedKey.foreach { keyId =>
-        throw AnalyticsError.InvalidConfiguration(
-          s"HMAC key '$keyId' cannot be removed: audited historical-data cleanup and writer-exclusion verification are not implemented"
-        )
-      }
-      val mismatched = pseudonymizer.keyVerifiers.find { case (keyId, verifier) =>
-        existing.get(keyId).exists(_ != verifier)
-      }
-      mismatched.foreach { case (keyId, _) =>
-        throw AnalyticsError.InvalidConfiguration(s"HMAC key material changed without a new key ID: $keyId")
-      }
-      val added = pseudonymizer.keyVerifiers.filterNot { case (keyId, _) => existing.contains(keyId) }
-      val unanchoredStoredKey = added.find { case (keyId, _) => hasStoredTokenForKey(spark, keyId) }
-      unanchoredStoredKey.foreach { case (keyId, _) =>
-        throw AnalyticsError.InvalidConfiguration(
-          s"stored rows use HMAC key ID '$keyId' without a continuity anchor; verify provenance before registering it"
-        )
-      }
-      if (added.nonEmpty) {
-        spark
-          .createDataFrame(
-            added.map { case (keyId, verifier) => Row(keyId, verifier) }.asJava,
-            StructType(
-              Seq(
-                StructField("keyId", StringType, nullable = false),
-                StructField("verifier", StringType, nullable = false)
-              )
-            )
-          )
-          .write
-          .format("delta")
-          .mode("append")
-          .save(paths.hmacKeyRegistry)
-      }
-    }
-  }
+  private val keyContinuityStage = new AnalyticsKeyContinuityStage(stageRuntime)
 
-  private def hasStoredTokenForKey(spark: SparkSession, keyId: String): Boolean =
-    Vector(paths.bronze, paths.quarantine, paths.silver).exists { path =>
-      if (!DeltaTable.isDeltaTable(spark, path)) false
-      else {
-        val frame = spark.read.format("delta").load(path)
-        val tokenFrames = Vector(
-          Option.when(frame.columns.contains("subjectTokens"))(
-            frame.select(explode(col("subjectTokens")).as("token"))
-          ),
-          Option.when(frame.columns.contains("subjectToken"))(
-            frame.select(col("subjectToken").as("token"))
-          )
-        ).flatten
-        tokenFrames
-          .reduceOption(_.unionByName(_))
-          .exists(_.filter(col("token").startsWith(keyId + "_")).limit(1).count() > 0L)
-      }
-    }
-
-  private[analytics] def validateKeyMaterialContinuity(spark: SparkSession): IO[Unit] =
-    AnalyticsLakehouseLock.resource(paths.root).use(_ => validateKeyMaterialContinuityLocked(spark))
+  private[analytics] def validateStoredTokenKeys(spark: SparkSession): IO[Unit] =
+    keyContinuityStage.validateStoredTokenKeys(spark)
 
   private def validateHmacConfigurationLocked(spark: SparkSession): IO[Unit] =
-    for {
-      _ <- validateKeyMaterialContinuityLocked(spark)
-      keyCheckAt <- now
-      _ <- validateStoredTokenKeys(spark)
-      _ <- ensurePrimaryTokenCompatibility(spark, keyCheckAt)
-    } yield ()
+    keyContinuityStage.validateHmacConfiguration(spark)
+
+  private[analytics] def validateKeyMaterialContinuity(spark: SparkSession): IO[Unit] =
+    AnalyticsLakehouseLock.resource(paths.root).use(_ => keyContinuityStage.validateKeyMaterialContinuity(spark))
 
   private[analytics] def validateHmacConfiguration(spark: SparkSession): IO[Unit] =
     AnalyticsLakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked(spark))
@@ -580,9 +430,9 @@ final class HiringAnalyticsBatch(
       _ <- expire(spark, paths.bronze, deletionTime)
       _ <- expire(spark, paths.quarantine, deletionTime)
       _ <- expire(spark, paths.silver, deletionTime)
-      _ <- purgeMarkedSubjectRows(spark, paths.bronze, markerTokens)
-      _ <- purgeMarkedSubjectRows(spark, paths.quarantine, markerTokens)
-      _ <- purgeMarkedSubjectRows(spark, paths.silver, markerTokens)
+      _ <- erasureStage.purgeMarkedSubjectRows(spark, paths.bronze, markerTokens)
+      _ <- erasureStage.purgeMarkedSubjectRows(spark, paths.quarantine, markerTokens)
+      _ <- erasureStage.purgeMarkedSubjectRows(spark, paths.silver, markerTokens)
       _ <- rebuildGoldFromStoredSilver(spark)
       _ <- vacuumExpiredFiles(spark).void
     } yield ()
@@ -599,256 +449,36 @@ final class HiringAnalyticsBatch(
   private[analytics] def extractCurrentReport(spark: SparkSession, asOf: Instant): IO[AnalyticsReportOutput] =
     extractReport(spark, asOf)
 
-  private[analytics] def verifyMarkedSubjectsAbsent(
-      spark: SparkSession,
-      markerTokens: DataFrame
-  ): IO[Unit] = lakehouse {
-    val marker = markerTokens.select(col("subjectToken")).filter(col("subjectToken").isNotNull).distinct()
-    val rawPaths = Set(paths.bronze, paths.quarantine)
-    Vector(paths.bronze, paths.quarantine, paths.silver).foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, path)) {
-        val frame = spark.read.format("delta").load(path)
-        val columns = frame.columns.toSet
-        val matched =
-          if (columns.contains("subjectTokens"))
-            frame
-              .as("stored")
-              .join(
-                marker.as("marker"),
-                array_contains(col("stored.subjectTokens"), col("marker.subjectToken")),
-                "left_semi"
-              )
-          else if (columns.contains("subjectToken"))
-            frame
-              .as("stored")
-              .join(marker.as("marker"), col("stored.subjectToken") === col("marker.subjectToken"), "left_semi")
-          else if (rawPaths.contains(path)) frame
-          else frame
-        if (matched.limit(1).count() > 0L)
-          throw AnalyticsError.LakehouseFailure(
-            new IllegalStateException(s"marked subject remains in Delta dataset $path")
-          )
-      }
-    }
-  }
+  private val erasureStage = new AnalyticsBatchErasureStage(stageRuntime)
 
-  /** Counts rows that the erasure rewrite must invalidate, including whole datasets without attribution columns. */
-  private[analytics] def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): IO[Long] = lakehouse {
-    val marker = markerTokens.select(col("subjectToken")).filter(col("subjectToken").isNotNull).distinct()
-    Vector(paths.bronze, paths.quarantine, paths.silver).foldLeft(0L) { (total, path) =>
-      if (!DeltaTable.isDeltaTable(spark, path)) total
-      else {
-        val frame = spark.read.format("delta").load(path)
-        val columns = frame.columns.toSet
-        val matched =
-          if (columns.contains("subjectTokens"))
-            frame
-              .as("stored")
-              .join(
-                marker.as("marker"),
-                array_contains(col("stored.subjectTokens"), col("marker.subjectToken")),
-                "left_semi"
-              )
-          else if (columns.contains("subjectToken"))
-            frame
-              .as("stored")
-              .join(
-                marker.as("marker"),
-                col("stored.subjectToken") === col("marker.subjectToken"),
-                "left_semi"
-              )
-          else frame
-        total + matched.count()
-      }
-    }
-  }
+  private[analytics] def verifyMarkedSubjectsAbsent(spark: SparkSession, markerTokens: DataFrame): IO[Unit] =
+    erasureStage.verifyMarkedSubjectsAbsent(spark, markerTokens)
 
-  /** Captures the exact active Delta files containing rows invalidated by the deletion rewrite. */
+  private[analytics] def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): IO[Long] =
+    erasureStage.countMarkedRows(spark, markerTokens)
+
   private[analytics] def captureMarkedFiles(spark: SparkSession, markerTokens: DataFrame): IO[Vector[String]] =
-    configureRawTablePrivacy(spark) *> lakehouse {
-      val marker = markerTokens.select(col("subjectToken")).filter(col("subjectToken").isNotNull).distinct()
-      val rawPaths = Set(paths.bronze, paths.quarantine)
-      val files = Vector(paths.bronze, paths.quarantine, paths.silver).flatMap { path =>
-        if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
-        else {
-          val frame = spark.read.format("delta").load(path)
-          val columns = frame.columns.toSet
-          val attributed =
-            if (columns.contains("subjectTokens"))
-              frame
-                .as("stored")
-                .join(
-                  marker.as("marker"),
-                  array_contains(col("stored.subjectTokens"), col("marker.subjectToken")),
-                  "left_semi"
-                )
-            else if (columns.contains("subjectToken"))
-              frame
-                .as("stored")
-                .join(marker.as("marker"), col("stored.subjectToken") === col("marker.subjectToken"), "left_semi")
-            else frame
-          val affected =
-            if (rawPaths.contains(path) && !columns.contains("subjectTokens")) frame
-            else if (rawPaths.contains(path) && columns.contains("subjectTokens")) {
-              val unattributed = frame.filter(col("subjectTokens").isNull || size(col("subjectTokens")) === 0)
-              attributed.unionByName(unattributed, allowMissingColumns = true)
-            } else attributed
-          val dataFiles = affected
-            .select(input_file_name().as("filePath"))
-            .distinct()
-            .limit(MaximumErasureEvidenceFiles + 1)
-            .collect()
-            .toVector
-            .map(_.getString(0))
-            .distinct
-          val logFiles = if (rawPaths.contains(path)) rawLogFiles(spark, path, None) else Vector.empty
-          dataFiles ++ logFiles
-        }
-      }.distinct
-      if (files.size > MaximumErasureEvidenceFiles)
-        throw AnalyticsError.InvalidConfiguration("analytics erasure exceeds the bounded physical evidence file limit")
-      files
-    }
+    erasureStage.captureMarkedFiles(spark, markerTokens)
 
-  /** Writes a clean current-state checkpoint immediately after the purge and returns only older log paths. Delta needs
-    * a checkpoint at or before the retention cutoff to eventually remove earlier log files.
-    */
-  private[analytics] def checkpointPurgedRawLogs(spark: SparkSession): IO[Vector[String]] = lakehouse {
-    val retiredLogs = Vector(paths.bronze, paths.quarantine).flatMap { path =>
-      if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
-      else {
-        val log = DeltaLog.forTable(spark, path)
-        // A no-op DELETE/MERGE does not create a Delta commit. Advance the table with a
-        // harmless, unique metadata commit so every path captured before this checkpoint
-        // is strictly older than the clean checkpoint boundary. This also makes a retry
-        // after a crash establish a fresh boundary instead of persisting its own baseline
-        // checkpoint JSON as evidence that must later disappear.
-        val tableIdentifier = path.replace("`", "``")
-        val checkpointNonce = java.util.UUID.randomUUID().toString
-        spark.sql(
-          s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES ('analytics.erasureCheckpointNonce' = '$checkpointNonce')"
-        )
-        val snapshot = log.update()
-        val oldLogs = rawLogFiles(spark, path, Some(snapshot.version))
-        log.checkpointAndCleanUpDeltaLog(snapshot, None)
-        oldLogs
-      }
-    }.distinct
-    if (retiredLogs.size > MaximumErasureEvidenceFiles)
-      throw AnalyticsError.InvalidConfiguration("analytics erasure exceeds the bounded physical evidence file limit")
-    retiredLogs
-  }
+  private[analytics] def checkpointPurgedRawLogs(spark: SparkSession): IO[Vector[String]] =
+    erasureStage.checkpointPurgedRawLogs(spark)
 
-  private def rawLogFiles(spark: SparkSession, tablePath: String, beforeVersion: Option[Long]): Vector[String] = {
-    val logDirectory = new org.apache.hadoop.fs.Path(s"$tablePath/_delta_log")
-    val fileSystem = logDirectory.getFileSystem(spark.sparkContext.hadoopConfiguration)
-    if (!fileSystem.exists(logDirectory)) Vector.empty
-    else {
-      val paths = Iterator
-        .unfold(fileSystem.listFiles(logDirectory, false)) { entries =>
-          if (entries.hasNext) Some(entries.next() -> entries) else None
-        }
-        .filter { status =>
-          val prefix = status.getPath.getName.take(20)
-          Try(prefix.toLong).exists(version => beforeVersion.forall(version < _))
-        }
-        .map(_.getPath.toString)
-        .take(MaximumErasureEvidenceFiles + 1)
-        .toVector
-      if (paths.size > MaximumErasureEvidenceFiles)
-        throw AnalyticsError.InvalidConfiguration("analytics erasure exceeds the bounded physical evidence file limit")
-      paths
-    }
-  }
+  private[analytics] def verifyFilesAbsent(spark: SparkSession, files: Vector[String]): IO[Unit] =
+    erasureStage.verifyFilesAbsent(spark, files)
 
-  /** Verifies the specific pre-purge files are physically absent after retention-safe VACUUM. */
-  private[analytics] def verifyFilesAbsent(spark: SparkSession, files: Vector[String]): IO[Unit] = lakehouse {
-    val configuration = spark.sparkContext.hadoopConfiguration
-    val remaining = files.filter { value =>
-      val path = new org.apache.hadoop.fs.Path(value)
-      path.getFileSystem(configuration).exists(path)
-    }
-    if (remaining.nonEmpty) throw AnalyticsError.PhysicalReclamationUnverified
-  }
-
-  private[analytics] def checkpointRawTableLogs(spark: SparkSession): IO[Unit] = lakehouse {
-    Vector(paths.bronze, paths.quarantine).foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, path)) {
-        val log = DeltaLog.forTable(spark, path)
-        val snapshot = log.update()
-        log.checkpointAndCleanUpDeltaLog(snapshot, None)
-      }
-    }
-  }
-
-  private def purgeMarkedSubjectRows(
-      spark: SparkSession,
-      path: String,
-      markerTokens: DataFrame
-  ): IO[Unit] =
-    lakehouse {
-      if (DeltaTable.isDeltaTable(spark, path)) {
-        val markedSubjects = markerTokens.select(col("subjectToken")).filter(col("subjectToken").isNotNull).distinct()
-        val columns = spark.read.format("delta").load(path).columns.toSet
-        val rawScope = path == paths.bronze || path == paths.quarantine
-        if (rawScope) {
-          val table = DeltaTable.forPath(spark, path)
-          if (columns.contains("subjectTokens"))
-            table.delete(col("subjectTokens").isNull || size(col("subjectTokens")) === 0)
-          else table.delete()
-        }
-        val condition =
-          if (columns.contains("subjectTokens"))
-            "array_contains(target.subjectTokens, source.subjectToken)" +
-              (if (columns.contains("subjectToken")) " OR target.subjectToken = source.subjectToken" else "")
-          else if (columns.contains("subjectToken")) "target.subjectToken = source.subjectToken"
-          else {
-            DeltaTable.forPath(spark, path).delete()
-            ""
-          }
-        if (condition.nonEmpty)
-          DeltaTable
-            .forPath(spark, path)
-            .as("target")
-            .merge(markedSubjects.as("source"), condition)
-            .whenMatched()
-            .delete()
-            .execute()
-      }
-    }
+  private[analytics] def checkpointRawTableLogs(spark: SparkSession): IO[Unit] =
+    erasureStage.checkpointRawTableLogs(spark)
 
   /** Deletion is applied to rebuildable Gold immediately, even if the new Kafka range later quality-blocks. */
   private def rebuildGoldFromStoredSilver(spark: SparkSession): IO[Unit] =
     lakehouse(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
       case true =>
-        for {
-          allSilver <- lakehouse(spark.read.format("delta").load(paths.silver))
-          funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(allSilver))
-          _ <- overwrite(funnel, paths.funnelGold)
-          timeToHire <- HiringGoldTransforms.timeToHire(allSilver).adaptError { case NonFatal(cause) =>
-            AnalyticsError.LakehouseFailure(cause)
-          }
-          _ <- overwrite(timeToHire, paths.timeToHireGold)
-          skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(allSilver))
-          _ <- overwrite(skills, paths.skillsGold)
-        } yield ()
-      case false =>
-        lakehouse {
-          Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
-            if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
-          }
-        }
+        lakehouse(spark.read.format("delta").load(paths.silver)).flatMap(AnalyticsGoldStage.rebuild(paths, _))
+      case false => AnalyticsGoldStage.clear(spark, paths)
     }
 
-  private final case class BronzeInput(frame: DataFrame, startedAt: Instant, records: Long)
-  private final case class PreparedEvents(
-      incomingSilver: DataFrame,
-      conflicts: DataFrame,
-      validRecords: Long,
-      suppressedRecords: Long,
-      quarantinedRecords: Long,
-      conflictingEventIds: Long
-  )
+  private val ingestionStage = new AnalyticsBatchIngestionStage(stageRuntime)
+  private val silverStage = new AnalyticsBatchSilverStage(stageRuntime)
 
   private def runWithMarkers(
       spark: SparkSession,
@@ -859,9 +489,9 @@ final class HiringAnalyticsBatch(
       reservation: Option[AnalyticsReportReservation]
   ): IO[AnalyticsPublication] =
     for {
-      bronze <- ingestBronze(spark, source, manifest, markerTokens)
-      prepared <- separateQuarantine(spark, bronze, markerTokens, activeMarkersPresent)
-      silver <- mergeSilver(prepared, bronze.startedAt)
+      bronze <- ingestionStage.ingest(spark, source, manifest, markerTokens)
+      prepared <- silverStage.separateQuarantine(spark, bronze, markerTokens, activeMarkersPresent)
+      silver <- silverStage.mergeSilver(prepared, bronze.startedAt)
       silverSchema <- lakehouse(silver.schema)
       completedAt <- now
       _ <- expireStored(spark, bronze.startedAt)
@@ -887,152 +517,6 @@ final class HiringAnalyticsBatch(
       prepared.quarantinedRecords,
       prepared.conflictingEventIds
     )
-
-  private def ingestBronze(
-      spark: SparkSession,
-      source: BoundedOperationalEventSource,
-      manifest: AnalyticsRunManifest,
-      markerTokens: DataFrame
-  ): IO[BronzeInput] =
-    for {
-      raw <- source.read(spark, manifest)
-      rawSchema <- lakehouse(raw.schema)
-      _ <- KafkaRecordColumns.validate(rawSchema)
-      _ <- source.verifyOffsets(raw, manifest)
-      _ <- validateRunIdentity(spark, manifest)
-      parsed <- lakehouse(OperationalEventTransforms.parseKafkaRecords(raw))
-      valid <- lakehouse(OperationalEventTransforms.validEvents(parsed))
-      pseudonymized <- lakehouse(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
-      safeToPersist <- lakehouse(AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens))
-      startedAt <- now
-      incoming <- lakehouse(
-        withExpiry(OperationalEventTransforms.bronze(safeToPersist), startedAt, AnalyticsRetention.BronzeDays)
-      )
-      recordCount <- lakehouse(raw.count())
-      _ <- persistManifest(spark, manifest, "STARTED", startedAt.toString)
-      _ <- merge(
-        incoming,
-        paths.bronze,
-        "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
-      )
-    } yield BronzeInput(parsed, startedAt, recordCount)
-
-  private def validateRunIdentity(spark: SparkSession, manifest: AnalyticsRunManifest): IO[Unit] = lakehouse {
-    if (DeltaTable.isDeltaTable(spark, paths.manifests)) {
-      val existing = spark.read
-        .format("delta")
-        .load(paths.manifests)
-        .filter(col("runId") === lit(manifest.runId.value))
-        .select("topic", "partition", "startOffset", "endOffsetExclusive")
-        .distinct()
-        .collect()
-        .toVector
-        .map(row => (row.getString(0), row.getInt(1), row.getLong(2), row.getLong(3)))
-        .toSet
-      val expected = manifest.offsetRanges
-        .map(range => (range.topic, range.partition, range.startOffset, range.endOffsetExclusive))
-        .toSet
-      if (existing.nonEmpty && existing != expected) throw AnalyticsError.RunIdRangeConflict(manifest.runId.value)
-    }
-  }
-
-  private def separateQuarantine(
-      spark: SparkSession,
-      bronze: BronzeInput,
-      markerTokens: DataFrame,
-      activeMarkersPresent: Boolean
-  ): IO[PreparedEvents] = {
-    val parsed = bronze.frame
-    for {
-      valid <- lakehouse(OperationalEventTransforms.validEvents(parsed))
-      pseudonymizedValid <- lakehouse(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
-      safeValid <- lakehouse(AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymizedValid, markerTokens))
-      malformed <- lakehouse(
-        withExpiry(
-          AnalyticsSubjectPrivacy
-            .withSubjectToken(OperationalEventTransforms.malformedEvents(parsed), pseudonymizer)
-            .withColumn("quarantineId", quarantineId)
-            .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
-          bronze.startedAt,
-          AnalyticsRetention.QuarantineDays
-        )
-      )
-      malformedCount <- lakehouse(malformed.count())
-      malformedToPersist <-
-        if (activeMarkersPresent) lakehouse(malformed.limit(0)) else IO.pure(malformed)
-      validRecords <- lakehouse(valid.count())
-      safeValidRecords <- lakehouse(safeValid.count())
-      suppressedRecords = validRecords - safeValidRecords
-      newConflicts <- lakehouse(OperationalEventTransforms.conflictingEventIds(safeValid))
-      incomingSilver <- lakehouse(OperationalEventTransforms.silver(safeValid, pseudonymizer, markerTokens))
-      incomingSilverSchema <- lakehouse(incomingSilver.schema)
-      storedSilver <- readOrEmpty(spark, paths.silver, incomingSilverSchema)
-      historicalConflicts <- lakehouse(
-        safeValid
-          .select("eventId", "rawValue")
-          .withColumn("incomingFingerprint", sha2(col("rawValue"), 256))
-          .join(
-            storedSilver
-              .select("eventId", "eventFingerprint")
-              .withColumnRenamed("eventFingerprint", "storedFingerprint"),
-            Seq("eventId"),
-            "inner"
-          )
-          .filter(col("incomingFingerprint") =!= col("storedFingerprint"))
-          .select("eventId")
-          .distinct()
-      )
-      conflicts <- lakehouse(newConflicts.unionByName(historicalConflicts).distinct())
-      conflictingEventIds <- lakehouse(conflicts.count())
-      conflictQuarantine <- lakehouse(
-        withExpiry(
-          AnalyticsSubjectPrivacy
-            .withSubjectToken(safeValid.join(conflicts, Seq("eventId"), "inner"), pseudonymizer)
-            .withColumn("quarantineId", quarantineId)
-            .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
-          bronze.startedAt,
-          AnalyticsRetention.QuarantineDays
-        )
-      )
-      conflictingRecords <- lakehouse(conflictQuarantine.count())
-      quarantine <- lakehouse(
-        malformedToPersist
-          .unionByName(conflictQuarantine)
-          .withColumn("payloadHash", sha2(col("rawValue"), 256))
-          .drop("rawValue", "actorId", "payload", "subjectToken")
-          .select(
-            "topic",
-            "partition",
-            "offset",
-            "payloadHash",
-            "subjectTokens",
-            "quarantineId",
-            "quarantineReason",
-            "expiresAt"
-          )
-      )
-      _ <- merge(quarantine, paths.quarantine, "target.quarantineId = source.quarantineId")
-    } yield PreparedEvents(
-      incomingSilver,
-      conflicts,
-      validRecords,
-      suppressedRecords,
-      malformedCount + conflictingRecords,
-      conflictingEventIds
-    )
-  }
-
-  private def mergeSilver(prepared: PreparedEvents, startedAt: Instant): IO[DataFrame] =
-    for {
-      silver <- lakehouse(
-        withExpiry(
-          prepared.incomingSilver.join(prepared.conflicts, Seq("eventId"), "left_anti"),
-          startedAt,
-          AnalyticsRetention.SilverDays
-        )
-      )
-      _ <- merge(silver, paths.silver, "target.eventId = source.eventId")
-    } yield silver
 
   private def expireStored(spark: SparkSession, startedAt: Instant): IO[Unit] =
     for {
@@ -1090,14 +574,7 @@ final class HiringAnalyticsBatch(
     else
       for {
         allSilver <- readOrEmpty(spark, paths.silver, silverSchema)
-        funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(allSilver))
-        _ <- overwrite(funnel, paths.funnelGold)
-        timeToHire <- HiringGoldTransforms.timeToHire(allSilver).adaptError { case NonFatal(cause) =>
-          AnalyticsError.LakehouseFailure(cause)
-        }
-        _ <- overwrite(timeToHire, paths.timeToHireGold)
-        skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(allSilver))
-        _ <- overwrite(skills, paths.skillsGold)
+        _ <- AnalyticsGoldStage.rebuild(paths, allSilver)
         report <- extractReport(spark, completedAt)
         _ <- (reportPublisher, reservation) match {
           case (Some(publisher), Some(value)) =>
@@ -1111,51 +588,8 @@ final class HiringAnalyticsBatch(
         _ <- persistManifest(spark, manifest, "PUBLISHED", completedAt.toString)
       } yield AnalyticsRunOutcome.Published
 
-  private def extractReport(spark: SparkSession, asOf: Instant): IO[AnalyticsReportOutput] = lakehouse {
-    def rows(path: String): Vector[Row] = {
-      if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
-      else {
-        val result = spark.read.format("delta").load(path).limit(MaximumReportRows + 1).collect().toVector
-        if (result.size > MaximumReportRows)
-          throw AnalyticsError.LakehouseFailure(
-            new IllegalStateException(s"report output exceeds $MaximumReportRows rows")
-          )
-        result
-      }
-    }
-    val funnel = rows(paths.funnelGold).map(row =>
-      AnalyticsFunnelDayOutput(
-        row.getAs[Timestamp]("day").toInstant,
-        row.getAs[Long]("created"),
-        row.getAs[Long]("accepted"),
-        row.getAs[Long]("declined"),
-        row.getAs[Long]("interview"),
-        row.getAs[Long]("hired"),
-        row.getAs[Long]("rejected")
-      )
-    )
-    val timeRows = rows(paths.timeToHireGold)
-    if (timeRows.size > 1)
-      throw AnalyticsError.LakehouseFailure(new IllegalStateException("time-to-hire report is not singular"))
-    val timeToHire = timeRows.headOption.map(row =>
-      AnalyticsTimeToHireOutput(
-        row.getAs[Double]("p50Hours"),
-        row.getAs[Double]("p75Hours"),
-        row.getAs[Double]("p90Hours"),
-        row.getAs[Double]("p95Hours"),
-        row.getAs[Long]("eligibleCount"),
-        row.getAs[Long]("excludedCount")
-      )
-    )
-    val skills = rows(paths.skillsGold).map(row =>
-      AnalyticsSkillPostingDayOutput(
-        row.getAs[Timestamp]("day").toInstant,
-        row.getAs[String]("skill"),
-        row.getAs[Long]("postings")
-      )
-    )
-    AnalyticsReportOutput(asOf, funnel, timeToHire, skills)
-  }
+  private def extractReport(spark: SparkSession, asOf: Instant): IO[AnalyticsReportOutput] =
+    AnalyticsGoldStage.extract(spark, paths, asOf)
 
   private def rangeFingerprint(manifest: AnalyticsRunManifest): String = {
     val canonical = manifest.offsetRanges
@@ -1226,9 +660,6 @@ final class HiringAnalyticsBatch(
         .execute()
     else source.write.format("delta").mode("errorifexists").save(path)
   }
-
-  private def overwrite(source: DataFrame, path: String): IO[Unit] =
-    lakehouse(source.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path))
 
   private def readOrEmpty(spark: SparkSession, path: String, schema: StructType): IO[DataFrame] =
     lakehouse {

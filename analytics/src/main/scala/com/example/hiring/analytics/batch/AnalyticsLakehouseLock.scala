@@ -22,24 +22,43 @@ private[analytics] object AnalyticsLakehouseLock {
       }
 
   private def openChannel(root: String): IO[FileChannel] =
-    IO.blocking {
-      val rootPath = localPath(root)
-      val lockPath = rootPath.resolve("control").resolve("batch.lock")
-      java.nio.file.Files.createDirectories(lockPath.getParent)
-      FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
-    }.adaptError {
-      case error: AnalyticsError => error
-      case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-    }
+    IO.fromEither(localPath(root))
+      .flatMap { rootPath =>
+        IO.blocking {
+          val lockPath = rootPath.resolve("control").resolve("batch.lock")
+          java.nio.file.Files.createDirectories(lockPath.getParent)
+          FileChannel.open(lockPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE)
+        }
+      }
+      .adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
+      }
 
-  private def localPath(root: String): Path = {
-    val uri = URI.create(root)
-    if (uri.getScheme == null) Paths.get(root)
-    else if (uri.getScheme == "file") Paths.get(uri)
-    else throw AnalyticsError.InvalidConfiguration("the local analytics lakehouse requires a file URI")
-  }
+  private def localPath(root: String): Either[AnalyticsError, Path] =
+    Either
+      .catchNonFatal(URI.create(root))
+      .leftMap(_ => AnalyticsError.InvalidConfiguration("the local analytics lakehouse requires a file URI"))
+      .flatMap { uri =>
+        if (uri.getScheme == null)
+          Either
+            .catchNonFatal(Paths.get(root))
+            .leftMap(_ => AnalyticsError.InvalidConfiguration("the local analytics lakehouse path is invalid"))
+        else if (uri.getScheme == "file")
+          Either
+            .catchNonFatal(Paths.get(uri))
+            .leftMap(_ => AnalyticsError.InvalidConfiguration("the local analytics lakehouse path is invalid"))
+        else Left(AnalyticsError.InvalidConfiguration("the local analytics lakehouse requires a file URI"))
+      }
+
+  private val InitialRetryDelay = 100.millis
+  private val MaximumRetryDelay = 5.seconds
+  private val AcquisitionTimeout = 2.minutes
 
   private def acquire(channel: FileChannel): IO[FileLock] =
+    IO.monotonic.flatMap(startedAt => acquire(channel, startedAt, InitialRetryDelay))
+
+  private def acquire(channel: FileChannel, startedAt: FiniteDuration, delay: FiniteDuration): IO[FileLock] =
     IO.blocking {
       try Option(channel.tryLock())
       catch {
@@ -50,6 +69,10 @@ private[analytics] object AnalyticsLakehouseLock {
       case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
     }.flatMap {
       case Some(lock) => IO.pure(lock)
-      case None       => IO.sleep(100.millis) *> acquire(channel)
+      case None       =>
+        IO.monotonic.flatMap { now =>
+          if (now - startedAt >= AcquisitionTimeout) IO.raiseError(AnalyticsError.LakehouseLockTimeout)
+          else IO.sleep(delay) *> acquire(channel, startedAt, (delay * 2).min(MaximumRetryDelay))
+        }
     }
 }

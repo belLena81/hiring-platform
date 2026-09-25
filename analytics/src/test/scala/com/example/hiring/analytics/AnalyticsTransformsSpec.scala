@@ -959,6 +959,28 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
+  test("completed deletion markers fail closed when their retention expiry is missing or malformed") {
+    val subjectId = java.util.UUID.fromString("d31d0f7b-0abf-4e47-94da-b2f52cb5dd2e").toString
+    val now = Instant.parse("2026-09-25T12:00:00Z")
+    val missingExpiry = new org.bson.Document("_id", subjectId).append("state", "Complete")
+    val malformedExpiry = new org.bson.Document("_id", subjectId)
+      .append("state", "Complete")
+      .append("expiresAt", "not-a-date")
+    val expired = new org.bson.Document("_id", subjectId)
+      .append("state", "Complete")
+      .append("expiresAt", java.util.Date.from(now.minusSeconds(1)))
+
+    assertEquals(
+      MongoActiveDeletionMarkerSource.activeTokens(missingExpiry, now, pseudonymizer),
+      Left(AnalyticsError.MalformedMarker)
+    )
+    assertEquals(
+      MongoActiveDeletionMarkerSource.activeTokens(malformedExpiry, now, pseudonymizer),
+      Left(AnalyticsError.MalformedMarker)
+    )
+    assertEquals(MongoActiveDeletionMarkerSource.activeTokens(expired, now, pseudonymizer), Right(None))
+  }
+
   test("active deletion tokens are excluded before Silver persistence without retaining raw identities") {
     val parsed = OperationalEventTransforms.parseKafkaRecords(
       records(
@@ -1421,6 +1443,44 @@ class AnalyticsTransformsSpec extends FunSuite {
 
     assert(fileSystem.delete(affectedPath, false))
     batch.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
+  }
+
+  test("erasure marker matching shares array, scalar, and unattributed row semantics") {
+    val marker = spark.createDataFrame(
+      Vector(Row("deleted"), Row("deleted"), Row(null)).asJava,
+      StructType(Seq(StructField("subjectToken", StringType, nullable = true)))
+    )
+    val arrayRows = spark.createDataFrame(
+      Vector(
+        Row("array-hit", Seq("deleted", "alias")),
+        Row("array-miss", Seq("retained")),
+        Row("array-empty", Seq.empty[String])
+      ).asJava,
+      StructType(
+        Seq(
+          StructField("rowId", StringType, nullable = false),
+          StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false)
+        )
+      )
+    )
+    val scalarRows = spark.createDataFrame(
+      Vector(Row("scalar-hit", "deleted"), Row("scalar-miss", "retained")).asJava,
+      StructType(
+        Seq(
+          StructField("rowId", StringType, nullable = false),
+          StructField("subjectToken", StringType, nullable = false)
+        )
+      )
+    )
+    val unattributedRows = spark.createDataFrame(
+      Vector(Row("raw-1"), Row("raw-2")).asJava,
+      StructType(Seq(StructField("rowId", StringType, nullable = false)))
+    )
+    val markerRows = BatchSubjectMatching.markerRows(marker)
+
+    assertEquals(BatchSubjectMatching.matchedBySubject(arrayRows, markerRows).count(), 1L)
+    assertEquals(BatchSubjectMatching.matchedBySubject(scalarRows, markerRows).count(), 1L)
+    assertEquals(BatchSubjectMatching.matchedBySubject(unattributedRows, markerRows).count(), 2L)
   }
 
   test("no-op erasure retries advance the raw-log checkpoint boundary") {

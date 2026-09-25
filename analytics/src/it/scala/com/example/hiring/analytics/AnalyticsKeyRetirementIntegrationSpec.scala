@@ -27,21 +27,32 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   override def beforeAll(): Unit = if (enabled) {
     mongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
     database = mongo.getDatabase(s"analytics_key_retirement_${java.util.UUID.randomUUID().toString.replace('-', '_')}")
-    spark = SparkSession.builder().master("local[1]").appName("AnalyticsKeyRetirementIntegrationSpec")
+    spark = SparkSession
+      .builder()
+      .master("local[1]")
+      .appName("AnalyticsKeyRetirementIntegrationSpec")
       .config("spark.ui.enabled", "false")
       .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
       .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
       .getOrCreate()
     lakehouseRoot = Files.createTempDirectory("analytics-key-retirement-")
     val required = Vector(
-      "analytics_report_snapshots", "analytics_report_runs", "analytics_report_control",
-      "analytics_erasure_requests", "analytics_erasure_completions", "analytics_erasure_delta_files",
-      "event_outbox", "hiring_migration_ledger", "outbox_subject_fences"
+      "analytics_report_snapshots",
+      "analytics_report_runs",
+      "analytics_report_control",
+      "analytics_erasure_requests",
+      "analytics_erasure_completions",
+      "analytics_erasure_delta_files",
+      "event_outbox",
+      "hiring_migration_ledger",
+      "outbox_subject_fences"
     )
     required.foreach(database.createCollection)
-    database.getCollection("hiring_migration_ledger").insertOne(
-      new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
-    )
+    database
+      .getCollection("hiring_migration_ledger")
+      .insertOne(
+        new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
+      )
     seedRegistry(AnalyticsLakehousePaths(lakehouseRoot.toUri.toString))
   }
 
@@ -57,50 +68,68 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     val passed = audit(paths)
     assert(passed.isRight, passed.swap.toOption.toString)
 
-    database.getCollection("analytics_erasure_requests").insertOne(
-      new Document("_id", "subject-1").append("state", "Pending")
-    )
+    database
+      .getCollection("analytics_erasure_requests")
+      .insertOne(
+        new Document("_id", "subject-1").append("state", "Pending")
+      )
     val activeMarker = audit(paths)
     assert(activeMarker.swap.toOption.get.exists(_.contains("active or unexpired erasure marker")))
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
 
-    database.getCollection("analytics_report_snapshots").insertOne(
-      new Document("_id", "snapshot-1").append("report", new Document("subjectToken", s"${oldKeyId}_report-reference"))
-    )
+    database
+      .getCollection("analytics_report_snapshots")
+      .insertOne(
+        new Document("_id", "snapshot-1")
+          .append("report", new Document("subjectToken", s"${oldKeyId}_report-reference"))
+      )
     val oldReportReference = audit(paths)
     assert(oldReportReference.swap.toOption.get.exists(_.contains("analytics_report_snapshots")))
     database.getCollection("analytics_report_snapshots").deleteMany(new Document())
 
     val tokenSchema = StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
-    spark.createDataFrame(List(Row(s"${oldKeyId}_unsafe-reference")).asJava, tokenSchema)
-      .write.format("delta").mode("overwrite").save(paths.silver)
+    spark
+      .createDataFrame(List(Row(s"${oldKeyId}_unsafe-reference")).asJava, tokenSchema)
+      .write
+      .format("delta")
+      .mode("overwrite")
+      .save(paths.silver)
     val oldToken = audit(paths)
     assert(oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"))
   }
 
   if (enabled) test("audit fails closed on malformed erasure state and permits unrelated outbox replay") {
-    database.getCollection("event_outbox").insertOne(
-      new Document("_id", "event-1")
-        .append("subjectIds", java.util.List.of("11111111-1111-4111-8111-111111111111"))
-        .append("subjectRefsVersion", 1)
-        .append("state", "Retryable")
-    )
+    database
+      .getCollection("event_outbox")
+      .insertOne(
+        new Document("_id", "event-1")
+          .append("subjectIds", java.util.List.of("11111111-1111-4111-8111-111111111111"))
+          .append("subjectRefsVersion", 1)
+          .append("state", "Retryable")
+      )
     val paths = AnalyticsLakehousePaths(lakehouseRoot.resolve("second").toUri.toString)
     seedRegistry(paths)
     val result = audit(paths)
     assert(result.isRight, result.swap.toOption.toString)
-    assertEquals(result.toOption.get.operatorEvidence, "DIAGNOSTIC ONLY: operator-attested; not an authorization to retire a key")
-
-    database.getCollection("analytics_erasure_requests").insertOne(
-      new Document("_id", "subject-unknown-state").append("state", "Unexpected")
+    assertEquals(
+      result.toOption.get.operatorEvidence,
+      "DIAGNOSTIC ONLY: operator-attested; not an authorization to retire a key"
     )
+
+    database
+      .getCollection("analytics_erasure_requests")
+      .insertOne(
+        new Document("_id", "subject-unknown-state").append("state", "Unexpected")
+      )
     val unknownState = audit(paths).swap.toOption.get
     assert(unknownState.exists(_.contains("erasure request has an unknown state")))
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
 
-    database.getCollection("analytics_erasure_requests").insertOne(
-      new Document("_id", "subject-complete-without-expiry").append("state", "Complete")
-    )
+    database
+      .getCollection("analytics_erasure_requests")
+      .insertOne(
+        new Document("_id", "subject-complete-without-expiry").append("state", "Complete")
+      )
     val missingExpiry = audit(paths).swap.toOption.get
     assert(missingExpiry.exists(_.contains("missing or invalid retention expiry")))
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
@@ -112,33 +141,50 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   }
 
   private def audit(paths: AnalyticsLakehousePaths) =
-    AnalyticsKeyRetirement.audit(
-      spark,
-      paths,
-      database,
-      oldKeyId,
-      AnalyticsKeyRetirement.RetentionEvidence(
-        kafka = AnalyticsKeyRetirement.KafkaRetentionEvidence(Some(10L), Some(10L), "test-kafka-barrier"),
-        deltaData = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-delta-data"),
-        deltaLogs = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-delta-logs"),
-        reports = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-reports")
-      ),
-      AnalyticsKeyRetirement.WriterInventory(
-        observedAt = now.minusSeconds(1),
-        coverageReference = "test-operator-inventory",
-        managed = Vector(AnalyticsKeyRetirement.WriterRecord("analytics-batch", AnalyticsKeyRetirement.WriterDisposition.Stopped, "test-stop-record")),
-        unmanaged = Vector(AnalyticsKeyRetirement.WriterRecord("unmanaged-writer", AnalyticsKeyRetirement.WriterDisposition.AccessRevoked, "test-access-revocation"))
-      ),
-      now
-    ).unsafeRunSync()
+    AnalyticsKeyRetirement
+      .audit(
+        spark,
+        paths,
+        database,
+        oldKeyId,
+        AnalyticsKeyRetirement.RetentionEvidence(
+          kafka = AnalyticsKeyRetirement.KafkaRetentionEvidence(Some(10L), Some(10L), "test-kafka-barrier"),
+          deltaData = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-delta-data"),
+          deltaLogs = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-delta-logs"),
+          reports = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-reports")
+        ),
+        AnalyticsKeyRetirement.WriterInventory(
+          observedAt = now.minusSeconds(1),
+          coverageReference = "test-operator-inventory",
+          managed = Vector(
+            AnalyticsKeyRetirement
+              .WriterRecord("analytics-batch", AnalyticsKeyRetirement.WriterDisposition.Stopped, "test-stop-record")
+          ),
+          unmanaged = Vector(
+            AnalyticsKeyRetirement.WriterRecord(
+              "unmanaged-writer",
+              AnalyticsKeyRetirement.WriterDisposition.AccessRevoked,
+              "test-access-revocation"
+            )
+          )
+        ),
+        now
+      )
+      .unsafeRunSync()
 
   private def seedRegistry(paths: AnalyticsLakehousePaths): Unit = {
-    val schema = StructType(Seq(
-      StructField("keyId", StringType, nullable = false),
-      StructField("verifier", StringType, nullable = false)
-    ))
-    spark.createDataFrame(List(Row(oldKeyId, "A" * 43)).asJava, schema)
-      .write.format("delta").mode("errorifexists").save(paths.hmacKeyRegistry)
+    val schema = StructType(
+      Seq(
+        StructField("keyId", StringType, nullable = false),
+        StructField("verifier", StringType, nullable = false)
+      )
+    )
+    spark
+      .createDataFrame(List(Row(oldKeyId, "A" * 43)).asJava, schema)
+      .write
+      .format("delta")
+      .mode("errorifexists")
+      .save(paths.hmacKeyRegistry)
   }
 
   private def deleteTree(root: Path): Unit = {

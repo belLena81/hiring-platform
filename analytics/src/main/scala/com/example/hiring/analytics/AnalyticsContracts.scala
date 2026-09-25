@@ -20,7 +20,8 @@ object AnalyticsRetention {
   val MinimumContributors: Long = 10L
 }
 
-sealed abstract class AnalyticsError(message: String, cause: Throwable = null) extends RuntimeException(message, cause)
+sealed abstract class AnalyticsError(message: String, cause: Option[Throwable] = None)
+    extends RuntimeException(message, cause.orNull)
 
 object AnalyticsError {
   final case class InvalidInput(problems: NonEmptyChain[String])
@@ -51,15 +52,16 @@ object AnalyticsError {
   final case class MarkerLimitExceeded(limit: Int)
       extends AnalyticsError(s"pending analytics erasure marker limit exceeded ($limit)")
   final case class MarkerStorageFailure(underlying: Throwable)
-      extends AnalyticsError("analytics erasure marker storage is unavailable", underlying)
+      extends AnalyticsError("analytics erasure marker storage is unavailable", Some(underlying))
   final case class SourceReadFailure(underlying: Throwable)
-      extends AnalyticsError("analytics source read failed", underlying)
+      extends AnalyticsError("analytics source read failed", Some(underlying))
   final case class LakehouseFailure(underlying: Throwable)
-      extends AnalyticsError("analytics lakehouse operation failed", underlying)
+      extends AnalyticsError("analytics lakehouse operation failed", Some(underlying))
   final case class SparkStartupFailure(underlying: Throwable)
-      extends AnalyticsError("analytics Spark session could not start", underlying)
+      extends AnalyticsError("analytics Spark session could not start", Some(underlying))
   final case class MongoConnectionFailure(underlying: Throwable)
-      extends AnalyticsError("analytics Mongo client could not start", underlying)
+      extends AnalyticsError("analytics Mongo client could not start", Some(underlying))
+  case object LakehouseLockTimeout extends AnalyticsError("timed out waiting for the analytics lakehouse lock")
 }
 
 opaque type RunId = String

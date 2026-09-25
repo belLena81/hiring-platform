@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.erasure
 
 import com.example.hiring.analytics.*
+import com.example.hiring.analytics.mongo.AnalyticsCollections
 import com.example.hiring.analytics.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Clock, IO, Resource}
@@ -25,7 +26,7 @@ final class MongoActiveDeletionMarkerSource(
     private[analytics] val maximumPendingMarkers: Int = MongoActiveDeletionMarkerSource.MaximumPendingMarkers,
     clock: Clock[IO] = Clock[IO]
 ) extends ActiveDeletionMarkerSource {
-  private val requestCollection = "analytics_erasure_requests"
+  private val requestCollection = com.example.hiring.analytics.mongo.AnalyticsCollections.ErasureRequests
 
   private def mongo[A](work: => A): IO[A] =
     IO.blocking(work).adaptError { case NonFatal(cause) => AnalyticsError.MarkerStorageFailure(cause) }
@@ -39,11 +40,25 @@ final class MongoActiveDeletionMarkerSource(
               .getCollection(requestCollection, classOf[Document])
               .find(
                 Filters.or(
-                  Filters.in("state", "Pending", "Processing"),
-                  Filters.and(Filters.eq("state", "Complete"), Filters.gt("expiresAt", Date.from(now)))
+                  Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
+                  Filters.and(
+                    Filters.eq(AnalyticsCollections.Fields.State, "Complete"),
+                    Filters.or(
+                      Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
+                      Filters.expr(
+                        new Document(
+                          "$ne",
+                          List(
+                            new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
+                            "date"
+                          ).asJava
+                        )
+                      )
+                    )
+                  )
                 )
               )
-              .sort(Sorts.ascending("_id"))
+              .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
               .batchSize(256)
               .iterator()
           )
@@ -63,17 +78,29 @@ final class MongoActiveDeletionMarkerSource(
       )
       _ <- IO.raiseUnless(collectionExists)(AnalyticsError.MissingMarkerCollection)
       now <- clock.realTimeInstant
-      requests <- activeRequests(now).take(maximumPendingMarkers.toLong + 1L).compile.toVector
-      _ <- IO.raiseWhen(requests.size > maximumPendingMarkers)(
+      tokens <- activeRequests(now)
+        .evalMap(request => IO.fromEither(MongoActiveDeletionMarkerSource.activeTokens(request, now, pseudonymizer)))
+        .unNone
+        .take(maximumPendingMarkers.toLong + 1L)
+        .compile
+        .toVector
+      _ <- IO.raiseWhen(tokens.size > maximumPendingMarkers)(
         AnalyticsError.MarkerLimitExceeded(maximumPendingMarkers)
       )
-      tokens <- IO.fromEither(requests.traverse(MongoActiveDeletionMarkerSource.tokensFor(_, pseudonymizer)))
       distinctTokens = tokens.flatten.distinct
       frame <- IO
         .blocking(
           spark.createDataFrame(
             distinctTokens.map(token => Row(token.value)).asJava,
-            StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
+            StructType(
+              Seq(
+                StructField(
+                  com.example.hiring.analytics.mongo.AnalyticsCollections.Fields.SubjectToken,
+                  StringType,
+                  nullable = false
+                )
+              )
+            )
           )
         )
         .adaptError { case NonFatal(cause) => AnalyticsError.LakehouseFailure(cause) }
@@ -87,7 +114,7 @@ private[analytics] object MongoActiveDeletionMarkerSource {
     tokensFor(request, pseudonymizer).map(_.head)
 
   def tokensFor(request: Document, pseudonymizer: SubjectPseudonymizer): Either[AnalyticsError, Vector[SubjectToken]] =
-    request.get("_id") match {
+    request.get(AnalyticsCollections.Fields.Id) match {
       case subjectId: String =>
         try {
           val parsed = UUID.fromString(subjectId)
@@ -96,6 +123,22 @@ private[analytics] object MongoActiveDeletionMarkerSource {
           else Left(AnalyticsError.MalformedMarker)
         } catch {
           case _: IllegalArgumentException => Left(AnalyticsError.MalformedMarker)
+        }
+      case _ => Left(AnalyticsError.MalformedMarker)
+    }
+
+  private[analytics] def activeTokens(
+      request: Document,
+      now: Instant,
+      pseudonymizer: SubjectPseudonymizer
+  ): Either[AnalyticsError, Option[Vector[SubjectToken]]] =
+    request.get(AnalyticsCollections.Fields.State) match {
+      case "Pending" | "Processing" => tokensFor(request, pseudonymizer).map(Some(_))
+      case "Complete"               =>
+        request.get(AnalyticsCollections.Fields.ExpiresAt) match {
+          case expiresAt: Date if expiresAt.after(Date.from(now)) => tokensFor(request, pseudonymizer).map(Some(_))
+          case _: Date                                            => Right(None)
+          case _                                                  => Left(AnalyticsError.MalformedMarker)
         }
       case _ => Left(AnalyticsError.MalformedMarker)
     }
