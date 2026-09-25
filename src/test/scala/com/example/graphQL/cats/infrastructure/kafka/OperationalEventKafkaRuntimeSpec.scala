@@ -1,7 +1,12 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{Deferred, IO, Ref, Resource}
-import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
+import com.example.graphQL.cats.config.{
+  KafkaConfig,
+  KafkaConsumerConfig,
+  KafkaPublisherConfig,
+  KafkaSaslSecurityProtocol
+}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.repository.protocol.RepositoryError
@@ -31,10 +36,23 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   test("publisher and reader use independent SASL principals") {
     val publisher = OperationalEventKafkaRuntime.saslProperties(Some("publisher"), Some("publish-secret"))
     val reader = OperationalEventKafkaRuntime.saslProperties(Some("analytics_reader"), Some("read-secret"))
-    assertEquals(publisher.get("security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(publisher.get("security.protocol"), Some("SASL_SSL"))
     assert(publisher.getOrElse("sasl.jaas.config", "").contains("username=\"publisher\""))
     assert(reader.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
     assert(!publisher.getOrElse("sasl.jaas.config", "").contains("read-secret"))
+  }
+
+  test("plaintext SASL transport requires explicit local configuration") {
+    val properties = OperationalEventKafkaRuntime.saslProperties(
+      Some("publisher"),
+      Some("publish-secret"),
+      KafkaSaslSecurityProtocol.Plaintext
+    )
+    assertEquals(properties.get("security.protocol"), Some("SASL_PLAINTEXT"))
+  }
+
+  test("Kafka clients without credentials receive no SASL properties") {
+    assertEquals(OperationalEventKafkaRuntime.saslProperties(None, None), Map.empty)
   }
 
   private def event(

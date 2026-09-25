@@ -2,7 +2,12 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.{KafkaConfig, KafkaConsumerConfig, KafkaPublisherConfig}
+import com.example.graphQL.cats.config.{
+  KafkaConfig,
+  KafkaConsumerConfig,
+  KafkaPublisherConfig,
+  KafkaSaslSecurityProtocol
+}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
@@ -57,7 +62,8 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
       quarantineTtlDays = 7,
       saslUsername = Some("analytics_reader"),
       saslPassword = sys.env.get("KAFKA_READER_PASSWORD")
-    )
+    ),
+    saslSecurityProtocol = KafkaSaslSecurityProtocol.Plaintext
   )
 
   private def job(id: JobId, createdAt: Instant, owner: UserId): Job = Job(

@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.config.KafkaConfig
+import com.example.graphQL.cats.config.{KafkaConfig, KafkaSaslSecurityProtocol}
 import com.example.graphQL.cats.repository.protocol.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -57,7 +57,11 @@ object OperationalEventKafkaRuntime {
         .withProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
         .withProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000")
         .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
-    val settings = saslProperties(config.publisher.saslUsername, config.publisher.saslPassword)
+    val settings = saslProperties(
+      config.publisher.saslUsername,
+      config.publisher.saslPassword,
+      config.saslSecurityProtocol
+    )
       .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
 
     def generation: Stream[IO, Unit] = {
@@ -190,7 +194,11 @@ object OperationalEventKafkaRuntime {
         .withAutoOffsetReset(AutoOffsetReset.Earliest)
         .withEnableAutoCommit(false)
         .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
-    val settings = saslProperties(config.consumer.saslUsername, config.consumer.saslPassword)
+    val settings = saslProperties(
+      config.consumer.saslUsername,
+      config.consumer.saslPassword,
+      config.saslSecurityProtocol
+    )
       .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
 
     background(
@@ -210,11 +218,15 @@ object OperationalEventKafkaRuntime {
     )
   }
 
-  private[kafka] def saslProperties(username: Option[String], password: Option[String]): Map[String, String] =
+  private[kafka] def saslProperties(
+      username: Option[String],
+      password: Option[String],
+      protocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls
+  ): Map[String, String] =
     (username, password) match {
       case (Some(user), Some(secret)) =>
         Map(
-          "security.protocol" -> "SASL_PLAINTEXT",
+          "security.protocol" -> protocol.kafkaValue,
           "sasl.mechanism" -> "PLAIN",
           "sasl.jaas.config" ->
             s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${jaasEscape(user)}\" password=\"${jaasEscape(secret)}\";"

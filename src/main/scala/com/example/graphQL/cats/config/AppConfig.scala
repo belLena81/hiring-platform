@@ -70,6 +70,7 @@ enum ConfigError(val key: String) {
   case InvalidKafkaReceiptTtl extends ConfigError("KAFKA_RECEIPT_TTL_DAYS")
   case InvalidKafkaQuarantineTtl extends ConfigError("KAFKA_QUARANTINE_TTL_DAYS")
   case InvalidKafkaCredentials extends ConfigError("KAFKA_CREDENTIALS")
+  case InvalidKafkaSaslSecurityProtocol extends ConfigError("KAFKA_SASL_SECURITY_PROTOCOL")
 }
 
 object ConfigError {
@@ -122,8 +123,14 @@ object ConfigError {
     InvalidKafkaPollInterval,
     InvalidKafkaReceiptTtl,
     InvalidKafkaQuarantineTtl,
-    InvalidKafkaCredentials
+    InvalidKafkaCredentials,
+    InvalidKafkaSaslSecurityProtocol
   ).map(_.key).toSet
+}
+
+enum KafkaSaslSecurityProtocol(val kafkaValue: String) {
+  case Tls extends KafkaSaslSecurityProtocol("SASL_SSL")
+  case Plaintext extends KafkaSaslSecurityProtocol("SASL_PLAINTEXT")
 }
 
 final case class VectorSearchConfig(
@@ -182,7 +189,8 @@ final case class KafkaConfig(
     topic: String,
     consumerGroup: String,
     publisher: KafkaPublisherConfig,
-    consumer: KafkaConsumerConfig
+    consumer: KafkaConsumerConfig,
+    saslSecurityProtocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls
 )
 
 type Port = Int :| Interval.Closed[1, 65535]
@@ -288,6 +296,7 @@ object AppConfig {
         validKafkaPollInterval(kafka.publisher.pollIntervalMs),
         validKafkaReceiptTtl(kafka.consumer.receiptTtlDays),
         validKafkaQuarantineTtl(kafka.consumer.quarantineTtlDays),
+        validKafkaSaslSecurityProtocol(kafka.saslSecurityProtocol, kafka.bootstrapServers),
         validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
         validKafkaCredentials(
           kafka.enabled && kafka.consumer.enabled,
@@ -306,6 +315,7 @@ object AppConfig {
             kafkaPollInterval,
             receiptTtl,
             quarantineTtl,
+            saslSecurityProtocol,
             _,
             _
         ) =>
@@ -330,7 +340,8 @@ object AppConfig {
               quarantineTtl,
               kafka.consumer.saslUsername,
               kafka.consumer.saslPassword
-            )
+            ),
+            saslSecurityProtocol
           )
       }
 
@@ -524,6 +535,39 @@ object AppConfig {
   private def validKafkaQuarantineTtl(value: Int): ValidatedNel[ConfigError, Int] =
     bounded(1, 365, ConfigError.InvalidKafkaQuarantineTtl)(value)
 
+  private def validKafkaSaslSecurityProtocol(
+      value: Option[String],
+      bootstrapServers: String
+  ): ValidatedNel[ConfigError, KafkaSaslSecurityProtocol] =
+    value.getOrElse("SASL_SSL") match {
+      case "SASL_SSL" => KafkaSaslSecurityProtocol.Tls.validNel
+      case "SASL_PLAINTEXT" if isLoopbackKafkaBootstrapServers(bootstrapServers) =>
+        KafkaSaslSecurityProtocol.Plaintext.validNel
+      case _ => ConfigError.InvalidKafkaSaslSecurityProtocol.invalidNel
+    }
+
+  private def isLoopbackKafkaBootstrapServers(value: String): Boolean =
+    value.split(",").toList.forall { server =>
+      val address = server.trim
+      val host =
+        if (address.startsWith("[")) address.drop(1).takeWhile(_ != ']')
+        else address.takeWhile(_ != ':')
+
+      host.equalsIgnoreCase("localhost") || host == "::1" || isLoopbackIpv4(host)
+    }
+
+  private def isLoopbackIpv4(host: String): Boolean =
+    host.split("\\.").toList match {
+      case first :: second :: third :: fourth :: Nil =>
+        val octets = List(first, second, third, fourth).traverse(_.toIntOption)
+        octets.exists {
+          case firstOctet :: remaining =>
+            firstOctet == 127 && remaining.forall(value => value >= 0 && value <= 255)
+          case Nil => false
+        }
+      case _ => false
+    }
+
   private def validKafkaCredentials(
       required: Boolean,
       username: Option[String],
@@ -607,6 +651,7 @@ object AppConfig {
     case "kafka.publisher.poll-interval-ms"       => Some(ConfigError.InvalidKafkaPollInterval)
     case "kafka.consumer.receipt-ttl-days"        => Some(ConfigError.InvalidKafkaReceiptTtl)
     case "kafka.consumer.quarantine-ttl-days"     => Some(ConfigError.InvalidKafkaQuarantineTtl)
+    case "kafka.sasl-security-protocol"           => Some(ConfigError.InvalidKafkaSaslSecurityProtocol)
     case _                                        => None
   }
 
@@ -650,7 +695,8 @@ object AppConfig {
       topic: NonBlankStr,
       consumerGroup: NonBlankStr,
       publisher: RawKafkaPublisherConfig,
-      consumer: RawKafkaConsumerConfig
+      consumer: RawKafkaConsumerConfig,
+      saslSecurityProtocol: Option[String] = None
   ) derives ConfigReader
   private final case class RawKafkaPublisherConfig(
       workerId: NonBlankStr,

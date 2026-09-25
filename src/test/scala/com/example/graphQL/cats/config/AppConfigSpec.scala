@@ -164,6 +164,30 @@ class AppConfigSpec extends FunSuite {
     assertEquals(parsed.map(_.kafka.consumer.saslPassword), Right(Some("reader-secret")))
   }
 
+  test("Kafka SASL transport defaults to TLS and supports explicit local plaintext") {
+    val tls = AppConfig.fromConfig(defaultConfig, Map.empty)
+    val plaintext = AppConfig.fromConfig(
+      defaultConfig + "kafka.sasl-security-protocol = ${?KAFKA_SASL_SECURITY_PROTOCOL}\n",
+      Map("KAFKA_SASL_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT")
+    )
+
+    assertEquals(tls.map(_.kafka.saslSecurityProtocol), Right(KafkaSaslSecurityProtocol.Tls))
+    assertEquals(plaintext.map(_.kafka.saslSecurityProtocol), Right(KafkaSaslSecurityProtocol.Plaintext))
+  }
+
+  test("Kafka SASL transport rejects unsupported protocols") {
+    val config = defaultConfig + "kafka.sasl-security-protocol = \"PLAINTEXT\"\n"
+    assertContainsError(AppConfig.fromConfig(config, Map.empty), ConfigError.InvalidKafkaSaslSecurityProtocol)
+  }
+
+  test("Kafka SASL plaintext is rejected for non-loopback bootstrap servers") {
+    val config = defaultConfig +
+      "kafka.bootstrap-servers = \"broker.example:9092\"\n" +
+      "kafka.sasl-security-protocol = \"SASL_PLAINTEXT\"\n"
+
+    assertContainsError(AppConfig.fromConfig(config, Map.empty), ConfigError.InvalidKafkaSaslSecurityProtocol)
+  }
+
   test("enabled Kafka rejects missing authentication credentials") {
     val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
     assertContainsError(AppConfig.fromConfig(enabled, Map.empty), ConfigError.InvalidKafkaCredentials)

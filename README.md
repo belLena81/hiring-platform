@@ -23,7 +23,10 @@ Event publication can also use the local Kafka broker:
 
 ```bash
 docker compose up -d mongodb kafka
+KAFKA_SASL_SECURITY_PROTOCOL=SASL_PLAINTEXT sbt run
 ```
+
+The local Compose broker is published only on loopback and uses SASL without TLS. The application defaults to `SASL_SSL` whenever SASL credentials are configured; use the explicit `SASL_PLAINTEXT` override only for this trusted local broker. Remote brokers should use `SASL_SSL`.
 
 Kafka publishes to `hiring.operational-events` with seven-day broker retention. MongoDB readiness and HTTP startup do not depend on Kafka availability; operational mutations write a transactional Mongo outbox first and the background publisher retries broker delivery.
 
