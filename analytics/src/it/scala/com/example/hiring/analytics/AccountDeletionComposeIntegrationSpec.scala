@@ -156,7 +156,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
 
   private def seedAttributedDeltaRows(subjectId: String): (String, String) = {
     val nonce = UUID.randomUUID().toString
-    val pseudonymizer = SubjectPseudonymizer.fromBase64(
+    val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(
       required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"),
       sys.env.getOrElse("HIRING_ANALYTICS_HMAC_KEY_ID", "hmac-v1"),
       sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID"),

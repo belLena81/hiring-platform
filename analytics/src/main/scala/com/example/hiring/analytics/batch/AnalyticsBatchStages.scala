@@ -233,75 +233,47 @@ private[batch] final class AnalyticsKeyContinuityStage(runtime: AnalyticsBatchSt
 
   def validateKeyMaterialContinuity(spark: SparkSession): IO[Unit] = blocking.either {
     val registryExists = DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)
-    if (!registryExists) {
-      val existingAnalyticsData = Vector(
-        paths.bronze,
-        paths.quarantine,
-        paths.silver,
-        paths.funnelGold,
-        paths.timeToHireGold,
-        paths.skillsGold,
-        paths.manifests
-      ).exists(DeltaTable.isDeltaTable(spark, _))
-      if (existingAnalyticsData)
-        Left(
-          AnalyticsError.InvalidConfiguration(
-            "existing lakehouse has no HMAC key continuity registry; startup fails closed, reset or rebuild this local lakehouse explicitly before reuse"
-          )
-        )
-      else {
-        createVerifierFrame(spark, pseudonymizer.keyVerifiers).write
+    val existingAnalyticsData = Vector(
+      paths.bronze,
+      paths.quarantine,
+      paths.silver,
+      paths.funnelGold,
+      paths.timeToHireGold,
+      paths.skillsGold,
+      paths.manifests
+    ).exists(DeltaTable.isDeltaTable(spark, _))
+    val existingRows =
+      if (registryExists)
+        spark.read
           .format("delta")
-          .mode("errorifexists")
-          .save(paths.hmacKeyRegistry)
-        Right(())
-      }
-    } else {
-      val existingRows =
-        spark.read.format("delta").load(paths.hmacKeyRegistry).select("keyId", "verifier").collect().toVector
-      val registryRowsAreValid = existingRows.forall { row =>
-        val keyId = row.getString(0)
-        val verifier = row.getString(1)
-        keyId != null && keyId.matches("[A-Za-z0-9-]{1,40}") && verifier != null && verifier.matches(
-          "[A-Za-z0-9_-]{43}"
-        )
-      }
-      val existing = existingRows.map(row => row.getString(0) -> row.getString(1)).toMap
-      val removedKey = existing.keys.find(keyId => !pseudonymizer.keyIds.contains(keyId))
-      val mismatched = pseudonymizer.keyVerifiers.find { case (keyId, verifier) =>
-        existing.get(keyId).exists(_ != verifier)
-      }
-      val added = pseudonymizer.keyVerifiers.filterNot { case (keyId, _) => existing.contains(keyId) }
-      val unanchoredStoredKey = added.find { case (keyId, _) => hasStoredTokenForKey(spark, keyId) }
-      val checks = for {
-        _ <- Either.cond(
-          registryRowsAreValid && existingRows.map(_.getString(0)).distinct.size == existingRows.size,
-          (),
-          AnalyticsError.InvalidConfiguration("HMAC key continuity registry is malformed")
-        )
-        _ <- removedKey.fold[Either[AnalyticsError, Unit]](Right(()))(keyId =>
-          Left(
-            AnalyticsError.InvalidConfiguration(
-              s"HMAC key '$keyId' cannot be removed: audited historical-data cleanup and writer-exclusion verification are not implemented"
-            )
-          )
-        )
-        _ <- mismatched.fold[Either[AnalyticsError, Unit]](Right(())) { case (keyId, _) =>
-          Left(AnalyticsError.InvalidConfiguration(s"HMAC key material changed without a new key ID: $keyId"))
-        }
-        _ <- unanchoredStoredKey.fold[Either[AnalyticsError, Unit]](Right(()))(keyId =>
-          Left(
-            AnalyticsError.InvalidConfiguration(
-              s"stored rows use HMAC key ID '$keyId' without a continuity anchor; verify provenance before registering it"
-            )
-          )
-        )
-      } yield ()
-      checks.map { _ =>
-        if (added.nonEmpty)
+          .load(paths.hmacKeyRegistry)
+          .select("keyId", "verifier")
+          .collect()
+          .toVector
+          .map(row => row.getString(0) -> row.getString(1))
+      else Vector.empty
+    val candidateKeys =
+      if (registryExists)
+        pseudonymizer.keyVerifiers.filterNot { case (keyId, _) => existingRows.exists(_._1 == keyId) }
+      else Vector.empty
+    val storedTokenKeys = candidateKeys.collect { case (keyId, _) if hasStoredTokenForKey(spark, keyId) => keyId }.toSet
+    KeyMaterialContinuityDecision
+      .evaluate(
+        registryExists,
+        existingAnalyticsData,
+        existingRows,
+        pseudonymizer.keyVerifiers,
+        storedTokenKeys
+      )
+      .map { added =>
+        if (!registryExists) {
+          createVerifierFrame(spark, pseudonymizer.keyVerifiers).write
+            .format("delta")
+            .mode("errorifexists")
+            .save(paths.hmacKeyRegistry)
+        } else if (added.nonEmpty)
           createVerifierFrame(spark, added).write.format("delta").mode("append").save(paths.hmacKeyRegistry)
       }
-    }
   }
 
   def validateHmacConfiguration(spark: SparkSession): IO[Unit] =
@@ -334,6 +306,61 @@ private[batch] final class AnalyticsKeyContinuityStage(runtime: AnalyticsBatchSt
         Seq(StructField("keyId", StringType, nullable = false), StructField("verifier", StringType, nullable = false))
       )
     )
+}
+
+/** Pure decision logic for fetched continuity-registry rows and stored-token observations. */
+private[batch] object KeyMaterialContinuityDecision {
+  def evaluate(
+      registryExists: Boolean,
+      analyticsDataExists: Boolean,
+      existingRows: Vector[(String, String)],
+      configured: Vector[(String, String)],
+      storedTokenKeys: Set[String]
+  ): Either[AnalyticsError, Vector[(String, String)]] = {
+    if (!registryExists && analyticsDataExists)
+      Left(
+        AnalyticsError.InvalidConfiguration(
+          "existing lakehouse has no HMAC key continuity registry; startup fails closed, reset or rebuild this local lakehouse explicitly before reuse"
+        )
+      )
+    else if (!registryExists) Right(configured)
+    else {
+      val rowsAreValid = existingRows.forall { case (keyId, verifier) =>
+        keyId != null && keyId.matches("[A-Za-z0-9-]{1,40}") && verifier != null && verifier.matches(
+          "[A-Za-z0-9_-]{43}"
+        )
+      }
+      val existing = existingRows.toMap
+      val removedKey = existing.keys.find(keyId => !configured.exists(_._1 == keyId))
+      val mismatched = configured.find { case (keyId, verifier) => existing.get(keyId).exists(_ != verifier) }
+      val added = configured.filterNot { case (keyId, _) => existing.contains(keyId) }
+      val unanchoredStoredKey = added.find { case (keyId, _) => storedTokenKeys.contains(keyId) }
+      for {
+        _ <- Either.cond(
+          rowsAreValid && existingRows.map(_._1).distinct.size == existingRows.size,
+          (),
+          AnalyticsError.InvalidConfiguration("HMAC key continuity registry is malformed")
+        )
+        _ <- removedKey.fold[Either[AnalyticsError, Unit]](Right(()))(keyId =>
+          Left(
+            AnalyticsError.InvalidConfiguration(
+              s"HMAC key '$keyId' cannot be removed: audited historical-data cleanup and writer-exclusion verification are not implemented"
+            )
+          )
+        )
+        _ <- mismatched.fold[Either[AnalyticsError, Unit]](Right(()))(entry =>
+          Left(AnalyticsError.InvalidConfiguration(s"HMAC key material changed without a new key ID: ${entry._1}"))
+        )
+        _ <- unanchoredStoredKey.fold[Either[AnalyticsError, Unit]](Right(()))(keyId =>
+          Left(
+            AnalyticsError.InvalidConfiguration(
+              s"stored rows use HMAC key ID '$keyId' without a continuity anchor; verify provenance before registering it"
+            )
+          )
+        )
+      } yield added
+    }
+  }
 }
 
 /** Owns erasure matching, Delta evidence capture, checkpointing, and physical-presence verification. */

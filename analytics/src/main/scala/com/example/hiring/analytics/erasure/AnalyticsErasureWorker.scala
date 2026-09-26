@@ -5,6 +5,7 @@ import com.example.hiring.analytics.batch.*
 import com.example.hiring.analytics.mongo.*
 
 import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
+import cats.Monad
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import org.apache.spark.sql.SparkSession
@@ -96,25 +97,29 @@ final class AnalyticsErasureWorker(
     }).foreverM
 
   private[analytics] def process(claim: ErasureClaim, reservation: AnalyticsReportReservation): IO[Unit] =
+    Monad[IO].tailRecM(claim)(current => step(current, reservation))
+
+  private def step(
+      claim: ErasureClaim,
+      reservation: AnalyticsReportReservation
+  ): IO[Either[ErasureClaim, Unit]] =
     claim.phase match {
       case ErasurePhase.Requested =>
         for {
+          next <- IO.fromEither(
+            claim.advanceTo(ErasurePhase.PublisherDrained).leftMap(_ => AnalyticsError.ErasureNotReady)
+          )
           transactionalIds <- store.transactionalIds(claim.requestId)
           _ <- producerFencer.fence(fencerKafka, transactionalIds)
           current <- now
           ready <- store.publisherDrainReady(claim.requestId, current, deliveryTimeout)
           _ <- if (ready) IO.unit else defer(claim, pollInterval)
           _ <- advance(claim, ErasurePhase.PublisherDrained)
-          next = claim.copy(
-            phase = ErasurePhase.PublisherDrained,
-            progress = 0,
-            progressKey = phaseKey(ErasurePhase.PublisherDrained)
-          )
-          _ <- process(next, reservation)
-        } yield ()
+        } yield Left(next)
 
       case ErasurePhase.PublisherDrained =>
         for {
+          next <- IO.fromEither(claim.advanceTo(ErasurePhase.OutboxPurged).leftMap(_ => AnalyticsError.ErasureNotReady))
           current <- now
           purged <- store.purgeOutbox(claim.requestId, current, deliveryTimeout)
           _ <- if (purged) IO.unit else defer(claim, pollInterval)
@@ -131,28 +136,18 @@ final class AnalyticsErasureWorker(
           }
           _ <- IO.fromEither(KafkaRetentionBarrier.validate(barrier))
           _ <- advance(claim, ErasurePhase.OutboxPurged)
-          next = claim.copy(
-            phase = ErasurePhase.OutboxPurged,
-            progress = 0,
-            progressKey = phaseKey(ErasurePhase.OutboxPurged)
-          )
-          _ <- process(next, reservation)
-        } yield ()
+        } yield Left(next)
 
       case ErasurePhase.OutboxPurged =>
         for {
+          next <- IO.fromEither(claim.advanceTo(ErasurePhase.DeltaPurged).leftMap(_ => AnalyticsError.ErasureNotReady))
           _ <- purgeAndRecordDelta(claim, spark, reservation.generation)
           _ <- advance(claim, ErasurePhase.DeltaPurged)
-          next = claim.copy(
-            phase = ErasurePhase.DeltaPurged,
-            progress = 0,
-            progressKey = phaseKey(ErasurePhase.DeltaPurged)
-          )
-          _ <- process(next, reservation)
-        } yield ()
+        } yield Left(next)
 
       case ErasurePhase.DeltaPurged =>
         for {
+          next <- IO.fromEither(claim.advanceTo(ErasurePhase.GoldRebuilt).leftMap(_ => AnalyticsError.ErasureNotReady))
           barrier <- store
             .readBarrier(claim.requestId)
             .flatMap(
@@ -181,15 +176,9 @@ final class AnalyticsErasureWorker(
           _ <- IO.raiseWhen(affectedRows > 0L && affectedFiles.isEmpty)(AnalyticsError.PhysicalReclamationUnverified)
           _ <- batch.verifyFilesAbsent(spark, affectedFiles)
           _ <- advance(claim, ErasurePhase.GoldRebuilt)
-          next = claim.copy(
-            phase = ErasurePhase.GoldRebuilt,
-            progress = 0,
-            progressKey = phaseKey(ErasurePhase.GoldRebuilt)
-          )
-          _ <- process(next, reservation)
-        } yield ()
+        } yield Left(next)
 
-      case ErasurePhase.GoldRebuilt => advance(claim, ErasurePhase.ReadyToPublish)
+      case ErasurePhase.GoldRebuilt => advance(claim, ErasurePhase.ReadyToPublish).as(Right(()))
 
       case ErasurePhase.ReadyToPublish =>
         for {
@@ -213,9 +202,9 @@ final class AnalyticsErasureWorker(
           expiry = completedAt.plusSeconds(AnalyticsRetention.PublishedSnapshotDays.toLong * 86400L)
           _ <- publisher.publishErasure(refreshed, report, expiry, claim, completedAt)
           _ <- logger.info("analytics erasure completed and the snapshot was safely revealed")
-        } yield ()
+        } yield Right(())
 
-      case ErasurePhase.ReportPublished => IO.unit
+      case ErasurePhase.ReportPublished => IO.pure(Right(()))
     }
 
   private def purgeAndRecordDelta(claim: ErasureClaim, spark: SparkSession, generation: Long): IO[Unit] =
@@ -295,9 +284,6 @@ final class AnalyticsErasureWorker(
       case true  => IO.unit
       case false => IO.raiseError(AnalyticsError.ErasureNotReady)
     }
-
-  private def phaseKey(phase: ErasurePhase): Long =
-    phase.ordinal.toLong * ErasurePhase.ProgressPerPhase
 
   private def sha256(value: String): String =
     MessageDigest

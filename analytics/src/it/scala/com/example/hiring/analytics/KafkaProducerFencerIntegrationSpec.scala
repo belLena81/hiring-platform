@@ -138,7 +138,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       val markers = AnalyticsSubjectPrivacy.emptyMarkers(spark.range(0L).toDF())
       val publication = new HiringAnalyticsBatch(
         paths,
-        SubjectPseudonymizer.fromSecret("analytics-kafka-fencing-secret".padTo(32, 'x').getBytes("UTF-8")),
+        AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-kafka-fencing-secret".padTo(32, 'x').getBytes("UTF-8")),
         DataFrameDeletionMarkerSource(markers)
       ).run(spark, new KafkaOffsetRangeSource(connection), manifest).unsafeRunSync()
       assertEquals(publication.bronzeRecords, 1L)

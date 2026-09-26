@@ -3,7 +3,7 @@ package com.example.hiring.analytics.batch
 import com.example.hiring.analytics.*
 
 import cats.effect.IO
-import org.apache.spark.sql.{Column, DataFrame}
+import org.apache.spark.sql.{Column, DataFrame, Dataset}
 import org.apache.spark.sql.functions.{
   col,
   count,
@@ -24,7 +24,29 @@ import org.apache.spark.sql.functions.{
 }
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
 
+import java.sql.Timestamp
+import scala.reflect.runtime.universe.TypeTag
+
+/** Typed contracts at the persisted Silver and derived Gold boundaries. Option fields preserve nullable Spark columns.
+  */
+private[batch] final case class SilverHiringEvent(
+    eventId: Option[String],
+    eventType: Option[String],
+    occurredAt: Option[Timestamp],
+    aggregateType: Option[String],
+    aggregateId: Option[String],
+    applicationId: Option[String],
+    jobId: Option[String],
+    newStatus: Option[String],
+    jobSkills: Option[Seq[String]],
+    subjectToken: Option[String],
+    subjectTokens: Seq[String],
+    eventFingerprint: Option[String]
+)
+
 object OperationalEventTransforms {
+  private given TypeTag[SilverHiringEvent] = SparkProductTypeTag[SilverHiringEvent]
+
   private val PayloadSchema: StructType = StructType(
     Seq(
       StructField("applicationId", StringType, nullable = true),
@@ -123,7 +145,7 @@ object OperationalEventTransforms {
       AnalyticsSubjectPrivacy.withSubjectToken(valid.join(conflicts, Seq("eventId"), "left_anti"), pseudonymizer),
       activeMarkerTokens
     )
-    privacySafe
+    val selected = privacySafe
       .dropDuplicates("eventId")
       .withColumn("applicationId", col("payload.applicationId"))
       .withColumn("jobId", col("payload.jobId"))
@@ -146,6 +168,12 @@ object OperationalEventTransforms {
         "subjectTokens",
         "eventFingerprint"
       )
+    typedSilver(selected).toDF()
+  }
+
+  private[batch] def typedSilver(silver: DataFrame): Dataset[SilverHiringEvent] = {
+    import silver.sparkSession.implicits.*
+    silver.as[SilverHiringEvent]
   }
 
   private def requiredEnvelopeFields: Column =
@@ -160,17 +188,22 @@ object OperationalEventTransforms {
 }
 
 object HiringGoldTransforms {
+  private given TypeTag[SilverHiringEvent] = SparkProductTypeTag[SilverHiringEvent]
+
   private val ApplicationCreated = AnalyticsEventType.ApplicationCreated.wire
   private val ApplicationStatusChanged = AnalyticsEventType.ApplicationStatusChanged.wire
   private val JobCreated = AnalyticsEventType.JobCreated.wire
   private val Hired = AnalyticsApplicationStatus.Hired.wire
 
+  private def typedSilver(silver: DataFrame): Dataset[SilverHiringEvent] =
+    OperationalEventTransforms.typedSilver(silver)
+
   private def applicationLifecycle(silver: DataFrame): DataFrame =
     silver.filter(col("eventType").isin(ApplicationCreated, ApplicationStatusChanged))
 
   /** The CANDIDATE_HIRED event duplicates the Hired status transition and is deliberately excluded. */
-  def funnelActivity(silver: DataFrame): DataFrame =
-    applicationLifecycle(silver)
+  def funnelActivity(silver: DataFrame): DataFrame = {
+    val result = applicationLifecycle(typedSilver(silver).toDF())
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .groupBy("day", "eventType", "newStatus")
       .agg(
@@ -179,10 +212,13 @@ object HiringGoldTransforms {
       )
       .filter(col("contributingSubjects") >= lit(AnalyticsRetention.MinimumContributors))
       .drop("contributingSubjects")
+    result
+  }
 
   /** Only JOB_CREATED snapshots contribute; updates and close events never alter this metric. */
   def skillPostingActivity(silver: DataFrame): DataFrame = {
-    silver
+    val result = typedSilver(silver)
+      .toDF()
       .filter(col("eventType") === lit(JobCreated))
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .withColumn("rawSkill", explode(col("jobSkills")))
@@ -196,6 +232,7 @@ object HiringGoldTransforms {
       )
       .filter(col("contributingSubjects") >= lit(AnalyticsRetention.MinimumContributors))
       .drop("contributingSubjects")
+    result
   }
 
   def suppressSmallGroups(dataset: DataFrame, contributorColumn: String): DataFrame =
@@ -216,7 +253,7 @@ object HiringGoldTransforms {
     val counts = subjectCounts ++ applicationCounts
     val subjectColumns = cells.map { case (name, _) => s"${name}Subjects" }
 
-    applicationLifecycle(silver)
+    val result = applicationLifecycle(typedSilver(silver).toDF())
       .withColumn("day", date_trunc("day", col("occurredAt")))
       .groupBy("day")
       .agg(counts.head, counts.tail*)
@@ -226,11 +263,12 @@ object HiringGoldTransforms {
           .reduce(_ && _)
       )
       .drop(subjectColumns*)
+    result
   }
 
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
   def timeToHire(silver: DataFrame): IO[DataFrame] = IO.blocking {
-    val lifecycle = applicationLifecycle(silver)
+    val lifecycle = applicationLifecycle(typedSilver(silver).toDF())
       .groupBy("applicationId", "subjectToken")
       .agg(
         min(when(col("eventType") === lit(ApplicationCreated), col("occurredAt"))).as("createdAt"),
@@ -246,7 +284,7 @@ object HiringGoldTransforms {
       .select("subjectToken")
       .distinct()
       .count()
-    eligible
+    val result = eligible
       .agg(
         percentile_approx(col("hours"), lit(0.5), lit(10000)).as("p50Hours"),
         percentile_approx(col("hours"), lit(0.75), lit(10000)).as("p75Hours"),
@@ -261,5 +299,6 @@ object HiringGoldTransforms {
           (col("excludedCount") === lit(0) || col("excludedCount") >= lit(AnalyticsRetention.MinimumContributors))
       )
       .drop("eligibleApplications")
+    result
   }
 }

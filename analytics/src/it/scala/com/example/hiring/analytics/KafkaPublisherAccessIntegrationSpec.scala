@@ -137,7 +137,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
         topic,
         AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
-        SubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
+        AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
         new MongoAnalyticsReportPublisher(client, database)
       )
       val result = (for {
@@ -179,7 +179,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
           AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString),
-          SubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
+          AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
           new MongoAnalyticsReportPublisher(client, database),
           producerFencer = uncertainFencer
         )
@@ -215,7 +215,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
           AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString),
-          SubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
+          AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
           new MongoAnalyticsReportPublisher(client, database),
           producerFencer = correctFencer
         )
@@ -391,7 +391,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         else KafkaConnection(workerBootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
         topic,
         AnalyticsLakehousePaths("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
-        SubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
+        AnalyticsTestSubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
         publisher,
         leaseDuration = 250.millis,
         pollInterval = 10.millis,

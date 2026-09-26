@@ -6,6 +6,7 @@ import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
 import io.github.iltotore.iron.constraint.numeric.Interval
 import io.github.iltotore.iron.constraint.string.Blank
+import io.github.iltotore.iron.constraint.string.Match
 
 /** The analytics retention policy is intentionally separate from Kafka retention. */
 object AnalyticsRetention {
@@ -77,12 +78,19 @@ object RunId {
   extension (value: RunId) def value: String = value
 }
 
-opaque type SubjectToken = String
+type SubjectTokenValue = String :| Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]
+opaque type SubjectToken = SubjectTokenValue
 
 object SubjectToken {
-  def fromHmac(value: String): SubjectToken = value
+  def fromHmac(value: String): Either[String, SubjectToken] =
+    Option(value)
+      .toRight("subject token has an invalid format")
+      .flatMap(
+        _.refineEither[Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]]
+          .leftMap(_ => "subject token has an invalid format")
+      )
 
-  extension (token: SubjectToken) def value: String = token
+  extension (token: SubjectToken) def value: String = token.asInstanceOf[String]
 }
 
 enum AnalyticsEventType(val wire: String) {

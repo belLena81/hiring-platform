@@ -7,6 +7,8 @@ import cats.syntax.all.*
 import java.nio.channels.{FileChannel, FileLock, OverlappingFileLockException}
 import java.nio.file.{Path, Paths, StandardOpenOption}
 import java.net.URI
+import retry.{RetryPolicies, retryingOnFailures}
+import retry.implicits.*
 import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
@@ -55,24 +57,32 @@ private[analytics] object AnalyticsLakehouseLock {
   private val MaximumRetryDelay = 5.seconds
   private val AcquisitionTimeout = 2.minutes
 
-  private def acquire(channel: FileChannel): IO[FileLock] =
-    IO.monotonic.flatMap(startedAt => acquire(channel, startedAt, InitialRetryDelay))
-
-  private def acquire(channel: FileChannel, startedAt: FiniteDuration, delay: FiniteDuration): IO[FileLock] =
-    IO.blocking {
-      try Option(channel.tryLock())
-      catch {
-        case _: OverlappingFileLockException => None
-      }
-    }.adaptError {
-      case error: AnalyticsError => error
-      case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-    }.flatMap {
-      case Some(lock) => IO.pure(lock)
-      case None       =>
-        IO.monotonic.flatMap { now =>
-          if (now - startedAt >= AcquisitionTimeout) IO.raiseError(AnalyticsError.LakehouseLockTimeout)
-          else IO.sleep(delay) *> acquire(channel, startedAt, (delay * 2).min(MaximumRetryDelay))
+  private def acquire(channel: FileChannel): IO[FileLock] = {
+    val attempt = IO
+      .blocking {
+        try Option(channel.tryLock())
+        catch {
+          case _: OverlappingFileLockException => None
         }
-    }
+      }
+      .adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
+      }
+    val backoff = RetryPolicies.capDelay(
+      MaximumRetryDelay,
+      RetryPolicies.fullJitter[IO](InitialRetryDelay)
+    )
+    val policy = RetryPolicies.limitRetriesByCumulativeDelay(AcquisitionTimeout, backoff)
+    retryingOnFailures[Option[FileLock]](
+      policy,
+      _.isDefined.pure[IO],
+      (_, _) => IO.unit
+    )(attempt)
+      .flatMap {
+        case Some(lock) => IO.pure(lock)
+        case None       => IO.raiseError(AnalyticsError.LakehouseLockTimeout)
+      }
+      .timeoutTo(AcquisitionTimeout, IO.raiseError(AnalyticsError.LakehouseLockTimeout))
+  }
 }

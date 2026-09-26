@@ -24,7 +24,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 5.minutes
 
   private def hmacKey(seed: String): Array[Byte] = seed.padTo(32, 'x').getBytes("UTF-8")
-  private val pseudonymizer = SubjectPseudonymizer.fromSecret(hmacKey("analytics-test-secret"))
+  private val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("analytics-test-secret"))
   private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
     .builder()
     .master("local[2]")
@@ -916,19 +916,25 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("HMAC secrets shorter than 256 bits are rejected") {
-    val error = intercept[AnalyticsError.InvalidConfiguration] {
-      SubjectPseudonymizer.fromSecret("short-secret".getBytes("UTF-8"))
-    }
-    assert(error.getMessage.contains("32 bytes"))
+    val errors = SubjectPseudonymizer
+      .validatedKeyRing("hmac-v1", "short-secret".getBytes("UTF-8"), Vector.empty)
+      .toEither
+      .swap
+      .toOption
+      .getOrElse(fail("expected short secret rejection"))
+      .toChain
+      .toList
+      .mkString(" ")
+    assert(errors.contains("32 bytes"))
     val encoded = java.util.Base64.getEncoder.encodeToString("short-secret".getBytes("UTF-8"))
-    intercept[AnalyticsError.InvalidConfiguration](SubjectPseudonymizer.fromBase64(encoded))
+    assert(SubjectPseudonymizer.validateFromBase64(Some(encoded), "hmac-v1", None, None).isInvalid)
   }
 
   test("versioned HMAC key rings preserve retiring tokens for deletion markers") {
     val oldSecret = hmacKey("old-analytics-key")
     val newSecret = hmacKey("new-analytics-key")
-    val oldKey = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
-    val rotating = SubjectPseudonymizer.fromKeyRing("hmac-v2", newSecret, Vector("hmac-v1" -> oldSecret))
+    val oldKey = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
+    val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", newSecret, Vector("hmac-v1" -> oldSecret))
     assertNotEquals(rotating.token("candidate-1"), oldKey.token("candidate-1"))
     assertEquals(
       rotating.matchingTokens("candidate-1").toSet,
@@ -946,8 +952,10 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("Mongo erasure request subject IDs map to HMAC tokens and malformed IDs fail closed") {
     val subjectId = java.util.UUID.fromString("d31d0f7b-0abf-4e47-94da-b2f52cb5dd2e")
     assertEquals(
-      MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", subjectId.toString), pseudonymizer),
-      Right(SubjectToken.fromHmac(pseudonymizer.token(subjectId.toString)))
+      MongoActiveDeletionMarkerSource
+        .tokenFor(new org.bson.Document("_id", subjectId.toString), pseudonymizer)
+        .toOption,
+      SubjectToken.fromHmac(pseudonymizer.token(subjectId.toString)).toOption
     )
     assertEquals(
       MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", "not-a-uuid"), pseudonymizer),
@@ -1089,9 +1097,27 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
+  test("subject-token UDFs represent missing actor and candidate identities as SQL nulls") {
+    val source = records(
+      Seq(
+        (
+          "hiring.operational-events",
+          0,
+          3L,
+          event("unattributed", "APPLICATION_CREATED", payload = Some("{\"candidateId\":\"\"}"), actorId = "")
+        )
+      )
+    )
+    val parsed = OperationalEventTransforms.parseKafkaRecords(source)
+    val attributed = AnalyticsSubjectPrivacy.withSubjectToken(parsed, pseudonymizer).head()
+
+    assert(attributed.isNullAt(attributed.fieldIndex("subjectToken")))
+    assertEquals(attributed.getSeq[String](attributed.fieldIndex("subjectTokens")), Seq.empty)
+  }
+
   test("new event attribution emits only the primary token while deletion matching retains previous keys") {
     val oldSecret = hmacKey("old-search-key")
-    val current = SubjectPseudonymizer.fromKeyRing(
+    val current = AnalyticsTestSubjectPseudonymizer.fromKeyRing(
       "hmac-v2",
       hmacKey("new-search-key"),
       Vector("hmac-v1" -> oldSecret)
@@ -1117,14 +1143,17 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(tokens, Set(current.token("actor-1"), current.token("rotation-candidate")))
     assertEquals(
       current.matchingTokens("rotation-candidate").toSet,
-      Set(current.token("rotation-candidate"), SubjectPseudonymizer.fromSecret(oldSecret).token("rotation-candidate"))
+      Set(
+        current.token("rotation-candidate"),
+        AnalyticsTestSubjectPseudonymizer.fromSecret(oldSecret).token("rotation-candidate")
+      )
     )
   }
 
   test("batch refuses an HMAC primary key cutover while unexpired Silver rows use the retiring key") {
     val oldSecret = hmacKey("old-cutover-key")
-    val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
-    val rotating = SubjectPseudonymizer.fromKeyRing(
+    val old = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
+    val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing(
       "hmac-v2",
       hmacKey("new-cutover-key"),
       Vector("hmac-v1" -> oldSecret)
@@ -1177,13 +1206,13 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("key removal stays blocked by the continuity registry after current rows disappear") {
     val oldSecret = hmacKey("old-stored-key")
-    val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
-    val rotating = SubjectPseudonymizer.fromKeyRing(
+    val old = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
+    val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing(
       "hmac-v2",
       hmacKey("new-stored-key"),
       Vector("hmac-v1" -> oldSecret)
     )
-    val removed = SubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("new-stored-key"), Vector.empty)
+    val removed = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("new-stored-key"), Vector.empty)
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-retirement").toUri.toString)
     new HiringAnalyticsBatch(paths, old, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
       .validateKeyMaterialContinuity(spark)
@@ -1217,8 +1246,10 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("HMAC key continuity rejects changed material under the same key ID") {
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-continuity").toUri.toString)
     val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
-    val original = SubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("original-continuity-key"), Vector.empty)
-    val changed = SubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("changed-continuity-key"), Vector.empty)
+    val original =
+      AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("original-continuity-key"), Vector.empty)
+    val changed =
+      AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("changed-continuity-key"), Vector.empty)
     new HiringAnalyticsBatch(paths, original, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
     new HiringAnalyticsBatch(paths, original, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
     val error = intercept[AnalyticsError.InvalidConfiguration] {
@@ -1229,7 +1260,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("legacy lakehouse data without HMAC provenance is not silently anchored") {
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-unanchored-key").toUri.toString)
-    val pseudonymizer = SubjectPseudonymizer.fromSecret(hmacKey("legacy-key-material"))
+    val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("legacy-key-material"))
     spark
       .createDataFrame(
         Seq(Row(pseudonymizer.token("candidate-1"))).asJava,
@@ -1248,11 +1279,12 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("a configured key ID with stored rows but no registry anchor fails closed") {
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-partial-key-registry").toUri.toString)
-    val current = SubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("current-registry-key"), Vector.empty)
+    val current =
+      AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("current-registry-key"), Vector.empty)
     new HiringAnalyticsBatch(paths, current, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
-    val old = SubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("old-unanchored-key"), Vector.empty)
+    val old = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("old-unanchored-key"), Vector.empty)
     spark
       .createDataFrame(
         Seq(Row(old.token("candidate-1"))).asJava,
@@ -1261,7 +1293,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .write
       .format("delta")
       .save(paths.silver)
-    val rotating = SubjectPseudonymizer.fromKeyRing(
+    val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing(
       "hmac-v2",
       hmacKey("current-registry-key"),
       Vector("hmac-v1" -> hmacKey("old-unanchored-key"))

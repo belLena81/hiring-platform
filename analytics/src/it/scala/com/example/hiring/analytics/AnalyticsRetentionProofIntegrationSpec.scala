@@ -206,7 +206,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
 
     val spark = sparkSession()
     try {
-      val pseudonymizer = SubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
+      val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
       val paths = AnalyticsLakehousePaths(lakehouseRoot)
       val batch = new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(db, pseudonymizer))
       val manifest = AnalyticsRunManifest
@@ -449,7 +449,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       val spark = sparkSession()
       try {
         val paths = AnalyticsLakehousePaths(lakehouseRoot)
-        val pseudonymizer = SubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
+        val pseudonymizer =
+          AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
         val batch =
           new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(db, pseudonymizer))
         val markers = new MongoActiveDeletionMarkerSource(db, pseudonymizer).activeSubjectTokens(spark).unsafeRunSync()

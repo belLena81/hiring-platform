@@ -4,11 +4,12 @@ import com.example.hiring.analytics.*
 import com.example.hiring.analytics.mongo.AnalyticsCollections
 import com.example.hiring.analytics.batch.ActiveDeletionMarkerSource
 
-import cats.effect.{Clock, IO, Resource}
+import cats.effect.{Clock, IO}
 import cats.syntax.all._
-import com.mongodb.client.{MongoCursor, MongoDatabase}
+import com.mongodb.client.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
 import fs2.Stream
+import com.example.hiring.analytics.mongo.MongoCursorStream
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.bson.Document
@@ -32,41 +33,36 @@ final class MongoActiveDeletionMarkerSource(
     IO.blocking(work).adaptError { case NonFatal(cause) => AnalyticsError.MarkerStorageFailure(cause) }
 
   private def activeRequests(now: Instant): Stream[IO, Document] =
-    Stream
-      .resource(
-        Resource.make(
-          mongo[MongoCursor[Document]](
-            database
-              .getCollection(requestCollection, classOf[Document])
-              .find(
-                Filters.or(
-                  Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
-                  Filters.and(
-                    Filters.eq(AnalyticsCollections.Fields.State, "Complete"),
-                    Filters.or(
-                      Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
-                      Filters.expr(
-                        new Document(
-                          "$ne",
-                          List(
-                            new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
-                            "date"
-                          ).asJava
-                        )
-                      )
-                    )
+    MongoCursorStream(
+      database
+        .getCollection(requestCollection, classOf[Document])
+        .find(
+          Filters.or(
+            Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
+            Filters.and(
+              Filters.eq(AnalyticsCollections.Fields.State, "Complete"),
+              Filters.or(
+                Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
+                Filters.expr(
+                  new Document(
+                    "$ne",
+                    List(
+                      new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
+                      "date"
+                    ).asJava
                   )
                 )
               )
-              .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
-              .batchSize(256)
-              .iterator()
+            )
           )
-        )(cursor => mongo(cursor.close()))
-      )
-      .flatMap { cursor =>
-        Stream.repeatEval(mongo(if (cursor.hasNext) Some(cursor.next()) else None)).unNoneTerminate
-      }
+        )
+        .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
+        .batchSize(256)
+        .iterator()
+    ).handleErrorWith {
+      case error: AnalyticsError => Stream.raiseError[IO](error)
+      case cause                 => Stream.raiseError[IO](AnalyticsError.MarkerStorageFailure(cause))
+    }
 
   override def activeSubjectTokens(spark: SparkSession): IO[DataFrame] =
     for {
@@ -119,7 +115,10 @@ private[analytics] object MongoActiveDeletionMarkerSource {
         try {
           val parsed = UUID.fromString(subjectId)
           if (parsed.toString == subjectId)
-            Right(pseudonymizer.matchingTokens(subjectId).map(SubjectToken.fromHmac))
+            pseudonymizer
+              .matchingTokens(subjectId)
+              .traverse(SubjectToken.fromHmac)
+              .leftMap(AnalyticsError.InvalidConfiguration.apply)
           else Left(AnalyticsError.MalformedMarker)
         } catch {
           case _: IllegalArgumentException => Left(AnalyticsError.MalformedMarker)

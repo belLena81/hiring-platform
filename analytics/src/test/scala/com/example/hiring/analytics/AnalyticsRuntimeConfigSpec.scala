@@ -72,6 +72,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       AnalyticsRuntimeConfig.batchFromHocon(packaged, settings).toOption.getOrElse(fail("expected packaged config"))
     assertEquals(loaded.common.sparkMaster, "local[*]")
     assertEquals(loaded.manifest.offsetRanges.head.topic, "hiring.operational-events")
+    assertEquals(AnalyticsKeyRetirementAuditMain.validateAuditHocon(packaged), Right(()))
   }
 
   test("worker settings validate a separate fencer connection") {

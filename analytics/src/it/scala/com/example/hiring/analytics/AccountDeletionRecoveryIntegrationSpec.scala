@@ -267,7 +267,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       )
       val reader = KafkaConnection(brokers, Some("analytics_reader"), Some(required("KAFKA_READER_PASSWORD")))
       val fencer = KafkaConnection(brokers, Some("analytics_fencer"), Some(required("KAFKA_FENCER_PASSWORD")))
-      val pseudonymizer = SubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
+      val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
       val transactionalId = "hiring-publisher-recovery-" + UUID.randomUUID().toString
 
       val test = resources.use { case (client, spark, root) =>

@@ -33,7 +33,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
   private val Topic = "hiring.operational-events"
   private val FixedNow = Instant.parse("2026-09-23T12:00:00Z")
   private val Pseudonymizer =
-    SubjectPseudonymizer.fromSecret("hal07-local-fixture".padTo(32, 'x').getBytes("UTF-8"))
+    AnalyticsTestSubjectPseudonymizer.fromSecret("hal07-local-fixture".padTo(32, 'x').getBytes("UTF-8"))
 
   private val RecordSchema = StructType(
     Seq(

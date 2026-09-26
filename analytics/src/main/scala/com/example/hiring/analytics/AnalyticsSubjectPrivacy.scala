@@ -16,7 +16,6 @@ import org.apache.spark.sql.functions.{
   when,
   transform
 }
-import org.apache.spark.sql.api.java.UDF1
 import org.apache.spark.sql.types.{ArrayType, StringType}
 import cats.data.ValidatedNec
 import cats.data.NonEmptyVector
@@ -49,12 +48,14 @@ final class SubjectPseudonymizer private (
     key._1 -> token.substring(key._1.length + 1)
   }
 
-  def typedToken(subjectId: String): SubjectToken = {
-    require(subjectId != null && subjectId.nonEmpty, "subject id must be non-empty")
-    SubjectToken.fromHmac(tokenFor(subjectId, copiedKeys.head))
+  def typedToken(subjectId: String): Either[String, SubjectToken] = {
+    Option(subjectId)
+      .filter(_.nonEmpty)
+      .toRight("subject id must be non-empty")
+      .flatMap(id => SubjectToken.fromHmac(tokenFor(id, copiedKeys.head)))
   }
 
-  def token(subjectId: String): String = typedToken(subjectId).value
+  def token(subjectId: String): String = tokenFor(subjectId, copiedKeys.head)
 
   /** Tokens written to new analytics rows use only the active primary key. */
   def tokenForNewRows(subjectId: String): String = token(subjectId)
@@ -78,15 +79,6 @@ object SubjectPseudonymizer {
   private val KeyIdPattern = "[A-Za-z0-9-]{1,40}".r
   private val MinimumKeyBytes = 32
 
-  def fromSecret(secret: Array[Byte]): SubjectPseudonymizer =
-    fromKeyRing("hmac-v1", secret, Vector.empty)
-
-  def fromKeyRing(
-      primaryKeyId: String,
-      secret: Array[Byte],
-      previousKeys: Vector[(String, Array[Byte])]
-  ): SubjectPseudonymizer = unsafe(validatedKeyRing(primaryKeyId, secret, previousKeys))
-
   def validatedKeyRing(
       primaryKeyId: String,
       secret: Array[Byte],
@@ -109,16 +101,6 @@ object SubjectPseudonymizer {
       case None           => cats.data.Validated.Valid(new SubjectPseudonymizer(primaryKeyId -> secret, previousKeys))
     }
   }
-
-  def fromBase64(secret: String): SubjectPseudonymizer =
-    fromBase64(secret, "hmac-v1", None, None)
-
-  def fromBase64(
-      secret: String,
-      primaryKeyId: String,
-      previousKeyId: Option[String],
-      previousSecret: Option[String]
-  ): SubjectPseudonymizer = unsafe(validateFromBase64(Option(secret), primaryKeyId, previousKeyId, previousSecret))
 
   def validateFromBase64(
       secret: Option[String],
@@ -166,11 +148,6 @@ object SubjectPseudonymizer {
           }
     }
 
-  private def unsafe(value: ValidatedNec[String, SubjectPseudonymizer]): SubjectPseudonymizer =
-    value.toEither.fold(
-      errors => throw AnalyticsError.InvalidConfiguration(errors.toChain.toList.mkString("; ")),
-      identity
-    )
 }
 
 /** Spark-only privacy transforms. Raw identifiers exist only in the input frame before `silver`. */
@@ -182,17 +159,14 @@ object AnalyticsSubjectPrivacy {
     */
   def withSubjectToken(events: DataFrame, pseudonymizer: SubjectPseudonymizer): DataFrame = {
     val tokenize = udf(
-      new UDF1[String, String] {
-        override def call(value: String): String =
-          Option(value).filter(_.trim.nonEmpty).map(pseudonymizer.token).orNull
-      },
+      (value: String) => Option(value).filter(_.trim.nonEmpty).map(pseudonymizer.token),
       StringType
     )
     val tokenizeAll = udf(
-      new UDF1[String, java.util.List[String]] {
-        override def call(value: String): java.util.List[String] =
-          Option(value).filter(_.trim.nonEmpty).map(value => Vector(pseudonymizer.tokenForNewRows(value)).asJava).orNull
-      },
+      (value: String) =>
+        Option(value)
+          .filter(_.trim.nonEmpty)
+          .fold(Vector.empty[String])(value => Vector(pseudonymizer.tokenForNewRows(value))),
       ArrayType(StringType, containsNull = false)
     )
     val candidateId = trim(col("payload.candidateId"))

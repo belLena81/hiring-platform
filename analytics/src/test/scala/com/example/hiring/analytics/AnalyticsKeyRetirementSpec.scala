@@ -85,4 +85,47 @@ class AnalyticsKeyRetirementSpec extends FunSuite {
     assert(erasureRequestActivity(new Document("state", "Unknown"), now).isLeft)
     assert(erasureRequestActivity(new Document(), now).isLeft)
   }
+
+  test("pure Delta verdict distinguishes checkpoint metadata from ordinary Parquet files") {
+    val checkpoint = deltaParquetVerdict("/table/_delta_log/000.checkpoint.parquet", containsReference = true)
+    assertEquals(checkpoint.count, 1L)
+    assert(checkpoint.blockers.toList.exists(_.contains("checkpoint")))
+
+    val data = deltaParquetVerdict("/table/part-000.parquet", containsReference = true)
+    assertEquals(data.count, 1L)
+    assert(data.blockers.toList.exists(_.contains("data file")))
+    assertEquals(deltaParquetVerdict("/table/part-000.parquet", containsReference = false), ScanResult(1L))
+  }
+
+  test("pure Mongo key-reference scan descends nested BSON values and leaves unrelated values clear") {
+    val nested = new Document("payload", new Document("tokens", java.util.Arrays.asList("key-1_subject")))
+    assert(containsKeyReferenceInValue(nested, "key-1"))
+    assert(!containsKeyReferenceInValue(new Document("payload", "key-2_subject"), "key-1"))
+  }
+
+  test("pure Mongo observation reducer carries active erasure subjects into outbox checks") {
+    val start = MongoScanState(0L, Set.empty, cats.data.Chain.empty)
+    val subject = "subject-123"
+    val (withActive, count) = reduceMongoObservation(
+      start,
+      com.example.hiring.analytics.mongo.AnalyticsCollections.ErasureRequests,
+      new Document("_id", subject).append("state", "Pending"),
+      "key-1",
+      now,
+      0
+    )
+    assertEquals(count, 1)
+    assert(withActive.activeSubjects.contains(subject))
+    assert(withActive.blockers.toList.exists(_.contains("active or unexpired erasure")))
+
+    val (withOutbox, _) = reduceMongoObservation(
+      withActive,
+      com.example.hiring.analytics.mongo.AnalyticsCollections.EventOutbox,
+      new Document("subjectIds", java.util.Arrays.asList(subject)).append("subjectRefsVersion", 1),
+      "key-1",
+      now,
+      0
+    )
+    assert(withOutbox.blockers.toList.exists(_.contains("outbox contains replay work")))
+  }
 }

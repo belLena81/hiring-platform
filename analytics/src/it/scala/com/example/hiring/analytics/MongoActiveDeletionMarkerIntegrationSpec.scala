@@ -28,7 +28,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   private final class MongoContainer extends GenericContainer[MongoContainer](DockerImageName.parse(image))
 
   private val pseudonymizer =
-    SubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8"))
+    AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8"))
   private val markerClock = fixedClock(Instant.parse("2026-09-24T12:00:00Z"))
   private var mongoContainer: MongoContainer = scala.compiletime.uninitialized
   private var mongoClient: MongoClient = scala.compiletime.uninitialized

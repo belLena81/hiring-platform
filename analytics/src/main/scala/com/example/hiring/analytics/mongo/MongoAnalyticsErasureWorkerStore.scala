@@ -127,15 +127,20 @@ final class MongoAnalyticsErasureWorkerStore(
       case false => IO.pure(false)
       case true  =>
         mongo {
-          migrationValidation.flatMap { _ =>
-            val filter =
-              Filters.in(AnalyticsCollections.Fields.SubjectIds, java.util.Collections.singletonList(subjectId))
+          migrationValidation.map { _ =>
+            val filter = Filters.in(
+              AnalyticsCollections.Fields.SubjectIds,
+              java.util.Collections.singletonList(subjectId)
+            )
             outbox.deleteMany(filter)
-            val remaining = outbox.find(filter).limit(1).iterator().hasNext
-            if (remaining) Right(false)
-            else outboxValidation.as(true)
+            filter
           }
-        }.flatMap(IO.fromEither)
+        }.flatMap(IO.fromEither).flatMap { filter =>
+          MongoCursorStream(outbox.find(filter).limit(1).iterator()).take(1).compile.count.flatMap {
+            case count if count > 0L => IO.pure(false)
+            case _                   => mongo(outboxValidation.as(true)).flatMap(IO.fromEither)
+          }
+        }
     }
 
   def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): IO[Boolean] = mongo {
@@ -241,15 +246,21 @@ final class MongoAnalyticsErasureWorkerStore(
         }
       }
 
-  def readDeltaFiles(requestId: String): IO[Vector[String]] = mongo {
-    val iterator = deltaEvidence.find(Filters.eq(AnalyticsCollections.Fields.RequestId, requestId)).iterator()
-    try
-      iterator.asScala.toVector
-        .traverse(document =>
-          Option(document.getString(AnalyticsCollections.Fields.FilePath)).toRight(AnalyticsError.MalformedMarker)
+  def readDeltaFiles(requestId: String): IO[Vector[String]] =
+    MongoCursorStream(
+      deltaEvidence.find(Filters.eq(AnalyticsCollections.Fields.RequestId, requestId)).iterator()
+    ).compile.toVector
+      .flatMap { documents =>
+        IO.fromEither(
+          documents.traverse(document =>
+            Option(document.getString(AnalyticsCollections.Fields.FilePath)).toRight(AnalyticsError.MalformedMarker)
+          )
         )
-    finally iterator.close()
-  }.flatMap(IO.fromEither)
+      }
+      .adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(error)       => AnalyticsError.MarkerStorageFailure(error)
+      }
 
   def readAffectedRows(requestId: String): IO[Long] = mongo {
     Option(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first())
@@ -297,13 +308,18 @@ final class MongoAnalyticsErasureWorkerStore(
         result.getMatchedCount == 1L
       }
 
-  def hasNonReadyOtherRequests(requestId: String): IO[Boolean] = mongo {
+  def hasNonReadyOtherRequests(requestId: String): IO[Boolean] = {
     val filter = Filters.and(
       Filters.ne(AnalyticsCollections.Fields.Id, requestId),
       Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
       Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
     )
-    requests.find(filter).limit(1).iterator().hasNext
+    MongoCursorStream(requests.find(filter).limit(1).iterator())
+      .take(1)
+      .compile
+      .count
+      .map(_ > 0L)
+      .adaptError { case NonFatal(cause) => AnalyticsError.MarkerStorageFailure(cause) }
   }
 
   /** A lease can only be extended while its token is current and its prior lease is still live. */

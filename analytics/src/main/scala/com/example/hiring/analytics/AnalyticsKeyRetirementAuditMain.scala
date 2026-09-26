@@ -6,6 +6,7 @@ import com.example.hiring.analytics.erasure.*
 import cats.effect.{Clock, ExitCode, IO, IOApp}
 import cats.syntax.all.*
 import com.mongodb.client.MongoClient
+import com.typesafe.config.ConfigFactory
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.{ConfigReader, ConfigSource}
 
@@ -75,6 +76,20 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
   )(RawAudit.apply)
 
   private val logger = Slf4jLogger.getLogger[IO]
+
+  private[analytics] def validateAuditHocon(value: String): Either[AnalyticsError, Unit] =
+    Either
+      .catchNonFatal(ConfigFactory.parseString(value).resolve())
+      .leftMap(_ => AnalyticsError.InvalidConfiguration("key-retirement audit HOCON is malformed"))
+      .flatMap { config =>
+        ConfigSource
+          .fromConfig(config)
+          .at("analytics.key-retirement-audit")
+          .load[RawAudit]
+          .left
+          .map(_ => AnalyticsError.InvalidConfiguration("key-retirement audit HOCON is missing or malformed"))
+          .map(_ => ())
+      }
 
   private def load: IO[RawAudit] =
     IO.blocking(ConfigSource.default.at("analytics.key-retirement-audit").load[RawAudit]).flatMap {
