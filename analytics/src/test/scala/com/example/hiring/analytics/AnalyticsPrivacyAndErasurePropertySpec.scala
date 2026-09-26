@@ -40,6 +40,12 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
     }
   }
 
+  test("Iron subject tokens expose their validated string without an unchecked cast") {
+    val token = "hmac-v1_" + "A" * 43
+
+    assertEquals(SubjectToken.fromHmac(token).map(_.value), Right(token))
+  }
+
   property("generated 256-bit HMAC configurations parse through the runtime boundary") {
     forAll(Gen.listOfN(32, Gen.choose(0, 255))) { generated =>
       val bytes = Array.tabulate[Byte](32)(index => generated.lift(index).getOrElse(0).toByte)

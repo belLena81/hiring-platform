@@ -30,8 +30,6 @@ enum ErasurePhase(val persistedName: String) {
   case ReadyToPublish extends ErasurePhase("ReadyToPublish")
   case ReportPublished extends ErasurePhase("ReportPublished")
 
-  def precedes(other: ErasurePhase): Boolean = ordinal < other.ordinal
-
   def next: Option[ErasurePhase] = ErasurePhase.values.lift(ordinal + 1)
 }
 

@@ -73,6 +73,7 @@ object AnalyticsRuntimeConfig {
       batch: RawBatch
   ) derives ConfigReader
 
+  // Scala 3's built-in PureConfig derivation ignores ProductHint and does not map camelCase fields to kebab-case.
   private given ConfigReader[RawKafka] =
     ConfigReader.forProduct5("bootstrap-servers", "username", "password", "topic", "fencer")(RawKafka.apply)
   private given ConfigReader[RawHmac] =

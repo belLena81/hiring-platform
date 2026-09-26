@@ -168,8 +168,14 @@ object OperationalEventTransforms {
         "subjectTokens",
         "eventFingerprint"
       )
-    typedSilver(selected).toDF()
+    validateSilverSchema(selected)
   }
+
+  /** Decodes persisted Silver rows against the case-class schema, then returns the original DataFrame shape. This is a
+    * schema-drift check at the Silver boundary; Gold aggregations remain DataFrame-based.
+    */
+  private def validateSilverSchema(silver: DataFrame): DataFrame =
+    typedSilver(silver).toDF()
 
   private[batch] def typedSilver(silver: DataFrame): Dataset[SilverHiringEvent] = {
     import silver.sparkSession.implicits.*

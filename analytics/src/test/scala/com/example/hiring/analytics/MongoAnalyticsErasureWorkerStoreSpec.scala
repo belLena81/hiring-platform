@@ -29,7 +29,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       )
     )
     assert(phases.sliding(2).forall {
-      case Vector(previous, next) => previous.precedes(next)
+      case Vector(previous, next) => previous.next.contains(next)
       case _                      => true
     })
     assertEquals(ErasurePhase.fromString("DeltaPurged"), Some(ErasurePhase.DeltaPurged))

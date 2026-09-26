@@ -78,8 +78,7 @@ object RunId {
   extension (value: RunId) def value: String = value
 }
 
-type SubjectTokenValue = String :| Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]
-opaque type SubjectToken = SubjectTokenValue
+opaque type SubjectToken = String :| Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]
 
 object SubjectToken {
   def fromHmac(value: String): Either[String, SubjectToken] =
@@ -90,7 +89,7 @@ object SubjectToken {
           .leftMap(_ => "subject token has an invalid format")
       )
 
-  extension (token: SubjectToken) def value: String = token.asInstanceOf[String]
+  extension (token: SubjectToken) def value: String = token
 }
 
 enum AnalyticsEventType(val wire: String) {
