@@ -39,58 +39,44 @@ private[analytics] object MongoAnalyticsReportRecords {
 
   private val malformed = AnalyticsError.InvalidConfiguration("analytics report record is malformed")
 
-  private def string(document: Document, field: String): Either[AnalyticsError, String] =
-    Option(document.get(field)).collect { case value: String => value }.toRight(malformed)
-
-  private def long(document: Document, field: String): Either[AnalyticsError, Long] =
-    Option(document.get(field)).collect { case value: java.lang.Long => value.longValue() }.toRight(malformed)
-
-  private def optionalString(document: Document, field: String): Either[AnalyticsError, Option[String]] =
-    Option(document.get(field)) match {
-      case None                => Right(None)
-      case Some(value: String) => Right(Some(value))
-      case _                   => Left(malformed)
-    }
-
-  private def optionalLong(document: Document, field: String): Either[AnalyticsError, Option[Long]] =
-    Option(document.get(field)) match {
-      case None                        => Right(None)
-      case Some(value: java.lang.Long) => Right(Some(value.longValue()))
-      case _                           => Left(malformed)
-    }
-
-  private def optionalDate(document: Document, field: String): Either[AnalyticsError, Option[Date]] =
-    Option(document.get(field)) match {
-      case None              => Right(None)
-      case Some(value: Date) => Right(Some(value))
-      case _                 => Left(malformed)
-    }
-
-  private def run(document: Document): Either[AnalyticsError, Run] =
+  private given BsonDecoder[Run] = BsonDecoder.instance { document =>
+    import BsonValueDecoder.given
     for {
-      id <- string(document, AnalyticsCollections.Fields.Id)
-      fingerprint <- string(document, AnalyticsCollections.Fields.RangeFingerprint)
-      generation <- long(document, AnalyticsCollections.Fields.Generation)
-      revision <- long(document, AnalyticsCollections.Fields.Revision)
-      state <- string(document, AnalyticsCollections.Fields.State)
+      id <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.Id, malformed)
+      fingerprint <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RangeFingerprint, malformed)
+      generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
+      revision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Revision, malformed)
+      state <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.State, malformed)
     } yield Run(AnalyticsReportReservation(id, fingerprint, generation, revision), state, document)
+  }
 
-  private def control(document: Document): Either[AnalyticsError, Control] =
+  private given BsonDecoder[Control] = BsonDecoder.instance { document =>
+    import BsonValueDecoder.given
     for {
-      generation <- long(document, AnalyticsCollections.Fields.Generation)
-      nextRevision <- optionalLong(document, AnalyticsCollections.Fields.NextRevision)
-      lastRevision <- long(document, AnalyticsCollections.Fields.LastPublishedRevision)
-      lastRunId <- optionalString(document, AnalyticsCollections.Fields.LastRunId)
-      state <- string(document, AnalyticsCollections.Fields.State)
+      generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
+      nextRevision <- BsonDecoder.optional[Long](document, AnalyticsCollections.Fields.NextRevision, malformed)
+      lastRevision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.LastPublishedRevision, malformed)
+      lastRunId <- BsonDecoder.optional[String](document, AnalyticsCollections.Fields.LastRunId, malformed)
+      state <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.State, malformed)
     } yield Control(generation, nextRevision, lastRevision, lastRunId, state, document)
+  }
 
-  private def snapshot(document: Document): Either[AnalyticsError, Snapshot] =
+  private given BsonDecoder[Snapshot] = BsonDecoder.instance { document =>
+    import BsonValueDecoder.given
     for {
-      generation <- long(document, AnalyticsCollections.Fields.Generation)
-      revision <- long(document, AnalyticsCollections.Fields.Revision)
-      runId <- string(document, AnalyticsCollections.Fields.RunId)
-      expiresAt <- optionalDate(document, AnalyticsCollections.Fields.ExpiresAt)
+      generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
+      revision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Revision, malformed)
+      runId <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RunId, malformed)
+      expiresAt <- BsonDecoder.optional[Date](document, AnalyticsCollections.Fields.ExpiresAt, malformed)
     } yield Snapshot(generation, revision, runId, expiresAt, document)
+  }
+
+  private def run(document: Document): Either[AnalyticsError, Run] = BsonDecoder[Run].decode(document)
+  private[analytics] def decodeControl(document: Document): Either[AnalyticsError, Control] =
+    BsonDecoder[Control].decode(document)
+
+  private def control(document: Document): Either[AnalyticsError, Control] = decodeControl(document)
+  private def snapshot(document: Document): Either[AnalyticsError, Snapshot] = BsonDecoder[Snapshot].decode(document)
 
   private class DocumentViewCodec[A](clazz: Class[A], wrap: Document => A, unwrap: A => Document) extends Codec[A] {
     private val documentCodec = new DocumentCodec()

@@ -1,7 +1,7 @@
 package com.example.hiring.analytics.mongo
 
 import com.example.hiring.analytics.batch.{AnalyticsReportOutput, AnalyticsReportPublisher, AnalyticsReportReservation}
-import com.example.hiring.analytics.erasure.{ErasureClaim, ErasurePhase}
+import com.example.hiring.analytics.erasure.{ErasureClaim, ErasurePhase, ErasureRequestState}
 
 import com.example.hiring.analytics.*
 import com.example.hiring.analytics.mongo.MongoAnalyticsReportRecords.*
@@ -339,14 +339,18 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
         .use { session =>
           val requestFilter = Filters.and(
             Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId),
-            Filters.eq(AnalyticsCollections.Fields.State, "Processing"),
+            Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
             Filters.eq(AnalyticsCollections.Fields.LeaseToken, claim.leaseToken),
             Filters.gt(AnalyticsCollections.Fields.LeaseUntil, Date.from(completedAt)),
             Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
           )
           val nonReadyOther = Filters.and(
             Filters.ne(AnalyticsCollections.Fields.Id, claim.requestId),
-            Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
+            Filters.in(
+              AnalyticsCollections.Fields.State,
+              ErasureRequestState.Pending.persistedName,
+              ErasureRequestState.Processing.persistedName
+            ),
             Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
           )
           val erasureRequests = database.getCollection(AnalyticsCollections.ErasureRequests, classOf[Document])
@@ -356,6 +360,14 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
           val work = for {
             request <- lift(MongoPublisherStream.optional(erasureRequests.find(session, requestFilter).first()))
             requestDoc <- result(request.toRight(AnalyticsError.ErasureNotReady))
+            receiptId <- result {
+              import BsonValueDecoder.given
+              BsonDecoder.optional[String](
+                requestDoc,
+                AnalyticsCollections.Fields.ReceiptId,
+                AnalyticsError.InvalidConfiguration("analytics report record is malformed")
+              )
+            }
             user <- lift(
               MongoPublisherStream.optional(
                 users.find(session, Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId)).first()
@@ -463,7 +475,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 erasureRequests,
                 requestFilter,
                 Updates.combine(
-                  Updates.set(AnalyticsCollections.Fields.State, "Complete"),
+                  Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
                   Updates.set(AnalyticsCollections.Fields.Phase, ErasurePhase.ReportPublished.persistedName),
                   Updates.set(AnalyticsCollections.Fields.Progress, 0),
                   Updates.set(
@@ -481,9 +493,6 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
               )
             )
             _ <- result(Either.cond(completed, (), AnalyticsError.ErasureNotReady))
-            receiptId = Option(requestDoc.get(AnalyticsCollections.Fields.ReceiptId)).collect { case value: String =>
-              value
-            }
             updates = receiptId.fold(
               Updates.combine(
                 Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId),
@@ -514,10 +523,14 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
           case NonFatal(cause)       => AnalyticsError.MongoConnectionFailure(cause)
         }
 
-  private def requiredString(document: Document, field: String): Either[AnalyticsError, String] =
-    Option(document.get(field))
-      .collect { case value: String => value }
-      .toRight(AnalyticsError.InvalidConfiguration("analytics report record is malformed"))
+  private def requiredString(document: Document, field: String): Either[AnalyticsError, String] = {
+    import BsonValueDecoder.given
+    BsonDecoder.required[String](
+      document,
+      field,
+      AnalyticsError.InvalidConfiguration("analytics report record is malformed")
+    )
+  }
 
   private def casUpdate(
       session: ClientSession,

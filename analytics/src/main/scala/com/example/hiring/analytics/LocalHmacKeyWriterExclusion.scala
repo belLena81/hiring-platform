@@ -1,6 +1,7 @@
 package com.example.hiring.analytics
 
 import cats.effect.IO
+import cats.syntax.all.*
 
 import java.util.UUID
 import java.net.URI
@@ -25,31 +26,37 @@ private[analytics] object LocalHmacKeyWriterExclusion {
 
   private final case class Result(exitCode: Int, output: String)
 
-  private def run(args: Vector[String]): Result = {
+  private def run(args: Vector[String]): Either[AnalyticsError, Result] = {
     val process = new ProcessBuilder(args*).redirectErrorStream(true).start()
     val completed = process.waitFor(30L, TimeUnit.SECONDS)
     if (!completed) {
       process.destroyForcibly()
-      throw AnalyticsError.InvalidConfiguration("Docker writer-exclusion probe timed out")
+      Left(AnalyticsError.InvalidConfiguration("Docker writer-exclusion probe timed out"))
+    } else {
+      val output = new String(process.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim
+      Right(Result(process.exitValue(), output))
     }
-    val output = new String(process.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim
-    Result(process.exitValue(), output)
   }
 
-  private def required(args: Vector[String]): String = {
-    val result = run(args)
-    if (result.exitCode != 0) throw AnalyticsError.InvalidConfiguration("Docker writer-exclusion inspection failed")
-    result.output
-  }
+  private def required(args: Vector[String]): Either[AnalyticsError, String] =
+    run(args).flatMap(result =>
+      Either.cond(
+        result.exitCode == 0,
+        result.output,
+        AnalyticsError.InvalidConfiguration("Docker writer-exclusion inspection failed")
+      )
+    )
 
-  private def imageIdentity(image: String, expectedId: String, expectedUid: Int): Unit = {
-    val identity = required(Vector("docker", "image", "inspect", "--format", "{{.Id}}|{{.Config.User}}", image))
-    val parts = identity.split("\\|", -1).toVector
-    if (parts != Vector(expectedId, expectedUid.toString))
-      throw AnalyticsError.InvalidConfiguration("Docker writer image identity or nonroot UID changed")
-  }
+  private def imageIdentity(image: String, expectedId: String, expectedUid: Int): Either[AnalyticsError, Unit] =
+    required(Vector("docker", "image", "inspect", "--format", "{{.Id}}|{{.Config.User}}", image)).flatMap { identity =>
+      Either.cond(
+        identity.split("\\|", -1).toVector == Vector(expectedId, expectedUid.toString),
+        (),
+        AnalyticsError.InvalidConfiguration("Docker writer image identity or nonroot UID changed")
+      )
+    }
 
-  private def probe(image: String, uid: Int, volume: String, script: String): Result =
+  private def probe(image: String, uid: Int, volume: String, script: String): Either[AnalyticsError, Result] =
     run(
       Vector(
         "docker",
@@ -76,109 +83,146 @@ private[analytics] object LocalHmacKeyWriterExclusion {
     mount.startsWith(protectedPath) || protectedPath.startsWith(mount)
   }
 
-  private def noRunningBindWriter(source: Path): Unit = {
-    val containers = required(Vector("docker", "ps", "-q")).linesIterator.filter(_.nonEmpty).toVector
-    containers.foreach { container =>
-      val mounts = required(
-        Vector(
-          "docker",
-          "inspect",
-          "--format",
-          "{{range .Mounts}}{{.Type}}|{{.Source}}|{{.Name}}|{{.RW}}{{println}}{{end}}",
-          container
-        )
-      )
-      mounts.linesIterator.filter(_.nonEmpty).foreach { line =>
-        val fields = line.split("\\|", -1).toVector
-        if (fields.size != 4 || !Set("true", "false").contains(fields(3)))
-          throw AnalyticsError.InvalidConfiguration("running Docker mount inventory is malformed")
-        val kind = fields(0)
-        if (kind == "bind" && fields(3) == "true") {
-          val path = Path.of(fields(1)).toRealPath()
-          if (mountIntersectsProtectedSource(path, source))
-            throw AnalyticsError.InvalidConfiguration("a running container can write the retirement bind source")
-        } else if (kind == "volume" && fields(3) == "true") {
-          val volumeDevice = required(
-            Vector(
-              "docker",
-              "volume",
-              "inspect",
-              "--format",
-              "{{if .Options}}{{index .Options \"device\"}}{{end}}",
-              fields(2)
-            )
+  private def noRunningBindWriter(source: Path): Either[AnalyticsError, Unit] =
+    required(Vector("docker", "ps", "-q")).flatMap { listing =>
+      listing.linesIterator.filter(_.nonEmpty).toVector.traverse_ { container =>
+        required(
+          Vector(
+            "docker",
+            "inspect",
+            "--format",
+            "{{range .Mounts}}{{.Type}}|{{.Source}}|{{.Name}}|{{.RW}}{{println}}{{end}}",
+            container
           )
-          val mountpoint = Path.of(fields(1)).toAbsolutePath.normalize()
-          val deviceIntersects = volumeDevice.nonEmpty &&
-            mountIntersectsProtectedSource(Path.of(volumeDevice).toRealPath(), source)
-          if (mountIntersectsProtectedSource(mountpoint, source) || deviceIntersects)
-            throw AnalyticsError.InvalidConfiguration("a running container can write the retirement volume")
-        } else if (kind != "bind" && kind != "volume" && fields(3) == "true")
-          throw AnalyticsError.InvalidConfiguration("a running container has an unclassified writable mount")
-      }
-    }
-  }
-
-  /** Checks effective ACL-aware access throughout the local fixture, then probes creation and modification rights. */
-  private def hostUserCannotWrite(source: Path): Unit = {
-    val uid = required(Vector("id", "-u")).toIntOption.getOrElse(
-      throw AnalyticsError.InvalidConfiguration("host writer identity is unavailable")
-    )
-    val groups = required(Vector("id", "-G")).split("\\s+").toVector.flatMap(_.toIntOption).toSet
-    if (uid == 0 || groups.isEmpty)
-      throw AnalyticsError.InvalidConfiguration("host writer identity cannot prove read-only access")
-    val stream = Files.walk(source)
-    try {
-      val entries = stream.iterator().asScala.take(100001).toVector
-      if (entries.size > 100000)
-        throw AnalyticsError.InvalidConfiguration("host writer permission inventory exceeds its bound")
-      entries.foreach { path =>
-        if (Files.isSymbolicLink(path))
-          throw AnalyticsError.InvalidConfiguration("retirement volume contains a symlink")
-        val owner = Files.getAttribute(path, "unix:uid").asInstanceOf[Int]
-        val group = Files.getAttribute(path, "unix:gid").asInstanceOf[Int]
-        val mode = Files.getAttribute(path, "unix:mode").asInstanceOf[Int]
-        val writable =
-          if (owner == uid) (mode & 0x80) != 0
-          else if (groups.contains(group)) (mode & 0x10) != 0
-          else (mode & 0x2) != 0
-        if (writable)
-          throw AnalyticsError.InvalidConfiguration("host user can write a retirement volume path")
-        if (Files.isWritable(path))
-          throw AnalyticsError.InvalidConfiguration("host user has effective write access to a retirement path")
-        if (Files.isDirectory(path)) {
-          val challenge = path.resolve(".hmac-host-create-" + UUID.randomUUID().toString)
-          val created = try {
-            Files.createFile(challenge)
-            true
-          } catch { case _: java.nio.file.AccessDeniedException => false }
-          if (created) {
-            Files.deleteIfExists(challenge)
-            throw AnalyticsError.InvalidConfiguration("host user can create a retirement file")
+        ).flatMap { mounts =>
+          mounts.linesIterator.filter(_.nonEmpty).toVector.traverse_ { line =>
+            val fields = line.split("\\|", -1).toVector
+            if (fields.size != 4 || !Set("true", "false").contains(fields(3)))
+              Left(AnalyticsError.InvalidConfiguration("running Docker mount inventory is malformed"))
+            else if (fields(0) == "bind" && fields(3) == "true") {
+              val path = Path.of(fields(1)).toRealPath()
+              Either.cond(
+                !mountIntersectsProtectedSource(path, source),
+                (),
+                AnalyticsError.InvalidConfiguration("a running container can write the retirement bind source")
+              )
+            } else if (fields(0) == "volume" && fields(3) == "true")
+              required(
+                Vector(
+                  "docker",
+                  "volume",
+                  "inspect",
+                  "--format",
+                  "{{if .Options}}{{index .Options \"device\"}}{{end}}",
+                  fields(2)
+                )
+              ).flatMap { volumeDevice =>
+                val mountpoint = Path.of(fields(1)).toAbsolutePath.normalize()
+                val deviceIntersects = volumeDevice.nonEmpty &&
+                  mountIntersectsProtectedSource(Path.of(volumeDevice).toRealPath(), source)
+                Either.cond(
+                  !mountIntersectsProtectedSource(mountpoint, source) && !deviceIntersects,
+                  (),
+                  AnalyticsError.InvalidConfiguration("a running container can write the retirement volume")
+                )
+              }
+            else
+              Either.cond(
+                fields(0) == "bind" || fields(0) == "volume" || fields(3) == "false",
+                (),
+                AnalyticsError.InvalidConfiguration("a running container has an unclassified writable mount")
+              )
           }
-        } else if (Files.isRegularFile(path)) {
-          val opened = try {
-            val channel = Files.newByteChannel(path, StandardOpenOption.WRITE)
-            channel.close()
-            true
-          } catch { case _: java.nio.file.AccessDeniedException => false }
-          if (opened)
-            throw AnalyticsError.InvalidConfiguration("host user can modify a retirement file")
         }
       }
-    } finally stream.close()
-  }
+    }
 
-  def verify(settings: Settings, lakehouseRoot: String): IO[Unit] = IO
-    .blocking {
-      val valid = settings != null && settings.volumeName.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}") &&
+  /** Checks effective ACL-aware access throughout the local fixture, then probes creation and modification rights. */
+  private def hostUserCannotWrite(source: Path): Either[AnalyticsError, Unit] =
+    for {
+      uidText <- required(Vector("id", "-u"))
+      uid <- uidText.toIntOption.toRight(AnalyticsError.InvalidConfiguration("host writer identity is unavailable"))
+      groupText <- required(Vector("id", "-G"))
+      groups = groupText.split("\\s+").toVector.flatMap(_.toIntOption).toSet
+      _ <- Either.cond(
+        uid != 0 && groups.nonEmpty,
+        (),
+        AnalyticsError.InvalidConfiguration("host writer identity cannot prove read-only access")
+      )
+      _ <- {
+        val stream = Files.walk(source)
+        try {
+          val entries = stream.iterator().asScala.take(100001).toVector
+          if (entries.size > 100000)
+            Left(AnalyticsError.InvalidConfiguration("host writer permission inventory exceeds its bound"))
+          else
+            entries.traverse_ { path =>
+              if (Files.isSymbolicLink(path))
+                Left(AnalyticsError.InvalidConfiguration("retirement volume contains a symlink"))
+              else {
+                val owner = Files.getAttribute(path, "unix:uid").asInstanceOf[Int]
+                val group = Files.getAttribute(path, "unix:gid").asInstanceOf[Int]
+                val mode = Files.getAttribute(path, "unix:mode").asInstanceOf[Int]
+                val writable =
+                  if (owner == uid) (mode & 0x80) != 0
+                  else if (groups.contains(group)) (mode & 0x10) != 0
+                  else (mode & 0x2) != 0
+                val permissionCheck =
+                  if (writable)
+                    Left(AnalyticsError.InvalidConfiguration("host user can write a retirement volume path"))
+                  else if (Files.isWritable(path))
+                    Left(
+                      AnalyticsError.InvalidConfiguration("host user has effective write access to a retirement path")
+                    )
+                  else if (Files.isDirectory(path)) {
+                    val challenge = path.resolve(".hmac-host-create-" + UUID.randomUUID().toString)
+                    val created = try {
+                      Files.createFile(challenge)
+                      true
+                    } catch { case _: java.nio.file.AccessDeniedException => false }
+                    if (created) Files.deleteIfExists(challenge)
+                    Either.cond(
+                      !created,
+                      (),
+                      AnalyticsError.InvalidConfiguration("host user can create a retirement file")
+                    )
+                  } else if (Files.isRegularFile(path)) {
+                    val opened = try {
+                      val channel = Files.newByteChannel(path, StandardOpenOption.WRITE)
+                      channel.close()
+                      true
+                    } catch { case _: java.nio.file.AccessDeniedException => false }
+                    Either.cond(
+                      !opened,
+                      (),
+                      AnalyticsError.InvalidConfiguration("host user can modify a retirement file")
+                    )
+                  } else Right(())
+                permissionCheck
+              }
+            }
+        } finally stream.close()
+      }
+    } yield ()
+
+  private def verifyBlocking(settings: Settings, lakehouseRoot: String): Either[AnalyticsError, Unit] =
+    for {
+      _ <- Either.cond(
+        settings != null,
+        (),
+        AnalyticsError.InvalidConfiguration("Docker writer-exclusion settings are invalid")
+      )
+      validSettings = settings != null && settings.volumeName.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}") &&
         settings.oldImage.nonEmpty && settings.newImage.nonEmpty &&
         settings.oldImageId.matches("sha256:[0-9a-f]{64}") &&
         settings.newImageId.matches("sha256:[0-9a-f]{64}") &&
         settings.oldUid > 0 && settings.newUid > 0 && settings.oldUid != settings.newUid
-      if (!valid) throw AnalyticsError.InvalidConfiguration("Docker writer-exclusion settings are invalid")
-
-      val descriptor = required(
+      _ <- Either.cond(
+        validSettings,
+        (),
+        AnalyticsError.InvalidConfiguration("Docker writer-exclusion settings are invalid")
+      )
+      descriptorText <- required(
         Vector(
           "docker",
           "volume",
@@ -187,70 +231,90 @@ private[analytics] object LocalHmacKeyWriterExclusion {
           "{{.Driver}}|{{.Mountpoint}}|{{if .Options}}{{index .Options \"type\"}}|{{index .Options \"o\"}}|{{index .Options \"device\"}}{{else}}||{{end}}",
           settings.volumeName
         )
-      ).split("\\|", -1).toVector
-      if (descriptor.size != 5 || descriptor.head != "local")
-        throw AnalyticsError.InvalidConfiguration("retirement volume must be a local Docker named volume")
-      val mountpoint = descriptor(1)
-      if (!mountpoint.startsWith("/var/lib/docker/volumes/") || !mountpoint.endsWith("/_data"))
-        throw AnalyticsError.InvalidConfiguration("retirement volume is not an isolated Docker named volume")
-      val source = descriptor.drop(2) match {
-        case Vector("<no value>", "<no value>", "<no value>") | Vector("", "", "") =>
-          Path.of(mountpoint)
+      )
+      descriptor = descriptorText.split("\\|", -1).toVector
+      _ <- Either.cond(
+        descriptor.size == 5 && descriptor.headOption.contains("local"),
+        (),
+        AnalyticsError.InvalidConfiguration("retirement volume must be a local Docker named volume")
+      )
+      mountpoint = descriptor(1)
+      _ <- Either.cond(
+        mountpoint.startsWith("/var/lib/docker/volumes/") && mountpoint.endsWith("/_data"),
+        (),
+        AnalyticsError.InvalidConfiguration("retirement volume is not an isolated Docker named volume")
+      )
+      source <- descriptor.drop(2) match {
+        case Vector("<no value>", "<no value>", "<no value>") | Vector("", "", "") => Right(Path.of(mountpoint))
         case Vector("none", "bind", device) if device.nonEmpty && Path.of(device).isAbsolute =>
           val path = Path.of(device).toAbsolutePath.normalize()
-          if (
-            !path.toString.contains("/.local/data/hmac-key-retirement/") ||
-            !Files.isDirectory(path) || path.toRealPath() != path
-          )
-            throw AnalyticsError.InvalidConfiguration(
+          Either.cond(
+            path.toString.contains("/.local/data/hmac-key-retirement/") &&
+              Files.isDirectory(path) && path.toRealPath() == path,
+            path,
+            AnalyticsError.InvalidConfiguration(
               "retirement bind source is outside the isolated local proof or is symlinked"
             )
-          path
-        case _ => throw AnalyticsError.InvalidConfiguration("retirement named volume options are unexpected")
+          )
+        case _ => Left(AnalyticsError.InvalidConfiguration("retirement named volume options are unexpected"))
       }
-      val actualRoot = new URI(lakehouseRoot).normalize()
-      if (
-        actualRoot.getScheme != "file" || actualRoot.getAuthority != null ||
-        Path.of(actualRoot).toAbsolutePath.normalize() != source.resolve("lakehouse")
+      actualRoot = new URI(lakehouseRoot).normalize()
+      _ <- Either.cond(
+        actualRoot.getScheme == "file" && actualRoot.getAuthority == null &&
+          Path.of(actualRoot).toAbsolutePath.normalize() == source.resolve("lakehouse"),
+        (),
+        AnalyticsError.InvalidConfiguration("retirement lakehouse root does not match the named Docker volume")
       )
-        throw AnalyticsError.InvalidConfiguration("retirement lakehouse root does not match the named Docker volume")
-      if (
-        Files.exists(source.resolve("lakehouse")) && source.resolve("lakehouse").toRealPath() !=
-          source.resolve("lakehouse").toAbsolutePath.normalize()
+      _ <- Either.cond(
+        !Files.exists(source.resolve("lakehouse")) ||
+          source.resolve("lakehouse").toRealPath() == source.resolve("lakehouse").toAbsolutePath.normalize(),
+        (),
+        AnalyticsError.InvalidConfiguration("retirement lakehouse root is symlinked")
       )
-        throw AnalyticsError.InvalidConfiguration("retirement lakehouse root is symlinked")
+      _ <- noRunningBindWriter(source)
+      _ <- if (descriptor(2) == "none") hostUserCannotWrite(source) else Right(())
+      _ <- imageIdentity(settings.oldImage, settings.oldImageId, settings.oldUid)
+      _ <- imageIdentity(settings.newImage, settings.newImageId, settings.newUid)
+      ownership <- probe(settings.newImage, settings.newUid, settings.volumeName, "stat -c '%u:%a' /retirement-volume")
+      ownerAndMode = ownership.output.split(":", -1).toVector
+      mode = ownerAndMode.lift(1).flatMap(value => scala.util.Try(Integer.parseInt(value, 8)).toOption)
+      _ <- Either.cond(
+        ownership.exitCode == 0 && ownerAndMode.headOption.contains(settings.newUid.toString) &&
+          mode.exists(bits => (bits & 0x12) == 0),
+        (),
+        AnalyticsError.InvalidConfiguration("isolated Docker volume ownership does not exclude the old writer")
+      )
+      running <- required(Vector("docker", "ps", "-q", "--filter", s"volume=${settings.volumeName}"))
+      _ <- Either.cond(
+        running.isEmpty,
+        (),
+        AnalyticsError.InvalidConfiguration("a container still has the retirement volume mounted")
+      )
+      shell <- probe(settings.oldImage, settings.oldUid, settings.volumeName, "true")
+      _ <- Either.cond(
+        shell.exitCode == 0,
+        (),
+        AnalyticsError.InvalidConfiguration("old writer image shell cannot be verified")
+      )
+      challenge = ".hmac-retirement-" + UUID.randomUUID().toString
+      path = "/retirement-volume/" + challenge
+      oldWrite <- probe(settings.oldImage, settings.oldUid, settings.volumeName, s"touch '$path'")
+      _ <- Either.cond(
+        oldWrite.exitCode != 0,
+        (),
+        AnalyticsError.InvalidConfiguration("old writer image can still write the retirement volume")
+      )
+      newWrite <- probe(settings.newImage, settings.newUid, settings.volumeName, s"touch '$path' && rm '$path'")
+      _ <- Either.cond(
+        newWrite.exitCode == 0,
+        (),
+        AnalyticsError.InvalidConfiguration("new writer image cannot write the retirement volume")
+      )
+    } yield ()
 
-      noRunningBindWriter(source)
-      if (descriptor(2) == "none") hostUserCannotWrite(source)
-
-      imageIdentity(settings.oldImage, settings.oldImageId, settings.oldUid)
-      imageIdentity(settings.newImage, settings.newImageId, settings.newUid)
-      val ownership = probe(
-        settings.newImage,
-        settings.newUid,
-        settings.volumeName,
-        "stat -c '%u:%a' /retirement-volume"
-      )
-      val ownerAndMode = ownership.output.split(":", -1).toVector
-      val mode = ownerAndMode.lift(1).flatMap(value => scala.util.Try(Integer.parseInt(value, 8)).toOption)
-      if (
-        ownership.exitCode != 0 || ownerAndMode.headOption != Some(settings.newUid.toString) ||
-        mode.forall(bits => (bits & 0x12) != 0)
-      )
-        throw AnalyticsError.InvalidConfiguration("isolated Docker volume ownership does not exclude the old writer")
-      val running = required(Vector("docker", "ps", "-q", "--filter", s"volume=${settings.volumeName}"))
-      if (running.nonEmpty)
-        throw AnalyticsError.InvalidConfiguration("a container still has the retirement volume mounted")
-
-      if (probe(settings.oldImage, settings.oldUid, settings.volumeName, "true").exitCode != 0)
-        throw AnalyticsError.InvalidConfiguration("old writer image shell cannot be verified")
-      val challenge = ".hmac-retirement-" + UUID.randomUUID().toString
-      val path = "/retirement-volume/" + challenge
-      if (probe(settings.oldImage, settings.oldUid, settings.volumeName, s"touch '$path'").exitCode == 0)
-        throw AnalyticsError.InvalidConfiguration("old writer image can still write the retirement volume")
-      if (probe(settings.newImage, settings.newUid, settings.volumeName, s"touch '$path' && rm '$path'").exitCode != 0)
-        throw AnalyticsError.InvalidConfiguration("new writer image cannot write the retirement volume")
-    }
+  def verify(settings: Settings, lakehouseRoot: String): IO[Unit] = IO
+    .blocking(verifyBlocking(settings, lakehouseRoot))
+    .flatMap(IO.fromEither)
     .adaptError {
       case error: AnalyticsError => error
       case NonFatal(_)           => AnalyticsError.InvalidConfiguration("Docker writer-exclusion proof is unavailable")

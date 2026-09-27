@@ -9,10 +9,9 @@ import org.apache.spark.sql.types.{DataType, DataTypes, StructType}
 
 import java.sql.Timestamp
 import java.time.Instant
-import scala.util.control.NonFatal
 
 /** Gold table rebuilds and bounded report extraction, kept outside the batch coordinator. */
-private[batch] object AnalyticsGoldStage {
+private[batch] object AnalyticsGoldStage extends LakehouseOperation {
   private val MaximumReportRows = 10000
   private val FunnelSchema = Vector(
     "day" -> DataTypes.TimestampType,
@@ -45,18 +44,11 @@ private[batch] object AnalyticsGoldStage {
     Either.cond(fields == expected, (), AnalyticsError.InvalidGoldSchema)
   }
 
-  private def lakehouse[A](work: => A): IO[A] = IO.blocking(work).adaptError {
-    case error: AnalyticsError => error
-    case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-  }
-
   def rebuild(paths: AnalyticsLakehousePaths, silver: DataFrame): IO[Unit] =
     for {
       funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(silver))
       _ <- write(funnel, paths.funnelGold)
-      timeToHire <- HiringGoldTransforms.timeToHire(silver).adaptError { case NonFatal(cause) =>
-        AnalyticsError.LakehouseFailure(cause)
-      }
+      timeToHire <- lakehouseIO(HiringGoldTransforms.timeToHire(silver))
       _ <- write(timeToHire, paths.timeToHireGold)
       skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(silver))
       _ <- write(skills, paths.skillsGold)

@@ -2,7 +2,7 @@ package com.example.hiring.analytics
 
 import com.example.hiring.analytics.batch.KafkaConnection
 import com.example.hiring.analytics.erasure.KafkaRetentionBarrier
-import com.example.hiring.analytics.mongo.MongoPublisherStream
+import com.example.hiring.analytics.mongo.{BsonDecoder, BsonValueDecoder, MongoPublisherStream}
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
@@ -29,6 +29,57 @@ private[analytics] final case class HmacKeyRetirementPreparation(
     barrier: KafkaRetentionBarrier,
     lineage: HmacKeyRetirementKafkaLineage
 )
+
+private[analytics] object HmacKeyRetirementPreparation {
+  private[analytics] given BsonDecoder[HmacKeyRetirementPreparation] = BsonDecoder.instance { document =>
+    import BsonValueDecoder.given
+    val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
+    for {
+      lakehouseId <- BsonDecoder.required[String](document, "lakehouseId", malformed)
+      keyId <- BsonDecoder.required[String](document, "keyId", malformed)
+      _ <- Either.cond(
+        lakehouseId.matches("[0-9a-f]{64}") && keyId.matches("[A-Za-z0-9-]{1,40}"),
+        (),
+        malformed
+      )
+      storedId <- BsonDecoder.required[String](document, "_id", malformed)
+      _ <- Either.cond(storedId == s"$lakehouseId:$keyId", (), malformed)
+      verifier <- BsonDecoder.required[String](document, "originalVerifier", malformed)
+      _ <- Either.cond(verifier.matches("[A-Za-z0-9_-]{43}"), (), malformed)
+      capturedAt <- BsonDecoder.required[Date](document, "capturedAt", malformed).map(_.toInstant)
+      topic <- BsonDecoder.required[String](document, "topic", malformed)
+      rows <- BsonDecoder.required[Vector[Any]](document, "partitions", malformed)
+      partitions <- rows.traverse {
+        case partition: Document =>
+          for {
+            number <- BsonDecoder.required[Int](partition, "number", malformed)
+            offset <- BsonDecoder.required[Long](partition, "endOffsetExclusive", malformed)
+          } yield KafkaRetentionBarrier.Partition(number, offset)
+        case _ => Left(malformed)
+      }
+      barrier <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(topic, partitions))
+      clusterId <- BsonDecoder.required[String](document, "clusterId", malformed)
+      topicId <- BsonDecoder.required[String](document, "topicId", malformed)
+      volumeName <- BsonDecoder.required[String](document, "kafkaVolumeName", malformed)
+      volumeMountpoint <- BsonDecoder.required[String](document, "kafkaVolumeMountpoint", malformed)
+      volumeCreatedAt <- BsonDecoder.required[String](document, "kafkaVolumeCreatedAt", malformed)
+      bootstrapEndpoint <- BsonDecoder.required[String](document, "kafkaBootstrapEndpoint", malformed)
+      lineage = HmacKeyRetirementKafkaLineage(
+        clusterId,
+        topicId,
+        volumeName,
+        volumeMountpoint,
+        volumeCreatedAt,
+        bootstrapEndpoint
+      )
+      _ <- Either.cond(
+        HmacKeyRetirementKafkaLineage.matches(lineage, lineage),
+        (),
+        AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
+      )
+    } yield HmacKeyRetirementPreparation(lakehouseId, keyId, verifier, capturedAt, barrier, lineage)
+  }
+}
 
 /** Broker and Docker storage identities must remain identical through the retention wait. */
 private[analytics] final case class HmacKeyRetirementKafkaLineage(
@@ -64,152 +115,183 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
         destination == "/var/lib/kafka/data" && (kind != "volume" || name != volumeName)
       }
 
-  private def docker(args: Vector[String]): String = {
-    val process = new ProcessBuilder(args*).redirectErrorStream(true).start()
-    if (!process.waitFor(30L, TimeUnit.SECONDS)) {
-      process.destroyForcibly()
-      throw AnalyticsError.InvalidConfiguration("Kafka Docker inspection timed out")
-    }
-    val output = new String(process.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim
-    if (process.exitValue() != 0)
-      throw AnalyticsError.InvalidConfiguration("Kafka Docker inspection failed")
-    output
-  }
-
-  private def dockerBrokerContainer(connection: KafkaConnection, volumeName: String): IO[String] = IO.blocking {
-    val suffix = "_hmac-rotation-kafka"
-    if (!volumeName.endsWith(suffix) || !connection.bootstrapServers.matches("127\\.0\\.0\\.1:[0-9]{1,5}"))
-      throw AnalyticsError.InvalidConfiguration("Kafka endpoint or isolated volume name is invalid")
-    val project = volumeName.stripSuffix(suffix)
-    val ids = docker(
-      Vector(
-        "docker",
-        "ps",
-        "--no-trunc",
-        "-q",
-        "--filter",
-        s"label=com.docker.compose.project=$project",
-        "--filter",
-        "label=com.docker.compose.service=kafka"
-      )
-    ).linesIterator.filter(_.nonEmpty).toVector
-    if (ids.size != 1)
-      throw AnalyticsError.InvalidConfiguration("exactly one isolated Compose Kafka container must be running")
-    val container = ids.head
-    val identity = docker(
-      Vector(
-        "docker",
-        "inspect",
-        "--format",
-        "{{.Id}}|{{.State.Running}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}",
-        container
-      )
-    ).split("\\|", -1).toVector
-    if (
-      identity.size != 4 || identity(0) != container || identity(1) != "true" ||
-      identity(2) != project || identity(3) != "kafka"
-    )
-      throw AnalyticsError.InvalidConfiguration("isolated Kafka container identity changed")
-    val published = docker(Vector("docker", "port", container, "29092/tcp"))
-    val mountLines = docker(
-      Vector(
-        "docker",
-        "inspect",
-        "--format",
-        "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Destination}}|{{.RW}}{{println}}{{end}}",
-        container
-      )
-    ).linesIterator.filter(_.nonEmpty).toVector
-    val mounts = mountLines.map { line =>
-      line.split("\\|", -1).toVector match {
-        case Vector(kind, name, destination, "true")  => (kind, name, destination, true)
-        case Vector(kind, name, destination, "false") => (kind, name, destination, false)
-        case _ => throw AnalyticsError.InvalidConfiguration("isolated Kafka mount inventory is malformed")
+  private def docker(args: Vector[String]): IO[String] = IO
+    .blocking {
+      val process = new ProcessBuilder(args*).redirectErrorStream(true).start()
+      if (!process.waitFor(30L, TimeUnit.SECONDS)) {
+        process.destroyForcibly()
+        Left(AnalyticsError.InvalidConfiguration("Kafka Docker inspection timed out"))
+      } else {
+        val output = new String(process.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim
+        Either.cond(
+          process.exitValue() == 0,
+          output,
+          AnalyticsError.InvalidConfiguration("Kafka Docker inspection failed")
+        )
       }
     }
-    if (!bindingMatches(connection.bootstrapServers, published, mounts, volumeName))
-      throw AnalyticsError.InvalidConfiguration("configured Kafka endpoint is not bound to the isolated Kafka volume")
-    container
-  }
+    .flatMap(IO.fromEither)
 
-  private def dockerVolume(volumeName: String): IO[(String, String)] = IO.blocking {
-    if (!volumeName.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"))
-      throw AnalyticsError.InvalidConfiguration("isolated Kafka volume name is invalid")
-    val result = docker(
-      Vector(
-        "docker",
-        "volume",
-        "inspect",
-        "--format",
-        "{{.Driver}}|{{.Mountpoint}}|{{.CreatedAt}}",
-        volumeName
+  private def dockerBrokerContainer(connection: KafkaConnection, volumeName: String): IO[String] =
+    for {
+      _ <- IO.fromEither(
+        Either.cond(
+          volumeName.endsWith("_hmac-rotation-kafka") &&
+            connection.bootstrapServers.matches("127\\.0\\.0\\.1:[0-9]{1,5}"),
+          (),
+          AnalyticsError.InvalidConfiguration("Kafka endpoint or isolated volume name is invalid")
+        )
       )
-    )
-    val parts = result.split("\\|", -1).toVector
-    if (
-      parts.size != 3 || parts.head != "local" ||
-      !parts(1).endsWith("/" + volumeName + "/_data") || parts(2).isEmpty
-    )
-      throw AnalyticsError.InvalidConfiguration("isolated Kafka Docker volume identity is unavailable")
-    parts(1) -> parts(2)
-  }
+      project = volumeName.stripSuffix("_hmac-rotation-kafka")
+      idsOutput <- docker(
+        Vector(
+          "docker",
+          "ps",
+          "--no-trunc",
+          "-q",
+          "--filter",
+          s"label=com.docker.compose.project=$project",
+          "--filter",
+          "label=com.docker.compose.service=kafka"
+        )
+      )
+      ids = idsOutput.linesIterator.filter(_.nonEmpty).toVector
+      _ <- IO.fromEither(
+        Either.cond(
+          ids.size == 1,
+          (),
+          AnalyticsError.InvalidConfiguration("exactly one isolated Compose Kafka container must be running")
+        )
+      )
+      container = ids.head
+      identityText <- docker(
+        Vector(
+          "docker",
+          "inspect",
+          "--format",
+          "{{.Id}}|{{.State.Running}}|{{index .Config.Labels \"com.docker.compose.project\"}}|{{index .Config.Labels \"com.docker.compose.service\"}}",
+          container
+        )
+      )
+      identity = identityText.split("\\|", -1).toVector
+      _ <- IO.fromEither(
+        Either.cond(
+          identity.size == 4 && identity(0) == container && identity(1) == "true" &&
+            identity(2) == project && identity(3) == "kafka",
+          (),
+          AnalyticsError.InvalidConfiguration("isolated Kafka container identity changed")
+        )
+      )
+      published <- docker(Vector("docker", "port", container, "29092/tcp"))
+      mountsText <- docker(
+        Vector(
+          "docker",
+          "inspect",
+          "--format",
+          "{{range .Mounts}}{{.Type}}|{{.Name}}|{{.Destination}}|{{.RW}}{{println}}{{end}}",
+          container
+        )
+      )
+      mounts <- IO.fromEither(mountsText.linesIterator.filter(_.nonEmpty).toVector.traverse { line =>
+        line.split("\\|", -1).toVector match {
+          case Vector(kind, name, destination, "true")  => Right((kind, name, destination, true))
+          case Vector(kind, name, destination, "false") => Right((kind, name, destination, false))
+          case _ => Left(AnalyticsError.InvalidConfiguration("isolated Kafka mount inventory is malformed"))
+        }
+      })
+      _ <- IO.fromEither(
+        Either.cond(
+          bindingMatches(connection.bootstrapServers, published, mounts, volumeName),
+          (),
+          AnalyticsError.InvalidConfiguration("configured Kafka endpoint is not bound to the isolated Kafka volume")
+        )
+      )
+    } yield container
+
+  private def dockerVolume(volumeName: String): IO[(String, String)] =
+    for {
+      _ <- IO.fromEither(
+        Either.cond(
+          volumeName.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"),
+          (),
+          AnalyticsError.InvalidConfiguration("isolated Kafka volume name is invalid")
+        )
+      )
+      result <- docker(
+        Vector("docker", "volume", "inspect", "--format", "{{.Driver}}|{{.Mountpoint}}|{{.CreatedAt}}", volumeName)
+      )
+      parts = result.split("\\|", -1).toVector
+      _ <- IO.fromEither(
+        Either.cond(
+          parts.size == 3 && parts.head == "local" &&
+            parts(1).endsWith("/" + volumeName + "/_data") && parts(2).nonEmpty,
+          (),
+          AnalyticsError.InvalidConfiguration("isolated Kafka Docker volume identity is unavailable")
+        )
+      )
+    } yield parts(1) -> parts(2)
 
   def observe(connection: KafkaConnection, topic: String, volumeName: String): IO[HmacKeyRetirementKafkaLineage] =
     for {
       containerBefore <- dockerBrokerContainer(connection, volumeName)
       volume <- dockerVolume(volumeName)
       broker <- Resource
-        .fromAutoCloseable(IO.blocking {
-          val properties = new Properties()
-          properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-          properties.setProperty("request.timeout.ms", "10000")
-          properties.setProperty("default.api.timeout.ms", "15000")
-          KafkaConnection.clientProperties(connection).foreach { case (key, value) =>
-            properties.setProperty(key, value)
-          }
-          try AdminClient.create(properties)
-          catch {
-            case NonFatal(error) =>
-              val cause = Option(error.getCause).getOrElse(error)
-              val privateValues = Vector(
-                Option(properties.getProperty("sasl.jaas.config")),
-                connection.saslPassword,
-                connection.saslUsername
-              ).flatten.filter(_.nonEmpty).sortBy(value => -value.length)
-              val diagnostic = privateValues
-                .foldLeft(Option(cause.getMessage).getOrElse("unavailable"))((message, value) =>
-                  message.replace(value, "[REDACTED]")
-                )
-                .replaceAll("(?i)password\\s*=\\s*[^;\\s]+", "password=[REDACTED]")
-                .replaceAll("[\\r\\n]", " ")
-                .take(240)
-              throw AnalyticsError.InvalidConfiguration(
-                s"Kafka lineage admin client initialization failed (${cause.getClass.getSimpleName}: $diagnostic)"
-              )
-          }
-        })
-        .use(client =>
+        .fromAutoCloseable(
           IO.blocking {
-            def observed[A](name: String)(read: => A): A =
-              try read
-              catch {
-                case NonFatal(error) =>
-                  val cause = Option(error.getCause).getOrElse(error)
-                  throw AnalyticsError.InvalidConfiguration(
-                    s"Kafka $name inspection failed (${cause.getClass.getSimpleName})"
+            val properties = new Properties()
+            properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+            properties.setProperty("request.timeout.ms", "10000")
+            properties.setProperty("default.api.timeout.ms", "15000")
+            KafkaConnection.clientProperties(connection).foreach { case (key, value) =>
+              properties.setProperty(key, value)
+            }
+            val created = try Right(AdminClient.create(properties))
+            catch {
+              case NonFatal(error) =>
+                val cause = Option(error.getCause).getOrElse(error)
+                val privateValues = Vector(
+                  Option(properties.getProperty("sasl.jaas.config")),
+                  connection.saslPassword,
+                  connection.saslUsername
+                ).flatten.filter(_.nonEmpty).sortBy(value => -value.length)
+                val diagnostic = privateValues
+                  .foldLeft(Option(cause.getMessage).getOrElse("unavailable"))((message, value) =>
+                    message.replace(value, "[REDACTED]")
                   )
-              }
-            val clusterId = observed("cluster ID") {
-              client.describeCluster().clusterId().get(10L, TimeUnit.SECONDS)
+                  .replaceAll("(?i)password\\s*=\\s*[^;\\s]+", "password=[REDACTED]")
+                  .replaceAll("[\\r\\n]", " ")
+                  .take(240)
+                Left(
+                  AnalyticsError.InvalidConfiguration(
+                    s"Kafka lineage admin client initialization failed (${cause.getClass.getSimpleName}: $diagnostic)"
+                  )
+                )
             }
-            val description = observed("topic ID") {
-              client.describeTopics(java.util.List.of(topic)).allTopicNames().get(10L, TimeUnit.SECONDS).get(topic)
-            }
-            if (description == null || description.topicId() == null)
-              throw AnalyticsError.InvalidConfiguration("Kafka topic identity is unavailable")
-            clusterId -> description.topicId().toString
-          }
+            created
+          }.flatMap(IO.fromEither)
         )
+        .use { client =>
+          IO.blocking {
+            def observed[A](name: String)(read: => A): Either[AnalyticsError, A] =
+              Either.catchNonFatal(read).leftMap { error =>
+                val cause = Option(error.getCause).getOrElse(error)
+                AnalyticsError.InvalidConfiguration(s"Kafka $name inspection failed (${cause.getClass.getSimpleName})")
+              }
+            for {
+              clusterId <- observed("cluster ID") {
+                client.describeCluster().clusterId().get(10L, TimeUnit.SECONDS)
+              }
+              description <- observed("topic ID") {
+                client.describeTopics(java.util.List.of(topic)).allTopicNames().get(10L, TimeUnit.SECONDS).get(topic)
+              }
+              _ <- Either.cond(
+                description != null && description.topicId() != null,
+                (),
+                AnalyticsError.InvalidConfiguration("Kafka topic identity is unavailable")
+              )
+            } yield clusterId -> description.topicId().toString
+          }.flatMap(IO.fromEither)
+        }
       containerAfter <- dockerBrokerContainer(connection, volumeName)
       _ <- IO.raiseUnless(containerBefore == containerAfter)(
         AnalyticsError.InvalidConfiguration("isolated Kafka container changed during broker identity inspection")
@@ -285,45 +367,18 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore(database: 
         .optional(collection.find(new Document("_id", id(lakehouseId, keyId))).first())
         .flatMap {
           case Some(document) =>
-            val partitions = Option(document.getList("partitions", classOf[Document])).toVector
-              .flatMap(_.asScala)
-              .map(partition =>
-                KafkaRetentionBarrier.Partition(
-                  partition.getInteger("number"),
-                  partition.getLong("endOffsetExclusive")
+            val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
+            IO.fromEither(
+              BsonDecoder[HmacKeyRetirementPreparation]
+                .decode(document)
+                .flatMap(value =>
+                  Either.cond(
+                    value.lakehouseId == lakehouseId && value.keyId == keyId,
+                    value,
+                    malformed
+                  )
                 )
-              )
-            (for {
-              barrier <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(document.getString("topic"), partitions))
-              _ <- Either.cond(
-                document.getString("lakehouseId") == lakehouseId &&
-                  document.getString("keyId") == keyId &&
-                  Option(document.getString("originalVerifier")).exists(_.matches("[A-Za-z0-9_-]{43}")) &&
-                  document.getDate("capturedAt") != null,
-                (),
-                AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
-              )
-              lineage = HmacKeyRetirementKafkaLineage(
-                document.getString("clusterId"),
-                document.getString("topicId"),
-                document.getString("kafkaVolumeName"),
-                document.getString("kafkaVolumeMountpoint"),
-                document.getString("kafkaVolumeCreatedAt"),
-                document.getString("kafkaBootstrapEndpoint")
-              )
-              _ <- Either.cond(
-                HmacKeyRetirementKafkaLineage.matches(lineage, lineage),
-                (),
-                AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
-              )
-            } yield HmacKeyRetirementPreparation(
-              lakehouseId,
-              keyId,
-              document.getString("originalVerifier"),
-              document.getDate("capturedAt").toInstant,
-              barrier,
-              lineage
-            )).liftTo[IO].map(Some(_))
+            ).map(Some(_))
           case None => IO.pure(None)
         }
         .adaptError { case NonFatal(_) =>
@@ -358,8 +413,8 @@ private[analytics] object HmacKeyRetirementKafkaOffsets {
               Option(actual.get(partition)).map(value => partition.partition() -> value.longValue())
             )
             .toMap
-          KafkaRetentionBarrier.hasExpired(valid, offsets).fold(throw _, _ => offsets)
-        }
+          KafkaRetentionBarrier.hasExpired(valid, offsets).map(_ => offsets)
+        }.flatMap(IO.fromEither)
       }
     }
 }

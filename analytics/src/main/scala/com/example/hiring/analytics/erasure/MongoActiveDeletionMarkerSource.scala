@@ -1,7 +1,7 @@
 package com.example.hiring.analytics.erasure
 
 import com.example.hiring.analytics.*
-import com.example.hiring.analytics.mongo.AnalyticsCollections
+import com.example.hiring.analytics.mongo.{AnalyticsCollections, BsonDecoder, BsonValueDecoder}
 import com.example.hiring.analytics.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Clock, IO}
@@ -35,9 +35,13 @@ final class MongoActiveDeletionMarkerSource(
         .getCollection(requestCollection, classOf[Document])
         .find(
           Filters.or(
-            Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
+            Filters.in(
+              AnalyticsCollections.Fields.State,
+              ErasureRequestState.Pending.persistedName,
+              ErasureRequestState.Processing.persistedName
+            ),
             Filters.and(
-              Filters.eq(AnalyticsCollections.Fields.State, "Complete"),
+              Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
               Filters.or(
                 Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
                 Filters.expr(
@@ -106,36 +110,46 @@ private[analytics] object MongoActiveDeletionMarkerSource {
   def tokenFor(request: Document, pseudonymizer: SubjectPseudonymizer): Either[AnalyticsError, SubjectToken] =
     tokensFor(request, pseudonymizer).map(_.head)
 
-  def tokensFor(request: Document, pseudonymizer: SubjectPseudonymizer): Either[AnalyticsError, Vector[SubjectToken]] =
-    request.get(AnalyticsCollections.Fields.Id) match {
-      case subjectId: String =>
-        try {
-          val parsed = UUID.fromString(subjectId)
-          if (parsed.toString == subjectId)
-            pseudonymizer
-              .matchingTokens(subjectId)
-              .traverse(SubjectToken.fromHmac)
-              .leftMap(AnalyticsError.InvalidConfiguration.apply)
-          else Left(AnalyticsError.MalformedMarker)
-        } catch {
-          case _: IllegalArgumentException => Left(AnalyticsError.MalformedMarker)
+  def tokensFor(
+      request: Document,
+      pseudonymizer: SubjectPseudonymizer
+  ): Either[AnalyticsError, Vector[SubjectToken]] = {
+    import BsonValueDecoder.given
+    BsonDecoder
+      .required[String](request, AnalyticsCollections.Fields.Id, AnalyticsError.MalformedMarker)
+      .flatMap { subjectId =>
+        val validId = scala.util.Try(UUID.fromString(subjectId)).toOption.exists(_.toString == subjectId)
+        Either.cond(validId, subjectId, AnalyticsError.MalformedMarker).flatMap { id =>
+          pseudonymizer
+            .matchingTokens(id)
+            .flatMap(_.traverse(SubjectToken.fromHmac))
+            .leftMap(AnalyticsError.InvalidConfiguration.apply)
         }
-      case _ => Left(AnalyticsError.MalformedMarker)
-    }
+      }
+  }
 
   private[analytics] def activeTokens(
       request: Document,
       now: Instant,
       pseudonymizer: SubjectPseudonymizer
-  ): Either[AnalyticsError, Option[Vector[SubjectToken]]] =
-    request.get(AnalyticsCollections.Fields.State) match {
-      case "Pending" | "Processing" => tokensFor(request, pseudonymizer).map(Some(_))
-      case "Complete"               =>
-        request.get(AnalyticsCollections.Fields.ExpiresAt) match {
-          case expiresAt: Date if expiresAt.after(Date.from(now)) => tokensFor(request, pseudonymizer).map(Some(_))
-          case _: Date                                            => Right(None)
-          case _                                                  => Left(AnalyticsError.MalformedMarker)
-        }
-      case _ => Left(AnalyticsError.MalformedMarker)
-    }
+  ): Either[AnalyticsError, Option[Vector[SubjectToken]]] = {
+    import BsonValueDecoder.given
+    BsonDecoder
+      .required[ErasureRequestState](
+        request,
+        AnalyticsCollections.Fields.State,
+        AnalyticsError.MalformedMarker
+      )
+      .flatMap {
+        case ErasureRequestState.Pending | ErasureRequestState.Processing =>
+          tokensFor(request, pseudonymizer).map(Some(_))
+        case ErasureRequestState.Complete =>
+          BsonDecoder
+            .required[Date](request, AnalyticsCollections.Fields.ExpiresAt, AnalyticsError.MalformedMarker)
+            .flatMap(expiresAt =>
+              if (expiresAt.after(Date.from(now))) tokensFor(request, pseudonymizer).map(Some(_))
+              else Right(None)
+            )
+      }
+  }
 }

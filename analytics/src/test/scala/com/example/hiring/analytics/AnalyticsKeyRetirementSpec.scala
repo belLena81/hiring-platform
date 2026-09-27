@@ -134,6 +134,19 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
     assert(withOutbox.blockers.toList.exists(_.contains("outbox contains replay work")))
   }
 
+  test("malformed operational fence leases block key retirement") {
+    val initial = MongoScanState(0L, Set.empty, cats.data.Chain.empty)
+    val (observed, _) = reduceMongoObservation(
+      initial,
+      com.example.hiring.analytics.mongo.AnalyticsCollections.OutboxSubjectFences,
+      new Document("_id", "subject").append("leaseUntil", "not-a-date"),
+      "key-1",
+      now,
+      0
+    )
+    assert(observed.blockers.toList.exists(_.contains("malformed lease")))
+  }
+
   property("unrelated Mongo observations preserve blockers and active subjects") {
     forAll(Gen.chooseNum(0L, Long.MaxValue - 1L), Gen.chooseNum(0L, Long.MaxValue)) { (count: Long, rowId: Long) =>
       val active = Set("active-subject")

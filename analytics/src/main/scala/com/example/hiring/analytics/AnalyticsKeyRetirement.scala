@@ -4,7 +4,8 @@ import com.example.hiring.analytics.batch.{AnalyticsLakehouseLock, AnalyticsLake
 import cats.data.{Chain, NonEmptyChain, ValidatedNec}
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.hiring.analytics.mongo.{AnalyticsCollections, MongoPublisherStream}
+import com.example.hiring.analytics.erasure.ErasureRequestState
+import com.example.hiring.analytics.mongo.{AnalyticsCollections, BsonDecoder, BsonValueDecoder, MongoPublisherStream}
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.SparkSession
@@ -90,8 +91,11 @@ private[analytics] object AnalyticsKeyRetirement {
         Chain.one(s"Mongo collection '$collectionName' contains a retiring-key reference")
       else Chain.empty[String]
     val (activeSubjects, erasureBlockers) = if (isErasure) erasureRequestActivity(document, now) match {
-      case Right(true) =>
-        Option(document.getString(AnalyticsCollections.Fields.Id)) match {
+      case Right(true) => {
+        import BsonValueDecoder.given
+        BsonDecoder
+          .required[String](document, AnalyticsCollections.Fields.Id, AnalyticsError.MalformedMarker)
+          .toOption match {
           case Some(subjectId) if state.activeSubjects.size < MaximumAuditedErasureSubjects =>
             (state.activeSubjects + subjectId, Chain.one("an active or unexpired erasure marker/request remains"))
           case _ =>
@@ -103,26 +107,48 @@ private[analytics] object AnalyticsKeyRetirement {
               )
             )
         }
+      }
       case Right(false) => (state.activeSubjects, Chain.empty[String])
       case Left(reason) => (state.activeSubjects, Chain.one(reason))
     }
     else (state.activeSubjects, Chain.empty[String])
     val outboxBlockers = if (collectionName == AnalyticsCollections.EventOutbox) {
-      val subjectIds =
-        Option(document.getList(AnalyticsCollections.Fields.SubjectIds, classOf[String])).map(_.asScala.toSet)
-      if (
-        subjectIds.isEmpty || Option(document.getInteger(AnalyticsCollections.Fields.SubjectRefsVersion)).forall(_ != 1)
-      ) Chain.one("outbox subject-reference migration or a stored row is incomplete")
-      else if (subjectIds.exists(_.exists(state.activeSubjects.contains)))
+      val decodedSubjectIds = {
+        import BsonValueDecoder.given
+        for {
+          rows <- BsonDecoder.required[Vector[Any]](
+            document,
+            AnalyticsCollections.Fields.SubjectIds,
+            AnalyticsError.MalformedMarker
+          )
+          subjectIds <- rows.traverse {
+            case subjectId: String => Right(subjectId)
+            case _                 => Left(AnalyticsError.MalformedMarker)
+          }
+          version <- BsonDecoder.required[Int](
+            document,
+            AnalyticsCollections.Fields.SubjectRefsVersion,
+            AnalyticsError.MalformedMarker
+          )
+        } yield (subjectIds.toSet, version)
+      }
+      if (decodedSubjectIds.forall(_._2 != 1))
+        Chain.one("outbox subject-reference migration or a stored row is incomplete")
+      else if (decodedSubjectIds.exists(_._1.exists(state.activeSubjects.contains)))
         Chain.one("outbox contains replay work for an active or unexpired erasure subject")
       else Chain.empty[String]
     } else Chain.empty[String]
-    val fenceBlockers =
-      if (
-        collectionName == AnalyticsCollections.OutboxSubjectFences &&
-        Option(document.getDate(AnalyticsCollections.Fields.LeaseUntil)).exists(_.toInstant.isAfter(now))
-      ) Chain.one("an active operational outbox publication fence remains")
-      else Chain.empty[String]
+    val fenceLease = if (collectionName == AnalyticsCollections.OutboxSubjectFences) {
+      import BsonValueDecoder.given
+      BsonDecoder
+        .optional[java.util.Date](document, AnalyticsCollections.Fields.LeaseUntil, AnalyticsError.MalformedMarker)
+    } else Right(None)
+    val fenceBlockers = fenceLease match {
+      case Left(_) => Chain.one("an operational outbox publication fence has a malformed lease")
+      case Right(Some(until)) if until.toInstant.isAfter(now) =>
+        Chain.one("an active operational outbox publication fence remains")
+      case _ => Chain.empty[String]
+    }
     (
       state.copy(
         count = collectionCount,
@@ -399,9 +425,13 @@ private[analytics] object AnalyticsKeyRetirement {
               .map { migration =>
                 val migrationBlockers =
                   if (
-                    migration.isEmpty || !migration
-                      .flatMap(row => Option(row.getString(AnalyticsCollections.Fields.State)))
-                      .contains("Complete")
+                    migration.forall { row =>
+                      import BsonValueDecoder.given
+                      !BsonDecoder
+                        .required[String](row, AnalyticsCollections.Fields.State, AnalyticsError.MalformedMarker)
+                        .toOption
+                        .contains("Complete")
+                    }
                   )
                     Chain.one("outbox subject-reference migration is not complete")
                   else Chain.empty[String]
@@ -414,17 +444,21 @@ private[analytics] object AnalyticsKeyRetirement {
 
   private val MaximumAuditedErasureSubjects = 100000
 
-  private[analytics] def erasureRequestActivity(document: Document, now: Instant): Either[String, Boolean] =
-    Option(document.getString(AnalyticsCollections.Fields.State)) match {
-      case Some("Pending" | "Processing") => Right(true)
-      case Some("Complete")               =>
-        Option(document.get(AnalyticsCollections.Fields.ExpiresAt)) match {
-          case Some(expiry: java.util.Date) => Right(expiry.toInstant.isAfter(now))
-          case _ => Left("completed erasure request has a missing or invalid retention expiry")
-        }
-      case Some(_) => Left("erasure request has an unknown state")
-      case None    => Left("erasure request has no state")
-    }
+  private[analytics] def erasureRequestActivity(document: Document, now: Instant): Either[String, Boolean] = {
+    import BsonValueDecoder.given
+    BsonDecoder
+      .required[String](document, AnalyticsCollections.Fields.State, AnalyticsError.MalformedMarker)
+      .leftMap(_ => "erasure request has no state")
+      .flatMap(state => ErasureRequestState.fromString(state).toRight("erasure request has an unknown state"))
+      .flatMap {
+        case ErasureRequestState.Pending | ErasureRequestState.Processing => Right(true)
+        case ErasureRequestState.Complete                                 =>
+          BsonDecoder
+            .required[java.util.Date](document, AnalyticsCollections.Fields.ExpiresAt, AnalyticsError.MalformedMarker)
+            .leftMap(_ => "completed erasure request has a missing or invalid retention expiry")
+            .map(_.toInstant.isAfter(now))
+      }
+  }
 
   private[analytics] def containsKeyReferenceInValue(value: Any, keyId: String): Boolean = value match {
     case text: String                  => text.contains(keyId + "_")

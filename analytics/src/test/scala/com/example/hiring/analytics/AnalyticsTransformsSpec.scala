@@ -1021,6 +1021,27 @@ class AnalyticsTransformsSpec extends FunSuite {
     assert(SubjectPseudonymizer.validateFromBase64(Some(encoded), "hmac-v1", None, None).isInvalid)
   }
 
+  test("lakehouse operation boundary preserves typed errors and adapts thrown failures") {
+    class Boundary extends LakehouseOperation {
+      def run[A](work: => A): IO[A] = lakehouse(work)
+      def runIO[A](work: IO[A]): IO[A] = lakehouseIO(work)
+      def runEither[A](work: => Either[AnalyticsError, A]): IO[A] = lakehouseEither(work)
+    }
+    val boundary = new Boundary
+    val expected = AnalyticsError.InvalidConfiguration("expected lakehouse validation failure")
+    val cause = new IllegalStateException("spark failure")
+
+    assertEquals(boundary.runEither[String](Left(expected)).attempt.unsafeRunSync(), Left(expected))
+    val failure = boundary.run[Unit](throw cause).attempt.unsafeRunSync().swap.toOption
+    val ioFailure = boundary.runIO(IO.raiseError[Unit](cause)).attempt.unsafeRunSync().swap.toOption
+    val adapted = failure.exists {
+      case AnalyticsError.LakehouseFailure(underlying) => underlying eq cause
+      case _                                           => false
+    }
+    assert(adapted, "expected the Spark failure to become LakehouseFailure")
+    assertEquals(ioFailure, failure)
+  }
+
   test("versioned HMAC key rings preserve retiring tokens for deletion markers") {
     val oldSecret = hmacKey("old-analytics-key")
     val newSecret = hmacKey("new-analytics-key")
@@ -1028,15 +1049,21 @@ class AnalyticsTransformsSpec extends FunSuite {
     val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", newSecret, Vector("hmac-v1" -> oldSecret))
     assertNotEquals(rotating.token("candidate-1"), oldKey.token("candidate-1"))
     assertEquals(
-      rotating.matchingTokens("candidate-1").toSet,
-      Set(rotating.token("candidate-1"), oldKey.token("candidate-1"))
+      rotating.matchingTokens("candidate-1"),
+      Right(Vector(rotating.token("candidate-1"), oldKey.token("candidate-1")))
     )
+    assertEquals(rotating.matchingTokens(null), Left("subject id must be non-empty"))
+    assertEquals(rotating.matchingTokens(""), Left("subject id must be non-empty"))
     val subjectId = java.util.UUID.fromString("d31d0f7b-0abf-4e47-94da-b2f52cb5dd2e").toString
     assertEquals(
       MongoActiveDeletionMarkerSource
         .tokensFor(new org.bson.Document("_id", subjectId), rotating)
         .map(_.map(_.value).toSet),
-      Right(rotating.matchingTokens(subjectId).toSet)
+      rotating
+        .matchingTokens(subjectId)
+        .left
+        .map(AnalyticsError.InvalidConfiguration.apply)
+        .map(_.toSet)
     )
   }
 
@@ -1233,10 +1260,12 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(attributed.getAs[String]("subjectToken"), current.token("rotation-candidate"))
     assertEquals(tokens, Set(current.token("actor-1"), current.token("rotation-candidate")))
     assertEquals(
-      current.matchingTokens("rotation-candidate").toSet,
-      Set(
-        current.token("rotation-candidate"),
-        AnalyticsTestSubjectPseudonymizer.fromSecret(oldSecret).token("rotation-candidate")
+      current.matchingTokens("rotation-candidate"),
+      Right(
+        Vector(
+          current.token("rotation-candidate"),
+          AnalyticsTestSubjectPseudonymizer.fromSecret(oldSecret).token("rotation-candidate")
+        )
       )
     )
   }

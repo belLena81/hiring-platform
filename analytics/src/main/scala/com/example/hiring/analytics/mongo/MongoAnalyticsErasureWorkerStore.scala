@@ -5,6 +5,7 @@ import com.example.hiring.analytics.erasure.{
   ErasureClaim,
   ErasureFailureCategory,
   ErasurePhase,
+  ErasureRequestState,
   KafkaRetentionBarrier
 }
 
@@ -41,6 +42,26 @@ final class MongoAnalyticsErasureWorkerStore(
 
   final case class RepairRequest(requestId: String, phase: String, attemptCount: Int, failureCategory: String)
 
+  private val repairRequestDecoder = BsonDecoder.instance[RepairRequest] { document =>
+    import BsonValueDecoder.given
+    for {
+      id <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.Id, AnalyticsError.MalformedMarker)
+      phase <- BsonDecoder
+        .optional[String](document, AnalyticsCollections.Fields.Phase, AnalyticsError.MalformedMarker)
+        .map(_.getOrElse(ErasurePhase.Requested.persistedName))
+      _ <- Either.cond(ErasurePhase.fromString(phase).nonEmpty, (), AnalyticsError.MalformedMarker)
+      attempt <- BsonDecoder
+        .required[Int](document, AnalyticsCollections.Fields.AttemptCount, AnalyticsError.MalformedMarker)
+      category <- BsonDecoder
+        .required[String](document, AnalyticsCollections.Fields.FailureCategory, AnalyticsError.MalformedMarker)
+      _ <- Either.cond(
+        ErasureFailureCategory.values.exists(_.persistedName == category),
+        (),
+        AnalyticsError.MalformedMarker
+      )
+    } yield RepairRequest(id, phase, attempt, category)
+  }
+
   def inspectRepairRequests(limit: Int): IO[Vector[RepairRequest]] =
     if (limit <= 0 || limit > MaximumClaimPageSize)
       IO.raiseError(AnalyticsError.InvalidConfiguration("repair inspection limit is out of bounds"))
@@ -55,24 +76,7 @@ final class MongoAnalyticsErasureWorkerStore(
         .compile
         .toVector
         .flatMap { documents =>
-          IO.fromEither(documents.traverse { document =>
-            for {
-              id <- Option(document.getString(AnalyticsCollections.Fields.Id)).toRight(AnalyticsError.MalformedMarker)
-              phase <- Option(document.getString(AnalyticsCollections.Fields.Phase))
-                .fold[Either[AnalyticsError, String]](Right(ErasurePhase.Requested.persistedName))(Right(_))
-              _ <- Either.cond(ErasurePhase.fromString(phase).nonEmpty, (), AnalyticsError.MalformedMarker)
-              attempt <- Option(document.getInteger(AnalyticsCollections.Fields.AttemptCount))
-                .map(_.intValue())
-                .toRight(AnalyticsError.MalformedMarker)
-              category <- Option(document.getString(AnalyticsCollections.Fields.FailureCategory))
-                .toRight(AnalyticsError.MalformedMarker)
-              _ <- Either.cond(
-                ErasureFailureCategory.values.exists(_.persistedName == category),
-                (),
-                AnalyticsError.MalformedMarker
-              )
-            } yield RepairRequest(id, phase, attempt, category)
-          })
+          IO.fromEither(documents.traverse(repairRequestDecoder.decode))
         }
         .adaptError { case NonFatal(error) => AnalyticsError.MarkerStorageFailure(error) }
 
@@ -84,7 +88,7 @@ final class MongoAnalyticsErasureWorkerStore(
       mongo {
         val observedState = Filters.and(
           Filters.eq(AnalyticsCollections.Fields.Id, requestId),
-          Filters.eq(AnalyticsCollections.Fields.State, "Processing"),
+          Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
           Filters.eq(AnalyticsCollections.Fields.RepairRequired, true),
           Filters.eq(AnalyticsCollections.Fields.AttemptCount, expectedAttempt),
           Filters.or(
@@ -97,7 +101,7 @@ final class MongoAnalyticsErasureWorkerStore(
           requests,
           observedState,
           Updates.combine(
-            Updates.set(AnalyticsCollections.Fields.State, "Pending"),
+            Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
             Updates.set(AnalyticsCollections.Fields.ResumeAfter, Date.from(now)),
             Updates.set(AnalyticsCollections.Fields.RepairRequired, false),
             Updates.unset(AnalyticsCollections.Fields.FailureCategory)
@@ -136,20 +140,26 @@ final class MongoAnalyticsErasureWorkerStore(
         Filters.ne(AnalyticsCollections.Fields.RepairRequired, true),
         Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName),
         Filters.or(
-          Filters.eq(AnalyticsCollections.Fields.State, "Pending"),
-          Filters.and(Filters.eq(AnalyticsCollections.Fields.State, "Processing"), available)
+          Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
+          Filters.and(
+            Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
+            available
+          )
         )
       )
       val finalizer = Filters.and(
         Filters.ne(AnalyticsCollections.Fields.RepairRequired, true),
         Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName),
         Filters.or(
-          Filters.eq(AnalyticsCollections.Fields.State, "Pending"),
-          Filters.and(Filters.eq(AnalyticsCollections.Fields.State, "Processing"), available)
+          Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Pending.persistedName),
+          Filters.and(
+            Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
+            available
+          )
         )
       )
       val update = Updates.combine(
-        Updates.set(AnalyticsCollections.Fields.State, "Processing"),
+        Updates.set(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
         Updates.set(AnalyticsCollections.Fields.LeaseToken, token),
         Updates.set(AnalyticsCollections.Fields.LeaseUntil, Date.from(leaseUntil)),
         Updates.unset(AnalyticsCollections.Fields.ResumeAfter)
@@ -174,13 +184,13 @@ final class MongoAnalyticsErasureWorkerStore(
     MongoPublisherStream
       .optional(fences.find(Filters.eq(AnalyticsCollections.Fields.Id, subjectId)).first())
       .map {
-        case None => false
-        case Some(fence) if !java.lang.Boolean.TRUE.equals(fence.getBoolean(AnalyticsCollections.Fields.Deleted)) =>
-          false
-        case Some(fence) if fence.getString(AnalyticsCollections.Fields.LeaseToken) == null => true
-        case Some(fence)                                                                    =>
-          Option(fence.getDate(AnalyticsCollections.Fields.LeaseUntil))
-            .exists(until => !now.isBefore(until.toInstant.plusMillis(deliveryTimeout.toMillis)))
+        case None        => false
+        case Some(fence) =>
+          decodePublisherFence(fence).exists { decoded =>
+            decoded.deleted && decoded.leaseToken.forall(_ =>
+              decoded.leaseUntil.exists(until => !now.isBefore(until.plusMillis(deliveryTimeout.toMillis)))
+            )
+          }
       }
   }
 
@@ -190,16 +200,25 @@ final class MongoAnalyticsErasureWorkerStore(
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first())
       .map(_.toRight(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing")))
       .map(_.flatMap { request =>
-        if (Option(request.getInteger(AnalyticsCollections.Fields.FencingVersion)).forall(_.intValue() != 1))
-          Left(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing"))
-        else
-          Option(request.getList(AnalyticsCollections.Fields.TransactionalIds, classOf[String]))
-            .toRight(AnalyticsError.MalformedMarker)
-            .flatMap(
-              _.asScala.toVector
-                .traverse(value => Option(value).filter(_.trim.nonEmpty).toRight(AnalyticsError.MalformedMarker))
-            )
-            .map(_.distinct.sorted)
+        import BsonValueDecoder.given
+        BsonDecoder
+          .optional[Int](request, AnalyticsCollections.Fields.FencingVersion, AnalyticsError.MalformedMarker)
+          .flatMap { fencingVersion =>
+            if (!fencingVersion.contains(1))
+              Left(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing"))
+            else
+              BsonDecoder
+                .required[Vector[Any]](
+                  request,
+                  AnalyticsCollections.Fields.TransactionalIds,
+                  AnalyticsError.MalformedMarker
+                )
+                .flatMap(_.traverse {
+                  case value: String if value.trim.nonEmpty => Right(value)
+                  case _                                    => Left(AnalyticsError.MalformedMarker)
+                })
+                .map(_.distinct.sorted)
+          }
       })
       .flatMap(IO.fromEither)
   }
@@ -248,34 +267,16 @@ final class MongoAnalyticsErasureWorkerStore(
     MongoPublisherStream
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first())
       .map(
-        _.flatMap(document =>
-          Option(document.get(AnalyticsCollections.Fields.KafkaRetentionBarrier, classOf[Document]))
-        )
+        _.traverse(document =>
+          BsonDecoder
+            .optional[Document](
+              document,
+              AnalyticsCollections.Fields.KafkaRetentionBarrier,
+              AnalyticsError.MalformedMarker
+            )
+            .flatMap(_.traverse(retentionBarrierDecoder.decode))
+        ).map(_.flatten)
       )
-      .map(_.traverse { stored =>
-        for {
-          topic <- Option(stored.get(AnalyticsCollections.Fields.Topic))
-            .collect { case value: String => value }
-            .toRight(AnalyticsError.MalformedMarker)
-          rows <- Option(stored.get(AnalyticsCollections.Fields.Partitions))
-            .collect { case values: java.util.List[?] => values.asScala.toVector }
-            .toRight(AnalyticsError.MalformedMarker)
-          partitions <- rows.traverse { row =>
-            for {
-              value <- Option(row)
-                .collect { case document: Document => document }
-                .toRight(AnalyticsError.MalformedMarker)
-              number <- Option(value.get(AnalyticsCollections.Fields.PartitionNumber))
-                .collect { case n: java.lang.Integer => n.intValue() }
-                .toRight(AnalyticsError.MalformedMarker)
-              offset <- Option(value.get(AnalyticsCollections.Fields.EndOffsetExclusive))
-                .collect { case n: java.lang.Long => n.longValue() }
-                .toRight(AnalyticsError.MalformedMarker)
-            } yield KafkaRetentionBarrier.Partition(number, offset)
-          }
-          valid <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(topic, partitions))
-        } yield valid
-      })
   }.flatMap(IO.fromEither)
 
   def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): IO[Boolean] = mongo {
@@ -355,7 +356,7 @@ final class MongoAnalyticsErasureWorkerStore(
       .flatMap { documents =>
         IO.fromEither(
           documents.traverse(document =>
-            Option(document.getString(AnalyticsCollections.Fields.FilePath)).toRight(AnalyticsError.MalformedMarker)
+            BsonDecoder.required[String](document, AnalyticsCollections.Fields.FilePath, AnalyticsError.MalformedMarker)
           )
         )
       }
@@ -367,24 +368,48 @@ final class MongoAnalyticsErasureWorkerStore(
   def readAffectedRows(requestId: String): IO[Long] = mongo {
     MongoPublisherStream
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first())
-      .map(
-        _.flatMap(document => Option(document.getLong(AnalyticsCollections.Fields.DeltaAffectedRows)))
-          .fold(0L)(_.longValue())
+      .flatMap(document =>
+        IO.fromEither(
+          document
+            .traverse(value =>
+              BsonDecoder
+                .optional[Long](value, AnalyticsCollections.Fields.DeltaAffectedRows, AnalyticsError.MalformedMarker)
+                .map(_.getOrElse(0L))
+            )
+            .map(_.getOrElse(0L))
+        )
       )
   }
 
   def readDeltaGeneration(requestId: String): IO[Option[Long]] = mongo {
     MongoPublisherStream
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first())
-      .map(
-        _.flatMap(document => Option(document.getLong(AnalyticsCollections.Fields.DeltaGeneration))).map(_.longValue())
+      .flatMap(document =>
+        IO.fromEither(
+          document
+            .traverse(value =>
+              BsonDecoder
+                .optional[Long](value, AnalyticsCollections.Fields.DeltaGeneration, AnalyticsError.MalformedMarker)
+            )
+            .map(_.flatten)
+        )
       )
   }
 
   def readDeltaPurgedAt(requestId: String): IO[Option[Instant]] = mongo {
     MongoPublisherStream
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first())
-      .map(_.flatMap(document => Option(document.getDate(AnalyticsCollections.Fields.DeltaPurgedAt))).map(_.toInstant))
+      .flatMap(document =>
+        IO.fromEither(
+          document
+            .traverse(value =>
+              BsonDecoder
+                .optional[Date](value, AnalyticsCollections.Fields.DeltaPurgedAt, AnalyticsError.MalformedMarker)
+                .map(_.map(_.toInstant))
+            )
+            .map(_.flatten)
+        )
+      )
   }
 
   /** Lets other requests progress while preserving the durable checkpoint for a final publication barrier. */
@@ -440,7 +465,11 @@ final class MongoAnalyticsErasureWorkerStore(
   def hasNonReadyOtherRequests(requestId: String): IO[Boolean] = {
     val filter = Filters.and(
       Filters.ne(AnalyticsCollections.Fields.Id, requestId),
-      Filters.in(AnalyticsCollections.Fields.State, "Pending", "Processing"),
+      Filters.in(
+        AnalyticsCollections.Fields.State,
+        ErasureRequestState.Pending.persistedName,
+        ErasureRequestState.Processing.persistedName
+      ),
       Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
     )
     MongoPublisherStream
@@ -552,7 +581,17 @@ final class MongoAnalyticsErasureWorkerStore(
       .flatMap(migration =>
         Either
           .cond(
-            migration.exists(_.getString(AnalyticsCollections.Fields.State) == "Complete"),
+            migration.exists { document =>
+              import BsonValueDecoder.given
+              BsonDecoder
+                .required[String](
+                  document,
+                  AnalyticsCollections.Fields.State,
+                  AnalyticsError.InvalidConfiguration("outbox subject-reference migration is incomplete")
+                )
+                .toOption
+                .contains("Complete")
+            },
             (),
             AnalyticsError.InvalidConfiguration("outbox subject-reference migration is incomplete")
           )
@@ -656,33 +695,91 @@ private[analytics] object MongoAnalyticsErasureWorkerStore {
   val MaximumClaimPageSize = 100
   val ProgressPerPhase = ErasurePhase.ProgressPerPhase
 
+  private val retentionBarrierDecoder = BsonDecoder.instance[KafkaRetentionBarrier] { document =>
+    import BsonValueDecoder.given
+    for {
+      topic <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.Topic, AnalyticsError.MalformedMarker)
+      rows <- BsonDecoder.required[Vector[Any]](
+        document,
+        AnalyticsCollections.Fields.Partitions,
+        AnalyticsError.MalformedMarker
+      )
+      partitions <- rows.traverse {
+        case row: Document =>
+          for {
+            number <- BsonDecoder
+              .required[Int](row, AnalyticsCollections.Fields.PartitionNumber, AnalyticsError.MalformedMarker)
+            offset <- BsonDecoder
+              .required[Long](row, AnalyticsCollections.Fields.EndOffsetExclusive, AnalyticsError.MalformedMarker)
+          } yield KafkaRetentionBarrier.Partition(number, offset)
+        case _ => Left(AnalyticsError.MalformedMarker)
+      }
+      valid <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(topic, partitions))
+    } yield valid
+  }
+
+  private final case class PublisherFence(deleted: Boolean, leaseToken: Option[String], leaseUntil: Option[Instant])
+
+  private val publisherFenceDecoder = BsonDecoder.instance[PublisherFence] { document =>
+    import BsonValueDecoder.given
+    for {
+      deleted <- BsonDecoder
+        .optional[Boolean](document, AnalyticsCollections.Fields.Deleted, AnalyticsError.MalformedMarker)
+      leaseToken <- BsonDecoder
+        .optional[String](document, AnalyticsCollections.Fields.LeaseToken, AnalyticsError.MalformedMarker)
+      leaseUntil <- BsonDecoder
+        .optional[Date](document, AnalyticsCollections.Fields.LeaseUntil, AnalyticsError.MalformedMarker)
+    } yield PublisherFence(deleted.getOrElse(false), leaseToken, leaseUntil.map(_.toInstant))
+  }
+
+  private def decodePublisherFence(document: Document): Either[AnalyticsError, PublisherFence] =
+    publisherFenceDecoder.decode(document)
+
   private[analytics] def ownedClaimFilter(claim: ErasureClaim, now: Instant) =
     Filters.and(
       Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId),
-      Filters.eq(AnalyticsCollections.Fields.State, "Processing"),
+      Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
       Filters.eq(AnalyticsCollections.Fields.LeaseToken, claim.leaseToken),
       Filters.gt(AnalyticsCollections.Fields.LeaseUntil, Date.from(now))
     )
 
-  private[analytics] def decodeClaim(document: Document): Option[ErasureClaim] = {
-    val requestId = Option(document.getString(AnalyticsCollections.Fields.Id))
-    val token = Option(document.getString(AnalyticsCollections.Fields.LeaseToken))
-    val until = Option(document.getDate(AnalyticsCollections.Fields.LeaseUntil)).map(_.toInstant)
-    val phase = Option(document.getString(AnalyticsCollections.Fields.Phase))
-      .fold(Some(ErasurePhase.Requested))(ErasurePhase.fromString)
-    val progress = Option(document.getInteger(AnalyticsCollections.Fields.Progress)).map(_.intValue()).getOrElse(0)
-    val progressKey = Option(document.getLong(AnalyticsCollections.Fields.ProgressKey)).map(_.longValue()).getOrElse(0L)
+  private val claimDecoder = BsonDecoder.instance[ErasureClaim] { document =>
+    import BsonValueDecoder.given
+    val malformed = AnalyticsError.MalformedMarker
     for {
-      _ <- Option(document.getInteger(AnalyticsCollections.Fields.FencingVersion)).filter(_.intValue() == 1)
-      id <- requestId
-      _ <- scala.util.Try(UUID.fromString(id)).toOption.filter(_.toString == id)
-      leaseToken <- token
-      _ <- scala.util.Try(UUID.fromString(leaseToken)).toOption.filter(_.toString == leaseToken)
-      leaseExpiry <- until
-      currentPhase <- phase
-      attempts = Option(document.getInteger(AnalyticsCollections.Fields.AttemptCount)).map(_.intValue()).getOrElse(0)
-      if progress >= 0 && progress < ErasurePhase.ProgressPerPhase &&
-        attempts >= 0 && progressKey == currentPhase.ordinal.toLong * ErasurePhase.ProgressPerPhase.toLong + progress.toLong
-    } yield ErasureClaim(id, leaseToken, leaseExpiry, currentPhase, progress, progressKey, attempts)
+      fencingVersion <- BsonDecoder.required[Int](document, AnalyticsCollections.Fields.FencingVersion, malformed)
+      _ <- Either.cond(fencingVersion == 1, (), malformed)
+      id <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.Id, malformed)
+      _ <- Either.cond(scala.util.Try(UUID.fromString(id)).toOption.exists(_.toString == id), (), malformed)
+      leaseToken <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.LeaseToken, malformed)
+      _ <- Either.cond(
+        scala.util.Try(UUID.fromString(leaseToken)).toOption.exists(_.toString == leaseToken),
+        (),
+        malformed
+      )
+      leaseExpiry <- BsonDecoder.required[java.util.Date](document, AnalyticsCollections.Fields.LeaseUntil, malformed)
+      storedPhase <- BsonDecoder.optional[String](document, AnalyticsCollections.Fields.Phase, malformed)
+      currentPhase <- storedPhase
+        .fold[Either[AnalyticsError, ErasurePhase]](Right(ErasurePhase.Requested))(phase =>
+          ErasurePhase.fromString(phase).toRight(malformed)
+        )
+      progress <- BsonDecoder
+        .optional[Int](document, AnalyticsCollections.Fields.Progress, malformed)
+        .map(_.getOrElse(0))
+      progressKey <- BsonDecoder
+        .optional[Long](document, AnalyticsCollections.Fields.ProgressKey, malformed)
+        .map(_.getOrElse(0L))
+      attempts <- BsonDecoder
+        .optional[Int](document, AnalyticsCollections.Fields.AttemptCount, malformed)
+        .map(_.getOrElse(0))
+      _ <- Either.cond(
+        progress >= 0 && progress < ErasurePhase.ProgressPerPhase && attempts >= 0 &&
+          progressKey == currentPhase.ordinal.toLong * ErasurePhase.ProgressPerPhase.toLong + progress.toLong,
+        (),
+        malformed
+      )
+    } yield ErasureClaim(id, leaseToken, leaseExpiry.toInstant, currentPhase, progress, progressKey, attempts)
   }
+
+  private[analytics] def decodeClaim(document: Document): Option[ErasureClaim] = claimDecoder.decode(document).toOption
 }

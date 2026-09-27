@@ -24,7 +24,7 @@ private[analytics] final class HmacKeyRetirementCoordinator(
     topic: String,
     writerSettings: LocalHmacKeyWriterExclusion.Settings,
     clock: Clock[IO] = Clock[IO]
-) {
+) extends LakehouseOperation {
   private val mutex = new MongoAnalyticsLakehouseLock(database)
   private val preparations = new MongoHmacKeyRetirementPreparationStore(database)
   private val authorizations = new MongoHmacKeyRetirementAuthorizationStore(database)
@@ -36,101 +36,141 @@ private[analytics] final class HmacKeyRetirementCoordinator(
       AnalyticsError.InvalidConfiguration("retirement analytics volume does not identify its isolated Kafka volume")
     ) *> HmacKeyRetirementKafkaLineage.observe(kafka, topic, kafkaVolumeName)
 
-  private def registryVerifier(keyId: String): IO[String] = IO.blocking {
+  private def registryVerifier(keyId: String): IO[String] = lakehouseEither {
     if (!DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry))
-      throw AnalyticsError.InvalidConfiguration("permanent HMAC continuity registry is missing")
-    val rows = spark.read
-      .format("delta")
-      .load(paths.hmacKeyRegistry)
-      .filter(org.apache.spark.sql.functions.col("keyId") === keyId)
-      .select("verifier")
-      .limit(2)
-      .collect()
-    if (rows.length != 1 || rows.head.isNullAt(0))
-      throw AnalyticsError.InvalidConfiguration("retiring key lacks one original continuity verifier")
-    val verifier = rows.head.getString(0)
-    if (!verifier.matches("[A-Za-z0-9_-]{43}"))
-      throw AnalyticsError.InvalidConfiguration("retiring key continuity verifier is malformed")
-    verifier
+      Left(
+        AnalyticsError.InvalidConfiguration("permanent HMAC continuity registry is missing")
+      )
+    else {
+      val rows = spark.read
+        .format("delta")
+        .load(paths.hmacKeyRegistry)
+        .filter(org.apache.spark.sql.functions.col("keyId") === keyId)
+        .select("verifier")
+        .limit(2)
+        .collect()
+      for {
+        _ <- Either.cond(
+          rows.length == 1 && !rows.head.isNullAt(0),
+          (),
+          AnalyticsError.InvalidConfiguration("retiring key lacks one original continuity verifier")
+        )
+        verifier = rows.head.getString(0)
+        _ <- Either.cond(
+          verifier.matches("[A-Za-z0-9_-]{43}"),
+          (),
+          AnalyticsError.InvalidConfiguration("retiring key continuity verifier is malformed")
+        )
+      } yield verifier
+    }
   }
 
-  private def verifyPreparedFixture(keyId: String, barrier: KafkaRetentionBarrier): IO[Unit] = IO.blocking {
+  private def verifyPreparedFixture(keyId: String, barrier: KafkaRetentionBarrier): IO[Unit] = lakehouseEither {
     val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
     if (!DeltaTable.isDeltaTable(spark, paths.silver) || !DeltaTable.isDeltaTable(spark, fixturePath))
-      throw AnalyticsError.InvalidConfiguration("old-key retirement fixture is missing")
-    val oldRows = spark.read
-      .format("delta")
-      .load(paths.silver)
-      .filter(org.apache.spark.sql.functions.col("subjectToken").startsWith(keyId + "_"))
-      .limit(1)
-      .count()
-    if (oldRows != 1L)
-      throw AnalyticsError.InvalidConfiguration("no old-key Silver row exists for the retirement fixture")
-    val published = spark.read
-      .format("delta")
-      .load(fixturePath)
-      .filter(org.apache.spark.sql.functions.col("stage") === "old-primary-event-published")
-      .select("reference")
-      .limit(2)
-      .collect()
-    val proof = published.headOption.map(_.getString(0).split(":", -1).toVector)
-    val valid = published.length == 1 && proof.exists {
-      case Vector(topicName, partition, end) =>
-        topicName == barrier.topic && partition.toIntOption.exists(number =>
-          end.toLongOption.exists(value =>
-            value > 0L &&
-              barrier.partitions.exists(p => p.number == number && p.endOffsetExclusive >= value)
+      Left(AnalyticsError.InvalidConfiguration("old-key retirement fixture is missing"))
+    else {
+      val oldRows = spark.read
+        .format("delta")
+        .load(paths.silver)
+        .filter(org.apache.spark.sql.functions.col("subjectToken").startsWith(keyId + "_"))
+        .limit(1)
+        .count()
+      val published = spark.read
+        .format("delta")
+        .load(fixturePath)
+        .filter(org.apache.spark.sql.functions.col("stage") === "old-primary-event-published")
+        .select("reference")
+        .limit(2)
+        .collect()
+      val proof = published.headOption.map(_.getString(0).split(":", -1).toVector)
+      val valid = published.length == 1 && proof.exists {
+        case Vector(topicName, partition, end) =>
+          topicName == barrier.topic && partition.toIntOption.exists(number =>
+            end.toLongOption.exists(value =>
+              value > 0L && barrier.partitions.exists(p => p.number == number && p.endOffsetExclusive >= value)
+            )
           )
+        case _ => false
+      }
+      for {
+        _ <- Either.cond(
+          oldRows == 1L,
+          (),
+          AnalyticsError.InvalidConfiguration("no old-key Silver row exists for the retirement fixture")
         )
-      case _ => false
+        _ <- Either.cond(
+          valid,
+          (),
+          AnalyticsError.InvalidConfiguration("captured Kafka barrier does not cover the fixture event")
+        )
+      } yield ()
     }
-    if (!valid)
-      throw AnalyticsError.InvalidConfiguration("captured Kafka barrier does not cover the fixture event")
   }
 
   /** The fixture captures exact old-primary Silver data and log paths before the retention wait. */
-  private def verifyCapturedPhysicalPaths(expectedPresent: Boolean): IO[Unit] = IO.blocking {
+  private def verifyCapturedPhysicalPaths(expectedPresent: Boolean): IO[Unit] = lakehouseEither {
     val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
     if (!DeltaTable.isDeltaTable(spark, fixturePath))
-      throw AnalyticsError.InvalidConfiguration("old-key physical path evidence is missing")
-    val references = spark.read
-      .format("delta")
-      .load(fixturePath)
-      .filter(org.apache.spark.sql.functions.col("stage") === "old-primary-physical-path")
-      .select("reference")
-      .limit(1001)
-      .collect()
-      .toVector
-      .map(row => if (row.isNullAt(0)) "" else row.getString(0))
-    if (references.isEmpty || references.size > 1000 || references.distinct.size != references.size)
-      throw AnalyticsError.InvalidConfiguration("old-key physical path evidence is empty, duplicated, or unbounded")
-    val rootUri = new URI(paths.silver)
-    if (rootUri.getScheme != "file" || rootUri.getAuthority != null)
-      throw AnalyticsError.InvalidConfiguration("local retirement requires a file-backed Silver table")
-    val silverRoot = Path.of(rootUri).toAbsolutePath.normalize()
-    val captured = references.map { reference =>
-      val uri = new URI(reference)
-      if (uri.getScheme != "file" || uri.getAuthority != null || uri.normalize() != uri)
-        throw AnalyticsError.InvalidConfiguration("old-key physical path evidence is malformed")
-      val path = Path.of(uri).toAbsolutePath.normalize()
-      if (
-        !path.startsWith(silverRoot) || path == silverRoot ||
-        !(path.getFileName.toString.endsWith(".parquet") ||
-          (path.getParent == silverRoot.resolve("_delta_log") && path.getFileName.toString.endsWith(".json")))
-      )
-        throw AnalyticsError.InvalidConfiguration("old-key physical path evidence is outside Silver")
-      path
+      Left(AnalyticsError.InvalidConfiguration("old-key physical path evidence is missing"))
+    else {
+      val references = spark.read
+        .format("delta")
+        .load(fixturePath)
+        .filter(org.apache.spark.sql.functions.col("stage") === "old-primary-physical-path")
+        .select("reference")
+        .limit(1001)
+        .collect()
+        .toVector
+        .map(row => if (row.isNullAt(0)) "" else row.getString(0))
+      for {
+        _ <- Either.cond(
+          references.nonEmpty && references.size <= 1000 && references.distinct.size == references.size,
+          (),
+          AnalyticsError.InvalidConfiguration("old-key physical path evidence is empty, duplicated, or unbounded")
+        )
+        rootUri = new URI(paths.silver)
+        _ <- Either.cond(
+          rootUri.getScheme == "file" && rootUri.getAuthority == null,
+          (),
+          AnalyticsError.InvalidConfiguration("local retirement requires a file-backed Silver table")
+        )
+        silverRoot = Path.of(rootUri).toAbsolutePath.normalize()
+        captured <- references.traverse { reference =>
+          val uri = new URI(reference)
+          if (uri.getScheme != "file" || uri.getAuthority != null || uri.normalize() != uri)
+            Left(AnalyticsError.InvalidConfiguration("old-key physical path evidence is malformed"))
+          else {
+            val path = Path.of(uri).toAbsolutePath.normalize()
+            Either.cond(
+              path.startsWith(silverRoot) && path != silverRoot &&
+                (path.getFileName.toString.endsWith(".parquet") ||
+                  (path.getParent == silverRoot.resolve("_delta_log") && path.getFileName.toString
+                    .endsWith(".json"))),
+              path,
+              AnalyticsError.InvalidConfiguration("old-key physical path evidence is outside Silver")
+            )
+          }
+        }
+        _ <- Either.cond(
+          captured.exists(_.getFileName.toString.endsWith(".parquet")) &&
+            captured.exists(_.getFileName.toString.endsWith(".json")),
+          (),
+          AnalyticsError.InvalidConfiguration("old-key Silver data and log evidence are both required")
+        )
+        present = captured.map(Files.exists(_, LinkOption.NOFOLLOW_LINKS))
+        _ <- Either.cond(
+          !expectedPresent || !present.exists(!_),
+          (),
+          AnalyticsError.InvalidConfiguration("a captured old-key Silver data or log path was absent at preparation")
+        )
+        _ <- Either.cond(
+          expectedPresent || !present.exists(identity),
+          (),
+          AnalyticsError.InvalidConfiguration("a captured old-key Silver data or log path is still present")
+        )
+      } yield ()
     }
-    if (
-      !captured.exists(_.getFileName.toString.endsWith(".parquet")) ||
-      !captured.exists(_.getFileName.toString.endsWith(".json"))
-    )
-      throw AnalyticsError.InvalidConfiguration("old-key Silver data and log evidence are both required")
-    val present = captured.map(Files.exists(_, LinkOption.NOFOLLOW_LINKS))
-    if (expectedPresent && present.exists(!_))
-      throw AnalyticsError.InvalidConfiguration("a captured old-key Silver data or log path was absent at preparation")
-    if (!expectedPresent && present.exists(identity))
-      throw AnalyticsError.InvalidConfiguration("a captured old-key Silver data or log path is still present")
   }
 
   def prepare(keyId: String): IO[HmacKeyRetirementPreparation] = mutex.resource(paths.root).use { _ =>

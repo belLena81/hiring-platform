@@ -64,10 +64,11 @@ final class SubjectPseudonymizer private (
   def tokenForNewRows(subjectId: String): String = token(subjectId)
 
   /** Tokens used to match existing rows include every configured primary/retiring key. */
-  def matchingTokens(subjectId: String): Vector[String] = {
-    require(subjectId != null && subjectId.nonEmpty, "subject id must be non-empty")
-    copiedKeys.toVector.map(key => tokenFor(subjectId, key))
-  }
+  def matchingTokens(subjectId: String): Either[String, Vector[String]] =
+    Option(subjectId)
+      .filter(_.nonEmpty)
+      .toRight("subject id must be non-empty")
+      .map(id => copiedKeys.toVector.map(key => tokenFor(id, key)))
 
   private def tokenFor(subjectId: String, key: (String, Array[Byte])) = {
     val mac = threadMacs

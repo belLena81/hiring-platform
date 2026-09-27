@@ -4,6 +4,7 @@ import com.example.hiring.analytics.*
 import com.example.hiring.analytics.batch.KafkaConnection
 
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
@@ -52,18 +53,30 @@ object KafkaRetentionBarrier {
           .flatMap(_.asScala)
           .map(partition => new TopicPartition(topic, partition.partition()))
           .sortBy(_.partition())
-        if (partitions.isEmpty)
-          throw AnalyticsError.InvalidConfiguration("Kafka erasure barrier topic has no partitions")
-        val ends = client.endOffsets(partitions.asJava)
-        val barrier = KafkaRetentionBarrier(
-          topic,
-          partitions.map(partition => Partition(partition.partition(), ends.get(partition).longValue())).toVector
-        )
-        validate(barrier).fold(throw _, identity)
-      }.adaptError {
-        case error: AnalyticsError => error
-        case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-      }
+        for {
+          _ <- Either.cond(
+            partitions.nonEmpty,
+            (),
+            AnalyticsError.InvalidConfiguration("Kafka erasure barrier topic has no partitions")
+          )
+          ends = client.endOffsets(partitions.asJava)
+          offsets <- partitions.traverse { partition =>
+            Option(ends.get(partition))
+              .map(_.longValue())
+              .toRight(AnalyticsError.InvalidConfiguration("Kafka erasure barrier end offset is unavailable"))
+          }
+          barrier <- validate(
+            KafkaRetentionBarrier(
+              topic,
+              partitions.zip(offsets).map { case (partition, offset) => Partition(partition.partition(), offset) }
+            )
+          )
+        } yield barrier
+      }.flatMap(IO.fromEither)
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
     }
 
   /** Checks actual broker earliest offsets rather than inferring expiry from wall-clock age. */
@@ -77,11 +90,12 @@ object KafkaRetentionBarrier {
             Option(beginnings.get(new TopicPartition(valid.topic, partition.number)))
               .map(offset => partition.number -> offset.longValue())
           }.toMap
-          hasExpired(valid, earliest).fold(throw _, identity)
-        }.adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+          hasExpired(valid, earliest)
+        }.flatMap(IO.fromEither)
+          .adaptError {
+            case error: AnalyticsError => error
+            case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+          }
       }
     }
 

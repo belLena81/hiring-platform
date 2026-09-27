@@ -335,19 +335,10 @@ final class HiringAnalyticsBatch(
     manifestWriter: Option[(SparkSession, AnalyticsRunManifest, String, String) => IO[Unit]] = None,
     lakehouseLock: AnalyticsLakehouseLock = AnalyticsLakehouseLock.processLocal,
     retirementStore: HmacKeyRetirementAuthorizationStore = HmacKeyRetirementAuthorizationStore.unavailable
-) {
+) extends LakehouseOperation {
   private val logger = Slf4jLogger.getLogger[IO]
   private val MaximumErasureEvidenceFiles = 100000
   private def now: IO[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
-
-  private def lakehouse[A](work: => A): IO[A] =
-    IO.blocking(work).adaptError {
-      case error: AnalyticsError => error
-      case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-    }
-
-  private def lakehouseEither[A](work: => Either[AnalyticsError, A]): IO[A] =
-    lakehouse(work).flatMap(IO.fromEither)
 
   private def persistManifest(
       spark: SparkSession,
@@ -581,12 +572,12 @@ final class HiringAnalyticsBatch(
       paths.skillsGold
     ).foldLeft(IO.pure(0L)) { (removedFiles, path) =>
       removedFiles.flatMap { count =>
-        IO.blocking(DeltaTable.isDeltaTable(spark, path)).flatMap {
+        lakehouse(DeltaTable.isDeltaTable(spark, path)).flatMap {
           case false => IO.pure(count)
           case true  =>
             val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
             DeltaPurgeRewrite.temporaryPath(spark, temporaryPath).use { _ =>
-              IO.blocking {
+              lakehouse {
                 spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
                 spark.read
                   .format("delta")

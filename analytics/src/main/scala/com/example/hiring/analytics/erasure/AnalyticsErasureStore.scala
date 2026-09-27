@@ -37,6 +37,18 @@ trait AnalyticsErasureStore {
   def preflight: IO[Unit]
 }
 
+/** Persisted lifecycle state for an account-erasure request. */
+enum ErasureRequestState(val persistedName: String) {
+  case Pending extends ErasureRequestState("Pending")
+  case Processing extends ErasureRequestState("Processing")
+  case Complete extends ErasureRequestState("Complete")
+}
+
+object ErasureRequestState {
+  def fromString(value: String): Option[ErasureRequestState] =
+    values.find(_.persistedName == value)
+}
+
 /** Fixed, non-sensitive operator-facing failure labels. Never persist exception messages. */
 enum ErasureFailureCategory(val persistedName: String) {
   case TransientStorage extends ErasureFailureCategory("TRANSIENT_STORAGE")

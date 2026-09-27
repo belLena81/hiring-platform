@@ -36,6 +36,15 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     assertEquals(ErasurePhase.fromString("Complete"), None)
   }
 
+  test("erasure request states retain their stored names and reject unknown values") {
+    assertEquals(
+      ErasureRequestState.values.toVector.map(_.persistedName),
+      Vector("Pending", "Processing", "Complete")
+    )
+    assertEquals(ErasureRequestState.fromString("Processing"), Some(ErasureRequestState.Processing))
+    assertEquals(ErasureRequestState.fromString("unknown"), None)
+  }
+
   test("a claimed request resumes its durable named phase and progress") {
     val id = UUID.randomUUID().toString
     val token = UUID.randomUUID().toString
@@ -56,6 +65,22 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     )
     assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(new Document(document).append("fencingVersion", 0)), None)
     assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(document.append("phase", "unknown")), None)
+  }
+
+  test("missing optional claim fields keep defaults while malformed BSON fails closed") {
+    val id = UUID.randomUUID().toString
+    val token = UUID.randomUUID().toString
+    val expiry = Instant.parse("2026-09-23T12:00:00Z")
+    val minimal = new Document("_id", id)
+      .append("fencingVersion", 1)
+      .append("leaseToken", token)
+      .append("leaseUntil", java.util.Date.from(expiry))
+
+    assertEquals(
+      MongoAnalyticsErasureWorkerStore.decodeClaim(minimal),
+      Some(ErasureClaim(id, token, expiry, ErasurePhase.Requested, 0, 0L, 0))
+    )
+    assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(new Document(minimal).append("progress", "bad")), None)
   }
 
   test("failure labels are fixed sanitized values and repaired claims preserve phase checkpoints") {

@@ -1,7 +1,11 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
-import com.example.hiring.analytics.mongo.MongoPublisherStream
+import com.example.hiring.analytics.mongo.{
+  BsonDecoder,
+  BsonValueDecoder,
+  MongoAnalyticsLakehouseLock,
+  MongoPublisherStream
+}
 
 import cats.effect.IO
 import cats.syntax.all.*
@@ -27,6 +31,26 @@ private[analytics] final case class HmacKeyRetirementAuthorization(
 )
 
 private[analytics] object HmacKeyRetirementAuthorization {
+  private[analytics] given BsonDecoder[HmacKeyRetirementAuthorization] = BsonDecoder.instance { document =>
+    import BsonValueDecoder.given
+    val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
+    for {
+      lakehouse <- BsonDecoder.required[String](document, "lakehouseId", malformed)
+      keyId <- BsonDecoder.required[String](document, "keyId", malformed)
+      verifier <- BsonDecoder.required[String](document, "originalVerifier", malformed)
+      digest <- BsonDecoder.required[String](document, "evidenceDigest", malformed)
+      facts <- BsonDecoder.required[String](document, "evidenceFacts", malformed)
+      at <- BsonDecoder.required[Date](document, "authorizedAt", malformed).map(_.toInstant)
+      result <- validate(HmacKeyRetirementAuthorization(lakehouse, keyId, verifier, facts, digest, at))
+      storedId <- BsonDecoder.required[String](document, "_id", malformed)
+      _ <- Either.cond(
+        storedId == s"${result.lakehouseId}:${result.keyId}",
+        (),
+        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization identity is malformed")
+      )
+    } yield result
+  }
+
   def lakehouseId(root: String): Either[AnalyticsError, String] = MongoAnalyticsLakehouseLock.lockId(root)
 
   def digest(facts: String): String = MessageDigest
@@ -73,36 +97,7 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore(database
   private def id(value: HmacKeyRetirementAuthorization): String = value.lakehouseId + ":" + value.keyId
 
   private def decode(document: Document): Either[AnalyticsError, HmacKeyRetirementAuthorization] =
-    for {
-      lakehouse <- Option(document.getString("lakehouseId")).toRight(
-        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
-      )
-      keyId <- Option(document.getString("keyId")).toRight(
-        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
-      )
-      verifier <- Option(document.getString("originalVerifier")).toRight(
-        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
-      )
-      digest <- Option(document.getString("evidenceDigest")).toRight(
-        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
-      )
-      facts <- Option(document.getString("evidenceFacts")).toRight(
-        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
-      )
-      at <- Option(document.getDate("authorizedAt"))
-        .map(_.toInstant)
-        .toRight(
-          AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is malformed")
-        )
-      result <- HmacKeyRetirementAuthorization.validate(
-        HmacKeyRetirementAuthorization(lakehouse, keyId, verifier, facts, digest, at)
-      )
-      _ <- Either.cond(
-        document.getString("_id") == id(result),
-        (),
-        AnalyticsError.InvalidConfiguration("HMAC key retirement authorization identity is malformed")
-      )
-    } yield result
+    BsonDecoder[HmacKeyRetirementAuthorization].decode(document)
 
   override def list(root: String): IO[Vector[HmacKeyRetirementAuthorization]] =
     IO.fromEither(HmacKeyRetirementAuthorization.lakehouseId(root)).flatMap { lakehouseId =>
