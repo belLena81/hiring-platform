@@ -231,50 +231,62 @@ private[batch] final class AnalyticsKeyContinuityStage(runtime: AnalyticsBatchSt
     }
   }
 
-  def validateKeyMaterialContinuity(spark: SparkSession): IO[Unit] = blocking.either {
-    val registryExists = DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)
-    val existingAnalyticsData = Vector(
-      paths.bronze,
-      paths.quarantine,
-      paths.silver,
-      paths.funnelGold,
-      paths.timeToHireGold,
-      paths.skillsGold,
-      paths.manifests
-    ).exists(DeltaTable.isDeltaTable(spark, _))
-    val existingRows =
-      if (registryExists)
-        spark.read
-          .format("delta")
-          .load(paths.hmacKeyRegistry)
-          .select("keyId", "verifier")
-          .collect()
-          .toVector
-          .map(row => row.getString(0) -> row.getString(1))
-      else Vector.empty
-    val candidateKeys =
-      if (registryExists)
-        pseudonymizer.keyVerifiers.filterNot { case (keyId, _) => existingRows.exists(_._1 == keyId) }
-      else Vector.empty
-    val storedTokenKeys = candidateKeys.collect { case (keyId, _) if hasStoredTokenForKey(spark, keyId) => keyId }.toSet
-    KeyMaterialContinuityDecision
-      .evaluate(
-        registryExists,
-        existingAnalyticsData,
-        existingRows,
-        pseudonymizer.keyVerifiers,
-        storedTokenKeys
-      )
-      .map { added =>
-        if (!registryExists) {
-          createVerifierFrame(spark, pseudonymizer.keyVerifiers).write
-            .format("delta")
-            .mode("errorifexists")
-            .save(paths.hmacKeyRegistry)
-        } else if (added.nonEmpty)
-          createVerifierFrame(spark, added).write.format("delta").mode("append").save(paths.hmacKeyRegistry)
+  def validateKeyMaterialContinuity(spark: SparkSession): IO[Unit] =
+    retirementAuthorizations(paths.root).flatMap { authorizations =>
+      blocking.either {
+        val registryExists = DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)
+        val existingAnalyticsData = Vector(
+          paths.bronze,
+          paths.quarantine,
+          paths.silver,
+          paths.funnelGold,
+          paths.timeToHireGold,
+          paths.skillsGold,
+          paths.manifests
+        ).exists(DeltaTable.isDeltaTable(spark, _))
+        val existingRows =
+          if (registryExists)
+            spark.read
+              .format("delta")
+              .load(paths.hmacKeyRegistry)
+              .select("keyId", "verifier")
+              .collect()
+              .toVector
+              .map(row => row.getString(0) -> row.getString(1))
+          else Vector.empty
+        val candidateKeys =
+          if (registryExists)
+            pseudonymizer.keyVerifiers.filterNot { case (keyId, _) => existingRows.exists(_._1 == keyId) }
+          else Vector.empty
+        val storedTokenKeys = candidateKeys.collect {
+          case (keyId, _) if hasStoredTokenForKey(spark, keyId) => keyId
+        }.toSet
+        val lakehouseId = HmacKeyRetirementAuthorization.lakehouseId(paths.root)
+        lakehouseId
+          .flatMap(
+            KeyMaterialContinuityDecision
+              .evaluate(
+                registryExists,
+                existingAnalyticsData,
+                existingRows,
+                pseudonymizer.keyVerifiers,
+                storedTokenKeys,
+                authorizations,
+                _,
+                pseudonymizer.primaryKeyId
+              )
+          )
+          .map { added =>
+            if (!registryExists) {
+              createVerifierFrame(spark, pseudonymizer.keyVerifiers).write
+                .format("delta")
+                .mode("errorifexists")
+                .save(paths.hmacKeyRegistry)
+            } else if (added.nonEmpty)
+              createVerifierFrame(spark, added).write.format("delta").mode("append").save(paths.hmacKeyRegistry)
+          }
       }
-  }
+    }
 
   def validateHmacConfiguration(spark: SparkSession): IO[Unit] =
     for {
@@ -315,7 +327,10 @@ private[batch] object KeyMaterialContinuityDecision {
       analyticsDataExists: Boolean,
       existingRows: Vector[(String, String)],
       configured: Vector[(String, String)],
-      storedTokenKeys: Set[String]
+      storedTokenKeys: Set[String],
+      authorizations: Vector[HmacKeyRetirementAuthorization] = Vector.empty,
+      lakehouseId: String = "",
+      primaryKeyId: String = ""
   ): Either[AnalyticsError, Vector[(String, String)]] = {
     if (!registryExists && analyticsDataExists)
       Left(
@@ -323,6 +338,8 @@ private[batch] object KeyMaterialContinuityDecision {
           "existing lakehouse has no HMAC key continuity registry; startup fails closed, reset or rebuild this local lakehouse explicitly before reuse"
         )
       )
+    else if (!registryExists && authorizations.nonEmpty)
+      Left(AnalyticsError.InvalidConfiguration("HMAC key retirement authorization has no continuity registry"))
     else if (!registryExists) Right(configured)
     else {
       val rowsAreValid = existingRows.forall { case (keyId, verifier) =>
@@ -331,7 +348,14 @@ private[batch] object KeyMaterialContinuityDecision {
         )
       }
       val existing = existingRows.toMap
-      val removedKey = existing.keys.find(keyId => !configured.exists(_._1 == keyId))
+      val authorizationsValid = authorizations.forall(record =>
+        HmacKeyRetirementAuthorization.validate(record).isRight && record.lakehouseId == lakehouseId
+      ) && authorizations.map(_.keyId).distinct.size == authorizations.size
+      val authorizationByKey = authorizations.map(record => record.keyId -> record).toMap
+      val removedKey = existing.find { case (keyId, verifier) =>
+        !configured.exists(_._1 == keyId) &&
+        !authorizationByKey.get(keyId).exists(record => record.originalVerifier == verifier)
+      }
       val mismatched = configured.find { case (keyId, verifier) => existing.get(keyId).exists(_ != verifier) }
       val added = configured.filterNot { case (keyId, _) => existing.contains(keyId) }
       val unanchoredStoredKey = added.find { case (keyId, _) => storedTokenKeys.contains(keyId) }
@@ -341,10 +365,15 @@ private[batch] object KeyMaterialContinuityDecision {
           (),
           AnalyticsError.InvalidConfiguration("HMAC key continuity registry is malformed")
         )
-        _ <- removedKey.fold[Either[AnalyticsError, Unit]](Right(()))(keyId =>
+        _ <- Either.cond(
+          authorizationsValid && !authorizationByKey.contains(primaryKeyId),
+          (),
+          AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is invalid or its key is primary")
+        )
+        _ <- removedKey.fold[Either[AnalyticsError, Unit]](Right(()))(entry =>
           Left(
             AnalyticsError.InvalidConfiguration(
-              s"HMAC key '$keyId' cannot be removed: audited historical-data cleanup and writer-exclusion verification are not implemented"
+              s"HMAC key '${entry._1}' cannot be removed without durable cleanup and writer-exclusion authorization"
             )
           )
         )

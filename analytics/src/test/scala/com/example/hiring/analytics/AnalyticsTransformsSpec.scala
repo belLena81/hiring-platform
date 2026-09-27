@@ -353,7 +353,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val errors = AnalyticsRunManifest
       .validated(
         "",
-        Vector(PartitionOffsetRange.unsafe("", 0, 0L, 1L), PartitionOffsetRange.unsafe("", 0, 1L, 2L))
+        Vector(PartitionOffsetRange.unsafe("topic", 0, 0L, 1L), PartitionOffsetRange.unsafe("topic", 0, 1L, 2L))
       )
       .toEither
       .swap
@@ -362,7 +362,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       .toNonEmptyList
       .toList
     assert(errors.contains("run id must be non-empty"))
-    assert(errors.contains("topic must be non-empty"))
+    val topicErrors = PartitionOffsetRange.from("", 0, 0L, 1L).toEither.swap.toOption.get
+    assert(topicErrors.toNonEmptyList.toList.contains("topic must be non-empty"))
     val numericErrors = PartitionOffsetRange.from("topic", -1, -1L, -2L).toEither.swap.toOption.get
     assert(numericErrors.toNonEmptyList.toList.contains("partition must be non-negative"))
     assert(numericErrors.toNonEmptyList.toList.contains("start offset must be non-negative"))
@@ -1279,7 +1280,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val retirementBlocked = intercept[AnalyticsError.InvalidConfiguration] {
       new HiringAnalyticsBatch(paths, removed, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
     }
-    assert(retirementBlocked.getMessage.contains("audited historical-data cleanup"))
+    assert(retirementBlocked.getMessage.contains("durable cleanup and writer-exclusion authorization"))
   }
 
   test("HMAC key continuity rejects changed material under the same key ID") {

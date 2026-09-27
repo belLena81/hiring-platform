@@ -48,7 +48,7 @@ final class MongoAnalyticsErasureWorkerStore(
       MongoCursorStream(
         requests
           .find(Filters.eq(AnalyticsCollections.Fields.RepairRequired, true))
-          .sort(Sorts.ascending("requestedAt"))
+          .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt))
           .limit(limit)
           .iterator()
       ).compile.toVector
@@ -153,7 +153,7 @@ final class MongoAnalyticsErasureWorkerStore(
         Updates.unset(AnalyticsCollections.Fields.ResumeAfter)
       )
       val options = new FindOneAndUpdateOptions()
-        .sort(Sorts.ascending("requestedAt", AnalyticsCollections.Fields.Id))
+        .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt, AnalyticsCollections.Fields.Id))
         .returnDocument(ReturnDocument.AFTER)
       Option(requests.findOneAndUpdate(nonFinalizer, update, options))
         .orElse(Option(requests.findOneAndUpdate(finalizer, update, options)))
@@ -166,7 +166,7 @@ final class MongoAnalyticsErasureWorkerStore(
       deliveryTimeout: scala.concurrent.duration.FiniteDuration
   ): IO[Boolean] = mongo {
     val fence = fences.find(Filters.eq(AnalyticsCollections.Fields.Id, subjectId)).first()
-    if (fence == null || !java.lang.Boolean.TRUE.equals(fence.getBoolean("deleted"))) false
+    if (fence == null || !java.lang.Boolean.TRUE.equals(fence.getBoolean(AnalyticsCollections.Fields.Deleted))) false
     else if (fence.getString(AnalyticsCollections.Fields.LeaseToken) == null) true
     else
       Option(fence.getDate(AnalyticsCollections.Fields.LeaseUntil)) match {
@@ -178,10 +178,13 @@ final class MongoAnalyticsErasureWorkerStore(
   /** IDs are copied into the durable request in the account deletion transaction. */
   def transactionalIds(requestId: String): IO[Vector[String]] = mongo {
     val request = requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first()
-    if (request == null || Option(request.getInteger("fencingVersion")).forall(_.intValue() != 1))
+    if (
+      request == null || Option(request.getInteger(AnalyticsCollections.Fields.FencingVersion))
+        .forall(_.intValue() != 1)
+    )
       Left(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing"))
     else
-      Option(request.getList("transactionalIds", classOf[String]))
+      Option(request.getList(AnalyticsCollections.Fields.TransactionalIds, classOf[String]))
         .toRight(AnalyticsError.MalformedMarker)
         .flatMap(
           _.asScala.toVector
@@ -219,12 +222,14 @@ final class MongoAnalyticsErasureWorkerStore(
   def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): IO[Boolean] = mongo {
     val partitionDocuments = barrier.partitions
       .map(partition =>
-        new Document("number", partition.number).append("endOffsetExclusive", partition.endOffsetExclusive)
+        new Document(AnalyticsCollections.Fields.PartitionNumber, partition.number)
+          .append(AnalyticsCollections.Fields.EndOffsetExclusive, partition.endOffsetExclusive)
       )
       .asJava
     val update = Updates.set(
       AnalyticsCollections.Fields.KafkaRetentionBarrier,
-      new Document("topic", barrier.topic).append("partitions", partitionDocuments)
+      new Document(AnalyticsCollections.Fields.Topic, barrier.topic)
+        .append(AnalyticsCollections.Fields.Partitions, partitionDocuments)
     )
     matchedUpdate(requests, ownedClaim(claim, now), update)
   }
@@ -233,21 +238,31 @@ final class MongoAnalyticsErasureWorkerStore(
     val request = requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId)).first()
     Option(request)
       .flatMap(document => Option(document.get(AnalyticsCollections.Fields.KafkaRetentionBarrier, classOf[Document])))
-      .map { stored =>
-        val topic = Option(stored.getString("topic")).getOrElse(throw AnalyticsError.MalformedMarker)
-        val rows =
-          Option(stored.getList("partitions", classOf[Document])).getOrElse(throw AnalyticsError.MalformedMarker)
-        val partitions = rows.asScala.toVector.map { value =>
-          val number =
-            Option(value.getInteger("number")).map(_.intValue()).getOrElse(throw AnalyticsError.MalformedMarker)
-          val offset = Option(value.getLong("endOffsetExclusive"))
-            .map(_.longValue())
-            .getOrElse(throw AnalyticsError.MalformedMarker)
-          KafkaRetentionBarrier.Partition(number, offset)
-        }
-        KafkaRetentionBarrier.validate(KafkaRetentionBarrier(topic, partitions)).fold(throw _, identity)
+      .traverse { stored =>
+        for {
+          topic <- Option(stored.get(AnalyticsCollections.Fields.Topic))
+            .collect { case value: String => value }
+            .toRight(AnalyticsError.MalformedMarker)
+          rows <- Option(stored.get(AnalyticsCollections.Fields.Partitions))
+            .collect { case values: java.util.List[?] => values.asScala.toVector }
+            .toRight(AnalyticsError.MalformedMarker)
+          partitions <- rows.traverse { row =>
+            for {
+              value <- Option(row)
+                .collect { case document: Document => document }
+                .toRight(AnalyticsError.MalformedMarker)
+              number <- Option(value.get(AnalyticsCollections.Fields.PartitionNumber))
+                .collect { case n: java.lang.Integer => n.intValue() }
+                .toRight(AnalyticsError.MalformedMarker)
+              offset <- Option(value.get(AnalyticsCollections.Fields.EndOffsetExclusive))
+                .collect { case n: java.lang.Long => n.longValue() }
+                .toRight(AnalyticsError.MalformedMarker)
+            } yield KafkaRetentionBarrier.Partition(number, offset)
+          }
+          valid <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(topic, partitions))
+        } yield valid
       }
-  }
+  }.flatMap(IO.fromEither)
 
   def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): IO[Boolean] = mongo {
     matchedUpdate(
@@ -300,28 +315,18 @@ final class MongoAnalyticsErasureWorkerStore(
       }.flatMap { operations =>
         MongoSession.resource(client).use { session =>
           mongo {
-            try {
-              session.startTransaction()
+            session.withTransaction(() => {
               val ownership = matchedUpdate(
                 session,
                 requests,
                 ownedClaim(claim, now),
                 Updates.inc(AnalyticsCollections.Fields.DeltaEvidenceRevision, 1L)
               )
-              if (!ownership) {
-                session.abortTransaction()
-                false
-              } else {
+              if (ownership) {
                 if (!operations.isEmpty) deltaEvidence.bulkWrite(session, operations)
-                session.commitTransaction()
-                true
               }
-            } catch {
-              case NonFatal(error) =>
-                try session.abortTransaction()
-                catch { case NonFatal(_) => () }
-                throw error
-            }
+              ownership
+            })
           }
         }
       }
@@ -630,7 +635,7 @@ private[analytics] object MongoAnalyticsErasureWorkerStore {
     val progress = Option(document.getInteger(AnalyticsCollections.Fields.Progress)).map(_.intValue()).getOrElse(0)
     val progressKey = Option(document.getLong(AnalyticsCollections.Fields.ProgressKey)).map(_.longValue()).getOrElse(0L)
     for {
-      _ <- Option(document.getInteger("fencingVersion")).filter(_.intValue() == 1)
+      _ <- Option(document.getInteger(AnalyticsCollections.Fields.FencingVersion)).filter(_.intValue() == 1)
       id <- requestId
       _ <- scala.util.Try(UUID.fromString(id)).toOption.filter(_.toString == id)
       leaseToken <- token

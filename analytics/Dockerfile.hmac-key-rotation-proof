@@ -1,0 +1,17 @@
+ARG ANALYTICS_BASE_IMAGE=sbtscala/scala-sbt:eclipse-temurin-17.0.20_8_1.13.0_2.13.18
+FROM ${ANALYTICS_BASE_IMAGE}
+
+ARG ANALYTICS_WRITER_UID
+RUN set -eu; \
+    test "${ANALYTICS_WRITER_UID}" = 20001 -o "${ANALYTICS_WRITER_UID}" = 20002; \
+    groupadd -g "${ANALYTICS_WRITER_UID}" analytics; \
+    useradd -M -u "${ANALYTICS_WRITER_UID}" -g "${ANALYTICS_WRITER_UID}" -d /home/analytics -s /bin/sh analytics; \
+    mkdir -p /home/analytics/.cache /home/analytics/.sbt /tmp/.sbt; \
+    if test -d /root/.cache; then cp -a /root/.cache/. /home/analytics/.cache/; fi; \
+    if test -d /root/.sbt; then cp -a /root/.sbt/. /home/analytics/.sbt/; fi; \
+    chown -R "${ANALYTICS_WRITER_UID}:${ANALYTICS_WRITER_UID}" /home/analytics /workspace/analytics /tmp/.sbt
+
+ENV HOME=/home/analytics
+ENV COURSIER_CACHE=/home/analytics/.cache/coursier/v1
+ENV SBT_OPTS=-Dsbt.server.autostart=false
+USER ${ANALYTICS_WRITER_UID}

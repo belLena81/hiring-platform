@@ -334,7 +334,8 @@ final class HiringAnalyticsBatch(
     clock: Clock[IO] = Clock[IO],
     reportPublisher: Option[AnalyticsReportPublisher] = None,
     manifestWriter: Option[(SparkSession, AnalyticsRunManifest, String, String) => IO[Unit]] = None,
-    lakehouseLock: AnalyticsLakehouseLock = AnalyticsLakehouseLock.processLocal
+    lakehouseLock: AnalyticsLakehouseLock = AnalyticsLakehouseLock.processLocal,
+    retirementStore: HmacKeyRetirementAuthorizationStore = HmacKeyRetirementAuthorizationStore.unavailable
 ) {
   private val logger = Slf4jLogger.getLogger[IO]
   private val MaximumErasureEvidenceFiles = 100000
@@ -452,7 +453,8 @@ final class HiringAnalyticsBatch(
     withExpiry = withExpiry,
     quarantineId = () => quarantineId,
     configureRawTablePrivacy = configureRawTablePrivacy,
-    maximumErasureEvidenceFiles = MaximumErasureEvidenceFiles
+    maximumErasureEvidenceFiles = MaximumErasureEvidenceFiles,
+    retirementAuthorizations = retirementStore.list
   )
 
   private val keyContinuityStage = new AnalyticsKeyContinuityStage(stageRuntime)

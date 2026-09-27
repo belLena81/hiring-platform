@@ -28,7 +28,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
   private def replicaSet(): ReplicaSet = {
     val container = (new ReplicaSet)
       .withExposedPorts(27017)
-      .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
+      .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0", "--setParameter", "enableTestCommands=1")
       .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
     container.start()
     val initiated = container.execInContainer(
@@ -141,6 +141,63 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(snapshot.getLong("revision"), Long.box(2L))
       assertEquals(snapshot.getString("runId"), "newer")
       assert(snapshot.getDate("expiresAt").after(Date.from(now)))
+      database
+        .getCollection("analytics_report_runs")
+        .insertOne(
+          new Document("_id", "malformed")
+            .append("rangeFingerprint", "range-malformed")
+            .append("generation", "invalid")
+            .append("revision", 3L)
+            .append("state", "Reserved")
+        )
+      val malformed = publisher.reserve("malformed", "range-malformed", now).attempt.unsafeRunSync()
+      assert(malformed.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+    } finally {
+      client.close()
+      container.stop()
+    }
+  }
+
+  test("report revision reservation retries transient Mongo transaction and uncertain commit without duplicates") {
+    val container = replicaSet()
+    val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    try {
+      val database = client.getDatabase(s"report_retry_${UUID.randomUUID()}")
+      val control = database.getCollection("analytics_report_control")
+      control.insertOne(
+        new Document("_id", "analytics-report")
+          .append("generation", 0L)
+          .append("state", "Unpublished")
+          .append("nextRevision", 0L)
+          .append("lastPublishedRevision", 0L)
+          .append("lastRunId", "")
+      )
+      val publisher = new MongoAnalyticsReportPublisher(client, database)
+      val admin = client.getDatabase("admin")
+      def failOnce(command: String, errorCode: Int, label: String): Unit = {
+        admin.runCommand(
+          new Document("configureFailPoint", "failCommand")
+            .append("mode", new Document("times", 1))
+            .append(
+              "data",
+              new Document("failCommands", java.util.List.of(command))
+                .append("errorCode", errorCode)
+                .append("errorLabels", java.util.List.of(label))
+            )
+        )
+        ()
+      }
+      val now = Instant.now()
+      failOnce("update", 112, "TransientTransactionError")
+      val first = publisher.reserve("transient", "range-transient", now).unsafeRunSync()
+      assertEquals(first.revision, 1L)
+      failOnce("commitTransaction", 91, "UnknownTransactionCommitResult")
+      val second = publisher.reserve("uncertain", "range-uncertain", now).unsafeRunSync()
+      assertEquals(second.revision, 2L)
+      assertEquals(control.find(new Document("_id", "analytics-report")).first().getLong("nextRevision"), Long.box(2L))
+      assertEquals(database.getCollection("analytics_report_runs").countDocuments(), 2L)
     } finally {
       client.close()
       container.stop()

@@ -7,23 +7,26 @@ import com.example.hiring.analytics.mongo.*
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.client.model.Filters
-import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
-import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
-import org.apache.kafka.common.serialization.StringSerializer
+import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.bson.Document
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{array_contains, col}
-import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType, TimestampType}
 
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.io.File
 import java.nio.charset.StandardCharsets
+import java.nio.file.{Files, Path}
+import java.nio.file.attribute.PosixFilePermissions
+import java.sql.Timestamp
 import java.time.Duration
+import java.time.Instant
 import java.util.{Date, Properties, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.Using
 
 /** Live API-to-Compose-worker proof on a disposable task-scoped Mongo/Kafka/Delta stack. */
 final class AccountDeletionComposeIntegrationSpec extends FunSuite {
@@ -102,27 +105,18 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     value
   }
 
-  private def isProducerFencingFailure(error: Throwable): Boolean =
-    Iterator.iterate(error)(_.getCause).takeWhile(_ != null).exists {
-      case _: ProducerFencedException       => true
-      case _: InvalidProducerEpochException => true
-      case _                                => false
-    }
-
-  private def publisherProperties(bootstrap: String, transactionalId: String): Properties = {
+  private def transactionEpoch(bootstrap: String, transactionalId: String): Int = {
     val props = new Properties()
-    props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap)
-    props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
-    props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
-    props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
-    props.put(ProducerConfig.ACKS_CONFIG, "all")
+    props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap)
     props.put("security.protocol", "SASL_PLAINTEXT")
     props.put("sasl.mechanism", "PLAIN")
     props.put(
       "sasl.jaas.config",
-      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"hiring_publisher_v2\" password=\"${required("KAFKA_PUBLISHER_V2_PASSWORD")}\";"
+      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"analytics_fencer\" password=\"${required("KAFKA_FENCER_PASSWORD")}\";"
     )
-    props
+    val admin = Admin.create(props)
+    try admin.describeTransactions(java.util.List.of(transactionalId)).all().get().get(transactionalId).producerEpoch()
+    finally admin.close(Duration.ofSeconds(5))
   }
 
   private def seedPublishableEvent(database: MongoDatabase, subjectId: String): String = {
@@ -173,7 +167,8 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     val schema = StructType(
       Seq(
         StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false),
-        StructField("rawValue", StringType, nullable = false)
+        StructField("rawValue", StringType, nullable = false),
+        StructField("expiresAt", TimestampType, nullable = false)
       )
     )
     val spark = SparkSession
@@ -186,11 +181,20 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
       .getOrCreate()
     try {
+      val expiresAt = Timestamp.from(Instant.now().plusSeconds(30L * 86400L))
       val rows = java.util.Arrays.asList(
-        org.apache.spark.sql.RowFactory.create(java.util.List.of(subjectToken), s"subject-proof-$nonce"),
-        org.apache.spark.sql.RowFactory.create(java.util.List.of(controlToken), s"control-proof-$nonce")
+        org.apache.spark.sql.RowFactory.create(java.util.List.of(subjectToken), s"subject-proof-$nonce", expiresAt),
+        org.apache.spark.sql.RowFactory.create(java.util.List.of(controlToken), s"control-proof-$nonce", expiresAt)
       )
       spark.createDataFrame(rows, schema).write.format("delta").mode("errorifexists").save(paths.bronze)
+      val bronzePath = Path.of(URI.create(paths.bronze))
+      val _ = Files.setPosixFilePermissions(bronzePath.getParent, PosixFilePermissions.fromString("rwxrwxrwx"))
+      Using.resource(Files.walk(bronzePath)) { entries =>
+        entries.forEach { path =>
+          val mode = if (Files.isDirectory(path)) "rwxrwxrwx" else "rw-rw-rw-"
+          val _ = Files.setPosixFilePermissions(path, PosixFilePermissions.fromString(mode))
+        }
+      }
       val seeded = spark.read.format("delta").load(paths.bronze)
       assertEquals(seeded.filter(array_contains(col("subjectTokens"), subjectToken)).count(), 1L)
       assertEquals(seeded.filter(array_contains(col("subjectTokens"), controlToken)).count(), 1L)
@@ -226,7 +230,10 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       val api = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_API_URL")
       val kafka = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_KAFKA")
       val analyticsDir = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_ANALYTICS_DIR")
+      val publisherProofDir = Path.of(required("HIRING_ACCOUNT_DELETION_PUBLISHER_PROOF_DIR"))
       assertEquals(new File(analyticsDir).getCanonicalPath, new File(analyticsDir).getAbsolutePath)
+      assertEquals(publisherProofDir.toRealPath(), publisherProofDir.toAbsolutePath.normalize())
+      assertEquals(publisherProofDir.getFileName.toString, "publisher")
       val nonce = databaseName.stripPrefix("account_deletion_")
       assertEquals(topic, s"hiring.deletion.$nonce", "database and topic must use the same proof nonce")
       validateLocalEndpoints(api, uri, kafka)
@@ -275,7 +282,9 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
         )
         val (token, subjectId) = authResult(login, "login")
         val (subjectToken, controlToken) = seedAttributedDeltaRows(subjectId)
+        Files.createFile(publisherProofDir.resolve("armed"))
         val eventId = seedPublishableEvent(database, subjectId)
+        eventually(Files.exists(publisherProofDir.resolve("held")))(identity)
         val fence = eventually {
           Option(database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first())
         }(_.exists(doc => Option(doc.getList("transactionalIds", classOf[String])).exists(!_.isEmpty))).get
@@ -285,17 +294,10 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
           transactionalId.startsWith("hiring-publisher-"),
           "ID must be registered by the production publisher claim"
         )
-        eventually(Option(database.getCollection("event_outbox").find(Filters.eq("_id", eventId)).first()))(
-          _.exists(_.getString("state") == "Published")
-        )
-
-        val producer = new KafkaProducer[String, String](publisherProperties(kafka, transactionalId))
+        val heldOutbox = database.getCollection("event_outbox").find(Filters.eq("_id", eventId)).first()
+        assertEquals(heldOutbox.getString("state"), "InFlight", "the real publisher must hold the subject lease")
+        val initialEpoch = transactionEpoch(kafka, transactionalId)
         try {
-          producer.initTransactions()
-          producer.beginTransaction()
-          producer
-            .send(new ProducerRecord(topic, subjectId, s"open-deletion-transaction-$subjectId"))
-            .get(30, java.util.concurrent.TimeUnit.SECONDS)
           val deletion = graphql(
             api,
             s"""mutation { deleteMyAccount(input: { idempotencyKey: "${UUID
@@ -314,6 +316,14 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
           val captured =
             Option(request.getList("transactionalIds", classOf[String])).fold(Vector.empty[String])(_.asScala.toVector)
           assert(captured.contains(transactionalId), "deletion must capture the production claim's transactional ID")
+          eventually(transactionEpoch(kafka, transactionalId))(_ > initialEpoch)
+          Files.createFile(publisherProofDir.resolve("release"))
+          val commitResult = eventually {
+            if (Files.exists(publisherProofDir.resolve("result")))
+              Some(Files.readString(publisherProofDir.resolve("result")))
+            else None
+          }(_.nonEmpty).get
+          assertEquals(commitResult, "fenced", "the actual publisher's commit must fail due to broker fencing")
           val purgedRequest = eventually(
             Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
           )(doc => doc.exists(_.getString("phase") == ErasurePhase.DeltaPurged.toString)).get
@@ -365,16 +375,15 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
               "unrelated subject row must remain in current snapshot"
             )
           } finally spark.stop()
-          val staleCommit = try { producer.commitTransaction(); None }
-          catch { case scala.util.control.NonFatal(error) => Some(error) }
-          assert(staleCommit.exists(isProducerFencingFailure), clues(staleCommit))
           val phase = database
             .getCollection("analytics_erasure_requests")
             .find(Filters.eq("_id", subjectId))
             .first()
             .getString("phase")
           assertEquals(phase, ErasurePhase.DeltaPurged.toString)
-        } finally producer.close(Duration.ofSeconds(5))
+        } finally
+          if (!Files.exists(publisherProofDir.resolve("release")))
+            Files.createFile(publisherProofDir.resolve("release"))
       } finally client.close()
     }
   }

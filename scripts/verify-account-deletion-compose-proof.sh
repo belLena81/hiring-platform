@@ -26,6 +26,12 @@ git check-ignore -q .local/data/account-deletion-compose-proof/probe
 [[ ! -e "$proof_data_dir" && ! -L "$proof_data_dir" ]] || { printf 'Nonce-scoped proof data path already exists; refusing to reuse it.\n' >&2; exit 1; }
 mkdir -p "$proof_data_dir"
 chmod 700 "$proof_data_dir"
+# Host Spark and the rootless Compose worker share only this nonce-scoped tree.
+mkdir -p "$proof_data_dir/lakehouse"
+chmod 777 "$proof_data_dir/lakehouse"
+publisher_proof_dir="$proof_data_dir/publisher"
+mkdir -p "$publisher_proof_dir"
+chmod 700 "$publisher_proof_dir"
 read -r mongo_port kafka_port api_port < <(python3 -c 'import socket; ss=[]
 for _ in range(3):
  s=socket.socket(); s.bind(("127.0.0.1",0)); ss.append(s)
@@ -43,8 +49,18 @@ cleanup() {
     "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
     if [[ ! -L "$repo_root/.local" && ! -L "$repo_root/.local/data" && ! -L "$proof_parent" &&
           "$(cd "$proof_parent" && pwd -P)" == "$proof_parent" &&
-          ! -L "$proof_data_dir" && "$(dirname "$proof_data_dir")" == "$proof_parent" ]]; then
-      rm -rf -- "$proof_data_dir"
+          ! -L "$proof_data_dir" && ! -L "$proof_data_dir/lakehouse" &&
+          "$(dirname "$proof_data_dir")" == "$proof_parent" ]]; then
+      # Rootless worker files are owned by its mapped host UID. The mount is
+      # restricted to this run's lakehouse, then the host removes its parent.
+      if ! docker run --rm -v "$proof_data_dir/lakehouse:/work" alpine:3.21 sh -c \
+        'for entry in /work/* /work/.[!.]* /work/..?*; do if [ -e "$entry" ] || [ -L "$entry" ]; then rm -rf -- "$entry"; fi; done'; then
+        result=1
+      fi
+      if (( result == 0 )) && ! rm -rf -- "$proof_data_dir"; then result=1; fi
+      if (( result == 0 )); then
+        printf 'Proof stack %s removed its task-scoped containers/network; named volumes remain for inspection. API log: %s\n' "$project" "$log"
+      fi
     else
       printf 'Proof-data path changed ownership or resolved through a symlink; retained it for inspection.\n' >&2
       result=1
@@ -68,6 +84,8 @@ export HIRING_ANALYTICS_HMAC_KEY_ID
 export HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID
 export HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64
 export KAFKA_TOPIC="$topic"
+export KAFKA_FENCER_PASSWORD
+export HIRING_ACCOUNT_DELETION_PUBLISHER_PROOF_DIR="$publisher_proof_dir"
 "${compose[@]}" up -d --wait mongodb kafka kafka-acl-init
 
 cat > "$config" <<EOF
@@ -85,6 +103,7 @@ export HTTP_HOST=127.0.0.1
 export HTTP_PORT="$api_port"
 export KAFKA_ENABLED=true
 export KAFKA_BOOTSTRAP_SERVERS="127.0.0.1:$kafka_port"
+export KAFKA_SASL_SECURITY_PROTOCOL=SASL_PLAINTEXT
 export KAFKA_PUBLISHER_USERNAME=hiring_publisher_v2
 export KAFKA_PUBLISHER_V2_PASSWORD
 export JAVA_TOOL_OPTIONS="-Dconfig.file=$config"
@@ -111,4 +130,3 @@ export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_MONGO_URI="$MONGODB_URI"
 export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_KAFKA="127.0.0.1:$kafka_port"
 export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_ANALYTICS_DIR="$proof_data_dir"
 (cd analytics && unset JAVA_TOOL_OPTIONS && sbt 'IntegrationTest / testOnly *AccountDeletionComposeIntegrationSpec')
-printf 'Proof stack %s removed its task-scoped containers/network; named volumes remain for inspection. Active retention/shared Compose projects were not targeted. API log: %s\n' "$project" "$log"

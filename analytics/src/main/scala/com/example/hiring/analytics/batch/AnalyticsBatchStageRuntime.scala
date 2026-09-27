@@ -1,6 +1,11 @@
 package com.example.hiring.analytics.batch
 
-import com.example.hiring.analytics.{AnalyticsError, AnalyticsRunManifest, SubjectPseudonymizer}
+import com.example.hiring.analytics.{
+  AnalyticsError,
+  AnalyticsRunManifest,
+  HmacKeyRetirementAuthorization,
+  SubjectPseudonymizer
+}
 
 import cats.effect.IO
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
@@ -24,7 +29,8 @@ private[batch] final case class AnalyticsBatchStageRuntime(
     withExpiry: (DataFrame, Instant, Int) => DataFrame,
     quarantineId: () => Column,
     configureRawTablePrivacy: SparkSession => IO[Unit],
-    maximumErasureEvidenceFiles: Int
+    maximumErasureEvidenceFiles: Int,
+    retirementAuthorizations: String => IO[Vector[HmacKeyRetirementAuthorization]]
 )
 
 private[batch] final case class AnalyticsBronzeInput(frame: DataFrame, startedAt: Instant, records: Long)

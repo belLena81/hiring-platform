@@ -69,7 +69,8 @@ object HiringAnalyticsBatchMain extends IOApp {
               common.pseudonymizer,
               markers,
               reportPublisher = Some(new MongoAnalyticsReportPublisher(mongo, database)),
-              lakehouseLock = new MongoAnalyticsLakehouseLock(database)
+              lakehouseLock = new MongoAnalyticsLakehouseLock(database),
+              retirementStore = new MongoHmacKeyRetirementAuthorizationStore(database)
             ).run(spark, new KafkaOffsetRangeSource(common.kafka), configured.manifest)
           }
       }

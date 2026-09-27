@@ -251,6 +251,30 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       assertEquals(request.getLong("progressKey"), Long.box(checkpoint.progressKey))
       assertEquals(request.getDate("resumeAfter"), null)
       assertEquals(request.getString("leaseToken"), recovered.leaseToken)
+      restartedClient
+        .getDatabase(databaseName)
+        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .updateOne(
+          new Document("_id", requestId),
+          new Document(
+            "$set",
+            new Document(
+              "kafkaRetentionBarrier",
+              new Document("topic", "hiring.operational-events")
+                .append(
+                  "partitions",
+                  java.util.List.of(new Document("number", "invalid").append("endOffsetExclusive", 21L))
+                )
+            )
+          )
+        )
+      assertEquals(
+        new MongoAnalyticsErasureWorkerStore(restartedClient, restartedClient.getDatabase(databaseName))
+          .readBarrier(requestId)
+          .attempt
+          .unsafeRunSync(),
+        Left(AnalyticsError.MalformedMarker)
+      )
     } finally {
       resumeEvidenceWrite.countDown()
       if (restartedClient != null) restartedClient.close()
@@ -591,6 +615,213 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       assertEquals(persisted.getString("state"), "Processing")
       assertEquals(persisted.getString("failureCategory"), null)
       assertEquals(persisted.getBoolean("repairRequired"), Boolean.box(false))
+    } finally {
+      client.close()
+      container.stop()
+    }
+  }
+
+  test("a failure write paused before Mongo cannot overwrite a reclaimed lease or its repair state") {
+    val container = replicaSet()
+    val connectionString =
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val databaseName = s"erasure_failure_race_${UUID.randomUUID()}"
+    val staleWriteStarted = new CountDownLatch(1)
+    val releaseStaleWrite = new CountDownLatch(1)
+    val pauseStaleWrite = new AtomicBoolean(true)
+    val listener = new CommandListener {
+      override def commandStarted(event: CommandStartedEvent): Unit = {
+        if (
+          event.getDatabaseName == databaseName &&
+          event.getCommandName == "update" &&
+          event.getCommand.toJson.contains("failureCategory") &&
+          pauseStaleWrite.compareAndSet(true, false)
+        ) {
+          staleWriteStarted.countDown()
+          if (!releaseStaleWrite.await(90, TimeUnit.SECONDS))
+            throw new AssertionError("stale failure write was not released")
+        }
+      }
+      override def commandSucceeded(event: CommandSucceededEvent): Unit = ()
+      override def commandFailed(event: CommandFailedEvent): Unit = ()
+    }
+    val settings = MongoClientSettings
+      .builder()
+      .applyConnectionString(new ConnectionString(connectionString))
+      .addCommandListener(listener)
+      .build()
+    val staleClient = MongoClients.create(settings)
+    val currentClient = MongoClients.create(connectionString)
+    try {
+      val database = currentClient.getDatabase(databaseName)
+      val requestId = UUID.randomUUID().toString
+      val now = Instant.now()
+      val requests = database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+      requests.insertOne(
+        new Document("_id", requestId)
+          .append("state", "Pending")
+          .append("fencingVersion", 1)
+          .append("transactionalIds", java.util.List.of[String]())
+          .append("requestedAt", Date.from(now))
+      )
+      val staleStore = new MongoAnalyticsErasureWorkerStore(staleClient, staleClient.getDatabase(databaseName))
+      val currentStore = new MongoAnalyticsErasureWorkerStore(currentClient, database)
+      val staleClaim = currentStore.claim(now, now.plusSeconds(1), 1).unsafeRunSync().head
+      val result = for {
+        delayed <- staleStore
+          .recordFailure(
+            staleClaim,
+            ErasureFailureCategory.Unknown,
+            1,
+            None,
+            now.plusMillis(500)
+          )
+          .start
+        _ <- IO.blocking(assert(staleWriteStarted.await(30, TimeUnit.SECONDS)))
+        currentClaim <- currentStore.claim(now.plusSeconds(2), now.plusSeconds(62), 1).map(_.head)
+        staleRequeue <- staleStore.requeueRepair(requestId, 1, now.plusSeconds(3))
+        _ <- IO.blocking(releaseStaleWrite.countDown())
+        staleSaved <- delayed.joinWithNever
+        currentSaved <- currentStore.recordFailure(
+          currentClaim,
+          ErasureFailureCategory.InvalidState,
+          1,
+          None,
+          now.plusSeconds(3)
+        )
+        observed <- IO.blocking(requests.find(new Document("_id", requestId)).first())
+      } yield (currentClaim, staleSaved, currentSaved, staleRequeue, observed)
+      val (currentClaim, staleSaved, currentSaved, staleRequeue, observed) = result.unsafeRunSync()
+      assertNotEquals(currentClaim.leaseToken, staleClaim.leaseToken)
+      assertEquals(staleSaved, false)
+      assertEquals(currentSaved, true)
+      assertEquals(staleRequeue, false)
+      assertEquals(observed.getInteger("attemptCount"), Integer.valueOf(1))
+      assertEquals(observed.getString("failureCategory"), ErasureFailureCategory.InvalidState.persistedName)
+      assertEquals(observed.getBoolean("repairRequired"), Boolean.box(true))
+      assertEquals(observed.getString("leaseToken"), null)
+    } finally {
+      releaseStaleWrite.countDown()
+      currentClient.close()
+      staleClient.close()
+      container.stop()
+    }
+  }
+
+  test("concurrent repair requeues and worker claims preserve one lease and the durable checkpoint") {
+    val container = replicaSet()
+    val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    try {
+      val database = client.getDatabase(s"erasure_repair_race_${UUID.randomUUID()}")
+      val collection = database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+      val users = database.getCollection("users")
+      val reportControl = database.getCollection("analytics_report_control")
+      val requestId = UUID.randomUUID().toString
+      val now = Instant.now()
+      val phase = ErasurePhase.OutboxPurged
+      val progress = 37
+      val progressKey = phase.ordinal.toLong * ErasurePhase.ProgressPerPhase + progress.toLong
+      collection.insertOne(
+        new Document("_id", requestId)
+          .append("state", "Pending")
+          .append("fencingVersion", 1)
+          .append("transactionalIds", java.util.List.of())
+          .append("requestedAt", Date.from(now))
+          .append("phase", phase.persistedName)
+          .append("progress", progress)
+          .append("progressKey", progressKey)
+          .append("attemptCount", 0)
+      )
+      users.insertOne(new Document("_id", requestId).append("accountStatus", "Deleted"))
+      reportControl.insertOne(
+        new Document("_id", "analytics-report")
+          .append("state", "Hidden")
+          .append("generation", 7L)
+          .append("lastPublishedRevision", 3L)
+      )
+      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val result = for {
+        initial <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
+        saved <- store.recordFailure(initial, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
+        _ <- IO.raiseWhen(!saved)(new AssertionError("repair failure was not recorded"))
+        _ <- IO.blocking {
+          collection.updateOne(
+            new Document("_id", requestId),
+            new Document(
+              "$set",
+              new Document("leaseToken", "competing-live-lease").append("leaseUntil", Date.from(now.plusSeconds(30L)))
+            )
+          )
+        }
+        liveLeaseRequeue <- store.requeueRepair(requestId, 1, now.plusSeconds(2L))
+        _ = assert(!liveLeaseRequeue, "operator requeue must reject a live lease")
+        _ <- IO.blocking {
+          collection.updateOne(
+            new Document("_id", requestId),
+            new Document("$unset", new Document("leaseToken", "").append("leaseUntil", ""))
+          )
+        }
+        gate <- Deferred[IO, Unit]
+        firstReady <- Deferred[IO, Unit]
+        secondReady <- Deferred[IO, Unit]
+        first <- (firstReady.complete(()) *> gate.get *>
+          store.requeueRepair(requestId, 1, now.plusSeconds(3L))).start
+        second <- (secondReady.complete(()) *> gate.get *>
+          store.requeueRepair(requestId, 1, now.plusSeconds(3L))).start
+        _ <- firstReady.get *> secondReady.get *> gate.complete(())
+        firstResult <- first.joinWithNever
+        secondResult <- second.joinWithNever
+        _ = assertEquals(Vector(firstResult, secondResult).count(identity), 1)
+        retryClaim <- store.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).map(_.head)
+        secondFailure <- store.recordFailure(
+          retryClaim,
+          ErasureFailureCategory.InvalidState,
+          2,
+          None,
+          now.plusSeconds(5L)
+        )
+        _ <- IO.raiseWhen(!secondFailure)(new AssertionError("second repair failure was not recorded"))
+        claimGate <- Deferred[IO, Unit]
+        claimReady <- Deferred[IO, Unit]
+        requeueReady <- Deferred[IO, Unit]
+        claimFiber <- (claimReady.complete(()) *> claimGate.get *>
+          store.claim(now.plusSeconds(6L), now.plusSeconds(66L), 1)).start
+        requeueFiber <- (requeueReady.complete(()) *> claimGate.get *>
+          store.requeueRepair(requestId, 2, now.plusSeconds(6L))).start
+        _ <- claimReady.get *> requeueReady.get *> claimGate.complete(())
+        racingClaims <- claimFiber.joinWithNever
+        racingRequeue <- requeueFiber.joinWithNever
+        laterClaims <- store.claim(now.plusSeconds(7L), now.plusSeconds(67L), 1)
+        persisted <- IO.blocking(collection.find(new Document("_id", requestId)).first())
+        tombstone <- IO.blocking(users.find(new Document("_id", requestId)).first())
+        reportState <- IO.blocking(reportControl.find(new Document("_id", "analytics-report")).first())
+      } yield (initial, racingClaims, racingRequeue, laterClaims, persisted, tombstone, reportState)
+
+      val (initial, racingClaims, racingRequeue, laterClaims, persisted, tombstone, reportState) =
+        result.unsafeRunSync()
+      assertEquals(initial.phase, phase)
+      assertEquals(initial.progress, progress)
+      assert(racingRequeue, "requeue must win while repair-required work remains unclaimable")
+      assertEquals(racingClaims.size + laterClaims.size, 1)
+      val owner = (racingClaims ++ laterClaims).head
+      assertEquals(owner.phase, phase)
+      assertEquals(owner.progress, progress)
+      assertEquals(owner.progressKey, progressKey)
+      assertEquals(owner.attemptCount, 2)
+      assertEquals(persisted.getString("state"), "Processing")
+      assertEquals(persisted.getString("leaseToken"), owner.leaseToken)
+      assertEquals(persisted.getString("phase"), phase.persistedName)
+      assertEquals(persisted.getInteger("progress"), Int.box(progress))
+      assertEquals(persisted.getLong("progressKey"), Long.box(progressKey))
+      assertEquals(persisted.getInteger("attemptCount"), Int.box(2))
+      assertEquals(persisted.getBoolean("repairRequired"), Boolean.box(false))
+      assertEquals(persisted.getString("failureCategory"), null)
+      assertEquals(tombstone.getString("accountStatus"), "Deleted")
+      assertEquals(reportState.getString("state"), "Hidden")
+      assertEquals(reportState.getLong("generation"), Long.box(7L))
+      assertEquals(reportState.getLong("lastPublishedRevision"), Long.box(3L))
     } finally {
       client.close()
       container.stop()

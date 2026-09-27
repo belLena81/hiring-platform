@@ -1,8 +1,12 @@
 package com.example.hiring.analytics.batch
 
+import com.example.hiring.analytics.HmacKeyRetirementAuthorization
+
 import munit.ScalaCheckSuite
 import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
+
+import java.time.Instant
 
 final class KeyMaterialContinuityDecisionSpec extends ScalaCheckSuite {
   private val oldKey = "old-key" -> ("a" * 43)
@@ -41,6 +45,53 @@ final class KeyMaterialContinuityDecisionSpec extends ScalaCheckSuite {
       KeyMaterialContinuityDecision
         .evaluate(true, true, Vector("old-key" -> ("c" * 43)), Vector(oldKey), Set.empty)
         .isLeft
+    )
+  }
+
+  test("omission needs an immutable authorization bound to the lakehouse and original verifier") {
+    val lakehouse = "1" * 64
+    val record = HmacKeyRetirementAuthorization(
+      lakehouse,
+      oldKey._1,
+      oldKey._2,
+      "test evidence",
+      HmacKeyRetirementAuthorization.digest("test evidence"),
+      Instant.EPOCH
+    )
+    val configured = Vector(newKey)
+    def decide(records: Vector[HmacKeyRetirementAuthorization], root: String = lakehouse) =
+      KeyMaterialContinuityDecision.evaluate(
+        true,
+        true,
+        Vector(oldKey, newKey),
+        configured,
+        Set.empty,
+        records,
+        root,
+        newKey._1
+      )
+    assertEquals(decide(Vector(record)), Right(Vector.empty))
+    assert(decide(Vector.empty).isLeft)
+    assert(decide(Vector(record.copy(lakehouseId = "3" * 64))).isLeft)
+    assert(decide(Vector(record.copy(originalVerifier = "4" * 43))).isLeft)
+    assert(decide(Vector(record, record)).isLeft)
+    assert(decide(Vector(record), "5" * 64).isLeft)
+    assert(
+      KeyMaterialContinuityDecision
+        .evaluate(
+          true,
+          true,
+          Vector(oldKey, newKey),
+          Vector(oldKey),
+          Set.empty,
+          Vector(record),
+          lakehouse,
+          oldKey._1
+        )
+        .isLeft
+    )
+    assert(
+      KeyMaterialContinuityDecision.evaluate(false, false, Vector.empty, configured, Set.empty, Vector(record)).isLeft
     )
   }
 

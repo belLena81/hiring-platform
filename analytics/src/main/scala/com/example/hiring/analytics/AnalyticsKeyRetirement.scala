@@ -41,7 +41,8 @@ private[analytics] object AnalyticsKeyRetirement {
   final case class KafkaRetentionEvidence(
       barrierOffset: Option[Long],
       earliestAvailableOffset: Option[Long],
-      evidenceReference: String
+      evidenceReference: String,
+      partitions: Vector[(Int, Long, Long)] = Vector.empty
   )
 
   final case class RetentionHorizon(retainedUntil: Option[Instant], evidenceReference: String)
@@ -147,30 +148,7 @@ private[analytics] object AnalyticsKeyRetirement {
   ): IO[Either[NonEmptyChain[String], AuditSummary]] =
     lakehouseLock
       .resource(paths.root)
-      .use { _ =>
-        val keyBlockers =
-          if (Option(retiringKeyId).forall(id => !RegistryIdPattern.matches(id)))
-            Chain.one("retiring key ID is invalid")
-          else Chain.empty[String]
-        val evidenceBlockers =
-          (validateRetention(retention, now), validateWriters(writers, now))
-            .mapN((_, _) => ())
-            .fold(_.toChain, _ => Chain.empty[String])
-        IO.blocking {
-          val delta = scanDelta(spark, paths, Option(retiringKeyId).getOrElse(""))
-          val registry = validateRegistry(spark, paths, Option(retiringKeyId).getOrElse(""))
-          (delta, registry)
-        }.adaptError { case NonFatal(_) =>
-          AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
-        }.flatMap { case (delta, registryBlockers) =>
-          scanMongo(database, Option(retiringKeyId).getOrElse(""), now).map { mongo =>
-            val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
-            val errors = blockers.toList.toVector
-            if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
-            else Right(AuditSummary(now, delta.count, mongo.count))
-          }
-        }
-      }
+      .use { _ => auditUnderLock(spark, paths, database, retiringKeyId, retention, writers, now) }
       .attempt
       .map {
         case Right(result)           => result
@@ -179,11 +157,55 @@ private[analytics] object AnalyticsKeyRetirement {
         case Left(_) => Left(NonEmptyChain.one("key retirement audit could not verify every required surface"))
       }
 
-  private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): ValidatedNec[String, Unit] = {
-    val kafkaReasons = (evidence.kafka.barrierOffset, evidence.kafka.earliestAvailableOffset) match {
-      case (Some(barrier), Some(earliest)) if barrier >= 0L && earliest >= barrier => Chain.empty[String]
-      case _ => Chain.one("Kafka retention barrier is missing, invalid, or not yet passed")
+  /** Caller already owns the shared lakehouse mutex; used by the guarded authorization transaction. */
+  private[analytics] def auditUnderLock(
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths,
+      database: MongoDatabase,
+      retiringKeyId: String,
+      retention: RetentionEvidence,
+      writers: WriterInventory,
+      now: Instant
+  ): IO[Either[NonEmptyChain[String], AuditSummary]] = {
+    val keyBlockers =
+      if (Option(retiringKeyId).forall(id => !RegistryIdPattern.matches(id)))
+        Chain.one("retiring key ID is invalid")
+      else Chain.empty[String]
+    val evidenceBlockers =
+      (validateRetention(retention, now), validateWriters(writers, now))
+        .mapN((_, _) => ())
+        .fold(_.toChain, _ => Chain.empty[String])
+    IO.blocking {
+      val delta = scanDelta(spark, paths, Option(retiringKeyId).getOrElse(""))
+      val registry = validateRegistry(spark, paths, Option(retiringKeyId).getOrElse(""))
+      (delta, registry)
+    }.adaptError { case NonFatal(_) =>
+      AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
+    }.flatMap { case (delta, registryBlockers) =>
+      scanMongo(database, Option(retiringKeyId).getOrElse(""), now).map { mongo =>
+        val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
+        val errors = blockers.toList.toVector
+        if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
+        else Right(AuditSummary(now, delta.count, mongo.count))
+      }
     }
+  }
+
+  private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): ValidatedNec[String, Unit] = {
+    val kafkaReasons =
+      if (evidence.kafka.partitions.nonEmpty) {
+        val parts = evidence.kafka.partitions
+        if (
+          parts.map(_._1).distinct.size == parts.size &&
+          parts.forall { case (number, barrier, earliest) => number >= 0 && barrier >= 0L && earliest >= barrier }
+        )
+          Chain.empty[String]
+        else Chain.one("Kafka retention partition barrier is missing, invalid, or not yet passed")
+      } else
+        (evidence.kafka.barrierOffset, evidence.kafka.earliestAvailableOffset) match {
+          case (Some(barrier), Some(earliest)) if barrier >= 0L && earliest >= barrier => Chain.empty[String]
+          case _ => Chain.one("Kafka retention barrier is missing, invalid, or not yet passed")
+        }
     val horizonReasons = Vector(
       "Delta data-file" -> evidence.deltaData,
       "Delta transaction-log" -> evidence.deltaLogs,

@@ -37,7 +37,13 @@ final class AnalyticsErasureWorker(
   private val logger = Slf4jLogger.getLogger[IO]
   private val lakehouseLock = new MongoAnalyticsLakehouseLock(database)
   private val markers = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
-  private val batch = new HiringAnalyticsBatch(paths, pseudonymizer, markers, lakehouseLock = lakehouseLock)
+  private val batch = new HiringAnalyticsBatch(
+    paths,
+    pseudonymizer,
+    markers,
+    lakehouseLock = lakehouseLock,
+    retirementStore = new MongoHmacKeyRetirementAuthorizationStore(database)
+  )
   private def now: IO[Instant] = clock.realTimeInstant
   private def leaseUntil: IO[Instant] = now.map(_.plusMillis(leaseDuration.toMillis))
 
