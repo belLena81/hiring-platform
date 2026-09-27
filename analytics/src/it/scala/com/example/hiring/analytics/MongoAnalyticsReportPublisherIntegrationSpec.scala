@@ -7,6 +7,7 @@ import com.example.hiring.analytics.mongo.*
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
+import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import com.mongodb.client.model.Updates
 import munit.FunSuite
 import org.bson.Document
@@ -61,6 +62,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     val client: MongoClient = MongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
+    val reactiveClient: ReactiveMongoClient = ReactiveMongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
     try {
       val database = client.getDatabase(s"analytics_report_${UUID.randomUUID()}")
       database
@@ -73,7 +77,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("lastPublishedRevision", 0L)
             .append("lastRunId", "")
         )
-      val publisher = new MongoAnalyticsReportPublisher(client, database)
+      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
       val now = Instant.now()
       val expiry = now.plusSeconds(3600L)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
@@ -154,6 +158,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assert(malformed.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()
+      reactiveClient.close()
       container.stop()
     }
   }
@@ -161,6 +166,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
   test("report revision reservation retries transient Mongo transaction and uncertain commit without duplicates") {
     val container = replicaSet()
     val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    val reactiveClient = ReactiveMongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -174,7 +182,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           .append("lastPublishedRevision", 0L)
           .append("lastRunId", "")
       )
-      val publisher = new MongoAnalyticsReportPublisher(client, database)
+      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
       val admin = client.getDatabase("admin")
       def failOnce(command: String, errorCode: Int, label: String): Unit = {
         admin.runCommand(
@@ -200,6 +208,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(database.getCollection("analytics_report_runs").countDocuments(), 2L)
     } finally {
       client.close()
+      reactiveClient.close()
       container.stop()
     }
   }
@@ -207,6 +216,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
   test("erasure publication reveals the report and writes the TTL independent completion ledger atomically") {
     val container = replicaSet()
     val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    val reactiveClient = ReactiveMongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -261,7 +273,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("progress", 0)
             .append("progressKey", key)
         )
-      val publisher = new MongoAnalyticsReportPublisher(client, database)
+      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
       val claim = ErasureClaim(subjectId, token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
@@ -307,6 +319,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(snapshot.getLong("generation"), Long.box(2L))
     } finally {
       client.close()
+      reactiveClient.close()
       container.stop()
     }
   }
@@ -314,6 +327,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
   test("guarded erasure publication rejects another request that has not passed retention") {
     val container = replicaSet()
     val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    val reactiveClient = ReactiveMongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -353,7 +369,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             new Document("_id", otherId).append("state", "Pending")
           )
         )
-      val publisher = new MongoAnalyticsReportPublisher(client, database)
+      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
       val claim = ErasureClaim(subjectId, token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
@@ -376,6 +392,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(snapshot, null)
     } finally {
       client.close()
+      reactiveClient.close()
       container.stop()
     }
   }
@@ -383,6 +400,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
   test("worker claims resume durable checkpoints, reject stale tokens, and persist broker barriers") {
     val container = replicaSet()
     val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    val reactiveClient = ReactiveMongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -419,7 +439,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("subjectIds", java.util.List.of(subjectId))
             .append("subjectRefsVersion", 1)
         )
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveClient.getDatabase(database.getName))
       val result = for {
         claim <- store.claim(now, now.plusSeconds(360), 1).map(_.head)
         early <- store.publisherDrainReady(subjectId, now, 30.seconds)
@@ -518,6 +538,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assert(malformedRefs.swap.toOption.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()
+      reactiveClient.close()
       container.stop()
     }
   }

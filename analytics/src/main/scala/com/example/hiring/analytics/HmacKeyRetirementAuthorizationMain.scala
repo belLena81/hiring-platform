@@ -4,7 +4,7 @@ import com.example.hiring.analytics.batch.{AnalyticsLakehousePaths, HiringAnalyt
 
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all.*
-import com.mongodb.client.MongoClients
+import com.mongodb.reactivestreams.client.MongoClients
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.{ConfigReader, ConfigSource}
 
@@ -146,7 +146,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
                 .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                 .getOrCreate()
             ),
-            IO.blocking(MongoClients.create(settings.mongoUri))
+            IO.delay(MongoClients.create(settings.mongoUri))
           )
           .use { case (spark, mongo) =>
             val coordinator = new HmacKeyRetirementCoordinator(

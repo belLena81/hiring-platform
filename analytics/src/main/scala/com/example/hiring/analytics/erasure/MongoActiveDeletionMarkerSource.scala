@@ -6,7 +6,7 @@ import com.example.hiring.analytics.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
-import com.mongodb.client.MongoDatabase
+import com.mongodb.reactivestreams.client.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
 import fs2.Stream
 import com.example.hiring.analytics.mongo.MongoCursorStream
@@ -28,9 +28,6 @@ final class MongoActiveDeletionMarkerSource(
     clock: Clock[IO] = Clock[IO]
 ) extends ActiveDeletionMarkerSource {
   private val requestCollection = com.example.hiring.analytics.mongo.AnalyticsCollections.ErasureRequests
-
-  private def mongo[A](work: => A): IO[A] =
-    IO.blocking(work).adaptError { case NonFatal(cause) => AnalyticsError.MarkerStorageFailure(cause) }
 
   private def activeRequests(now: Instant): Stream[IO, Document] =
     MongoCursorStream(
@@ -58,7 +55,6 @@ final class MongoActiveDeletionMarkerSource(
         )
         .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
         .batchSize(256)
-        .iterator()
     ).handleErrorWith {
       case error: AnalyticsError => Stream.raiseError[IO](error)
       case cause                 => Stream.raiseError[IO](AnalyticsError.MarkerStorageFailure(cause))
@@ -69,9 +65,10 @@ final class MongoActiveDeletionMarkerSource(
       _ <- IO.raiseWhen(maximumPendingMarkers <= 0)(
         AnalyticsError.InvalidConfiguration("maximum pending marker count must be positive")
       )
-      collectionExists <- mongo(
-        database.listCollectionNames().filter(Filters.eq("name", requestCollection)).first() != null
-      )
+      collectionExists <- com.example.hiring.analytics.mongo.MongoPublisherStream
+        .optional(database.listCollections().filter(Filters.eq("name", requestCollection)).first())
+        .map(_.isDefined)
+        .adaptError { case NonFatal(cause) => AnalyticsError.MarkerStorageFailure(cause) }
       _ <- IO.raiseUnless(collectionExists)(AnalyticsError.MissingMarkerCollection)
       now <- clock.realTimeInstant
       tokens <- activeRequests(now)

@@ -5,7 +5,7 @@ import com.example.hiring.analytics.mongo.MongoAnalyticsErasureWorkerStore
 
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
-import com.mongodb.client.{MongoClient, MongoClients}
+import com.mongodb.reactivestreams.client.{MongoClient, MongoClients}
 
 /** Local operator utility. It exposes only fixed failure labels and requires an observed attempt count to requeue. */
 object AnalyticsErasureRepairMain extends IOApp {
@@ -13,7 +13,7 @@ object AnalyticsErasureRepairMain extends IOApp {
     if (updated) ExitCode.Success else ExitCode.Error
 
   private def mongoClient(uri: String): Resource[IO, MongoClient] =
-    Resource.make(IO.blocking(MongoClients.create(uri)))(client => IO.blocking(client.close()))
+    Resource.make(IO.delay(MongoClients.create(uri)))(client => IO.delay(client.close()))
 
   override def run(args: List[String]): IO[ExitCode] = args match {
     case "inspect" :: limitText :: Nil =>
@@ -53,7 +53,7 @@ object AnalyticsErasureRepairMain extends IOApp {
   private def program(operation: MongoAnalyticsErasureWorkerStore => IO[ExitCode]): IO[ExitCode] =
     AnalyticsRuntimeConfig.loadWorker.flatMap { settings =>
       mongoClient(settings.common.mongoUri).use { client =>
-        IO.blocking(client.getDatabase(settings.common.mongoDatabase)).flatMap { database =>
+        IO.delay(client.getDatabase(settings.common.mongoDatabase)).flatMap { database =>
           operation(new MongoAnalyticsErasureWorkerStore(client, database))
         }
       }

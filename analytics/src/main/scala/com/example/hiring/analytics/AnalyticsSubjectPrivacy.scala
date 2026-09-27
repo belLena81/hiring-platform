@@ -24,6 +24,7 @@ import io.github.iltotore.iron.*
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -41,6 +42,8 @@ final class SubjectPseudonymizer private (
     primaryKey._1 -> primaryKey._2.clone(),
     previousKeys.map { case (version, key) => version -> key.clone() }*
   )
+  @transient private lazy val threadMacs: ThreadLocal[mutable.Map[String, Mac]] =
+    ThreadLocal.withInitial(() => mutable.Map.empty[String, Mac])
   val primaryKeyId: String = copiedKeys.head._1
   val keyIds: Set[String] = copiedKeys.iterator.map(_._1).toSet
   private[analytics] val keyVerifiers: Vector[(String, String)] = copiedKeys.toVector.map { key =>
@@ -67,8 +70,15 @@ final class SubjectPseudonymizer private (
   }
 
   private def tokenFor(subjectId: String, key: (String, Array[Byte])) = {
-    val mac = Mac.getInstance(SubjectPseudonymizer.Algorithm)
-    mac.init(new SecretKeySpec(key._2, SubjectPseudonymizer.Algorithm))
+    val mac = threadMacs
+      .get()
+      .getOrElseUpdate(
+        key._1, {
+          val initialized = Mac.getInstance(SubjectPseudonymizer.Algorithm)
+          initialized.init(new SecretKeySpec(key._2, SubjectPseudonymizer.Algorithm))
+          initialized
+        }
+      )
     val digest = mac.doFinal(subjectId.getBytes(StandardCharsets.UTF_8))
     key._1 + "_" + Base64.getUrlEncoder.withoutPadding().encodeToString(digest)
   }

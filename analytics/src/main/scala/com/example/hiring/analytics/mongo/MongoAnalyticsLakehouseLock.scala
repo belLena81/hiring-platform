@@ -6,7 +6,7 @@ import com.example.hiring.analytics.AnalyticsError
 import com.example.hiring.analytics.batch.AnalyticsLakehouseLock
 import com.mongodb.MongoException
 import com.mongodb.WriteConcern
-import com.mongodb.client.MongoDatabase
+import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
 
 import java.net.URI
@@ -36,14 +36,14 @@ private[analytics] final class MongoAnalyticsLakehouseLock(database: MongoDataba
     IO.fromEither(lockId(root)).flatMap { id =>
       val owner = UUID.randomUUID().toString
       val deadline = System.nanoTime() + WaitTimeout.toNanos
-      def attempt(retryDelay: FiniteDuration): IO[String] = IO
-        .blocking {
+      def attempt(retryDelay: FiniteDuration): IO[String] = MongoPublisherStream
+        .one(
           collection.insertOne(
             new Document("_id", id)
               .append("ownerToken", owner)
               .append("acquiredAt", java.util.Date.from(Instant.now()))
           )
-        }
+        )
         .as(owner)
         .handleErrorWith {
           case error: MongoException if error.getCode == 11000 =>
@@ -56,7 +56,8 @@ private[analytics] final class MongoAnalyticsLakehouseLock(database: MongoDataba
     }
 
   private def release(root: String, owner: String): IO[Unit] = IO.fromEither(lockId(root)).flatMap { id =>
-    IO.blocking(collection.deleteOne(new Document("_id", id).append("ownerToken", owner)))
+    MongoPublisherStream
+      .one(collection.deleteOne(new Document("_id", id).append("ownerToken", owner)))
       .flatMap(result =>
         IO.raiseWhen(result.getDeletedCount != 1L)(
           AnalyticsError.LakehouseFailure(new IllegalStateException("lakehouse mutex owner changed before release"))

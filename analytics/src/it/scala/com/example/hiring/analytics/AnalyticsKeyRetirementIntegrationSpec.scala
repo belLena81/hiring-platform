@@ -4,6 +4,11 @@ import com.example.hiring.analytics.batch.AnalyticsLakehousePaths
 import cats.effect.{Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
+import com.mongodb.reactivestreams.client.{
+  MongoClient as ReactiveMongoClient,
+  MongoClients as ReactiveMongoClients,
+  MongoDatabase as ReactiveMongoDatabase
+}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.Row
@@ -21,7 +26,10 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   private val enabled = sys.env.get("ANALYTICS_KEY_RETIREMENT_MONGO_URI").exists(_.nonEmpty)
   private var mongo: MongoClient = uninitialized
   private var peerMongo: MongoClient = uninitialized
+  private var reactiveMongo: ReactiveMongoClient = uninitialized
+  private var reactivePeerMongo: ReactiveMongoClient = uninitialized
   private var database: MongoDatabase = uninitialized
+  private var reactiveDatabase: ReactiveMongoDatabase = uninitialized
   private var spark: SparkSession = uninitialized
   private var lakehouseRoot: Path = uninitialized
   private val now = Instant.parse("2026-10-26T00:00:00Z")
@@ -30,7 +38,10 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   override def beforeAll(): Unit = if (enabled) {
     mongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
     peerMongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+    reactiveMongo = ReactiveMongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+    reactivePeerMongo = ReactiveMongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
     database = mongo.getDatabase(s"analytics_key_retirement_${java.util.UUID.randomUUID().toString.replace('-', '_')}")
+    reactiveDatabase = reactiveMongo.getDatabase(database.getName)
     spark = SparkSession
       .builder()
       .master("local[1]")
@@ -64,6 +75,8 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     Try(database.drop())
     Try(mongo.close())
     Try(peerMongo.close())
+    Try(reactiveMongo.close())
+    Try(reactivePeerMongo.close())
     Try(spark.stop())
     if (lakehouseRoot != null) deleteTree(lakehouseRoot)
   }
@@ -105,9 +118,11 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
 
   if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
-    val firstLock = new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(database)
+    val firstLock = new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
     val secondLock =
-      new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(peerMongo.getDatabase(database.getName))
+      new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(
+        reactivePeerMongo.getDatabase(database.getName)
+      )
     val result = (for {
       firstEntered <- Deferred[IO, Unit]
       releaseFirst <- Deferred[IO, Unit]
@@ -171,7 +186,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
       .audit(
         spark,
         paths,
-        database,
+        reactiveDatabase,
         oldKeyId,
         AnalyticsKeyRetirement.RetentionEvidence(
           kafka = AnalyticsKeyRetirement.KafkaRetentionEvidence(Some(10L), Some(10L), "test-kafka-barrier"),
@@ -195,7 +210,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           )
         ),
         now,
-        new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(database)
+        new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
       )
       .unsafeRunSync()
 

@@ -8,7 +8,7 @@ import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
-import com.mongodb.client.{MongoClient, MongoClients}
+import com.mongodb.reactivestreams.client.{MongoClient, MongoClients}
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
 
@@ -46,7 +46,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
           .config("spark.ui.enabled", "false")
           .getOrCreate()
       ),
-      IO.blocking(MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200"))
+      IO.delay(MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200"))
     )
 
     val result = resources
@@ -59,6 +59,8 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     assert(result.isLeft)
     val (spark, mongo) = acquired.get().getOrElse(fail("resources were not acquired"))
     assert(spark.sparkContext.isStopped)
-    intercept[IllegalStateException](mongo.listDatabaseNames().first())
+    assert(
+      MongoPublisherStream.stream(mongo.listDatabaseNames()).compile.drain.attempt.unsafeRunSync().isLeft
+    )
   }
 }

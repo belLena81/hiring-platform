@@ -6,7 +6,7 @@ import com.example.hiring.analytics.mongo.{MongoAnalyticsLakehouseLock, MongoAna
 
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
-import com.mongodb.client.{MongoClient, MongoClients}
+import com.mongodb.reactivestreams.client.{MongoClient, MongoClients}
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
@@ -32,7 +32,7 @@ object HiringAnalyticsBatchMain extends IOApp {
         case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
         case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
       })(client =>
-        IO.blocking(client.close()).adaptError { case NonFatal(cause) =>
+        IO.delay(client.close()).adaptError { case NonFatal(cause) =>
           AnalyticsError.MongoConnectionFailure(cause)
         }
       )
@@ -49,14 +49,14 @@ object HiringAnalyticsBatchMain extends IOApp {
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
       ),
-      IO.blocking(MongoClients.create(mongoUri))
+      IO.delay(MongoClients.create(mongoUri))
     )
 
   private def program: IO[AnalyticsPublication] =
     AnalyticsRuntimeConfig.loadBatch.flatMap { configured =>
       val common = configured.common
       resources(common.mongoUri, common.sparkMaster).use { case (spark, mongo) =>
-        IO.blocking(mongo.getDatabase(common.mongoDatabase))
+        IO.delay(mongo.getDatabase(common.mongoDatabase))
           .adaptError {
             case _: IllegalArgumentException =>
               AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")

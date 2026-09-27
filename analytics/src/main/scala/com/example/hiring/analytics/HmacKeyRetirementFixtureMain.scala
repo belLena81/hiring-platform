@@ -20,7 +20,7 @@ import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.kafka.common.serialization.StringSerializer
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
-import com.mongodb.client.MongoClients
+import com.mongodb.reactivestreams.client.MongoClients
 
 /** Opt-in local fixture. It preserves the named-volume lakehouse and uses the real wall clock. */
 object HmacKeyRetirementFixtureMain extends IOApp {
@@ -368,7 +368,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         for {
           uri <- IO.fromEither(required("analytics.mongo.uri", raw.uri))
           database <- IO.fromEither(required("analytics.mongo.database", raw.database))
-          _ <- Resource.fromAutoCloseable(IO.blocking(MongoClients.create(uri))).use { client =>
+          _ <- Resource.fromAutoCloseable(IO.delay(MongoClients.create(uri))).use { client =>
             new MongoHmacKeyRetirementAuthorizationStore(client.getDatabase(database)).list(root).flatMap { rows =>
               IO.raiseUnless(rows.exists(_.keyId == oldKeyId))(
                 AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")

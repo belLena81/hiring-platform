@@ -1,11 +1,12 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
+import com.example.hiring.analytics.mongo.MongoPublisherStream
 
 import cats.effect.IO
 import cats.syntax.all.*
 import com.mongodb.{ReadConcern, WriteConcern}
-import com.mongodb.client.MongoDatabase
+import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
 
 import java.time.Instant
@@ -13,7 +14,6 @@ import java.util.Date
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
-import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Permanent evidence that one anchored key may be omitted from this exact lakehouse's runtime key ring. */
@@ -106,11 +106,11 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore(database
 
   override def list(root: String): IO[Vector[HmacKeyRetirementAuthorization]] =
     IO.fromEither(HmacKeyRetirementAuthorization.lakehouseId(root)).flatMap { lakehouseId =>
-      IO.blocking {
-        val cursor = collection.find(new Document("lakehouseId", lakehouseId)).iterator()
-        try cursor.asScala.toVector.traverse(decode)
-        finally cursor.close()
-      }.flatMap(IO.fromEither)
+      MongoPublisherStream
+        .stream(collection.find(new Document("lakehouseId", lakehouseId)))
+        .compile
+        .toVector
+        .flatMap(_.traverse(decode).liftTo[IO])
         .adaptError { case NonFatal(_) =>
           AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is unavailable or malformed")
         }
@@ -123,8 +123,8 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore(database
       _ <- IO.raiseUnless(checked.lakehouseId == expectedLakehouse)(
         AnalyticsError.InvalidConfiguration("HMAC key retirement authorization targets another lakehouse")
       )
-      _ <- IO
-        .blocking {
+      _ <- MongoPublisherStream
+        .drain {
           collection.insertOne(
             new Document("_id", id(checked))
               .append("lakehouseId", checked.lakehouseId)

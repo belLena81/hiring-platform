@@ -9,6 +9,7 @@ import cats.effect.{Clock, Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.{ConnectionString, MongoClientSettings}
 import com.mongodb.client.{MongoClient, MongoClients}
+import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import com.mongodb.event.{CommandFailedEvent, CommandListener, CommandStartedEvent, CommandSucceededEvent}
 import org.bson.Document
 import org.apache.spark.sql.SparkSession
@@ -22,6 +23,7 @@ import java.util.Date
 import java.util.UUID
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.IdentityHashMap
 import scala.concurrent.duration.*
 
 class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
@@ -29,6 +31,25 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
 
   private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
   private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
+
+  private val reactiveBySync = new IdentityHashMap[MongoClient, ReactiveMongoClient]()
+  private def syncClient(uri: String): MongoClient = {
+    val sync = MongoClients.create(uri)
+    reactiveBySync.put(sync, ReactiveMongoClients.create(uri))
+    sync
+  }
+  private def syncClient(settings: MongoClientSettings): MongoClient = {
+    val sync = MongoClients.create(settings)
+    reactiveBySync.put(sync, ReactiveMongoClients.create(settings))
+    sync
+  }
+  private def reactive(sync: MongoClient): ReactiveMongoClient = reactiveBySync.get(sync)
+  override def afterEach(context: AfterEach): Unit = {
+    val clients = reactiveBySync.values().iterator()
+    while (clients.hasNext) clients.next().close()
+    reactiveBySync.clear()
+    super.afterEach(context)
+  }
 
   private def replicaSet(): ReplicaSet = {
     val container = (new ReplicaSet)
@@ -106,7 +127,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
     var client: MongoClient = null
     var restartedClient: MongoClient = null
     try {
-      client = MongoClients.create(settings)
+      client = syncClient(settings)
       val database = client.getDatabase(databaseName)
       val requestId = UUID.randomUUID().toString
       val requestedAt = Instant.parse("2026-01-01T00:00:00Z")
@@ -119,7 +140,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("transactionalIds", java.util.List.of("hiring-publisher-test"))
             .append("requestedAt", Date.from(requestedAt))
         )
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactive(client), reactive(client).getDatabase(databaseName))
       val barrier = KafkaRetentionBarrier(
         "hiring.operational-events",
         Vector(
@@ -156,9 +177,12 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           if (!evidenceWriteStarted.await(90, TimeUnit.SECONDS))
             throw new AssertionError("old worker did not reach the file evidence write")
         }
-        _ <- IO.blocking { restartedClient = MongoClients.create(settings) }
+        _ <- IO.blocking { restartedClient = syncClient(settings) }
         restartedDatabase = restartedClient.getDatabase(databaseName)
-        restartedStore = new MongoAnalyticsErasureWorkerStore(restartedClient, restartedDatabase)
+        restartedStore = new MongoAnalyticsErasureWorkerStore(
+          reactive(restartedClient),
+          reactive(restartedClient).getDatabase(databaseName)
+        )
         claimResult <- Deferred[IO, Either[Throwable, Vector[ErasureClaim]]]
         claimFiber <- restartedStore
           .claim(requestedAt.plusSeconds(11), requestedAt.plusSeconds(61), 1)
@@ -269,7 +293,10 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           )
         )
       assertEquals(
-        new MongoAnalyticsErasureWorkerStore(restartedClient, restartedClient.getDatabase(databaseName))
+        new MongoAnalyticsErasureWorkerStore(
+          reactive(restartedClient),
+          reactive(restartedClient).getDatabase(databaseName)
+        )
           .readBarrier(requestId)
           .attempt
           .unsafeRunSync(),
@@ -312,7 +339,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
     var restartedClient: MongoClient = null
     var spark: SparkSession = null
     try {
-      client = MongoClients.create(connectionString)
+      client = syncClient(connectionString)
       val database = client.getDatabase(databaseName)
       database
         .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
@@ -358,11 +385,13 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()
 
-      val firstStore = new MongoAnalyticsErasureWorkerStore(client, database)
-      val firstPublisher = new MongoAnalyticsReportPublisher(client, database)
+      val firstStore =
+        new MongoAnalyticsErasureWorkerStore(reactive(client), reactive(client).getDatabase(databaseName))
+      val firstPublisher =
+        new MongoAnalyticsReportPublisher(reactive(client), reactive(client).getDatabase(databaseName))
       val firstWorker = new AnalyticsErasureWorker(
         spark,
-        database,
+        reactive(client).getDatabase(databaseName),
         firstStore,
         KafkaConnection("unused:9092"),
         KafkaConnection("unused:9092"),
@@ -394,18 +423,24 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         _ <- IO.blocking {
           client.close()
           client = null
-          restartedClient = MongoClients.create(connectionString)
+          restartedClient = syncClient(connectionString)
         }
         restartedDatabase = restartedClient.getDatabase(databaseName)
-        restartedStore = new MongoAnalyticsErasureWorkerStore(restartedClient, restartedDatabase)
-        restartedPublisher = new MongoAnalyticsReportPublisher(restartedClient, restartedDatabase)
+        restartedStore = new MongoAnalyticsErasureWorkerStore(
+          reactive(restartedClient),
+          reactive(restartedClient).getDatabase(databaseName)
+        )
+        restartedPublisher = new MongoAnalyticsReportPublisher(
+          reactive(restartedClient),
+          reactive(restartedClient).getDatabase(databaseName)
+        )
         _ <- IO.delay(retentionHasPassed.set(true))
         resumedClaim <- restartedStore.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
         _ = assertEquals(resumedClaim.phase, ErasurePhase.DeltaPurged)
         resumedReservation <- restartedPublisher.reserve(runId, rangeFingerprint, afterRetention)
         restartedWorker = new AnalyticsErasureWorker(
           spark,
-          restartedDatabase,
+          reactive(restartedClient).getDatabase(databaseName),
           restartedStore,
           KafkaConnection("unused:9092"),
           KafkaConnection("unused:9092"),
@@ -439,7 +474,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         finalizerReservation <- restartedPublisher.reserve(runId, rangeFingerprint, afterRetention)
         finalizerWorker = new AnalyticsErasureWorker(
           spark,
-          restartedDatabase,
+          reactive(restartedClient).getDatabase(databaseName),
           restartedStore,
           KafkaConnection("unused:9092"),
           KafkaConnection("unused:9092"),
@@ -497,7 +532,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
 
   test("a failed publisher fence leaves deletion pending without a barrier or outbox purge") {
     val container = replicaSet()
-    val client: MongoClient = MongoClients.create(
+    val client: MongoClient = syncClient(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -522,14 +557,14 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("subjectIds", java.util.List.of(requestId))
             .append("subjectRefsVersion", 1)
         )
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactive(client), reactive(client).getDatabase(database.getName))
       val failedFencer = new TransactionalProducerFencer {
         override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
           IO.raiseError(new IllegalStateException("simulated broker fencing failure"))
       }
       val worker = new AnalyticsErasureWorker(
         null,
-        database,
+        reactive(client).getDatabase(database.getName),
         store,
         KafkaConnection("unused:9092"),
         KafkaConnection("unused:9092"),
@@ -578,7 +613,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
 
   test("repair-required erasure stays pending and can be requeued only against observed attempt and lease state") {
     val container = replicaSet()
-    val client = MongoClients.create(
+    val client = syncClient(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -593,7 +628,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("transactionalIds", java.util.List.of())
           .append("requestedAt", Date.from(now))
       )
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactive(client), reactive(client).getDatabase(database.getName))
       val claim = store.claim(now, now.plusSeconds(60L), 1).unsafeRunSync().head
       val saved = store
         .recordFailure(claim, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
@@ -650,8 +685,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       .applyConnectionString(new ConnectionString(connectionString))
       .addCommandListener(listener)
       .build()
-    val staleClient = MongoClients.create(settings)
-    val currentClient = MongoClients.create(connectionString)
+    val staleClient = syncClient(settings)
+    val currentClient = syncClient(connectionString)
     try {
       val database = currentClient.getDatabase(databaseName)
       val requestId = UUID.randomUUID().toString
@@ -664,8 +699,10 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("transactionalIds", java.util.List.of[String]())
           .append("requestedAt", Date.from(now))
       )
-      val staleStore = new MongoAnalyticsErasureWorkerStore(staleClient, staleClient.getDatabase(databaseName))
-      val currentStore = new MongoAnalyticsErasureWorkerStore(currentClient, database)
+      val staleStore =
+        new MongoAnalyticsErasureWorkerStore(reactive(staleClient), reactive(staleClient).getDatabase(databaseName))
+      val currentStore =
+        new MongoAnalyticsErasureWorkerStore(reactive(currentClient), reactive(currentClient).getDatabase(databaseName))
       val staleClaim = currentStore.claim(now, now.plusSeconds(1), 1).unsafeRunSync().head
       val result = for {
         delayed <- staleStore
@@ -710,7 +747,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
 
   test("concurrent repair requeues and worker claims preserve one lease and the durable checkpoint") {
     val container = replicaSet()
-    val client = MongoClients.create(
+    val client = syncClient(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -741,7 +778,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("generation", 7L)
           .append("lastPublishedRevision", 3L)
       )
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactive(client), reactive(client).getDatabase(database.getName))
       val result = for {
         initial <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
         saved <- store.recordFailure(initial, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))

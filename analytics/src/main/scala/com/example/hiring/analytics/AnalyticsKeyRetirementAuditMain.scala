@@ -5,7 +5,7 @@ import com.example.hiring.analytics.erasure.*
 
 import cats.effect.{Clock, ExitCode, IO, IOApp}
 import cats.syntax.all.*
-import com.mongodb.client.MongoClient
+import com.mongodb.reactivestreams.client.MongoClient
 import com.typesafe.config.ConfigFactory
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.{ConfigReader, ConfigSource}
@@ -180,7 +180,7 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
       ),
-      IO.blocking(com.mongodb.client.MongoClients.create(inputs.mongoUri))
+      IO.delay(com.mongodb.reactivestreams.client.MongoClients.create(inputs.mongoUri))
     )
 
   private def program: IO[ExitCode] =

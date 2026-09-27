@@ -9,6 +9,7 @@ import cats.effect.{Clock, Deferred, IO, Ref, Resource}
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
+import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import com.mongodb.client.model.ReplaceOptions
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.errors.AuthenticationException
@@ -39,9 +40,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
   private def required(name: String): String =
     sys.env.get(name).filter(_.nonEmpty).getOrElse(fail(s"$name is required for recovery evidence"))
 
-  private def resources: Resource[IO, (MongoClient, SparkSession, Path)] =
+  private def resources: Resource[IO, (MongoClient, ReactiveMongoClient, SparkSession, Path)] =
     for {
       client <- Resource.fromAutoCloseable(IO.blocking(MongoClients.create(mongoUri)))
+      reactiveClient <- Resource.fromAutoCloseable(IO.delay(ReactiveMongoClients.create(mongoUri)))
       root <- Resource.make(IO.blocking(Files.createTempDirectory("account-deletion-recovery-")))(deleteTree)
       spark <- Resource.make(IO.blocking {
         SparkSession
@@ -53,7 +55,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
       })(session => IO.blocking(session.stop()))
-    } yield (client, spark, root)
+    } yield (client, reactiveClient, spark, root)
 
   private def deleteTree(root: Path): IO[Unit] = IO.blocking {
     val paths = Files.walk(root)
@@ -270,10 +272,11 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
       val transactionalId = "hiring-publisher-recovery-" + UUID.randomUUID().toString
 
-      val test = resources.use { case (client, spark, root) =>
+      val test = resources.use { case (client, reactiveClient, spark, root) =>
         val database = client.getDatabase(databaseName)
-        val store = new MongoAnalyticsErasureWorkerStore(client, database)
-        val publisher = new MongoAnalyticsReportPublisher(client, database)
+        val reactiveDatabase = reactiveClient.getDatabase(databaseName)
+        val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDatabase)
+        val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase)
         for {
           claimedFixture <- IO.blocking(
             database
@@ -334,7 +337,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                 }
                 worker = new AnalyticsErasureWorker(
                   spark,
-                  database,
+                  reactiveDatabase,
                   store,
                   reader,
                   fencer,

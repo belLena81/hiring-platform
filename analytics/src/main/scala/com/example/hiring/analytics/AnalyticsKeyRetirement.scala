@@ -4,8 +4,8 @@ import com.example.hiring.analytics.batch.{AnalyticsLakehouseLock, AnalyticsLake
 import cats.data.{Chain, NonEmptyChain, ValidatedNec}
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.hiring.analytics.mongo.{AnalyticsCollections, MongoCursorStream}
-import com.mongodb.client.MongoDatabase
+import com.example.hiring.analytics.mongo.{AnalyticsCollections, MongoPublisherStream}
+import com.mongodb.reactivestreams.client.MongoDatabase
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, struct, to_json}
@@ -360,7 +360,7 @@ private[analytics] object AnalyticsKeyRetirement {
   private val MaximumWriterEvidenceAge = java.time.Duration.ofHours(1)
 
   private def scanMongo(database: MongoDatabase, keyId: String, now: Instant): IO[ScanResult] = {
-    IO.blocking(database.listCollectionNames().into(new java.util.ArrayList[String]()).asScala.toSet).flatMap { names =>
+    MongoPublisherStream.stream(database.listCollectionNames()).compile.toVector.map(_.toSet).flatMap { names =>
       val missing = MongoCollections.toSet -- names
       val missingBlockers =
         if (missing.nonEmpty)
@@ -370,11 +370,13 @@ private[analytics] object AnalyticsKeyRetirement {
       MongoCollections
         .filter(names.contains)
         .foldM(initial) { (state, collectionName) =>
-          MongoCursorStream {
-            val find = database.getCollection(collectionName, classOf[Document]).find()
-            if (collectionName == AnalyticsCollections.ErasureRequests) find.limit(MaximumAuditedErasureSubjects + 1)
-            find.iterator()
-          }.compile
+          MongoPublisherStream
+            .stream {
+              val find = database.getCollection(collectionName, classOf[Document]).find()
+              if (collectionName == AnalyticsCollections.ErasureRequests) find.limit(MaximumAuditedErasureSubjects + 1)
+              find
+            }
+            .compile
             .fold((state, 0)) { case ((current, collectionDocuments), document) =>
               reduceMongoObservation(current, collectionName, document, keyId, now, collectionDocuments)
             }
@@ -382,23 +384,29 @@ private[analytics] object AnalyticsKeyRetirement {
         }
         .flatMap { scanned =>
           if (names.contains(AnalyticsCollections.HiringMigrationLedger))
-            IO.blocking {
-              val migration = database
-                .getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
-                .find(
-                  com.mongodb.client.model.Filters
-                    .eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.OutboxSubjectReferences)
-                )
-                .first()
-              val migrationBlockers =
-                if (
-                  migration == null || !Option(migration.getString(AnalyticsCollections.Fields.State))
-                    .contains("Complete")
-                )
-                  Chain.one("outbox subject-reference migration is not complete")
-                else Chain.empty[String]
-              ScanResult(scanned.count, scanned.blockers ++ migrationBlockers)
-            }
+            MongoPublisherStream
+              .optional {
+                database
+                  .getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
+                  .find(
+                    new Document(
+                      AnalyticsCollections.Fields.Id,
+                      AnalyticsCollections.MigrationIds.OutboxSubjectReferences
+                    )
+                  )
+                  .first()
+              }
+              .map { migration =>
+                val migrationBlockers =
+                  if (
+                    migration.isEmpty || !migration
+                      .flatMap(row => Option(row.getString(AnalyticsCollections.Fields.State)))
+                      .contains("Complete")
+                  )
+                    Chain.one("outbox subject-reference migration is not complete")
+                  else Chain.empty[String]
+                ScanResult(scanned.count, scanned.blockers ++ migrationBlockers)
+              }
           else IO.pure(ScanResult(scanned.count, scanned.blockers))
         }
     }

@@ -7,6 +7,11 @@ import com.example.hiring.analytics.mongo.*
 import cats.effect.unsafe.implicits.global
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
+import com.mongodb.reactivestreams.client.{
+  MongoClient as ReactiveMongoClient,
+  MongoClients as ReactiveMongoClients,
+  MongoDatabase as ReactiveMongoDatabase
+}
 import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import io.delta.tables.DeltaTable
 import munit.FunSuite
@@ -170,7 +175,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       )
   }
 
-  private def prepare(db: MongoDatabase): Unit = {
+  private def prepare(db: MongoDatabase, reactiveDb: ReactiveMongoDatabase): Unit = {
     assert(enabled)
     assertEquals(mode, "prepare")
     assert(nonce.matches("[a-f0-9]{16}"))
@@ -208,7 +213,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     try {
       val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
       val paths = AnalyticsLakehousePaths(lakehouseRoot)
-      val batch = new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(db, pseudonymizer))
+      val batch =
+        new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(reactiveDb, pseudonymizer))
       val manifest = AnalyticsRunManifest
         .validated(
           runId(rangeEnd),
@@ -329,7 +335,11 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     assert(found, "legacy Delta fixture must contain rawValue statistics in an AddFile action")
   }
 
-  private def appendRetentionTail(client: MongoClient, db: MongoDatabase): Unit = {
+  private def appendRetentionTail(
+      reactiveClient: ReactiveMongoClient,
+      reactiveDb: ReactiveMongoDatabase,
+      db: MongoDatabase
+  ): Unit = {
     assertEquals(mode, "append-retention-tail")
     val staged = db.getCollection(proofCollection).find(Filters.eq("_id", nonce)).first()
     if (staged != null && staged.get("rolloverTailOffset", classOf[java.lang.Long]) != null) {
@@ -343,7 +353,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     val request = db.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first()
     assert(request != null)
     assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
-    val barrier = new MongoAnalyticsErasureWorkerStore(client, db)
+    val barrier = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDb)
       .readBarrier(subjectId)
       .unsafeRunSync()
       .getOrElse(fail("worker must persist its Kafka barrier"))
@@ -393,7 +403,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   }
 
   private def inspect(
-      client: MongoClient,
+      reactiveClient: ReactiveMongoClient,
+      reactiveDb: ReactiveMongoDatabase,
       db: MongoDatabase,
       requireKafka: Boolean,
       requireAll: Boolean,
@@ -403,7 +414,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     assert(request != null)
     val purgedAt =
       Option(request.getDate("deltaPurgedAt")).map(_.toInstant).getOrElse(fail("DeltaPurged timestamp is missing"))
-    val barrier = new MongoAnalyticsErasureWorkerStore(client, db)
+    val barrier = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDb)
       .readBarrier(subjectId)
       .unsafeRunSync()
       .getOrElse(fail("Kafka barrier is missing"))
@@ -452,8 +463,9 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         val pseudonymizer =
           AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
         val batch =
-          new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(db, pseudonymizer))
-        val markers = new MongoActiveDeletionMarkerSource(db, pseudonymizer).activeSubjectTokens(spark).unsafeRunSync()
+          new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(reactiveDb, pseudonymizer))
+        val markers =
+          new MongoActiveDeletionMarkerSource(reactiveDb, pseudonymizer).activeSubjectTokens(spark).unsafeRunSync()
         batch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
         batch.verifyFilesAbsent(spark, evidence).unsafeRunSync()
       } finally spark.stop()
@@ -488,20 +500,27 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     if (enabled) {
       assert(nonce.matches("[a-f0-9]{16}"))
       val client = MongoClients.create(required("MONGODB_URI"))
+      val reactiveClient = ReactiveMongoClients.create(required("MONGODB_URI"))
       try {
         val db = client.getDatabase(databaseName)
+        val reactiveDb = reactiveClient.getDatabase(databaseName)
         mode match {
-          case "prepare"               => prepare(db)
-          case "append-retention-tail" => appendRetentionTail(client, db)
-          case "inspect" => inspect(client, db, requireKafka = false, requireAll = false, finalCheck = false)
+          case "prepare"               => prepare(db, reactiveDb)
+          case "append-retention-tail" => appendRetentionTail(reactiveClient, reactiveDb, db)
+          case "inspect"               =>
+            inspect(reactiveClient, reactiveDb, db, requireKafka = false, requireAll = false, finalCheck = false)
           case "require-kafka-retention" =>
-            inspect(client, db, requireKafka = true, requireAll = false, finalCheck = false)
+            inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = false, finalCheck = false)
           case "require-all-retention" =>
-            inspect(client, db, requireKafka = true, requireAll = true, finalCheck = false)
-          case "verify" => inspect(client, db, requireKafka = true, requireAll = true, finalCheck = true)
-          case other    => fail("unsupported retention proof mode: " + other)
+            inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = false)
+          case "verify" =>
+            inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = true)
+          case other => fail("unsupported retention proof mode: " + other)
         }
-      } finally client.close()
+      } finally {
+        reactiveClient.close()
+        client.close()
+      }
     }
   }
 }

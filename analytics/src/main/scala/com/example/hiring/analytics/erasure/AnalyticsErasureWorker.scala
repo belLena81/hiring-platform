@@ -7,7 +7,7 @@ import com.example.hiring.analytics.mongo.*
 import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.Monad
 import cats.syntax.all.*
-import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
+import com.mongodb.reactivestreams.client.{MongoClient, MongoClients, MongoDatabase}
 import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -325,14 +325,14 @@ object AnalyticsErasureWorkerMain extends IOApp {
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
       ),
-      IO.blocking(MongoClients.create(uri))
+      IO.delay(MongoClients.create(uri))
     )
 
   private def program: IO[Unit] =
     AnalyticsRuntimeConfig.loadWorker.flatMap { configured =>
       val common = configured.common
       resources(common.mongoUri, common.sparkMaster).use { case (spark, client) =>
-        IO.blocking(client.getDatabase(common.mongoDatabase)).flatMap { database =>
+        IO.delay(client.getDatabase(common.mongoDatabase)).flatMap { database =>
           val store = new MongoAnalyticsErasureWorkerStore(client, database)
           val publisher = new MongoAnalyticsReportPublisher(client, database)
           new AnalyticsErasureWorker(

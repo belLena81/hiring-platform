@@ -9,6 +9,7 @@ import cats.effect.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
+import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import org.apache.kafka.clients.admin.{Admin, NewTopic}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.errors.{
@@ -102,6 +103,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val client: MongoClient = MongoClients.create(mongoUri)
     val databaseName = "analytics_fencer_auth_" + UUID.randomUUID().toString.replace('-', '_')
     val database = client.getDatabase(databaseName)
+    val reactiveClient: ReactiveMongoClient = ReactiveMongoClients.create(mongoUri)
+    val reactiveDatabase = reactiveClient.getDatabase(databaseName)
     val requestId = UUID.randomUUID().toString
     val transactionalId = "hiring-publisher-invalid-fencer-" + UUID.randomUUID().toString
     val requestedAt = Instant.now()
@@ -128,17 +131,17 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .insertOne(
           new Document("_id", requestId).append("deleted", true)
         )
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDatabase)
       val worker = new AnalyticsErasureWorker(
         null,
-        database,
+        reactiveDatabase,
         store,
         KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
         KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
         topic,
         AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-        new MongoAnalyticsReportPublisher(client, database)
+        new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase)
       )
       val result = (for {
         claim <- store.claim(requestedAt, requestedAt.plusSeconds(60L), 1).map(_.head)
@@ -173,14 +176,14 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         }
         uncertainWorker = new AnalyticsErasureWorker(
           null,
-          database,
+          reactiveDatabase,
           store,
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
           AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-          new MongoAnalyticsReportPublisher(client, database),
+          new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase),
           producerFencer = uncertainFencer
         )
         uncertainFailure <- uncertainWorker.process(reclaimed, reservation).attempt
@@ -209,14 +212,14 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         }
         retryWorker = new AnalyticsErasureWorker(
           null,
-          database,
+          reactiveDatabase,
           store,
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
           AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-          new MongoAnalyticsReportPublisher(client, database),
+          new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase),
           producerFencer = correctFencer
         )
         retryFailure <- retryWorker.process(retryClaim, reservation).attempt
@@ -270,7 +273,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       assertEquals(result._16, 1L)
     } finally {
       try database.drop()
-      finally client.close()
+      finally {
+        reactiveClient.close()
+        client.close()
+      }
     }
   }
 
@@ -286,7 +292,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
     )
     val client = MongoClients.create(mongoUri)
-    val database = client.getDatabase("analytics_poll_recovery_" + UUID.randomUUID().toString.replace('-', '_'))
+    val databaseName = "analytics_poll_recovery_" + UUID.randomUUID().toString.replace('-', '_')
+    val database = client.getDatabase(databaseName)
+    val reactiveClient: ReactiveMongoClient = ReactiveMongoClients.create(mongoUri)
+    val reactiveDatabase = reactiveClient.getDatabase(databaseName)
     val requestId = UUID.randomUUID().toString
     val receiptId = UUID.randomUUID().toString
     val transactionalId =
@@ -310,7 +319,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .getCollection("event_outbox")
         .insertOne(new Document("_id", UUID.randomUUID().toString).append("subjectIds", java.util.List.of(requestId)))
 
-      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDatabase)
       val attempts = new AtomicInteger(0)
       val firstFailure = new AtomicReference[Throwable](null)
       val pendingWasObservedDuringOutage = new AtomicBoolean(false)
@@ -384,7 +393,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       }
       val worker = new AnalyticsErasureWorker(
         null,
-        database,
+        reactiveDatabase,
         store,
         KafkaConnection(workerBootstrapServers, None, None),
         if (fencerPassword.isEmpty) KafkaConnection(workerBootstrapServers, None, None)
@@ -426,7 +435,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       } finally polling.cancel.unsafeRunSync()
     } finally {
       try database.drop()
-      finally client.close()
+      finally {
+        reactiveClient.close()
+        client.close()
+      }
     }
   }
 

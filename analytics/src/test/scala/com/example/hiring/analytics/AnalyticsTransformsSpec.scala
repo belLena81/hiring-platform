@@ -4,7 +4,7 @@ import com.example.hiring.analytics.batch.*
 import com.example.hiring.analytics.erasure.*
 import com.example.hiring.analytics.mongo.*
 
-import cats.effect.{Clock, IO}
+import cats.effect.{Clock, Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import munit.FunSuite
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -953,6 +953,57 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertNotEquals(token, pseudonymizer.token("candidate-2"))
     assert(!token.contains("candidate-1"))
     assert(token.startsWith("hmac-v1_"))
+  }
+
+  test("pseudonymizer Mac cache is per-thread and reinitialized after closure serialization") {
+    val subjectIds = Vector.tabulate(128)(index => s"candidate-$index")
+    val expected = subjectIds.map(pseudonymizer.token)
+    val bytes = new java.io.ByteArrayOutputStream()
+    val output = new java.io.ObjectOutputStream(bytes)
+    output.writeObject(pseudonymizer)
+    output.close()
+    val input = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray))
+    val serializedCopy = input.readObject().asInstanceOf[SubjectPseudonymizer]
+    input.close()
+    assertEquals(subjectIds.map(serializedCopy.token), expected)
+
+    val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
+    try {
+      val actual = subjectIds.zip(expected).map { case (subjectId, token) =>
+        executor.submit(new java.util.concurrent.Callable[String] {
+          override def call(): String = pseudonymizer.token(subjectId)
+        }) -> token
+      }
+      assertEquals(actual.map(_._1.get()), expected)
+    } finally executor.shutdownNow()
+  }
+
+  test("temporary Delta rewrite path is removed after failure and cancellation") {
+    val root = Files.createTempDirectory("delta-purge-resource")
+    val failedPath = new org.apache.hadoop.fs.Path(root.resolve("failed").toUri)
+    val failedFileSystem = failedPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val primaryFailure = new IllegalStateException("rewrite failed")
+    val failure = DeltaPurgeRewrite
+      .temporaryPath(spark, failedPath.toString)
+      .use(_ => IO.blocking(failedFileSystem.mkdirs(failedPath)) *> IO.raiseError[Unit](primaryFailure))
+      .attempt
+      .unsafeRunSync()
+    assert(failure.swap.toOption.contains(primaryFailure))
+    assert(!failedFileSystem.exists(failedPath))
+
+    val canceledPath = new org.apache.hadoop.fs.Path(root.resolve("canceled").toUri)
+    val canceledFileSystem = canceledPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val pathRemoved = (for {
+      acquired <- Deferred[IO, Unit]
+      fiber <- DeltaPurgeRewrite
+        .temporaryPath(spark, canceledPath.toString)
+        .use(_ => IO.blocking(canceledFileSystem.mkdirs(canceledPath)) *> acquired.complete(()).void *> IO.never[Unit])
+        .start
+      _ <- acquired.get
+      _ <- fiber.cancel
+      remains <- IO.blocking(canceledFileSystem.exists(canceledPath))
+    } yield remains).unsafeRunSync()
+    assert(!pathRemoved)
   }
 
   test("HMAC secrets shorter than 256 bits are rejected") {

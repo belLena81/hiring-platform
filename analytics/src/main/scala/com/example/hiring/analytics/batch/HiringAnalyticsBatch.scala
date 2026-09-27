@@ -14,7 +14,6 @@ import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, concat, lit, sha2, struct, to_json, when}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
-import com.mongodb.client.{MongoClient, MongoClients}
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
@@ -573,61 +572,39 @@ final class HiringAnalyticsBatch(
     } yield ()
 
   private def vacuumExpiredFiles(spark: SparkSession): IO[Long] =
-    lakehouse {
-      val tables = Vector(
-        paths.bronze,
-        paths.quarantine,
-        paths.silver,
-        paths.funnelGold,
-        paths.timeToHireGold,
-        paths.skillsGold
-      )
-      tables.foldLeft(0L) { (removedFiles, path) =>
-        if (DeltaTable.isDeltaTable(spark, path)) {
-          val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
-          val fileSystem =
-            new org.apache.hadoop.fs.Path(temporaryPath).getFileSystem(spark.sparkContext.hadoopConfiguration)
-          val temp = new org.apache.hadoop.fs.Path(temporaryPath)
-          var rewriteFailure: Throwable = null
-          try {
-            spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
-            spark.read
-              .format("delta")
-              .load(temporaryPath)
-              .write
-              .format("delta")
-              .mode("overwrite")
-              .option("overwriteSchema", "true")
-              .save(path)
-          } catch {
-            case NonFatal(error) =>
-              rewriteFailure = error
-              throw error
-          } finally {
-            try {
-              val removed = fileSystem.delete(temp, true)
-              if (!removed && fileSystem.exists(temp))
-                throw new java.io.IOException("temporary purge rewrite path remains")
-            } catch {
-              case NonFatal(cleanupFailure) if rewriteFailure != null => rewriteFailure.addSuppressed(cleanupFailure)
-              case NonFatal(cleanupFailure)                           => throw cleanupFailure
+    Vector(
+      paths.bronze,
+      paths.quarantine,
+      paths.silver,
+      paths.funnelGold,
+      paths.timeToHireGold,
+      paths.skillsGold
+    ).foldLeft(IO.pure(0L)) { (removedFiles, path) =>
+      removedFiles.flatMap { count =>
+        IO.blocking(DeltaTable.isDeltaTable(spark, path)).flatMap {
+          case false => IO.pure(count)
+          case true  =>
+            val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
+            DeltaPurgeRewrite.temporaryPath(spark, temporaryPath).use { _ =>
+              IO.blocking {
+                spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
+                spark.read
+                  .format("delta")
+                  .load(temporaryPath)
+                  .write
+                  .format("delta")
+                  .mode("overwrite")
+                  .option("overwriteSchema", "true")
+                  .save(path)
+                // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
+                count + DeltaTable.forPath(spark, path).vacuum().count()
+              }
             }
-          }
-          // Respect Delta's retention safety horizon. A deletion is not complete until this reclaim horizon has passed.
-          removedFiles + DeltaTable.forPath(spark, path).vacuum().count()
-        } else removedFiles
+        }
       }
     }.handleErrorWith { error =>
-      val cleanupFailures = Option(error.getSuppressed).toVector.flatMap(_.toVector)
-      val log = if (cleanupFailures.nonEmpty) {
-        val failures = cleanupFailures
-          .map(cause => s"${cause.getClass.getSimpleName}: ${safeDiagnostic(cause.getMessage)}")
-          .mkString("; ")
-        logger.error(
-          s"lakehouse rewrite failed (${error.getClass.getSimpleName}); temporary path cleanup failure(s): $failures"
-        )
-      } else IO.unit
-      log *> IO.raiseError(error)
+      logger.error(s"lakehouse expired-file vacuum failed (${error.getClass.getSimpleName})") *>
+        IO.raiseError(error)
     }
 
   private def safeDiagnostic(message: String): String =
@@ -765,6 +742,24 @@ final class HiringAnalyticsBatch(
       DeltaTable.forPath(spark, path).delete(col("expiresAt") <= lit(Timestamp.from(now)))
   }
 
+}
+
+private[analytics] object DeltaPurgeRewrite {
+  def temporaryPath(spark: SparkSession, temporaryPath: String): Resource[IO, Unit] =
+    Resource
+      .make(
+        IO.blocking {
+          val path = new org.apache.hadoop.fs.Path(temporaryPath)
+          (path.getFileSystem(spark.sparkContext.hadoopConfiguration), path)
+        }
+      ) { case (fileSystem, path) =>
+        IO.blocking {
+          val removed = fileSystem.delete(path, true)
+          if (!removed && fileSystem.exists(path))
+            throw new java.io.IOException("temporary purge rewrite path remains")
+        }
+      }
+      .void
 }
 
 private[analytics] object KafkaRecordColumns {

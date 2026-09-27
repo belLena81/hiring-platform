@@ -2,10 +2,12 @@ package com.example.hiring.analytics
 
 import com.example.hiring.analytics.batch.KafkaConnection
 import com.example.hiring.analytics.erasure.KafkaRetentionBarrier
+import com.example.hiring.analytics.mongo.MongoPublisherStream
 
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 import com.mongodb.{ReadConcern, WriteConcern}
-import com.mongodb.client.MongoDatabase
+import com.mongodb.reactivestreams.client.MongoDatabase
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
@@ -247,8 +249,8 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore(database: 
       _ <- IO.raiseUnless(HmacKeyRetirementKafkaLineage.matches(value.lineage, value.lineage))(
         AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
       )
-      _ <- IO
-        .blocking {
+      _ <- MongoPublisherStream
+        .drain {
           collection.insertOne(
             new Document("_id", id(value.lakehouseId, value.keyId))
               .append("lakehouseId", value.lakehouseId)
@@ -279,54 +281,54 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore(database: 
 
   def read(root: String, keyId: String): IO[Option[HmacKeyRetirementPreparation]] =
     IO.fromEither(HmacKeyRetirementAuthorization.lakehouseId(root)).flatMap { lakehouseId =>
-      IO.blocking {
-        Option(collection.find(new Document("_id", id(lakehouseId, keyId))).first()).map { document =>
-          val partitions = Option(document.getList("partitions", classOf[Document])).toVector
-            .flatMap(_.asScala)
-            .map(partition =>
-              KafkaRetentionBarrier.Partition(
-                partition.getInteger("number"),
-                partition.getLong("endOffsetExclusive")
+      MongoPublisherStream
+        .optional(collection.find(new Document("_id", id(lakehouseId, keyId))).first())
+        .flatMap {
+          case Some(document) =>
+            val partitions = Option(document.getList("partitions", classOf[Document])).toVector
+              .flatMap(_.asScala)
+              .map(partition =>
+                KafkaRetentionBarrier.Partition(
+                  partition.getInteger("number"),
+                  partition.getLong("endOffsetExclusive")
+                )
               )
-            )
-          for {
-            barrier <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(document.getString("topic"), partitions))
-            _ <- Either.cond(
-              document.getString("lakehouseId") == lakehouseId &&
-                document.getString("keyId") == keyId &&
-                Option(document.getString("originalVerifier")).exists(_.matches("[A-Za-z0-9_-]{43}")) &&
-                document.getDate("capturedAt") != null,
-              (),
-              AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
-            )
-            lineage = HmacKeyRetirementKafkaLineage(
-              document.getString("clusterId"),
-              document.getString("topicId"),
-              document.getString("kafkaVolumeName"),
-              document.getString("kafkaVolumeMountpoint"),
-              document.getString("kafkaVolumeCreatedAt"),
-              document.getString("kafkaBootstrapEndpoint")
-            )
-            _ <- Either.cond(
-              HmacKeyRetirementKafkaLineage.matches(lineage, lineage),
-              (),
-              AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
-            )
-          } yield HmacKeyRetirementPreparation(
-            lakehouseId,
-            keyId,
-            document.getString("originalVerifier"),
-            document.getDate("capturedAt").toInstant,
-            barrier,
-            lineage
-          )
+            (for {
+              barrier <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(document.getString("topic"), partitions))
+              _ <- Either.cond(
+                document.getString("lakehouseId") == lakehouseId &&
+                  document.getString("keyId") == keyId &&
+                  Option(document.getString("originalVerifier")).exists(_.matches("[A-Za-z0-9_-]{43}")) &&
+                  document.getDate("capturedAt") != null,
+                (),
+                AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
+              )
+              lineage = HmacKeyRetirementKafkaLineage(
+                document.getString("clusterId"),
+                document.getString("topicId"),
+                document.getString("kafkaVolumeName"),
+                document.getString("kafkaVolumeMountpoint"),
+                document.getString("kafkaVolumeCreatedAt"),
+                document.getString("kafkaBootstrapEndpoint")
+              )
+              _ <- Either.cond(
+                HmacKeyRetirementKafkaLineage.matches(lineage, lineage),
+                (),
+                AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
+              )
+            } yield HmacKeyRetirementPreparation(
+              lakehouseId,
+              keyId,
+              document.getString("originalVerifier"),
+              document.getDate("capturedAt").toInstant,
+              barrier,
+              lineage
+            )).liftTo[IO].map(Some(_))
+          case None => IO.pure(None)
         }
-      }.flatMap {
-        case Some(value) => IO.fromEither(value).map(Some(_))
-        case None        => IO.pure(None)
-      }.adaptError { case NonFatal(_) =>
-        AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is unavailable or malformed")
-      }
+        .adaptError { case NonFatal(_) =>
+          AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is unavailable or malformed")
+        }
     }
 }
 

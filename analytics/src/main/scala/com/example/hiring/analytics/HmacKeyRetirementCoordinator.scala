@@ -6,7 +6,7 @@ import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
 
 import cats.effect.{Clock, IO}
 import cats.syntax.all.*
-import com.mongodb.client.MongoDatabase
+import com.mongodb.reactivestreams.client.MongoDatabase
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
 
