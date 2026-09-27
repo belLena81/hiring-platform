@@ -146,8 +146,12 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       .save(fixturePath(paths))
   }
 
-  private def stageTime(spark: SparkSession, paths: AnalyticsLakehousePaths, stage: String): Option[Instant] =
-    if (!DeltaTable.isDeltaTable(spark, fixturePath(paths))) None
+  private def stageTime(
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths,
+      stage: String
+  ): Either[AnalyticsError, Option[Instant]] =
+    if (!DeltaTable.isDeltaTable(spark, fixturePath(paths))) Right(None)
     else {
       val rows = spark.read
         .format("delta")
@@ -156,11 +160,18 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         .select("observedAt")
         .limit(2)
         .collect()
-      if (rows.length > 1) throw AnalyticsError.InvalidConfiguration("retirement fixture has duplicate stage records")
-      rows.headOption.map(_.getTimestamp(0).toInstant)
+      Either.cond(
+        rows.length <= 1,
+        rows.headOption.map(_.getTimestamp(0).toInstant),
+        AnalyticsError.InvalidConfiguration("retirement fixture has duplicate stage records")
+      )
     }
 
-  private def captureOldPaths(spark: SparkSession, paths: AnalyticsLakehousePaths, at: Instant): Unit = {
+  private def captureOldPaths(
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths,
+      at: Instant
+  ): Either[AnalyticsError, Unit] = {
     val root = new Path(paths.silver)
     val fs = root.getFileSystem(spark.sparkContext.hadoopConfiguration)
     val files = fs
@@ -173,9 +184,11 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         else Vector.empty
       }
       .filter(path => path.endsWith(".parquet") || path.endsWith(".json"))
-    if (files.isEmpty || files.size > 1000)
-      throw AnalyticsError.InvalidConfiguration("old-key fixture physical path evidence is missing or unbounded")
-    files.foreach(path => fixtureRecord(spark, paths, at, "old-primary-physical-path", path))
+    Either.cond(
+      files.nonEmpty && files.size <= 1000,
+      files.foreach(path => fixtureRecord(spark, paths, at, "old-primary-physical-path", path)),
+      AnalyticsError.InvalidConfiguration("old-key fixture physical path evidence is missing or unbounded")
+    )
   }
 
   private def stageOld(
@@ -183,30 +196,36 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
       at: Instant
-  ): Unit = {
-    if (DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry) || DeltaTable.isDeltaTable(spark, paths.silver))
-      throw AnalyticsError.InvalidConfiguration("old-key fixture already exists; preserve its original volume")
-    val registrySchema = StructType(
-      Seq(
-        StructField("keyId", StringType, nullable = false),
-        StructField("verifier", StringType, nullable = false)
+  ): Either[AnalyticsError, Unit] = {
+    Either
+      .cond(
+        !DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry) && !DeltaTable.isDeltaTable(spark, paths.silver),
+        (),
+        AnalyticsError.InvalidConfiguration("old-key fixture already exists; preserve its original volume")
       )
-    )
-    spark
-      .createDataFrame(pseudonymizer.keyVerifiers.map((id, verifier) => Row(id, verifier)).asJava, registrySchema)
-      .write
-      .format("delta")
-      .mode("errorifexists")
-      .save(paths.hmacKeyRegistry)
-    val token = pseudonymizer.tokenForNewRows(OldSubjectId)
-    spark
-      .createDataFrame(List(eventRow(token, at)).asJava, silverSchema)
-      .write
-      .format("delta")
-      .mode("errorifexists")
-      .save(paths.silver)
-    fixtureRecord(spark, paths, at, "old-primary-silver-staged")
-    captureOldPaths(spark, paths, at)
+      .flatMap { _ =>
+        val registrySchema = StructType(
+          Seq(
+            StructField("keyId", StringType, nullable = false),
+            StructField("verifier", StringType, nullable = false)
+          )
+        )
+        spark
+          .createDataFrame(pseudonymizer.keyVerifiers.map((id, verifier) => Row(id, verifier)).asJava, registrySchema)
+          .write
+          .format("delta")
+          .mode("errorifexists")
+          .save(paths.hmacKeyRegistry)
+        val token = pseudonymizer.tokenForNewRows(OldSubjectId)
+        spark
+          .createDataFrame(List(eventRow(token, at)).asJava, silverSchema)
+          .write
+          .format("delta")
+          .mode("errorifexists")
+          .save(paths.silver)
+        fixtureRecord(spark, paths, at, "old-primary-silver-staged")
+        captureOldPaths(spark, paths, at)
+      }
   }
 
   private def seedNewControl(
@@ -214,17 +233,24 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
       at: Instant
-  ): Unit = {
-    if (!DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry) || !DeltaTable.isDeltaTable(spark, paths.silver))
-      throw AnalyticsError.InvalidConfiguration("old-key fixture is missing")
-    val token = pseudonymizer.tokenForNewRows(NewControlSubjectId)
-    spark
-      .createDataFrame(List(eventRow(token, at)).asJava, silverSchema)
-      .write
-      .format("delta")
-      .mode("append")
-      .save(paths.silver)
-    fixtureRecord(spark, paths, at, "new-primary-control-staged")
+  ): Either[AnalyticsError, Unit] = {
+    Either
+      .cond(
+        DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry) && DeltaTable.isDeltaTable(spark, paths.silver),
+        (),
+        AnalyticsError.InvalidConfiguration("old-key fixture is missing")
+      )
+      .map { _ =>
+        val token = pseudonymizer.tokenForNewRows(NewControlSubjectId)
+        spark
+          .createDataFrame(List(eventRow(token, at)).asJava, silverSchema)
+          .write
+          .format("delta")
+          .mode("append")
+          .save(paths.silver)
+        fixtureRecord(spark, paths, at, "new-primary-control-staged")
+        ()
+      }
   }
 
   private def publishOldEvent(
@@ -232,134 +258,162 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       paths: AnalyticsLakehousePaths,
       raw: RawFixture,
       at: Instant
-  ): Unit = {
-    if (
-      stageTime(spark, paths, "old-primary-silver-staged").isEmpty ||
-      stageTime(spark, paths, "old-primary-event-published").nonEmpty
-    )
-      throw AnalyticsError.InvalidConfiguration("old-key fixture must be staged and published only once")
-    val config = raw.kafka.getOrElse(
-      throw AnalyticsError.InvalidConfiguration("fixture.kafka settings are required for the old-subject event")
-    )
-    val bootstrap = required("fixture.kafka.bootstrap-servers", config.bootstrapServers).fold(throw _, identity)
-    val topic = required("fixture.kafka.topic", config.topic).fold(throw _, identity)
-    val connection = KafkaConnection
-      .validate(
-        KafkaConnection(
-          bootstrap,
-          config.username.filter(_.nonEmpty),
-          config.password.filter(_.nonEmpty),
-          config.securityProtocol.getOrElse("SASL_SSL"),
-          config.allowPlaintext.getOrElse(false)
+  ): Either[AnalyticsError, Unit] = {
+    val settings = for {
+      staged <- stageTime(spark, paths, "old-primary-silver-staged")
+      published <- stageTime(spark, paths, "old-primary-event-published")
+      _ <- Either.cond(
+        staged.nonEmpty && published.isEmpty,
+        (),
+        AnalyticsError.InvalidConfiguration("old-key fixture must be staged and published only once")
+      )
+      config <- raw.kafka.toRight(
+        AnalyticsError.InvalidConfiguration("fixture.kafka settings are required for the old-subject event")
+      )
+      bootstrap <- required("fixture.kafka.bootstrap-servers", config.bootstrapServers)
+      topic <- required("fixture.kafka.topic", config.topic)
+      connection <- KafkaConnection
+        .validate(
+          KafkaConnection(
+            bootstrap,
+            config.username.filter(_.nonEmpty),
+            config.password.filter(_.nonEmpty),
+            config.securityProtocol.getOrElse("SASL_SSL"),
+            config.allowPlaintext.getOrElse(false)
+          )
         )
-      )
-      .toEither
-      .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
-      .fold(throw _, identity)
-    val properties = new Properties()
-    properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-    properties.setProperty("key.serializer", classOf[StringSerializer].getName)
-    properties.setProperty("value.serializer", classOf[StringSerializer].getName)
-    properties.setProperty("enable.idempotence", "true")
-    properties.setProperty("acks", "all")
-    properties.setProperty("delivery.timeout.ms", "30000")
-    KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
-    val eventId = UUID.randomUUID().toString
-    val jobId = UUID.randomUUID().toString
-    val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
-      s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$OldSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
-    val producer = new KafkaProducer[String, String](properties)
-    try {
-      val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
-      producer.flush()
-      fixtureRecord(
-        spark,
-        paths,
-        at,
-        "old-primary-event-published",
-        s"${metadata.topic()}:${metadata.partition()}:${metadata.offset() + 1L}"
-      )
-    } finally producer.close()
+        .toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+    } yield (connection, topic)
+    settings.map { case (connection, topic) =>
+      val properties = new Properties()
+      properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+      properties.setProperty("key.serializer", classOf[StringSerializer].getName)
+      properties.setProperty("value.serializer", classOf[StringSerializer].getName)
+      properties.setProperty("enable.idempotence", "true")
+      properties.setProperty("acks", "all")
+      properties.setProperty("delivery.timeout.ms", "30000")
+      KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
+      val eventId = UUID.randomUUID().toString
+      val jobId = UUID.randomUUID().toString
+      val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
+        s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$OldSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
+      val producer = new KafkaProducer[String, String](properties)
+      try {
+        val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
+        producer.flush()
+        fixtureRecord(
+          spark,
+          paths,
+          at,
+          "old-primary-event-published",
+          s"${metadata.topic()}:${metadata.partition()}:${metadata.offset() + 1L}"
+        )
+      } finally producer.close()
+    }
   }
 
-  private def newEventRange(spark: SparkSession, paths: AnalyticsLakehousePaths): String = {
+  private def newEventRange(
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths
+  ): Either[AnalyticsError, String] = {
     if (!DeltaTable.isDeltaTable(spark, fixturePath(paths)))
-      throw AnalyticsError.InvalidConfiguration("new-primary event range is missing")
-    val rows = spark.read
-      .format("delta")
-      .load(fixturePath(paths))
-      .filter(col("stage") === "new-primary-event-published")
-      .select("reference")
-      .limit(2)
-      .collect()
-    if (rows.length != 1)
-      throw AnalyticsError.InvalidConfiguration("new-primary event range is missing or duplicated")
-    val reference = rows.head.getString(0)
-    if (!reference.matches("[A-Za-z0-9._-]+:[0-9]+:[0-9]+:[0-9]+"))
-      throw AnalyticsError.InvalidConfiguration("new-primary event range is malformed")
-    reference
+      Left(AnalyticsError.InvalidConfiguration("new-primary event range is missing"))
+    else {
+      val rows = spark.read
+        .format("delta")
+        .load(fixturePath(paths))
+        .filter(col("stage") === "new-primary-event-published")
+        .select("reference")
+        .limit(2)
+        .collect()
+      Either
+        .cond(
+          rows.length == 1,
+          rows.head.getString(0),
+          AnalyticsError.InvalidConfiguration("new-primary event range is missing or duplicated")
+        )
+        .flatMap(reference =>
+          Either.cond(
+            reference.matches("[A-Za-z0-9._-]+:[0-9]+:[0-9]+:[0-9]+"),
+            reference,
+            AnalyticsError.InvalidConfiguration("new-primary event range is malformed")
+          )
+        )
+    }
   }
 
-  private def printStageStatus(spark: SparkSession, paths: AnalyticsLakehousePaths): Unit = {
-    println(s"OLD_ROW_STAGED=${stageTime(spark, paths, "old-primary-silver-staged").nonEmpty}")
-    println(s"OLD_EVENT_PUBLISHED=${stageTime(spark, paths, "old-primary-event-published").nonEmpty}")
-    println(s"NEW_CONTROL_STAGED=${stageTime(spark, paths, "new-primary-control-staged").nonEmpty}")
-    println(s"NEW_EVENT_PUBLISHED=${stageTime(spark, paths, "new-primary-event-published").nonEmpty}")
-  }
+  private def printStageStatus(spark: SparkSession, paths: AnalyticsLakehousePaths): Either[AnalyticsError, Unit] =
+    for {
+      oldRow <- stageTime(spark, paths, "old-primary-silver-staged")
+      oldEvent <- stageTime(spark, paths, "old-primary-event-published")
+      newControl <- stageTime(spark, paths, "new-primary-control-staged")
+      newEvent <- stageTime(spark, paths, "new-primary-event-published")
+    } yield {
+      println(s"OLD_ROW_STAGED=${oldRow.nonEmpty}")
+      println(s"OLD_EVENT_PUBLISHED=${oldEvent.nonEmpty}")
+      println(s"NEW_CONTROL_STAGED=${newControl.nonEmpty}")
+      println(s"NEW_EVENT_PUBLISHED=${newEvent.nonEmpty}")
+    }
 
   private def publishNewEvent(
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       raw: RawFixture,
       at: Instant
-  ): Unit = {
-    if (
-      stageTime(spark, paths, "new-primary-control-staged").isEmpty ||
-      stageTime(spark, paths, "new-primary-event-published").nonEmpty
-    )
-      throw AnalyticsError.InvalidConfiguration("new-key control must be staged and event published only once")
-    val config = raw.kafka.getOrElse(
-      throw AnalyticsError.InvalidConfiguration("fixture.kafka settings are required for the new-subject event")
-    )
-    val bootstrap = required("fixture.kafka.bootstrap-servers", config.bootstrapServers).fold(throw _, identity)
-    val topic = required("fixture.kafka.topic", config.topic).fold(throw _, identity)
-    val connection = KafkaConnection
-      .validate(
-        KafkaConnection(
-          bootstrap,
-          config.username.filter(_.nonEmpty),
-          config.password.filter(_.nonEmpty),
-          config.securityProtocol.getOrElse("SASL_SSL"),
-          config.allowPlaintext.getOrElse(false)
+  ): Either[AnalyticsError, Unit] = {
+    val settings = for {
+      staged <- stageTime(spark, paths, "new-primary-control-staged")
+      published <- stageTime(spark, paths, "new-primary-event-published")
+      _ <- Either.cond(
+        staged.nonEmpty && published.isEmpty,
+        (),
+        AnalyticsError.InvalidConfiguration("new-key control must be staged and event published only once")
+      )
+      config <- raw.kafka.toRight(
+        AnalyticsError.InvalidConfiguration("fixture.kafka settings are required for the new-subject event")
+      )
+      bootstrap <- required("fixture.kafka.bootstrap-servers", config.bootstrapServers)
+      topic <- required("fixture.kafka.topic", config.topic)
+      connection <- KafkaConnection
+        .validate(
+          KafkaConnection(
+            bootstrap,
+            config.username.filter(_.nonEmpty),
+            config.password.filter(_.nonEmpty),
+            config.securityProtocol.getOrElse("SASL_SSL"),
+            config.allowPlaintext.getOrElse(false)
+          )
         )
-      )
-      .toEither
-      .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
-      .fold(throw _, identity)
-    val properties = new Properties()
-    properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-    properties.setProperty("key.serializer", classOf[StringSerializer].getName)
-    properties.setProperty("value.serializer", classOf[StringSerializer].getName)
-    properties.setProperty("enable.idempotence", "true")
-    properties.setProperty("acks", "all")
-    properties.setProperty("delivery.timeout.ms", "30000")
-    KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
-    val eventId = UUID.randomUUID().toString
-    val jobId = UUID.randomUUID().toString
-    val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
-      s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$NewControlSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
-    val producer = new KafkaProducer[String, String](properties)
-    try {
-      val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
-      producer.flush()
-      fixtureRecord(
-        spark,
-        paths,
-        at,
-        "new-primary-event-published",
-        s"${metadata.topic()}:${metadata.partition()}:${metadata.offset()}:${metadata.offset() + 1L}"
-      )
-    } finally producer.close()
+        .toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+    } yield (connection, topic)
+    settings.map { case (connection, topic) =>
+      val properties = new Properties()
+      properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+      properties.setProperty("key.serializer", classOf[StringSerializer].getName)
+      properties.setProperty("value.serializer", classOf[StringSerializer].getName)
+      properties.setProperty("enable.idempotence", "true")
+      properties.setProperty("acks", "all")
+      properties.setProperty("delivery.timeout.ms", "30000")
+      KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
+      val eventId = UUID.randomUUID().toString
+      val jobId = UUID.randomUUID().toString
+      val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
+        s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$NewControlSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
+      val producer = new KafkaProducer[String, String](properties)
+      try {
+        val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
+        producer.flush()
+        fixtureRecord(
+          spark,
+          paths,
+          at,
+          "new-primary-event-published",
+          s"${metadata.topic()}:${metadata.partition()}:${metadata.offset()}:${metadata.offset() + 1L}"
+        )
+      } finally producer.close()
+    }
   }
 
   private def requireRetirementAuthorization(root: String, oldKeyId: String): IO[Unit] =
@@ -386,60 +440,84 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       pseudonymizer: SubjectPseudonymizer,
       oldKeyId: String,
       at: Instant
-  ): Unit = {
-    if (stageTime(spark, paths, "new-primary-control-staged").isEmpty)
-      throw AnalyticsError.InvalidConfiguration("new-primary control row has not been staged")
-    val stagedAt = stageTime(spark, paths, "old-primary-silver-staged").getOrElse(
-      throw AnalyticsError.InvalidConfiguration("old-key fixture stage timestamp is missing")
-    )
-    if (at.isBefore(stagedAt.plusSeconds(30L * 86400L)))
-      throw AnalyticsError.InvalidConfiguration("old-key Silver retention has not elapsed")
-    val expiredAt = stageTime(spark, paths, "old-primary-silver-expired").getOrElse {
-      if (!DeltaTable.isDeltaTable(spark, paths.silver))
-        throw AnalyticsError.InvalidConfiguration("old-key Silver table is missing")
-      DeltaTable.forPath(spark, paths.silver).delete(col("subjectToken").startsWith(oldKeyId + "_"))
-      val remaining = spark.read
-        .format("delta")
-        .load(paths.silver)
-        .filter(col("subjectToken").startsWith(oldKeyId + "_"))
-        .limit(1)
-        .count()
-      if (remaining != 0L)
-        throw AnalyticsError.InvalidConfiguration("old-key Silver rows remain after elapsed cleanup")
-      fixtureRecord(spark, paths, at, "old-primary-silver-expired")
-      at
-    }
-    if (
-      !at.isBefore(expiredAt.plusSeconds(7L * 86400L)) &&
-      stageTime(spark, paths, "old-primary-data-reclaimed").isEmpty
-    ) {
-      DeltaTable.forPath(spark, paths.silver).vacuum().count()
-      fixtureRecord(spark, paths, at, "old-primary-data-reclaimed")
-    }
-    if (
-      !at.isBefore(expiredAt.plusSeconds(30L * 86400L)) &&
-      stageTime(spark, paths, "old-primary-log-cleaned").isEmpty
-    ) {
-      val tableIdentifier = paths.silver.replace("`", "``")
-      spark.sql(
-        s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES " +
-          s"('analytics.retirementCheckpointNonce' = '${UUID.randomUUID()}')"
+  ): Either[AnalyticsError, Unit] =
+    for {
+      control <- stageTime(spark, paths, "new-primary-control-staged")
+      _ <- Either.cond(
+        control.nonEmpty,
+        (),
+        AnalyticsError.InvalidConfiguration("new-primary control row has not been staged")
       )
-      val log = DeltaLog.forTable(spark, paths.silver)
-      log.checkpointAndCleanUpDeltaLog(log.update(), None)
-      fixtureRecord(spark, paths, at, "old-primary-log-cleaned")
-    }
-    val controlToken = pseudonymizer.tokenForNewRows(NewControlSubjectId)
-    if (
-      spark.read
+      staged <- stageTime(spark, paths, "old-primary-silver-staged")
+      stagedAt <- staged.toRight(AnalyticsError.InvalidConfiguration("old-key fixture stage timestamp is missing"))
+      _ <- Either.cond(
+        !at.isBefore(stagedAt.plusSeconds(30L * 86400L)),
+        (),
+        AnalyticsError.InvalidConfiguration("old-key Silver retention has not elapsed")
+      )
+      expiredStage <- stageTime(spark, paths, "old-primary-silver-expired")
+      expiredAt <- expiredStage match {
+        case Some(value) => Right(value)
+        case None        =>
+          Either
+            .cond(
+              DeltaTable.isDeltaTable(spark, paths.silver),
+              (),
+              AnalyticsError.InvalidConfiguration("old-key Silver table is missing")
+            )
+            .flatMap { _ =>
+              DeltaTable.forPath(spark, paths.silver).delete(col("subjectToken").startsWith(oldKeyId + "_"))
+              val remaining = spark.read
+                .format("delta")
+                .load(paths.silver)
+                .filter(col("subjectToken").startsWith(oldKeyId + "_"))
+                .limit(1)
+                .count()
+              Either
+                .cond(
+                  remaining == 0L,
+                  (),
+                  AnalyticsError.InvalidConfiguration("old-key Silver rows remain after elapsed cleanup")
+                )
+                .map { _ =>
+                  fixtureRecord(spark, paths, at, "old-primary-silver-expired")
+                  at
+                }
+            }
+      }
+      reclaimed <- stageTime(spark, paths, "old-primary-data-reclaimed")
+      _ <- Right[AnalyticsError, Unit](()).map { _ =>
+        if (!at.isBefore(expiredAt.plusSeconds(7L * 86400L)) && reclaimed.isEmpty) {
+          DeltaTable.forPath(spark, paths.silver).vacuum().count()
+          fixtureRecord(spark, paths, at, "old-primary-data-reclaimed")
+        }
+      }
+      logCleaned <- stageTime(spark, paths, "old-primary-log-cleaned")
+      _ <- Right[AnalyticsError, Unit](()).map { _ =>
+        if (!at.isBefore(expiredAt.plusSeconds(30L * 86400L)) && logCleaned.isEmpty) {
+          val tableIdentifier = paths.silver.replace("`", "``")
+          spark.sql(
+            s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES " +
+              s"('analytics.retirementCheckpointNonce' = '${UUID.randomUUID()}')"
+          )
+          val log = DeltaLog.forTable(spark, paths.silver)
+          log.checkpointAndCleanUpDeltaLog(log.update(), None)
+          fixtureRecord(spark, paths, at, "old-primary-log-cleaned")
+        }
+      }
+      controlToken = pseudonymizer.tokenForNewRows(NewControlSubjectId)
+      controlCount = spark.read
         .format("delta")
         .load(paths.silver)
         .filter(col("subjectToken") === controlToken)
         .limit(1)
-        .count() != 1L
-    )
-      throw AnalyticsError.InvalidConfiguration("new-primary control row was lost during old-key cleanup")
-  }
+        .count()
+      _ <- Either.cond(
+        controlCount == 1L,
+        (),
+        AnalyticsError.InvalidConfiguration("new-primary control row was lost during old-key cleanup")
+      )
+    } yield ()
 
   override def run(args: List[String]): IO[ExitCode] = args match {
     case List(
@@ -490,10 +568,11 @@ object HmacKeyRetirementFixtureMain extends IOApp {
               else if (action == "publish-old-event") publishOldEvent(spark, paths, raw, at)
               else if (action == "seed-new-control") seedNewControl(spark, paths, pseudonymizer, at)
               else if (action == "publish-new-event") publishNewEvent(spark, paths, raw, at)
-              else if (action == "new-event-range") println("NEW_EVENT_RANGE=" + newEventRange(spark, paths))
+              else if (action == "new-event-range")
+                newEventRange(spark, paths).map(range => println("NEW_EVENT_RANGE=" + range))
               else if (action == "stage-status") printStageStatus(spark, paths)
               else maintain(spark, paths, pseudonymizer, raw.oldKeyId.getOrElse(""), at)
-            }
+            }.flatMap(IO.fromEither(_))
           }
         _ <- logger.info(s"HMAC retirement fixture $action at $at")
       } yield ExitCode.Success).handleErrorWith {

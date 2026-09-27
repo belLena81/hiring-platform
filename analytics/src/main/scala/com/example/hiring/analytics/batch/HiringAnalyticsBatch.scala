@@ -598,13 +598,6 @@ final class HiringAnalyticsBatch(
         IO.raiseError(error)
     }
 
-  private def safeDiagnostic(message: String): String =
-    Option(message)
-      .getOrElse("")
-      .replaceAll("(?i)[a-z][a-z0-9+.-]*://[^\\s,;]+", "[REDACTED_URI]")
-      .replaceAll("(?i)(password|token|secret)=\\S+", "$1=[REDACTED]")
-      .take(300)
-
   private def finishRun(
       spark: SparkSession,
       manifest: AnalyticsRunManifest,
