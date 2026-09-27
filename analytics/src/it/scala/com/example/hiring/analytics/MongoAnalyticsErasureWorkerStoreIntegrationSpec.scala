@@ -512,14 +512,20 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         "hiring.operational-events",
         AnalyticsLakehousePaths(Files.createTempDirectory("analytics-fence-failure").toUri.toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8")),
-        new MongoAnalyticsReportPublisher(client, database),
+        new AnalyticsReportPublisher {
+          override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+            IO.pure(AnalyticsReportReservation(runId, rangeFingerprint, 1L, 1L))
+          override def publish(
+              reservation: AnalyticsReportReservation,
+              report: AnalyticsReportOutput,
+              expiresAt: Instant
+          ): IO[Unit] = IO.unit
+        },
         producerFencer = failedFencer
       )
-      val reservation = AnalyticsReportReservation("erasure-" + requestId, "range-fingerprint", 1L, 1L)
-
       val result = for {
         claim <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
-        failed <- worker.process(claim, reservation).attempt
+        _ <- worker.runClaim(claim)
         barrier <- store.readBarrier(requestId)
         request <- IO.blocking(
           database
@@ -528,14 +534,17 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .first()
         )
         outboxCount <- IO.blocking(database.getCollection("event_outbox").countDocuments())
-      } yield (claim, failed, barrier, request, outboxCount)
+      } yield (claim, barrier, request, outboxCount)
 
-      val (claim, failed, barrier, request, outboxCount) = result.unsafeRunSync()
+      val (claim, barrier, request, outboxCount) = result.unsafeRunSync()
       assertEquals(claim.phase, ErasurePhase.Requested)
-      assert(failed.swap.toOption.exists(_.getMessage == "simulated broker fencing failure"))
       assertEquals(barrier, None)
       assertEquals(request.getString("state"), "Processing")
       assertEquals(request.getString("phase"), null)
+      assertEquals(request.getString("failureCategory"), ErasureFailureCategory.Unknown.persistedName)
+      assertEquals(request.getInteger("attemptCount"), Integer.valueOf(1))
+      assertEquals(request.getBoolean("repairRequired"), Boolean.box(false))
+      assert(request.getDate("resumeAfter").toInstant.isAfter(now))
       assertEquals(outboxCount, 1L)
     } finally {
       client.close()

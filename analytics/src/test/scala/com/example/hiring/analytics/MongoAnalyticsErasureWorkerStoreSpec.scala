@@ -79,6 +79,11 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     assertEquals(claim.map(_.attemptCount), Some(7))
   }
 
+  test("a rejected repair compare-and-set is reported as an unsuccessful command") {
+    assertEquals(AnalyticsErasureRepairMain.requeueExitCode(updated = true), cats.effect.ExitCode.Success)
+    assertEquals(AnalyticsErasureRepairMain.requeueExitCode(updated = false), cats.effect.ExitCode.Error)
+  }
+
   test("lease compare-and-set filter binds request, processing state, current token, and unexpired lease") {
     val now = Instant.parse("2026-09-23T11:00:00Z")
     val id = UUID.randomUUID().toString

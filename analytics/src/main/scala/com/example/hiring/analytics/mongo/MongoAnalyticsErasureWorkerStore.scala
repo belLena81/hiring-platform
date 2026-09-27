@@ -56,7 +56,8 @@ final class MongoAnalyticsErasureWorkerStore(
           IO.fromEither(documents.traverse { document =>
             for {
               id <- Option(document.getString(AnalyticsCollections.Fields.Id)).toRight(AnalyticsError.MalformedMarker)
-              phase <- Option(document.getString(AnalyticsCollections.Fields.Phase)).toRight(AnalyticsError.MalformedMarker)
+              phase <- Option(document.getString(AnalyticsCollections.Fields.Phase))
+                .fold[Either[AnalyticsError, String]](Right(ErasurePhase.Requested.persistedName))(Right(_))
               _ <- Either.cond(ErasurePhase.fromString(phase).nonEmpty, (), AnalyticsError.MalformedMarker)
               attempt <- Option(document.getInteger(AnalyticsCollections.Fields.AttemptCount))
                 .map(_.intValue())

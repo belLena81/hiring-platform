@@ -5,7 +5,7 @@ import com.example.hiring.analytics.*
 import cats.effect.IO
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.types.{DataType, DataTypes}
+import org.apache.spark.sql.types.{DataType, DataTypes, StructType}
 
 import java.sql.Timestamp
 import java.time.Instant
@@ -36,6 +36,14 @@ private[batch] object AnalyticsGoldStage {
     "skill" -> DataTypes.StringType,
     "postings" -> DataTypes.LongType
   )
+
+  private[batch] def validateOutputSchema(
+      actual: StructType,
+      expected: Vector[(String, DataType)]
+  ): Either[AnalyticsError.InvalidGoldSchema.type, Unit] = {
+    val fields = actual.fields.toVector.map(field => field.name -> field.dataType)
+    Either.cond(fields == expected, (), AnalyticsError.InvalidGoldSchema)
+  }
 
   private def lakehouse[A](work: => A): IO[A] = IO.blocking(work).adaptError {
     case error: AnalyticsError => error
@@ -106,8 +114,7 @@ private[batch] object AnalyticsGoldStage {
       if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
       else {
         val frame = spark.read.format("delta").load(path)
-        val actual = frame.schema.fields.toVector.map(field => field.name -> field.dataType)
-        if (actual != expected) throw AnalyticsError.InvalidGoldSchema
+        validateOutputSchema(frame.schema, expected).fold(throw _, identity)
         frame.limit(MaximumReportRows + 1).collect().toVector
       }
     }.flatMap { result =>

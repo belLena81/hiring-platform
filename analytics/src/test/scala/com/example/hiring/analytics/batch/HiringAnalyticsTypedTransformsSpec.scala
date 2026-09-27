@@ -5,6 +5,7 @@ import com.example.hiring.analytics.AnalyticsError
 
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.types.{DataTypes, StructType}
 import cats.effect.unsafe.implicits.global
 
 import java.sql.Timestamp
@@ -157,18 +158,22 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
     assertEquals(timeToHire.head().getAs[Long]("excludedCount"), 0L)
   }
 
-  test("report extraction rejects a Gold Delta schema drift before Row decoding") {
-    import spark.implicits.*
-
-    val root = java.nio.file.Files.createTempDirectory("analytics-gold-schema").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(root)
-    Seq(("not-a-timestamp", 1L)).toDF("day", "created")
-      .write.format("delta").mode("overwrite").save(paths.funnelGold)
-
-    val failure = intercept[AnalyticsError.InvalidGoldSchema.type] {
-      AnalyticsGoldStage.extract(spark, paths, Instant.parse("2026-01-01T00:00:00Z")).unsafeRunSync()
-    }
-    assertEquals(failure, AnalyticsError.InvalidGoldSchema)
+  test("report extraction schema contract detects field and type drift") {
+    val invalid = StructType.fromDDL("day STRING, created BIGINT")
+    val valid = StructType.fromDDL(
+      "day TIMESTAMP, created BIGINT, accepted BIGINT, declined BIGINT, interview BIGINT, hired BIGINT, rejected BIGINT"
+    )
+    val expected = Vector(
+      "day" -> DataTypes.TimestampType,
+      "created" -> DataTypes.LongType,
+      "accepted" -> DataTypes.LongType,
+      "declined" -> DataTypes.LongType,
+      "interview" -> DataTypes.LongType,
+      "hired" -> DataTypes.LongType,
+      "rejected" -> DataTypes.LongType
+    )
+    assertEquals(AnalyticsGoldStage.validateOutputSchema(invalid, expected), Left(AnalyticsError.InvalidGoldSchema))
+    assertEquals(AnalyticsGoldStage.validateOutputSchema(valid, expected), Right(()))
   }
 
   private def ts(value: Instant): Timestamp = Timestamp.from(value)

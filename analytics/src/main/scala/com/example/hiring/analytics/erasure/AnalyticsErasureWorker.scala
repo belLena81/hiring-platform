@@ -65,7 +65,7 @@ final class AnalyticsErasureWorker(
       _ <- pollForever
     } yield ()
 
-  private def runClaim(claim: ErasureClaim): IO[Unit] = {
+  private[analytics] def runClaim(claim: ErasureClaim): IO[Unit] = {
     val work = for {
       current <- now
       reservation <- publisher.reserve(
@@ -85,26 +85,13 @@ final class AnalyticsErasureWorker(
         case AnalyticsError.ErasureNotReady => now.flatMap(store.releaseForOtherRequests(claim, _)).void
         case error                          =>
           val nextAttempt = claim.attemptCount + 1
-          val category = error match {
-            case _: AnalyticsError.MarkerStorageFailure | _: AnalyticsError.MongoConnectionFailure =>
-              ErasureFailureCategory.TransientStorage
-            case _: AnalyticsError.SourceReadFailure | _: AnalyticsError.LakehouseFailure =>
-              ErasureFailureCategory.TransientSource
-            case AnalyticsError.MalformedMarker | AnalyticsError.InvalidGoldSchema | _: AnalyticsError.InvalidConfiguration =>
-              ErasureFailureCategory.InvalidState
-            case _ => ErasureFailureCategory.Unknown
-          }
-          val retryable = category match {
-            case ErasureFailureCategory.InvalidState => false
-            case ErasureFailureCategory.Unknown      => nextAttempt < 3
-            case _                                   => nextAttempt < 8
-          }
+          val decision = ErasureFailurePolicy.decide(error, nextAttempt)
           now.flatMap { current =>
-            val scheduled = Option.when(retryable)(current.plusMillis(retryDelay(nextAttempt).toMillis))
-            store.recordFailure(claim, category, nextAttempt, scheduled, current).flatMap {
+            val scheduled = decision.retryAfter.map(delay => current.plusMillis(delay.toMillis))
+            store.recordFailure(claim, decision.category, nextAttempt, scheduled, current).flatMap {
               case true =>
                 logger.error(
-                  "analytics erasure failed; persisted category=" + category.persistedName + ", attempt=" + nextAttempt
+                  "analytics erasure failed; persisted category=" + decision.category.persistedName + ", attempt=" + nextAttempt
                 )
               case false =>
                 logger.warn("analytics erasure failure could not be recorded because the lease is no longer owned")
@@ -112,9 +99,6 @@ final class AnalyticsErasureWorker(
           }
       }
   }
-
-  private def retryDelay(attempt: Int): FiniteDuration =
-    math.min(300L, 5L * (1L << math.min(attempt - 1, 6))).seconds
 
   private def renewForever(claim: ErasureClaim): IO[Nothing] =
     (IO.sleep(leaseDuration / 3) *> (now, leaseUntil).tupled.flatMap { case (current, until) =>

@@ -130,7 +130,6 @@ final case class PartitionOffsetRange private (
 
 object PartitionOffsetRange {
   private[analytics] def partitionNumber(value: AnalyticsPartition): Int = value
-  private[analytics] def offsetValue(value: AnalyticsOffset): Long = value
 
   def from(
       topic: String,
