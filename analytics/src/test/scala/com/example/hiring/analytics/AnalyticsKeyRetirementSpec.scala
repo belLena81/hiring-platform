@@ -1,12 +1,14 @@
 package com.example.hiring.analytics
 
-import munit.FunSuite
+import munit.ScalaCheckSuite
+import org.scalacheck.Gen
+import org.scalacheck.Prop.forAll
 
 import java.time.Instant
 import java.util.Date
 import org.bson.Document
 
-class AnalyticsKeyRetirementSpec extends FunSuite {
+class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
   import AnalyticsKeyRetirement.*
 
   private val now = Instant.parse("2026-10-26T00:00:00Z")
@@ -25,27 +27,30 @@ class AnalyticsKeyRetirementSpec extends FunSuite {
     unmanaged = Vector(WriterRecord("external-delta-jobs", WriterDisposition.AccessRevoked, "acl-audit-record"))
   )
 
+  private def messages(result: cats.data.ValidatedNec[String, Unit]): List[String] =
+    result.fold(_.toNonEmptyList.toList, _ => Nil)
+
   test("retention gate requires passed Kafka barrier and every elapsed horizon") {
-    assertEquals(validateRetention(passedRetention, now), Vector.empty)
+    assert(validateRetention(passedRetention, now).isValid)
 
     val blocked = passedRetention.copy(
       kafka = KafkaRetentionEvidence(Some(10L), Some(9L), "kafka-barrier-evidence"),
       deltaData = RetentionHorizon(None, "delta-data-retention-evidence"),
       reports = RetentionHorizon(Some(now.plusSeconds(1)), "report-retention-evidence")
     )
-    val reasons = validateRetention(blocked, now)
+    val reasons = messages(validateRetention(blocked, now))
     assert(reasons.exists(_.contains("Kafka retention barrier")))
     assert(reasons.exists(_.contains("Delta data-file retention horizon")))
     assert(reasons.exists(_.contains("report retention horizon")))
   }
 
   test("writer gate requires coverage and evidence for every managed and unmanaged writer") {
-    assertEquals(validateWriters(completeWriterInventory, now), Vector.empty)
+    assert(validateWriters(completeWriterInventory, now).isValid)
 
     val incomplete = completeWriterInventory.copy(
       unmanaged = Vector(WriterRecord("unmanaged-spark-job", WriterDisposition.Unknown, ""))
     )
-    val reasons = validateWriters(incomplete, now)
+    val reasons = messages(validateWriters(incomplete, now))
     assert(reasons.exists(_.contains("not accounted for as stopped or access-revoked")))
     assert(reasons.exists(_.contains("evidence reference is missing")))
   }
@@ -57,14 +62,14 @@ class AnalyticsKeyRetirementSpec extends FunSuite {
       managed = Vector.empty,
       unmanaged = Vector.empty
     )
-    val reasons = validateWriters(empty, now)
+    val reasons = messages(validateWriters(empty, now))
     assert(reasons.exists(_.contains("lacks fresh operator-attested coverage evidence")))
     assert(reasons.exists(_.contains("no individually accounted writer identities")))
   }
 
   test("writer evidence older than one hour blocks the audit") {
     val stale = completeWriterInventory.copy(observedAt = now.minusSeconds(3601))
-    assert(validateWriters(stale, now).exists(_.contains("fresh operator-attested coverage evidence")))
+    assert(messages(validateWriters(stale, now)).exists(_.contains("fresh operator-attested coverage evidence")))
   }
 
   test("erasure request states fail closed unless completion retention has elapsed") {
@@ -127,5 +132,19 @@ class AnalyticsKeyRetirementSpec extends FunSuite {
       0
     )
     assert(withOutbox.blockers.toList.exists(_.contains("outbox contains replay work")))
+  }
+
+  property("unrelated Mongo observations preserve blockers and active subjects") {
+    forAll(Gen.chooseNum(0L, Long.MaxValue - 1L), Gen.chooseNum(0L, Long.MaxValue)) { (count: Long, rowId: Long) =>
+      val active = Set("active-subject")
+      val blockers = cats.data.Chain.one("existing blocker")
+      val initial = MongoScanState(count, active, blockers)
+      val document = new Document("_id", rowId.toString).append("payload", "unrelated")
+
+      val (next, collectionDocuments) =
+        reduceMongoObservation(initial, "unrelated_collection", document, "retiring-key", now, 0)
+
+      next.count == count + 1L && next.activeSubjects == active && next.blockers == blockers && collectionDocuments == 1
+    }
   }
 }

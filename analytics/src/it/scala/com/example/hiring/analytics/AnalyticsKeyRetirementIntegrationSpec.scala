@@ -1,6 +1,7 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.batch.AnalyticsLakehousePaths
+import cats.effect.{Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import org.apache.spark.sql.SparkSession
@@ -11,6 +12,7 @@ import org.bson.Document
 import java.nio.file.{Files, Path}
 import java.time.Instant
 import scala.compiletime.uninitialized
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
@@ -18,6 +20,7 @@ import scala.util.Try
 final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   private val enabled = sys.env.get("ANALYTICS_KEY_RETIREMENT_MONGO_URI").exists(_.nonEmpty)
   private var mongo: MongoClient = uninitialized
+  private var peerMongo: MongoClient = uninitialized
   private var database: MongoDatabase = uninitialized
   private var spark: SparkSession = uninitialized
   private var lakehouseRoot: Path = uninitialized
@@ -26,6 +29,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
 
   override def beforeAll(): Unit = if (enabled) {
     mongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+    peerMongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
     database = mongo.getDatabase(s"analytics_key_retirement_${java.util.UUID.randomUUID().toString.replace('-', '_')}")
     spark = SparkSession
       .builder()
@@ -59,6 +63,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   override def afterAll(): Unit = if (enabled) {
     Try(database.drop())
     Try(mongo.close())
+    Try(peerMongo.close())
     Try(spark.stop())
     if (lakehouseRoot != null) deleteTree(lakehouseRoot)
   }
@@ -96,6 +101,27 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
       .save(paths.silver)
     val oldToken = audit(paths)
     assert(oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"))
+  }
+
+  if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
+    val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
+    val firstLock = new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(database)
+    val secondLock =
+      new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(peerMongo.getDatabase(database.getName))
+    val result = (for {
+      firstEntered <- Deferred[IO, Unit]
+      releaseFirst <- Deferred[IO, Unit]
+      secondEntered <- Deferred[IO, Unit]
+      first <- firstLock.resource(root).use(_ => firstEntered.complete(()) *> releaseFirst.get).start
+      _ <- firstEntered.get
+      second <- secondLock.resource(root).use(_ => secondEntered.complete(())).start
+      beforeRelease <- IO.sleep(1.second) *> secondEntered.tryGet
+      _ <- releaseFirst.complete(())
+      _ <- secondEntered.get.timeout(10.seconds)
+      _ <- first.joinWithNever
+      _ <- second.joinWithNever
+    } yield beforeRelease).unsafeRunSync()
+    assertEquals(result, None)
   }
 
   if (enabled) test("audit fails closed on malformed erasure state and permits unrelated outbox replay") {
@@ -168,7 +194,8 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
             )
           )
         ),
-        now
+        now,
+        new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(database)
       )
       .unsafeRunSync()
 

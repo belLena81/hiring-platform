@@ -8,7 +8,8 @@ final case class ErasureClaim(
     leaseUntil: Instant,
     phase: ErasurePhase,
     progress: Int,
-    progressKey: Long
+    progressKey: Long,
+    attemptCount: Int = 0
 ) {
   def advanceTo(nextPhase: ErasurePhase): Either[String, ErasureClaim] =
     phase.next match {

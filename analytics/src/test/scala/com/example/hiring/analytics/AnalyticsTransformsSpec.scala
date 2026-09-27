@@ -341,19 +341,19 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("offset manifests reject impossible or duplicated partition ranges") {
     assertEquals(AnalyticsRetention.BronzeDays, 7)
     assertEquals(AnalyticsRetention.SilverDays, 30)
-    assert(PartitionOffsetRange.validate(PartitionOffsetRange("topic", 0, 5L, 4L)).isInvalid)
+    assert(PartitionOffsetRange.from("topic", 0, 5L, 4L).isInvalid)
     assert(
       AnalyticsRunManifest
         .validated(
           "run-1",
-          Vector(PartitionOffsetRange("topic", 0, 0L, 1L), PartitionOffsetRange("topic", 0, 1L, 2L))
+          Vector(PartitionOffsetRange.unsafe("topic", 0, 0L, 1L), PartitionOffsetRange.unsafe("topic", 0, 1L, 2L))
         )
         .isInvalid
     )
     val errors = AnalyticsRunManifest
       .validated(
         "",
-        Vector(PartitionOffsetRange("", -1, -1L, -2L), PartitionOffsetRange("", -1, 0L, 1L))
+        Vector(PartitionOffsetRange.unsafe("", 0, 0L, 1L), PartitionOffsetRange.unsafe("", 0, 1L, 2L))
       )
       .toEither
       .swap
@@ -363,11 +363,15 @@ class AnalyticsTransformsSpec extends FunSuite {
       .toList
     assert(errors.contains("run id must be non-empty"))
     assert(errors.contains("topic must be non-empty"))
+    val numericErrors = PartitionOffsetRange.from("topic", -1, -1L, -2L).toEither.swap.toOption.get
+    assert(numericErrors.toNonEmptyList.toList.contains("partition must be non-negative"))
+    assert(numericErrors.toNonEmptyList.toList.contains("start offset must be non-negative"))
+    assert(numericErrors.toNonEmptyList.toList.contains("end offset must be non-negative"))
     assert(errors.contains("each topic partition may occur only once"))
   }
 
   test("Kafka offset bounds are valid JSON without escaped structural quotes") {
-    val ranges = Vector(PartitionOffsetRange("hiring.operational-events", 0, 3L, 8L))
+    val ranges = Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 3L, 8L))
     assertEquals(KafkaOffsetRangeSource.assignJson(ranges), "{\"hiring.operational-events\":[0]}")
     assertEquals(KafkaOffsetRangeSource.offsetJson(ranges, _.startOffset), "{\"hiring.operational-events\":{\"0\":3}}")
     assertEquals(
@@ -376,17 +380,35 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
-  test("Kafka range reader builds SASL settings for both metadata and Spark reads") {
+  test("Kafka range reader defaults authenticated metadata and Spark settings to SASL_SSL") {
     val authenticated = KafkaConnection("kafka:9092", Some("analytics_reader"), Some("local-secret"))
     val client = KafkaConnection.clientProperties(authenticated)
     val spark = KafkaConnection.sparkOptions(authenticated)
-    assertEquals(client.get("security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(client.get("security.protocol"), Some("SASL_SSL"))
     assertEquals(client.get("sasl.mechanism"), Some("PLAIN"))
     assert(client.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
-    assertEquals(spark.get("kafka.security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(spark.get("kafka.security.protocol"), Some("SASL_SSL"))
     assertEquals(spark.get("kafka.group.id"), Some("hiring-analytics-batch"))
     assertEquals(spark.get("kafka.isolation.level"), Some("read_committed"))
     assertEquals(KafkaConnection.validate(KafkaConnection("kafka:9092", Some("reader"), None)).isInvalid, true)
+  }
+
+  test("Kafka SASL_PLAINTEXT requires explicit opt-in and reaches both client property sets") {
+    val unapproved = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "SASL_PLAINTEXT")
+    assert(KafkaConnection.validate(unapproved).isInvalid)
+    assertEquals(KafkaConnection.clientProperties(unapproved).get("security.protocol"), None)
+    assertEquals(KafkaConnection.sparkOptions(unapproved).get("kafka.security.protocol"), None)
+
+    val approved = unapproved.copy(allowPlaintext = true)
+    assert(KafkaConnection.validate(approved).isValid)
+    assertEquals(KafkaConnection.clientProperties(approved).get("security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(KafkaConnection.sparkOptions(approved).get("kafka.security.protocol"), Some("SASL_PLAINTEXT"))
+  }
+
+  test("Kafka rejects an unsupported security protocol") {
+    val invalid = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "PLAINTEXT", allowPlaintext = true)
+    assert(KafkaConnection.validate(invalid).isInvalid)
+    assertEquals(KafkaConnection.clientProperties(invalid).get("security.protocol"), None)
   }
 
   test("bounded batch persists replayable layers and quality-blocks Gold on malformed or conflicting records") {
@@ -410,7 +432,8 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 13L, event("outside", "APPLICATION_CREATED"))
       )
     )
-    val manifest = validatedManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 13L)))
+    val manifest =
+      validatedManifest("run-1", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 13L)))
     val publication = new HiringAnalyticsBatch(
       AnalyticsLakehousePaths(lakehouse),
       pseudonymizer,
@@ -448,11 +471,11 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val firstManifest = validatedManifest(
       "tombstone-first-run",
-      Vector(PartitionOffsetRange("hiring.operational-events", 3, 17L, 18L))
+      Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 3, 17L, 18L))
     )
     val replayManifest = validatedManifest(
       "tombstone-replay-run",
-      Vector(PartitionOffsetRange("hiring.operational-events", 3, 17L, 18L))
+      Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 3, 17L, 18L))
     )
 
     val first = batch.run(spark, DataFrameBatchSource(input), firstManifest).unsafeRunSync()
@@ -481,7 +504,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         .run(
           spark,
           DataFrameBatchSource(source),
-          validatedManifest("run-fail", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+          validatedManifest("run-fail", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 2L)))
         )
         .unsafeRunSync()
     }
@@ -509,7 +532,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val manifest =
-      validatedManifest("run-published", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
+      validatedManifest("run-published", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 11L)))
     val publication = new HiringAnalyticsBatch(
       paths,
       pseudonymizer,
@@ -546,7 +569,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val manifest =
-      validatedManifest("run-private-delta-stats", Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L)))
+      validatedManifest(
+        "run-private-delta-stats",
+        Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L))
+      )
 
     new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
       .run(spark, DataFrameBatchSource(input), manifest)
@@ -646,7 +672,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       Some(reportPublisher)
     )
     val manifest =
-      validatedManifest("run-publication-fails", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
+      validatedManifest(
+        "run-publication-fails",
+        Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 11L))
+      )
 
     val error = intercept[AnalyticsError.RunIdRangeConflict] {
       batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
@@ -678,7 +707,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val manifest =
-      validatedManifest("run-manifest-retry", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 11L)))
+      validatedManifest(
+        "run-manifest-retry",
+        Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 11L))
+      )
     val published = new AtomicInteger(0)
     val failPublishedManifestOnce = new AtomicBoolean(true)
     val publisher = new AnalyticsReportPublisher {
@@ -758,7 +790,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       Some(publisher)
     )
     val manifest =
-      validatedManifest("reserve-before-markers", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+      validatedManifest(
+        "reserve-before-markers",
+        Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 2L))
+      )
 
     val error = intercept[AnalyticsError.SourceReadFailure](batch.run(spark, source, manifest).unsafeRunSync())
 
@@ -824,7 +859,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     }
     val deletionRun = validatedManifest(
       "erasure-with-bad-range",
-      Vector(PartitionOffsetRange("hiring.operational-events", 0, 11L, 13L))
+      Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 11L, 13L))
     )
 
     val publication = deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).unsafeRunSync()
@@ -843,14 +878,18 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 2L, event("out", "APPLICATION_CREATED"))
       )
     )
-    val manifest = validatedManifest("run-1", Vector(PartitionOffsetRange("hiring.operational-events", 0, 1L, 2L)))
+    val manifest =
+      validatedManifest("run-1", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 2L)))
     assertEquals(DataFrameBatchSource(source).read(spark, manifest).unsafeRunSync().count(), 1L)
   }
 
   test("data frame source reports missing Kafka columns as a typed schema error") {
     val source = records(Seq.empty).drop("partition", "offset")
     val manifest =
-      validatedManifest("run-missing-columns", Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L)))
+      validatedManifest(
+        "run-missing-columns",
+        Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L))
+      )
     val failure = intercept[AnalyticsError.InvalidSourceSchema] {
       DataFrameBatchSource(source).read(spark, manifest).unsafeRunSync()
     }
@@ -860,7 +899,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("empty requested ranges fail before reading or writing a manifest") {
     val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-empty-offset-range").toUri.toString)
     val source = DataFrameBatchSource(records(Seq.empty))
-    val manifest = validatedManifest("empty-offset-range", Vector(PartitionOffsetRange("topic", 0, 4L, 4L)))
+    val manifest = validatedManifest("empty-offset-range", Vector(PartitionOffsetRange.unsafe("topic", 0, 4L, 4L)))
     val failure = intercept[AnalyticsError.EmptyRequestedRange] {
       new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
         .run(spark, source, manifest)
@@ -878,8 +917,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val scenarios = Vector(
-      ("missing-partition", PartitionOffsetRange("topic", 1, 5L, 6L), 1L, 0L),
-      ("missing-interior", PartitionOffsetRange("topic", 0, 1L, 4L), 3L, 2L)
+      ("missing-partition", PartitionOffsetRange.unsafe("topic", 1, 5L, 6L), 1L, 0L),
+      ("missing-interior", PartitionOffsetRange.unsafe("topic", 0, 1L, 4L), 3L, 2L)
     )
     scenarios.foreach { case (runId, range, requested, observed) =>
       val paths = AnalyticsLakehousePaths(Files.createTempDirectory(s"analytics-$runId").toUri.toString)
@@ -895,7 +934,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("broker retention bounds distinguish expired from not yet available offsets") {
-    val range = PartitionOffsetRange("topic", 0, 3L, 8L)
+    val range = PartitionOffsetRange.unsafe("topic", 0, 3L, 8L)
     assertEquals(
       AnalyticsOffsetRanges.available(range, earliestAvailable = 4L, latestExclusive = 10L),
       Left(AnalyticsError.ExpiredOffsetRange("topic", 0, 3L, 4L))
@@ -1194,7 +1233,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           validatedManifest(
             "key-cutover",
             Vector(
-              PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L)
+              PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L)
             )
           )
         )
@@ -1323,7 +1362,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           source,
           validatedManifest(
             "marker-before-key-registry",
-            Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L))
+            Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L))
           )
         )
         .unsafeRunSync()
@@ -1368,7 +1407,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           source,
           validatedManifest(
             "marker-action-before-key-registry",
-            Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 1L))
+            Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L))
           )
         )
         .unsafeRunSync()
@@ -1405,7 +1444,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val manifest =
-      validatedManifest("erasure-before-bronze", Vector(PartitionOffsetRange("hiring.operational-events", 0, 0L, 3L)))
+      validatedManifest(
+        "erasure-before-bronze",
+        Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 3L))
+      )
 
     val publication = batch.run(spark, source, manifest).unsafeRunSync()
     val bronze = spark.read.format("delta").load(paths.bronze)
@@ -1444,7 +1486,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
         IO.raiseError(AnalyticsError.SourceReadFailure(new IllegalStateException("injected read failure")))
     }
-    val manifest = validatedManifest("cleanup", Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+    val manifest = validatedManifest("cleanup", Vector(PartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
 
     intercept[AnalyticsError.SourceReadFailure](batch.run(spark, source, manifest).unsafeRunSync())
     assertEquals(markers.storageLevel, StorageLevel.NONE)

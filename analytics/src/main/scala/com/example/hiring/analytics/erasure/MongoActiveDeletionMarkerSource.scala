@@ -5,7 +5,7 @@ import com.example.hiring.analytics.mongo.AnalyticsCollections
 import com.example.hiring.analytics.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Clock, IO}
-import cats.syntax.all._
+import cats.syntax.all.*
 import com.mongodb.client.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
 import fs2.Stream
@@ -17,7 +17,7 @@ import org.bson.Document
 import java.util.UUID
 import java.util.Date
 import java.time.Instant
-import scala.jdk.CollectionConverters._
+import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Reads pending account-erasure requests before an analytics run can mutate Delta data. */

@@ -143,7 +143,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
 
   private def runWorkload(spark: SparkSession, root: Path): IO[Unit] = {
     val manifest = AnalyticsRunManifest
-      .validated("hal07-fixed-seed-424242", Vector(PartitionOffsetRange(Topic, 0, 0L, TotalRecords.toLong)))
+      .validated("hal07-fixed-seed-424242", Vector(PartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
     val paths = AnalyticsLakehousePaths(root.toString)

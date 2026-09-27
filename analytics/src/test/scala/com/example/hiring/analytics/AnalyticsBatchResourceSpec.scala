@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.duration.*
 
 class AnalyticsBatchResourceSpec extends FunSuite {
-  test("lakehouse lock serializes cross-resource batch and erasure access") {
+  test("process-local test lock serializes same-process access") {
     val root = java.nio.file.Files.createTempDirectory("analytics-lock").toUri.toString
     val result = (for {
       firstEntered <- Deferred[IO, Unit]

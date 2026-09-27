@@ -542,4 +542,49 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       container.stop()
     }
   }
+
+  test("repair-required erasure stays pending and can be requeued only against observed attempt and lease state") {
+    val container = replicaSet()
+    val client = MongoClients.create(
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    )
+    try {
+      val database = client.getDatabase(s"analytics_erasure_repair_${UUID.randomUUID()}")
+      val collection = database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+      val requestId = UUID.randomUUID().toString
+      val now = Instant.now()
+      collection.insertOne(
+        new Document("_id", requestId)
+          .append("state", "Pending")
+          .append("fencingVersion", 1)
+          .append("transactionalIds", java.util.List.of())
+          .append("requestedAt", Date.from(now))
+      )
+      val store = new MongoAnalyticsErasureWorkerStore(client, database)
+      val claim = store.claim(now, now.plusSeconds(60L), 1).unsafeRunSync().head
+      val saved = store
+        .recordFailure(claim, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
+        .unsafeRunSync()
+      assert(saved)
+      val repair = store.inspectRepairRequests(10).unsafeRunSync().head
+      assertEquals(repair.requestId, requestId)
+      assertEquals(repair.phase, ErasurePhase.Requested.persistedName)
+      assertEquals(repair.attemptCount, 1)
+      assertEquals(repair.failureCategory, ErasureFailureCategory.InvalidState.persistedName)
+      assertEquals(store.claim(now.plusSeconds(2L), now.plusSeconds(62L), 1).unsafeRunSync(), Vector.empty)
+      assert(!store.requeueRepair(requestId, 2, now.plusSeconds(3L)).unsafeRunSync())
+      assert(store.requeueRepair(requestId, 1, now.plusSeconds(3L)).unsafeRunSync())
+      val resumed = store.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).unsafeRunSync().head
+      assertEquals(resumed.phase, ErasurePhase.Requested)
+      assertEquals(resumed.progress, 0)
+      assertEquals(resumed.attemptCount, 1)
+      val persisted = collection.find(new Document("_id", requestId)).first()
+      assertEquals(persisted.getString("state"), "Processing")
+      assertEquals(persisted.getString("failureCategory"), null)
+      assertEquals(persisted.getBoolean("repairRequired"), Boolean.box(false))
+    } finally {
+      client.close()
+      container.stop()
+    }
+  }
 }

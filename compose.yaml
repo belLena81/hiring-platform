@@ -95,6 +95,9 @@ services:
       ANALYTICS_RUN_ID: ${ANALYTICS_RUN_ID:-}
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
       ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
+      # Local Compose broker only: credentials are unencrypted on this private Compose network.
+      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
       ANALYTICS_KAFKA_USERNAME: analytics_reader
       ANALYTICS_KAFKA_PASSWORD: ${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}
       ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
@@ -127,6 +130,9 @@ services:
       ANALYTICS_JOB: erasure-worker
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
       ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
+      # Local Compose broker only: credentials are unencrypted on this private Compose network.
+      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
       ANALYTICS_KAFKA_USERNAME: analytics_reader
       ANALYTICS_KAFKA_PASSWORD: ${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}
       ANALYTICS_KAFKA_FENCER_USERNAME: analytics_fencer

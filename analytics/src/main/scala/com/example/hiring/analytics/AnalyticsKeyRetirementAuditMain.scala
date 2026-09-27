@@ -189,14 +189,16 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
         resources(inputs).use { case (spark, client: MongoClient) =>
           for {
             now <- Clock[IO].realTimeInstant
+            database = client.getDatabase(inputs.mongoDatabase)
             result <- AnalyticsKeyRetirement.audit(
               spark,
               inputs.paths,
-              client.getDatabase(inputs.mongoDatabase),
+              database,
               inputs.retiringKeyId,
               inputs.retention,
               inputs.writers,
-              now
+              now,
+              new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(database)
             )
             code <- result match {
               case Right(summary) =>
@@ -207,7 +209,9 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
                     )
                     .as(ExitCode.Success)
               case Left(blockers) =>
-                logger.warn("key-retirement diagnostic blocked: " + blockers.mkString("; ")).as(ExitCode.Error)
+                logger
+                  .warn("key-retirement diagnostic blocked: " + blockers.toNonEmptyList.toList.mkString("; "))
+                  .as(ExitCode.Error)
             }
           } yield code
         }

@@ -212,7 +212,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       val manifest = AnalyticsRunManifest
         .validated(
           runId(rangeEnd),
-          Vector(PartitionOffsetRange(topic, 0, 0L, rangeEnd))
+          Vector(PartitionOffsetRange.unsafe(topic, 0, 0L, rangeEnd))
         )
         .toEither
         .fold(errors => fail(errors.toString), identity)

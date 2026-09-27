@@ -36,7 +36,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
 
   private def manifest(runId: String): AnalyticsRunManifest =
     AnalyticsRunManifest
-      .validated(runId, Vector(PartitionOffsetRange("topic", 0, 0L, 1L)))
+      .validated(runId, Vector(PartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
 

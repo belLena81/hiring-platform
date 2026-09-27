@@ -77,7 +77,10 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
 
       val connection = KafkaConnection(kafka.getBootstrapServers)
       val openTransactionManifest = AnalyticsRunManifest
-        .validated("open-transaction-it-" + UUID.randomUUID().toString, Vector(PartitionOffsetRange(topic, 0, 0L, 1L)))
+        .validated(
+          "open-transaction-it-" + UUID.randomUUID().toString,
+          Vector(PartitionOffsetRange.unsafe(topic, 0, 0L, 1L))
+        )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
       val openTransactionAvailability = KafkaOffsetRangeSource
@@ -130,7 +133,10 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       val barrier = KafkaRetentionBarrier.capture(connection, topic).unsafeRunSync()
       val endOffset = barrier.partitions.head.endOffsetExclusive
       val manifest = AnalyticsRunManifest
-        .validated("fencer-it-" + UUID.randomUUID().toString, Vector(PartitionOffsetRange(topic, 0, 0L, endOffset)))
+        .validated(
+          "fencer-it-" + UUID.randomUUID().toString,
+          Vector(PartitionOffsetRange.unsafe(topic, 0, 0L, endOffset))
+        )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
       val paths =

@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.batch
 
 import com.example.hiring.analytics.{AnalyticsEventType, AnalyticsApplicationStatus}
+import com.example.hiring.analytics.AnalyticsError
 
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
@@ -154,6 +155,20 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
     )
     assertEquals(timeToHire.head().getAs[Long]("eligibleCount"), 10L)
     assertEquals(timeToHire.head().getAs[Long]("excludedCount"), 0L)
+  }
+
+  test("report extraction rejects a Gold Delta schema drift before Row decoding") {
+    import spark.implicits.*
+
+    val root = java.nio.file.Files.createTempDirectory("analytics-gold-schema").toUri.toString.stripSuffix("/")
+    val paths = AnalyticsLakehousePaths(root)
+    Seq(("not-a-timestamp", 1L)).toDF("day", "created")
+      .write.format("delta").mode("overwrite").save(paths.funnelGold)
+
+    val failure = intercept[AnalyticsError.InvalidGoldSchema.type] {
+      AnalyticsGoldStage.extract(spark, paths, Instant.parse("2026-01-01T00:00:00Z")).unsafeRunSync()
+    }
+    assertEquals(failure, AnalyticsError.InvalidGoldSchema)
   }
 
   private def ts(value: Instant): Timestamp = Timestamp.from(value)

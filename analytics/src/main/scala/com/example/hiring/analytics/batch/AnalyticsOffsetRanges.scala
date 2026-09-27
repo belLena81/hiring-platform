@@ -87,7 +87,9 @@ private[analytics] object AnalyticsOffsetRanges {
       found: Map[(String, Int), Observed],
       allowKafkaGaps: Boolean
   ): IO[Unit] = {
-    val requested = manifest.offsetRanges.map(range => (range.topic, range.partition)).toSet
+    val requested: Set[(String, Int)] = manifest.offsetRanges
+      .map(range => (range.topic, PartitionOffsetRange.partitionNumber(range.partition)))
+      .toSet
     found.keySet.diff(requested).headOption match {
       case Some((topic, partition)) =>
         IO.raiseError(AnalyticsError.UnexpectedOffsetPartition(topic, partition))

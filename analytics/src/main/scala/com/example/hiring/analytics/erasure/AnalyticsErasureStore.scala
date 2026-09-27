@@ -22,10 +22,25 @@ trait AnalyticsErasureStore {
   def readDeltaGeneration(requestId: String): IO[Option[Long]]
   def readDeltaPurgedAt(requestId: String): IO[Option[Instant]]
   def releaseForOtherRequests(claim: ErasureClaim, now: Instant): IO[Boolean]
+  def recordFailure(
+      claim: ErasureClaim,
+      category: ErasureFailureCategory,
+      attempt: Int,
+      retryAt: Option[Instant],
+      now: Instant
+  ): IO[Boolean]
   def defer(claim: ErasureClaim, resumeAt: Instant, now: Instant): IO[Boolean]
   def hasNonReadyOtherRequests(requestId: String): IO[Boolean]
   def renew(claim: ErasureClaim, now: Instant, leaseUntil: Instant): IO[Boolean]
   def advance(claim: ErasureClaim, phase: ErasurePhase, progress: Int, now: Instant): IO[Boolean]
   def heartbeat(now: Instant, leaseUntil: Instant): IO[Unit]
   def preflight: IO[Unit]
+}
+
+/** Fixed, non-sensitive operator-facing failure labels. Never persist exception messages. */
+enum ErasureFailureCategory(val persistedName: String) {
+  case TransientStorage extends ErasureFailureCategory("TRANSIENT_STORAGE")
+  case TransientSource extends ErasureFailureCategory("TRANSIENT_SOURCE")
+  case InvalidState extends ErasureFailureCategory("INVALID_STATE")
+  case Unknown extends ErasureFailureCategory("UNKNOWN")
 }

@@ -5,6 +5,7 @@ import com.example.hiring.analytics.erasure.*
 import com.example.hiring.analytics.mongo.*
 
 import cats.data.ValidatedNec
+import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
 import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -19,11 +20,13 @@ import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 
 import java.time.Instant
+import java.net.InetAddress
 import java.sql.Timestamp
 import java.util.UUID
 import java.util.Properties
 import scala.concurrent.duration.FiniteDuration
 import scala.jdk.CollectionConverters.*
+import scala.util.Try
 import scala.util.control.NonFatal
 
 /** A bounded source is intentionally separate from storage and publication. */
@@ -47,7 +50,9 @@ final case class DataFrameDeletionMarkerSource(tokens: DataFrame) extends Active
 final case class KafkaConnection(
     bootstrapServers: String,
     saslUsername: Option[String] = None,
-    saslPassword: Option[String] = None
+    saslPassword: Option[String] = None,
+    securityProtocol: String = "SASL_SSL",
+    allowPlaintext: Boolean = false
 )
 
 object KafkaConnection {
@@ -59,16 +64,54 @@ object KafkaConnection {
         case (None, None)                                                            => connection.validNec
         case (Some(user), Some(password)) if user.trim.nonEmpty && password.nonEmpty => connection.validNec
         case _ => "Kafka SASL username and password must both be non-empty".invalidNec
+      },
+      connection.securityProtocol match {
+        case "SASL_SSL" => connection.validNec
+        case "SASL_PLAINTEXT" if connection.allowPlaintext && localPlaintextBootstrap(connection.bootstrapServers) =>
+          connection.validNec
+        case "SASL_PLAINTEXT" if !connection.allowPlaintext =>
+          "Kafka SASL_PLAINTEXT requires analytics.kafka.allow-plaintext=true".invalidNec
+        case "SASL_PLAINTEXT" =>
+          "Kafka SASL_PLAINTEXT is restricted to validated loopback brokers and the local Compose kafka:9092 endpoint".invalidNec
+        case _ => "Kafka security protocol must be SASL_SSL or SASL_PLAINTEXT".invalidNec
       }
-    ).mapN((_, _) => connection)
+    ).mapN((_, _, _) => connection)
+
+  private def localPlaintextBootstrap(bootstrapServers: String): Boolean =
+    Option(bootstrapServers)
+      .filter(_.trim.nonEmpty)
+      .exists(_.split(",", -1).forall { endpoint =>
+        val broker = endpoint.trim
+        val hostPort =
+          if (broker.startsWith("[")) {
+            val close = broker.indexOf(']')
+            if (close > 0 && broker.drop(close + 1).startsWith(":"))
+              Some(broker.substring(1, close) -> broker.drop(close + 2))
+            else None
+          } else {
+            val separator = broker.lastIndexOf(':')
+            if (separator > 0) Some(broker.substring(0, separator) -> broker.drop(separator + 1)) else None
+          }
+        hostPort.exists { case (host, rawPort) =>
+          val validPort = rawPort.toIntOption.exists(port => port > 0 && port <= 65535)
+          val localHost = host.equalsIgnoreCase("localhost") ||
+            (host.equalsIgnoreCase("kafka") && rawPort == "9092") ||
+            ((host.forall(char => char.isDigit || char == '.' || char == ':') && host.nonEmpty) &&
+              Try(InetAddress.getByName(host).isLoopbackAddress).getOrElse(false))
+          validPort && localHost
+        }
+      })
 
   private def escaped(value: String): String = value.replace("\\", "\\\\").replace("\"", "\\\"")
 
   def clientProperties(connection: KafkaConnection): Map[String, String] =
     (connection.saslUsername, connection.saslPassword) match {
-      case (Some(username), Some(password)) =>
+      case (Some(username), Some(password))
+          if connection.securityProtocol == "SASL_SSL" ||
+            (connection.securityProtocol == "SASL_PLAINTEXT" && connection.allowPlaintext &&
+              localPlaintextBootstrap(connection.bootstrapServers)) =>
         Map(
-          "security.protocol" -> "SASL_PLAINTEXT",
+          "security.protocol" -> connection.securityProtocol,
           "sasl.mechanism" -> "PLAIN",
           "sasl.jaas.config" ->
             s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"${escaped(username)}\" password=\"${escaped(password)}\";"
@@ -290,8 +333,10 @@ final class HiringAnalyticsBatch(
     deletionMarkers: ActiveDeletionMarkerSource,
     clock: Clock[IO] = Clock[IO],
     reportPublisher: Option[AnalyticsReportPublisher] = None,
-    manifestWriter: Option[(SparkSession, AnalyticsRunManifest, String, String) => IO[Unit]] = None
+    manifestWriter: Option[(SparkSession, AnalyticsRunManifest, String, String) => IO[Unit]] = None,
+    lakehouseLock: AnalyticsLakehouseLock = AnalyticsLakehouseLock.processLocal
 ) {
+  private val logger = Slf4jLogger.getLogger[IO]
   private val MaximumErasureEvidenceFiles = 100000
   private def now: IO[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
 
@@ -329,7 +374,7 @@ final class HiringAnalyticsBatch(
       _ <- IO.fromEither(AnalyticsLakehousePaths.validate(paths).toEither.leftMap(AnalyticsError.InvalidInput.apply))
       _ <- IO.fromEither(AnalyticsRunManifest.validate(manifest).toEither.leftMap(AnalyticsError.InvalidInput.apply))
       _ <- AnalyticsOffsetRanges.requireNonEmpty(manifest)
-      publication <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
+      publication <- lakehouseLock.resource(paths.root).use { _ =>
         cachedMarkers(spark).use { markerTokens =>
           for {
             _ <- validateMarkerColumns(markerTokens)
@@ -419,10 +464,10 @@ final class HiringAnalyticsBatch(
     keyContinuityStage.validateHmacConfiguration(spark)
 
   private[analytics] def validateKeyMaterialContinuity(spark: SparkSession): IO[Unit] =
-    AnalyticsLakehouseLock.resource(paths.root).use(_ => keyContinuityStage.validateKeyMaterialContinuity(spark))
+    lakehouseLock.resource(paths.root).use(_ => keyContinuityStage.validateKeyMaterialContinuity(spark))
 
   private[analytics] def validateHmacConfiguration(spark: SparkSession): IO[Unit] =
-    AnalyticsLakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked(spark))
+    lakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked(spark))
 
   private def applyActiveDeletions(spark: SparkSession, markerTokens: DataFrame): IO[Unit] =
     for {
@@ -525,38 +570,70 @@ final class HiringAnalyticsBatch(
       _ <- expire(spark, paths.silver, startedAt)
     } yield ()
 
-  private def vacuumExpiredFiles(spark: SparkSession): IO[Long] = lakehouse {
-    val tables = Vector(
-      paths.bronze,
-      paths.quarantine,
-      paths.silver,
-      paths.funnelGold,
-      paths.timeToHireGold,
-      paths.skillsGold
-    )
-    tables.foldLeft(0L) { (removedFiles, path) =>
-      if (DeltaTable.isDeltaTable(spark, path)) {
-        val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
-        val fileSystem =
-          new org.apache.hadoop.fs.Path(temporaryPath).getFileSystem(spark.sparkContext.hadoopConfiguration)
-        try {
-          spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
-          spark.read
-            .format("delta")
-            .load(temporaryPath)
-            .write
-            .format("delta")
-            .mode("overwrite")
-            .option("overwriteSchema", "true")
-            .save(path)
-        } finally {
-          val _ = fileSystem.delete(new org.apache.hadoop.fs.Path(temporaryPath), true)
-        }
-        // Respect Delta's retention safety horizon. A deletion is not complete until this reclaim horizon has passed.
-        removedFiles + DeltaTable.forPath(spark, path).vacuum().count()
-      } else removedFiles
+  private def vacuumExpiredFiles(spark: SparkSession): IO[Long] =
+    lakehouse {
+      val tables = Vector(
+        paths.bronze,
+        paths.quarantine,
+        paths.silver,
+        paths.funnelGold,
+        paths.timeToHireGold,
+        paths.skillsGold
+      )
+      tables.foldLeft(0L) { (removedFiles, path) =>
+        if (DeltaTable.isDeltaTable(spark, path)) {
+          val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
+          val fileSystem =
+            new org.apache.hadoop.fs.Path(temporaryPath).getFileSystem(spark.sparkContext.hadoopConfiguration)
+          val temp = new org.apache.hadoop.fs.Path(temporaryPath)
+          var rewriteFailure: Throwable = null
+          try {
+            spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
+            spark.read
+              .format("delta")
+              .load(temporaryPath)
+              .write
+              .format("delta")
+              .mode("overwrite")
+              .option("overwriteSchema", "true")
+              .save(path)
+          } catch {
+            case NonFatal(error) =>
+              rewriteFailure = error
+              throw error
+          } finally {
+            try {
+              val removed = fileSystem.delete(temp, true)
+              if (!removed && fileSystem.exists(temp))
+                throw new java.io.IOException("temporary purge rewrite path remains")
+            } catch {
+              case NonFatal(cleanupFailure) if rewriteFailure != null => rewriteFailure.addSuppressed(cleanupFailure)
+              case NonFatal(cleanupFailure)                           => throw cleanupFailure
+            }
+          }
+          // Respect Delta's retention safety horizon. A deletion is not complete until this reclaim horizon has passed.
+          removedFiles + DeltaTable.forPath(spark, path).vacuum().count()
+        } else removedFiles
+      }
+    }.handleErrorWith { error =>
+      val cleanupFailures = Option(error.getSuppressed).toVector.flatMap(_.toVector)
+      val log = if (cleanupFailures.nonEmpty) {
+        val failures = cleanupFailures
+          .map(cause => s"${cause.getClass.getSimpleName}: ${safeDiagnostic(cause.getMessage)}")
+          .mkString("; ")
+        logger.error(
+          s"lakehouse rewrite failed (${error.getClass.getSimpleName}); temporary path cleanup failure(s): $failures"
+        )
+      } else IO.unit
+      log *> IO.raiseError(error)
     }
-  }
+
+  private def safeDiagnostic(message: String): String =
+    Option(message)
+      .getOrElse("")
+      .replaceAll("(?i)[a-z][a-z0-9+.-]*://[^\\s,;]+", "[REDACTED_URI]")
+      .replaceAll("(?i)(password|token|secret)=\\S+", "$1=[REDACTED]")
+      .take(300)
 
   private def finishRun(
       spark: SparkSession,
@@ -697,79 +774,3 @@ private[analytics] object KafkaRecordColumns {
 }
 
 /** Bounded batch entry point. Runtime settings and the explicit offset range load from HOCON. */
-object HiringAnalyticsBatchMain extends IOApp {
-  private val logger = Slf4jLogger.getLogger[IO]
-
-  private[analytics] def managedResources(
-      acquireSpark: IO[SparkSession],
-      acquireMongo: IO[MongoClient]
-  ): Resource[IO, (SparkSession, MongoClient)] =
-    for {
-      spark <- Resource.make(acquireSpark.adaptError { case NonFatal(cause) =>
-        AnalyticsError.SparkStartupFailure(cause)
-      })(session =>
-        IO.blocking(session.stop()).adaptError { case NonFatal(cause) =>
-          AnalyticsError.LakehouseFailure(cause)
-        }
-      )
-      mongo <- Resource.make(acquireMongo.adaptError {
-        case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
-        case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
-      })(client =>
-        IO.blocking(client.close()).adaptError { case NonFatal(cause) =>
-          AnalyticsError.MongoConnectionFailure(cause)
-        }
-      )
-    } yield (spark, mongo)
-
-  private[analytics] def resources(mongoUri: String, sparkMaster: String): Resource[IO, (SparkSession, MongoClient)] =
-    managedResources(
-      IO.blocking(
-        org.apache.spark.sql.classic.SparkSession
-          .builder()
-          .appName("hiring-analytics-batch")
-          .master(sparkMaster)
-          .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-          .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-          .getOrCreate()
-      ),
-      IO.blocking(MongoClients.create(mongoUri))
-    )
-
-  private def program: IO[AnalyticsPublication] =
-    AnalyticsRuntimeConfig.loadBatch.flatMap { configured =>
-      val common = configured.common
-      resources(common.mongoUri, common.sparkMaster).use { case (spark, mongo) =>
-        IO.blocking(mongo.getDatabase(common.mongoDatabase))
-          .adaptError {
-            case _: IllegalArgumentException =>
-              AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")
-            case NonFatal(cause) => AnalyticsError.MongoConnectionFailure(cause)
-          }
-          .flatMap { database =>
-            val markers = new MongoActiveDeletionMarkerSource(database, common.pseudonymizer)
-            new HiringAnalyticsBatch(
-              common.lakehousePaths,
-              common.pseudonymizer,
-              markers,
-              reportPublisher = Some(new MongoAnalyticsReportPublisher(mongo, database))
-            )
-              .run(spark, new KafkaOffsetRangeSource(common.kafka), configured.manifest)
-          }
-      }
-    }
-
-  override def run(args: List[String]): IO[ExitCode] =
-    (if (args.nonEmpty)
-       IO.raiseError[AnalyticsPublication](
-         AnalyticsError.InvalidConfiguration(
-           "batch inputs are loaded from HOCON; command-line arguments are not accepted"
-         )
-       )
-     else program).attempt.flatMap {
-      case Right(publication)          => logger.info(publication.toString).as(ExitCode.Success)
-      case Left(error: AnalyticsError) => logger.error(error.getMessage).as(ExitCode.Error)
-      case Left(error)                 =>
-        logger.error(s"analytics batch failed unexpectedly: ${error.getClass.getSimpleName}").as(ExitCode.Error)
-    }
-}

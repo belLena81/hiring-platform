@@ -6,9 +6,10 @@ import com.example.hiring.analytics.erasure.{ErasureClaim, ErasurePhase}
 import com.example.hiring.analytics.*
 
 import cats.effect.IO
-import com.mongodb.client.{MongoClient, MongoDatabase}
+import com.mongodb.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
 import com.mongodb.client.model.{Filters, ReplaceOptions, Updates}
 import org.bson.Document
+import org.bson.conversions.Bson
 
 import java.time.Instant
 import java.util.Date
@@ -44,12 +45,13 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 val lastPublishedRevision = current.getLong("lastPublishedRevision")
                 if (generation <= existing.generation && lastPublishedRevision < existing.revision) existing
                 else {
-                  val changed = control.updateOne(
+                  val changed = casUpdate(
                     session,
+                    control,
                     Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
                     Updates.inc("nextRevision", 1L)
                   )
-                  if (changed.getMatchedCount != 1L)
+                  if (!changed)
                     throw AnalyticsError.InvalidConfiguration("analytics report control is unavailable")
                   val updated =
                     control.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
@@ -57,8 +59,9 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                     generation = updated.getLong("generation"),
                     revision = updated.getLong("nextRevision")
                   )
-                  val replaced = reservations.updateOne(
+                  val replaced = casUpdate(
                     session,
+                    reservations,
                     Filters.and(
                       Filters.eq(AnalyticsCollections.Fields.Id, runId),
                       Filters.eq(AnalyticsCollections.Fields.State, "Reserved")
@@ -71,7 +74,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                         .set(AnalyticsCollections.Fields.ExpiresAt, Date.from(now.plusSeconds(90L * 24L * 60L * 60L)))
                     )
                   )
-                  if (replaced.getMatchedCount != 1L)
+                  if (!replaced)
                     throw AnalyticsError.RunIdRangeConflict(runId)
                   refreshed
                 }
@@ -83,12 +86,13 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
           IO.blocking(session.withTransaction(() => {
             val state = control.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
             if (state == null) throw AnalyticsError.InvalidConfiguration("analytics report control is not initialized")
-            val changed = control.updateOne(
+            val changed = casUpdate(
               session,
+              control,
               Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
               Updates.inc("nextRevision", 1L)
             )
-            if (changed.getMatchedCount != 1L)
+            if (!changed)
               throw AnalyticsError.InvalidConfiguration("analytics report control is unavailable")
             val updated = control.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
             val value = AnalyticsReportReservation(
@@ -162,8 +166,9 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
             } else if (reservation.revision <= lastRevision)
               throw AnalyticsError.RunIdRangeConflict(reservation.runId)
             else {
-              val cas = control.updateOne(
+              val cas = casUpdate(
                 session,
+                control,
                 Filters.and(
                   Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
                   Filters.eq("generation", reservation.generation),
@@ -177,7 +182,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                   Updates.unset("hiddenAt")
                 )
               )
-              if (cas.getMatchedCount != 1L) throw AnalyticsError.RunIdRangeConflict(reservation.runId)
+              if (!cas) throw AnalyticsError.RunIdRangeConflict(reservation.runId)
               snapshots.replaceOne(
                 session,
                 Filters.eq(AnalyticsCollections.Fields.Id, "current"),
@@ -266,8 +271,9 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
             if (reservation.revision <= lastRevision)
               throw AnalyticsError.RunIdRangeConflict(reservation.runId)
 
-            val cas = control.updateOne(
+            val cas = casUpdate(
               session,
+              control,
               Filters.and(
                 Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"),
                 Filters.eq("generation", reservation.generation),
@@ -281,7 +287,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 Updates.unset("hiddenAt")
               )
             )
-            if (cas.getMatchedCount != 1L) throw AnalyticsError.RunIdRangeConflict(reservation.runId)
+            if (!cas) throw AnalyticsError.RunIdRangeConflict(reservation.runId)
 
             snapshots.replaceOne(
               session,
@@ -297,30 +303,29 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
               ),
               Updates.set(AnalyticsCollections.Fields.State, "Published")
             )
-            val completed = database
-              .getCollection(AnalyticsCollections.ErasureRequests)
-              .updateOne(
-                session,
-                requestFilter,
-                Updates.combine(
-                  Updates.set(AnalyticsCollections.Fields.State, "Complete"),
-                  Updates.set(AnalyticsCollections.Fields.Phase, ErasurePhase.ReportPublished.persistedName),
-                  Updates.set(AnalyticsCollections.Fields.Progress, 0),
-                  Updates
-                    .set(
-                      AnalyticsCollections.Fields.ProgressKey,
-                      ErasurePhase.ReportPublished.ordinal.toLong * ErasurePhase.ProgressPerPhase
-                    ),
-                  Updates.set("completedAt", Date.from(completedAt)),
-                  Updates.set(
-                    AnalyticsCollections.Fields.ExpiresAt,
-                    Date.from(completedAt.plusSeconds(AnalyticsRetention.DeletionMarkerDays.toLong * 86400L))
+            val completed = casUpdate(
+              session,
+              database.getCollection(AnalyticsCollections.ErasureRequests),
+              requestFilter,
+              Updates.combine(
+                Updates.set(AnalyticsCollections.Fields.State, "Complete"),
+                Updates.set(AnalyticsCollections.Fields.Phase, ErasurePhase.ReportPublished.persistedName),
+                Updates.set(AnalyticsCollections.Fields.Progress, 0),
+                Updates
+                  .set(
+                    AnalyticsCollections.Fields.ProgressKey,
+                    ErasurePhase.ReportPublished.ordinal.toLong * ErasurePhase.ProgressPerPhase
                   ),
-                  Updates.unset(AnalyticsCollections.Fields.LeaseToken),
-                  Updates.unset(AnalyticsCollections.Fields.LeaseUntil)
-                )
+                Updates.set("completedAt", Date.from(completedAt)),
+                Updates.set(
+                  AnalyticsCollections.Fields.ExpiresAt,
+                  Date.from(completedAt.plusSeconds(AnalyticsRetention.DeletionMarkerDays.toLong * 86400L))
+                ),
+                Updates.unset(AnalyticsCollections.Fields.LeaseToken),
+                Updates.unset(AnalyticsCollections.Fields.LeaseUntil)
               )
-            if (completed.getMatchedCount != 1L) throw AnalyticsError.ErasureNotReady
+            )
+            if (!completed) throw AnalyticsError.ErasureNotReady
 
             val completion = database.getCollection(AnalyticsCollections.ErasureCompletions)
             completion.updateOne(
@@ -356,6 +361,16 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
       document.getLong("generation"),
       document.getLong("revision")
     )
+
+  /** Runs the matched-count CAS inside the caller-owned transaction session. A false result is interpreted by the
+    * caller so each operation retains its existing typed conflict failure.
+    */
+  private def casUpdate(
+      session: ClientSession,
+      collection: MongoCollection[Document],
+      filter: Bson,
+      update: Bson
+  ): Boolean = collection.updateOne(session, filter, update).getMatchedCount == 1L
 
   private def reportDocument(
       reservation: AnalyticsReportReservation,

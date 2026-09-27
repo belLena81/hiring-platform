@@ -1,7 +1,7 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.batch.{AnalyticsLakehouseLock, AnalyticsLakehousePaths}
-import cats.data.Chain
+import cats.data.{Chain, NonEmptyChain, ValidatedNec}
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.hiring.analytics.mongo.{AnalyticsCollections, MongoCursorStream}
@@ -142,9 +142,10 @@ private[analytics] object AnalyticsKeyRetirement {
       retiringKeyId: String,
       retention: RetentionEvidence,
       writers: WriterInventory,
-      now: Instant
-  ): IO[Either[Vector[String], AuditSummary]] =
-    AnalyticsLakehouseLock
+      now: Instant,
+      lakehouseLock: AnalyticsLakehouseLock
+  ): IO[Either[NonEmptyChain[String], AuditSummary]] =
+    lakehouseLock
       .resource(paths.root)
       .use { _ =>
         val keyBlockers =
@@ -152,7 +153,9 @@ private[analytics] object AnalyticsKeyRetirement {
             Chain.one("retiring key ID is invalid")
           else Chain.empty[String]
         val evidenceBlockers =
-          Chain.fromSeq(validateRetention(retention, now)) ++ Chain.fromSeq(validateWriters(writers, now))
+          (validateRetention(retention, now), validateWriters(writers, now))
+            .mapN((_, _) => ())
+            .fold(_.toChain, _ => Chain.empty[String])
         IO.blocking {
           val delta = scanDelta(spark, paths, Option(retiringKeyId).getOrElse(""))
           val registry = validateRegistry(spark, paths, Option(retiringKeyId).getOrElse(""))
@@ -163,7 +166,7 @@ private[analytics] object AnalyticsKeyRetirement {
           scanMongo(database, Option(retiringKeyId).getOrElse(""), now).map { mongo =>
             val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
             val errors = blockers.toList.toVector
-            if (errors.nonEmpty) Left(errors)
+            if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
             else Right(AuditSummary(now, delta.count, mongo.count))
           }
         }
@@ -172,11 +175,11 @@ private[analytics] object AnalyticsKeyRetirement {
       .map {
         case Right(result)           => result
         case Left(_: AnalyticsError) =>
-          Left(Vector("key retirement audit could not acquire the lakehouse audit boundary"))
-        case Left(_) => Left(Vector("key retirement audit could not verify every required surface"))
+          Left(NonEmptyChain.one("key retirement audit could not acquire the lakehouse audit boundary"))
+        case Left(_) => Left(NonEmptyChain.one("key retirement audit could not verify every required surface"))
       }
 
-  private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): Vector[String] = {
+  private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): ValidatedNec[String, Unit] = {
     val kafkaReasons = (evidence.kafka.barrierOffset, evidence.kafka.earliestAvailableOffset) match {
       case (Some(barrier), Some(earliest)) if barrier >= 0L && earliest >= barrier => Chain.empty[String]
       case _ => Chain.one("Kafka retention barrier is missing, invalid, or not yet passed")
@@ -197,10 +200,10 @@ private[analytics] object AnalyticsKeyRetirement {
       if (Option(evidence.kafka.evidenceReference).forall(_.trim.isEmpty))
         Chain.one("Kafka retention barrier evidence reference is missing")
       else Chain.empty[String]
-    (kafkaReasons ++ horizonReasons ++ evidenceReasons).toList.toVector
+    accumulate(kafkaReasons ++ horizonReasons ++ evidenceReasons)
   }
 
-  private[analytics] def validateWriters(inventory: WriterInventory, now: Instant): Vector[String] = {
+  private[analytics] def validateWriters(inventory: WriterInventory, now: Instant): ValidatedNec[String, Unit] = {
     val freshnessReasons =
       if (
         inventory == null || inventory.observedAt == null || inventory.observedAt.isAfter(now) ||
@@ -228,8 +231,14 @@ private[analytics] object AnalyticsKeyRetirement {
       }
       reasons ++ missing ++ disposition
     }
-    (freshnessReasons ++ identityReasons ++ writerReasons).toList.toVector
+    accumulate(freshnessReasons ++ identityReasons ++ writerReasons)
   }
+
+  private def accumulate(reasons: Chain[String]): ValidatedNec[String, Unit] =
+    NonEmptyChain.fromSeq(reasons.toList) match {
+      case Some(errors) => errors.invalid
+      case None         => ().validNec[String]
+    }
 
   private def scanDelta(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): ScanResult = {
     val tables = Vector(

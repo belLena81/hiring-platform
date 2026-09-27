@@ -203,11 +203,11 @@ Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means
 - `[x] Phase 3 — GraphQL + Performance:` hiring operations, authorization, bounded pagination, batching, and query/resource limits.
 - `[x] Phase 4 — Vector / Hybrid Search:` semantic and hybrid job/candidate search with MongoDB Vector Search integration.
 - `[x] Phase 5 — Event Architecture:` operational events, transactional outbox, Kafka publication, idempotent consumption, and quarantine.
-- `[~] Phase 6 — Lakehouse + Spark Batch Analytics:` local Bronze/Silver/Gold processing and Admin reporting; erasure, publication, retention, recovery, and full source-to-projection evidence remain open in the [lakehouse specification](docs/specs/hiring-analytics-lakehouse.md).
+- `[~] Phase 6 — Lakehouse + Spark Batch Analytics:` local Bronze/Silver/Gold processing and Admin reporting; finish the durable account-deletion workflow with forward recovery across MongoDB, Kafka, and Delta. Erasure, publication, retention, recovery, and full source-to-projection evidence remain open in the [lakehouse specification](docs/specs/hiring-analytics-lakehouse.md).
 - `[ ] Phase 7 — Structured Streaming:` continuous processing, checkpoint/restart behavior, late-event handling, and bounded state.
 - `[ ] Phase 8 — Search Evaluation:` reproducible relevance datasets and measured keyword/vector/hybrid search quality.
 - `[ ] Phase 9 — Scale:` workload-backed capacity, latency, throughput, and storage tuning.
-- `[~] Phase 10 — Observability & Resilience:` structured diagnostics and runtime telemetry exist; end-to-end failure, recovery, and operational evidence remain open.
+- `[~] Phase 10 — Observability & Resilience:` structured diagnostics and runtime telemetry exist; add interview scheduling as a scoped feature with durable saga coordination when an external calendar is introduced. End-to-end failure, recovery, and operational evidence remain open.
 - `[ ] Phase 11 — Production Hardening:` deployment controls, security review, recovery procedures, and production readiness evidence.
 - `[ ] Phase 12 — Discovery Intelligence & Search Quality (Post-MVP):` radius discovery, richer Atlas search/facets, and evidence-backed ranking extensions.
 

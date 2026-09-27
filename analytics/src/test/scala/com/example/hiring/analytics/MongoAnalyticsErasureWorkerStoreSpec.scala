@@ -58,6 +58,27 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(document.append("phase", "unknown")), None)
   }
 
+  test("failure labels are fixed sanitized values and repaired claims preserve phase checkpoints") {
+    assertEquals(
+      ErasureFailureCategory.values.toVector.map(_.persistedName),
+      Vector("TRANSIENT_STORAGE", "TRANSIENT_SOURCE", "INVALID_STATE", "UNKNOWN")
+    )
+    val request = new Document("_id", UUID.randomUUID().toString)
+      .append("fencingVersion", 1)
+      .append("leaseToken", UUID.randomUUID().toString)
+      .append("leaseUntil", java.util.Date.from(Instant.parse("2026-09-23T12:00:00Z")))
+      .append("phase", "DeltaPurged")
+      .append("progress", 17)
+      .append("progressKey", ErasurePhase.DeltaPurged.ordinal.toLong * ErasurePhase.ProgressPerPhase + 17L)
+      .append("attemptCount", 7)
+      .append("failureCategory", "TRANSIENT_STORAGE")
+      .append("repairRequired", true)
+    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(request)
+    assertEquals(claim.map(_.phase), Some(ErasurePhase.DeltaPurged))
+    assertEquals(claim.map(_.progress), Some(17))
+    assertEquals(claim.map(_.attemptCount), Some(7))
+  }
+
   test("lease compare-and-set filter binds request, processing state, current token, and unexpired lease") {
     val now = Instant.parse("2026-09-23T11:00:00Z")
     val id = UUID.randomUUID().toString

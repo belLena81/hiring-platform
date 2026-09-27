@@ -8,6 +8,7 @@ import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.Monad
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
+import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
@@ -34,8 +35,9 @@ final class AnalyticsErasureWorker(
     kafkaRetention: KafkaRetention = KafkaRetentionBarrier.liveRetention
 ) {
   private val logger = Slf4jLogger.getLogger[IO]
+  private val lakehouseLock = new MongoAnalyticsLakehouseLock(database)
   private val markers = new MongoActiveDeletionMarkerSource(database, pseudonymizer)
-  private val batch = new HiringAnalyticsBatch(paths, pseudonymizer, markers)
+  private val batch = new HiringAnalyticsBatch(paths, pseudonymizer, markers, lakehouseLock = lakehouseLock)
   private def now: IO[Instant] = clock.realTimeInstant
   private def leaseUntil: IO[Instant] = now.map(_.plusMillis(leaseDuration.toMillis))
 
@@ -82,11 +84,37 @@ final class AnalyticsErasureWorker(
         case AnalyticsError.ErasureDeferred => IO.unit
         case AnalyticsError.ErasureNotReady => now.flatMap(store.releaseForOtherRequests(claim, _)).void
         case error                          =>
-          logger.error(
-            "analytics erasure attempt failed (" + error.getClass.getSimpleName + "); durable claim will be retried after lease expiry"
-          )
+          val nextAttempt = claim.attemptCount + 1
+          val category = error match {
+            case _: AnalyticsError.MarkerStorageFailure | _: AnalyticsError.MongoConnectionFailure =>
+              ErasureFailureCategory.TransientStorage
+            case _: AnalyticsError.SourceReadFailure | _: AnalyticsError.LakehouseFailure =>
+              ErasureFailureCategory.TransientSource
+            case AnalyticsError.MalformedMarker | AnalyticsError.InvalidGoldSchema | _: AnalyticsError.InvalidConfiguration =>
+              ErasureFailureCategory.InvalidState
+            case _ => ErasureFailureCategory.Unknown
+          }
+          val retryable = category match {
+            case ErasureFailureCategory.InvalidState => false
+            case ErasureFailureCategory.Unknown      => nextAttempt < 3
+            case _                                   => nextAttempt < 8
+          }
+          now.flatMap { current =>
+            val scheduled = Option.when(retryable)(current.plusMillis(retryDelay(nextAttempt).toMillis))
+            store.recordFailure(claim, category, nextAttempt, scheduled, current).flatMap {
+              case true =>
+                logger.error(
+                  "analytics erasure failed; persisted category=" + category.persistedName + ", attempt=" + nextAttempt
+                )
+              case false =>
+                logger.warn("analytics erasure failure could not be recorded because the lease is no longer owned")
+            }
+          }
       }
   }
+
+  private def retryDelay(attempt: Int): FiniteDuration =
+    math.min(300L, 5L * (1L << math.min(attempt - 1, 6))).seconds
 
   private def renewForever(claim: ErasureClaim): IO[Nothing] =
     (IO.sleep(leaseDuration / 3) *> (now, leaseUntil).tupled.flatMap { case (current, until) =>
@@ -165,7 +193,7 @@ final class AnalyticsErasureWorker(
           ready <- replayHorizonsPassed(barrier, purgedAt)
           _ <- if (ready) IO.unit else defer(claim, 5.minutes)
           markerFrame <- markers.activeSubjectTokens(spark)
-          _ <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
+          _ <- lakehouseLock.resource(paths.root).use { _ =>
             for {
               _ <- batch.reclaimRetainedFiles(spark)
               _ <- batch.verifyMarkedSubjectsAbsent(spark, markerFrame)
@@ -191,7 +219,7 @@ final class AnalyticsErasureWorker(
             if (deltaGeneration.contains(refreshed.generation)) IO.unit
             else refreshErasureProjection(claim, refreshed.generation)
           markerFrame <- markers.activeSubjectTokens(spark)
-          report <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
+          report <- lakehouseLock.resource(paths.root).use { _ =>
             for {
               _ <- batch.verifyMarkedSubjectsAbsent(spark, markerFrame)
               asOf <- now
@@ -209,7 +237,7 @@ final class AnalyticsErasureWorker(
 
   private def purgeAndRecordDelta(claim: ErasureClaim, spark: SparkSession, generation: Long): IO[Unit] =
     for {
-      _ <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
+      _ <- lakehouseLock.resource(paths.root).use { _ =>
         for {
           markerFrame <- markers.activeSubjectTokens(spark)
           affectedRows <- batch.countMarkedRows(spark, markerFrame)
@@ -253,7 +281,7 @@ final class AnalyticsErasureWorker(
       ready <- replayHorizonsPassed(barrier, purgedAt)
       _ <- if (ready) IO.unit else defer(claim, 5.minutes)
       currentMarkers <- markers.activeSubjectTokens(spark)
-      _ <- AnalyticsLakehouseLock.resource(paths.root).use { _ =>
+      _ <- lakehouseLock.resource(paths.root).use { _ =>
         batch.reclaimRetainedFiles(spark) *> batch.verifyMarkedSubjectsAbsent(spark, currentMarkers)
       }
       allAffectedRows <- store.readAffectedRows(claim.requestId)

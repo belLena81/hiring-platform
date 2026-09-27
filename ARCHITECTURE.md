@@ -732,7 +732,7 @@ Each Saga step must define:
 The most useful Saga showcases for this application are:
 
 - application submission enrichment: submit application, then parse resume, generate embeddings, update Vector Search metadata, and notify recruiter
-- interview scheduling: move an application to `INTERVIEW`, reserve an interview slot, send candidate/recruiter notifications, and compensate calendar reservations if notification or persistence fails
+- interview scheduling: reserve a slot, commit the guarded move to `INTERVIEW`, then notify candidate and recruiter; release the reservation if the status change fails and retry or reconcile uncertain notification delivery
 - job closing with bulk effects: close a job, prevent new applications immediately, then asynchronously decline or archive remaining active applications according to explicit product rules
 - event publication repair: publish outbox events to Kafka with retry, deduplication, and dead-letter/quarantine handling while keeping MongoDB as operational truth
 - candidate or job profile reindexing: update profile/job content first, then regenerate embeddings and search index entries without blocking the user-facing mutation

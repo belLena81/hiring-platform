@@ -1,8 +1,10 @@
 package com.example.hiring.analytics.batch
 
-import munit.FunSuite
+import munit.ScalaCheckSuite
+import org.scalacheck.Gen
+import org.scalacheck.Prop.forAll
 
-final class KeyMaterialContinuityDecisionSpec extends FunSuite {
+final class KeyMaterialContinuityDecisionSpec extends ScalaCheckSuite {
   private val oldKey = "old-key" -> ("a" * 43)
   private val newKey = "new-key" -> ("b" * 43)
 
@@ -40,5 +42,26 @@ final class KeyMaterialContinuityDecisionSpec extends FunSuite {
         .evaluate(true, true, Vector("old-key" -> ("c" * 43)), Vector(oldKey), Set.empty)
         .isLeft
     )
+  }
+
+  property("valid new key anchors are accepted only when no stored row uses them") {
+    val keyIds = Gen
+      .nonEmptyListOf(Gen.oneOf(('a' to 'z') ++ ('0' to '9') ++ Seq('-')))
+      .map(_.take(40).mkString)
+      .suchThat(_.nonEmpty)
+    val verifiers = Gen
+      .listOfN(43, Gen.oneOf(('A' to 'Z') ++ ('a' to 'z') ++ ('0' to '9') ++ Seq('_', '-')))
+      .map(_.mkString)
+
+    forAll(keyIds, verifiers, verifiers) { (keyId: String, oldVerifier: String, newVerifier: String) =>
+      val existing = keyId -> oldVerifier
+      val addition = ("new-" + keyId.take(30)) -> newVerifier
+      val configured = Vector(existing, addition)
+
+      KeyMaterialContinuityDecision.evaluate(true, true, Vector(existing), configured, Set.empty) == Right(
+        Vector(addition)
+      ) &&
+      KeyMaterialContinuityDecision.evaluate(true, true, Vector(existing), configured, Set(addition._1)).isLeft
+    }
   }
 }

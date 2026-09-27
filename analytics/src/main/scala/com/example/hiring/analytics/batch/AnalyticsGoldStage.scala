@@ -5,6 +5,7 @@ import com.example.hiring.analytics.*
 import cats.effect.IO
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.types.{DataType, DataTypes}
 
 import java.sql.Timestamp
 import java.time.Instant
@@ -13,6 +14,28 @@ import scala.util.control.NonFatal
 /** Gold table rebuilds and bounded report extraction, kept outside the batch coordinator. */
 private[batch] object AnalyticsGoldStage {
   private val MaximumReportRows = 10000
+  private val FunnelSchema = Vector(
+    "day" -> DataTypes.TimestampType,
+    "created" -> DataTypes.LongType,
+    "accepted" -> DataTypes.LongType,
+    "declined" -> DataTypes.LongType,
+    "interview" -> DataTypes.LongType,
+    "hired" -> DataTypes.LongType,
+    "rejected" -> DataTypes.LongType
+  )
+  private val TimeToHireSchema = Vector(
+    "p50Hours" -> DataTypes.DoubleType,
+    "p75Hours" -> DataTypes.DoubleType,
+    "p90Hours" -> DataTypes.DoubleType,
+    "p95Hours" -> DataTypes.DoubleType,
+    "eligibleCount" -> DataTypes.LongType,
+    "excludedCount" -> DataTypes.LongType
+  )
+  private val SkillsSchema = Vector(
+    "day" -> DataTypes.TimestampType,
+    "skill" -> DataTypes.StringType,
+    "postings" -> DataTypes.LongType
+  )
 
   private def lakehouse[A](work: => A): IO[A] = IO.blocking(work).adaptError {
     case error: AnalyticsError => error
@@ -39,7 +62,7 @@ private[batch] object AnalyticsGoldStage {
 
   def extract(spark: SparkSession, paths: AnalyticsLakehousePaths, asOf: Instant): IO[AnalyticsReportOutput] =
     for {
-      funnelRows <- rows(spark, paths.funnelGold)
+      funnelRows <- rows(spark, paths.funnelGold, FunnelSchema)
       funnel = funnelRows.map(row =>
         AnalyticsFunnelDayOutput(
           row.getAs[Timestamp]("day").toInstant,
@@ -51,7 +74,7 @@ private[batch] object AnalyticsGoldStage {
           row.getAs[Long]("rejected")
         )
       )
-      timeRows <- rows(spark, paths.timeToHireGold)
+      timeRows <- rows(spark, paths.timeToHireGold, TimeToHireSchema)
       _ <-
         if (timeRows.size > 1)
           IO.raiseError[Unit](
@@ -68,7 +91,7 @@ private[batch] object AnalyticsGoldStage {
           row.getAs[Long]("excludedCount")
         )
       )
-      skillRows <- rows(spark, paths.skillsGold)
+      skillRows <- rows(spark, paths.skillsGold, SkillsSchema)
       skills = skillRows.map(row =>
         AnalyticsSkillPostingDayOutput(
           row.getAs[Timestamp]("day").toInstant,
@@ -78,15 +101,21 @@ private[batch] object AnalyticsGoldStage {
       )
     } yield AnalyticsReportOutput(asOf, funnel, timeToHire, skills)
 
-  private def rows(spark: SparkSession, path: String): IO[Vector[Row]] =
+  private def rows(spark: SparkSession, path: String, expected: Vector[(String, DataType)]): IO[Vector[Row]] =
     lakehouse {
       if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
-      else spark.read.format("delta").load(path).limit(MaximumReportRows + 1).collect().toVector
+      else {
+        val frame = spark.read.format("delta").load(path)
+        val actual = frame.schema.fields.toVector.map(field => field.name -> field.dataType)
+        if (actual != expected) throw AnalyticsError.InvalidGoldSchema
+        frame.limit(MaximumReportRows + 1).collect().toVector
+      }
     }.flatMap { result =>
       if (result.size > MaximumReportRows)
         IO.raiseError(
           AnalyticsError.LakehouseFailure(new IllegalStateException(s"report output exceeds $MaximumReportRows rows"))
         )
+      else if (result.exists(_.anyNull)) IO.raiseError(AnalyticsError.InvalidGoldSchema)
       else IO.pure(result)
     }
 

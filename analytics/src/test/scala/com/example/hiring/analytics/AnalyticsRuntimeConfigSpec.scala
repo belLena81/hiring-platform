@@ -33,6 +33,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |    username = ${?ANALYTICS_KAFKA_USERNAME}
     |    password = ${?ANALYTICS_KAFKA_PASSWORD}
     |    topic = "hiring.operational-events"
+    |    security-protocol = ${?ANALYTICS_KAFKA_SECURITY_PROTOCOL}
+    |    allow-plaintext = ${?ANALYTICS_KAFKA_ALLOW_PLAINTEXT}
     |    fencer {
     |      username = ${?ANALYTICS_KAFKA_FENCER_USERNAME}
     |      password = ${?ANALYTICS_KAFKA_FENCER_PASSWORD}
@@ -58,10 +60,69 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val loaded =
       AnalyticsRuntimeConfig.batchFromHocon(hocon, settings).toOption.getOrElse(fail("expected valid batch config"))
     assertEquals(loaded.manifest.runId.value, "run-local-1")
-    assertEquals(loaded.manifest.offsetRanges, Vector(PartitionOffsetRange("hiring.operational-events", 2, 10L, 20L)))
+    assertEquals(
+      loaded.manifest.offsetRanges,
+      Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 2, 10L, 20L))
+    )
     assertEquals(loaded.common.kafka.bootstrapServers, "localhost:9092")
+    assertEquals(loaded.common.kafka.securityProtocol, "SASL_SSL")
+    assertEquals(loaded.common.kafka.allowPlaintext, false)
     assertEquals(loaded.common.mongoDatabase, "hiring")
     assert(!loaded.toString.contains(key))
+  }
+
+  test("Kafka configuration allows plaintext only with an explicit opt-in") {
+    val local = settings ++ Map(
+      "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
+      "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "true"
+    )
+    val loaded = AnalyticsRuntimeConfig.batchFromHocon(hocon, local).toOption.getOrElse(fail("expected local config"))
+    assertEquals(loaded.common.kafka.securityProtocol, "SASL_PLAINTEXT")
+    assertEquals(loaded.common.kafka.allowPlaintext, true)
+
+    val missingOptIn = AnalyticsRuntimeConfig
+      .batchFromHocon(
+        hocon,
+        settings + ("ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT")
+      )
+      .swap
+      .toOption
+      .getOrElse(fail("expected disallowed plaintext protocol"))
+    assert(missingOptIn.getMessage.contains("allow-plaintext=true"))
+
+    val composeEndpoint = KafkaConnection.validate(
+      KafkaConnection("kafka:9092", Some("reader"), Some("password"), "SASL_PLAINTEXT", allowPlaintext = true)
+    )
+    assert(composeEndpoint.isValid)
+    val externalEndpoint = KafkaConnection(
+      "broker.example.com:9092",
+      Some("reader"),
+      Some("password"),
+      "SASL_PLAINTEXT",
+      allowPlaintext = true
+    )
+    assert(KafkaConnection.validate(externalEndpoint).isInvalid)
+    assertEquals(KafkaConnection.clientProperties(externalEndpoint), Map.empty[String, String])
+  }
+
+  test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {
+    val unsupported = AnalyticsRuntimeConfig.batchFromHocon(
+      hocon,
+      settings ++ Map(
+        "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "PLAINTEXT",
+        "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "true"
+      )
+    )
+    assert(unsupported.swap.toOption.exists(_.getMessage.contains("security protocol")))
+
+    val malformedFlag = AnalyticsRuntimeConfig.batchFromHocon(
+      hocon,
+      settings ++ Map(
+        "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
+        "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "yes"
+      )
+    )
+    assert(malformedFlag.isLeft)
   }
 
   test("packaged application.conf supports the same substitutions and defaults") {

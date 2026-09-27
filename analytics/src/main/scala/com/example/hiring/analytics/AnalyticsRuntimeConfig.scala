@@ -50,7 +50,9 @@ object AnalyticsRuntimeConfig {
       username: Option[String],
       password: Option[String],
       topic: Option[String],
-      fencer: RawFencer
+      fencer: RawFencer,
+      securityProtocol: Option[String],
+      allowPlaintext: Option[String]
   )
   private final case class RawHmac(
       secretBase64: Option[String],
@@ -75,7 +77,15 @@ object AnalyticsRuntimeConfig {
 
   // Scala 3's built-in PureConfig derivation ignores ProductHint and does not map camelCase fields to kebab-case.
   private given ConfigReader[RawKafka] =
-    ConfigReader.forProduct5("bootstrap-servers", "username", "password", "topic", "fencer")(RawKafka.apply)
+    ConfigReader.forProduct7(
+      "bootstrap-servers",
+      "username",
+      "password",
+      "topic",
+      "fencer",
+      "security-protocol",
+      "allow-plaintext"
+    )(RawKafka.apply)
   private given ConfigReader[RawHmac] =
     ConfigReader.forProduct4("secret-base64", "key-id", "previous-key-id", "previous-secret-base64")(RawHmac.apply)
   private given ConfigReader[RawBatch] =
@@ -137,7 +147,7 @@ object AnalyticsRuntimeConfig {
         offsetOrder(raw.batch.startOffset, raw.batch.endOffsetExclusive)
       ).mapN { (settings, topic, runId, partition, start, end, _) =>
         AnalyticsRunManifest
-          .validated(runId, Vector(PartitionOffsetRange(topic, partition, start, end)))
+          .validated(runId, Vector(PartitionOffsetRange.refined(topic, partition, start, end)))
           .map(AnalyticsBatchSettings(settings, _))
       }.andThen(identity)
     )
@@ -151,7 +161,15 @@ object AnalyticsRuntimeConfig {
         required(raw.kafka.fencer.password, "analytics.kafka.fencer.password")
       ).mapN { (settings, topic, username, password) =>
         KafkaConnection
-          .validate(KafkaConnection(settings.kafka.bootstrapServers, Some(username), Some(password)))
+          .validate(
+            KafkaConnection(
+              settings.kafka.bootstrapServers,
+              Some(username),
+              Some(password),
+              settings.kafka.securityProtocol,
+              settings.kafka.allowPlaintext
+            )
+          )
           .map(AnalyticsWorkerSettings(settings, topic, _))
       }.andThen(identity)
     )
@@ -167,9 +185,17 @@ object AnalyticsRuntimeConfig {
     val kafka = (
       required(raw.kafka.bootstrapServers, "analytics.kafka.bootstrap-servers"),
       required(raw.kafka.username, "analytics.kafka.username"),
-      required(raw.kafka.password, "analytics.kafka.password")
-    ).mapN((brokers, username, password) => KafkaConnection(brokers, Some(username), Some(password)))
-      .andThen(KafkaConnection.validate)
+      required(raw.kafka.password, "analytics.kafka.password"),
+      kafkaSecurity(raw)
+    ).mapN((brokers, username, password, security) =>
+      KafkaConnection(
+        brokers,
+        Some(username),
+        Some(password),
+        security._1,
+        security._2
+      )
+    ).andThen(KafkaConnection.validate)
     val paths = required(raw.lakehouse.root, "analytics.lakehouse.root")
       .andThen(root => AnalyticsLakehousePaths.validate(AnalyticsLakehousePaths(root)))
     val pseudonymizer = SubjectPseudonymizer.validateFromBase64(
@@ -189,6 +215,16 @@ object AnalyticsRuntimeConfig {
     ).mapN(AnalyticsCommonSettings.apply)
   }
 
+  private def kafkaSecurity(raw: RawAnalytics): ValidatedNec[String, (String, Boolean)] = {
+    val protocol = raw.kafka.securityProtocol.getOrElse("SASL_SSL")
+    val allowPlaintext = raw.kafka.allowPlaintext match {
+      case None | Some("false") => false.validNec[String]
+      case Some("true")         => true.validNec[String]
+      case Some(_)              => "analytics.kafka.allow-plaintext must be true or false".invalidNec
+    }
+    allowPlaintext.map(protocol -> _)
+  }
+
   private def required(value: Option[String], field: String): ValidatedNec[String, AnalyticsNonBlank] =
     value match {
       case None            => s"$field is required".invalidNec
@@ -196,7 +232,7 @@ object AnalyticsRuntimeConfig {
         candidate.refineEither[Not[Blank]].leftMap(_ => s"$field must be non-empty").toValidatedNec
     }
 
-  private def nonNegativeInt(value: Option[String], field: String): ValidatedNec[String, Int] =
+  private def nonNegativeInt(value: Option[String], field: String): ValidatedNec[String, AnalyticsPartition] =
     required(value, field)
       .andThen { candidate =>
         Try(candidate.toInt).toEither.leftMap(_ => s"$field must be an integer").toValidatedNec
@@ -208,7 +244,7 @@ object AnalyticsRuntimeConfig {
           .toValidatedNec
       }
 
-  private def nonNegativeLong(value: Option[String], field: String): ValidatedNec[String, Long] =
+  private def nonNegativeLong(value: Option[String], field: String): ValidatedNec[String, AnalyticsOffset] =
     required(value, field)
       .andThen { candidate =>
         Try(candidate.toLong).toEither.leftMap(_ => s"$field must be an integer").toValidatedNec

@@ -48,6 +48,7 @@ object AnalyticsError {
   case object MalformedMarker extends AnalyticsError("pending analytics erasure request has an invalid subject id")
   case object ErasureNotReady extends AnalyticsError("analytics erasure is not ready for guarded publication")
   case object ErasureDeferred extends AnalyticsError("analytics erasure was durably deferred for a later retry")
+  case object InvalidGoldSchema extends AnalyticsError("Gold dataset does not match its declared report schema")
   case object PhysicalReclamationUnverified
       extends AnalyticsError("analytics erasure could not verify retention-safe physical Delta reclamation")
   final case class MarkerLimitExceeded(limit: Int)
@@ -65,12 +66,14 @@ object AnalyticsError {
   case object LakehouseLockTimeout extends AnalyticsError("timed out waiting for the analytics lakehouse lock")
 }
 
-opaque type RunId = String
+opaque type RunId = String :| Not[Blank]
+
+type AnalyticsPartition = Int :| Interval.Closed[0, 2147483647]
+type AnalyticsOffset = Long :| Interval.Closed[0L, 9223372036854775807L]
 
 object RunId {
   def from(value: String): ValidatedNec[String, RunId] =
     Option(value)
-      .filter(_.trim.nonEmpty)
       .toRight("run id must be non-empty")
       .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "run id must be non-empty"))
       .toValidatedNec
@@ -118,33 +121,77 @@ enum AnalyticsApplicationStatus(val wire: String) {
   case Rejected extends AnalyticsApplicationStatus("Rejected")
 }
 
-final case class PartitionOffsetRange(topic: String, partition: Int, startOffset: Long, endOffsetExclusive: Long)
+final case class PartitionOffsetRange private (
+    topic: String,
+    partition: AnalyticsPartition,
+    startOffset: AnalyticsOffset,
+    endOffsetExclusive: AnalyticsOffset
+)
 
 object PartitionOffsetRange {
+  private[analytics] def partitionNumber(value: AnalyticsPartition): Int = value
+  private[analytics] def offsetValue(value: AnalyticsOffset): Long = value
+
+  def from(
+      topic: String,
+      partition: Int,
+      startOffset: Long,
+      endOffsetExclusive: Long
+  ): ValidatedNec[String, PartitionOffsetRange] = {
+    val validTopic = Option(topic)
+      .filter(_.trim.nonEmpty)
+      .toRight("topic must be non-empty")
+      .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty"))
+      .toValidatedNec
+    val validPartition = partition
+      .refineEither[Interval.Closed[0, 2147483647]]
+      .leftMap(_ => "partition must be non-negative")
+      .toValidatedNec
+    val validStart = startOffset
+      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
+      .leftMap(_ => "start offset must be non-negative")
+      .toValidatedNec
+    val validEnd = endOffsetExclusive
+      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
+      .leftMap(_ => "end offset must be non-negative")
+      .toValidatedNec
+    (validTopic, validPartition, validStart, validEnd)
+      .mapN { (topic, partition, start, end) =>
+        if (end < start) "end offset must not precede start offset".invalidNec
+        else new PartitionOffsetRange(topic, partition, start, end).validNec
+      }
+      .andThen(identity)
+  }
+
+  private[analytics] def unsafe(
+      topic: String,
+      partition: Int,
+      startOffset: Long,
+      endOffsetExclusive: Long
+  ): PartitionOffsetRange =
+    from(topic, partition, startOffset, endOffsetExclusive).toEither.fold(
+      errors => throw new IllegalArgumentException(errors.toNonEmptyList.toList.mkString("; ")),
+      identity
+    )
+
+  private[analytics] def refined(
+      topic: String,
+      partition: AnalyticsPartition,
+      startOffset: AnalyticsOffset,
+      endOffsetExclusive: AnalyticsOffset
+  ): PartitionOffsetRange =
+    new PartitionOffsetRange(topic, partition, startOffset, endOffsetExclusive)
+
   def validate(range: PartitionOffsetRange): ValidatedNec[String, PartitionOffsetRange] = {
     val topic = Option(range.topic)
       .filter(_.trim.nonEmpty)
       .toRight("topic must be non-empty")
       .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty"))
       .toValidatedNec
-    val partition = range.partition
-      .refineEither[Interval.Closed[0, 2147483647]]
-      .leftMap(_ => "partition must be non-negative")
-      .toValidatedNec
-    val start = range.startOffset
-      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
-      .leftMap(_ => "start offset must be non-negative")
-      .toValidatedNec
-    val end = range.endOffsetExclusive
-      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
-      .leftMap(_ => "end offset must be non-negative")
-      .toValidatedNec
-    (topic, partition, start, end)
-      .mapN { (_, _, validStart, validEnd) =>
-        if (validEnd < validStart) "end offset must not precede start offset".invalidNec
-        else range.validNec
-      }
-      .andThen(identity)
+    topic.andThen { _ =>
+      if (range.endOffsetExclusive < range.startOffset) "end offset must not precede start offset".invalidNec
+      else range.validNec
+    }
   }
 }
 
