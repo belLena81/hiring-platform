@@ -4,6 +4,9 @@ import com.tngtech.archunit.core.importer.ClassFileImporter
 import com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses
 import cats.effect.IOApp
 import munit.FunSuite
+import java.nio.file.Paths
+import java.nio.file.Files
+import scala.jdk.CollectionConverters.*
 
 final class AnalyticsLayeringSpec extends FunSuite {
   test("domain, service, and config do not depend on adapters or CLI entrypoints") {
@@ -16,6 +19,45 @@ final class AnalyticsLayeringSpec extends FunSuite {
       .resideInAnyPackage("..adapter..", "..cli..")
 
     rule.check(analyticsClasses)
+  }
+
+  test("config does not depend on service") {
+    val analyticsClasses = new ClassFileImporter().importPackages("com.example.hiring.analytics")
+    val rule = noClasses()
+      .that()
+      .resideInAnyPackage("..config..")
+      .should()
+      .dependOnClassesThat()
+      .resideInAnyPackage("..service..")
+
+    rule.check(analyticsClasses)
+  }
+
+  test("domain, service, and config use explicit internal analytics imports") {
+    val sourceRoot = Paths.get("src/main/scala/com/example/hiring/analytics")
+    List("domain", "service", "config").foreach { layer =>
+      val layerRoot = sourceRoot.resolve(layer)
+      assert(Files.isDirectory(layerRoot), s"missing production source directory: $layerRoot")
+      val files = Files.walk(layerRoot)
+      try
+        files
+          .iterator()
+          .asScala
+          .filter(path => path.toString.endsWith(".scala"))
+          .foreach { path =>
+            val wildcardImports = Files
+              .readString(path)
+              .linesIterator
+              .map(_.trim)
+              .filter(line => line.startsWith("import com.example.hiring.analytics") && line.contains("*"))
+              .toList
+            assert(
+              wildcardImports.isEmpty,
+              s"internal analytics wildcard import found in $path: ${wildcardImports.mkString(", ")}"
+            )
+          }
+      finally files.close()
+    }
   }
 
   test("runnable analytics entrypoints live in cli and adapters expose no Main objects") {

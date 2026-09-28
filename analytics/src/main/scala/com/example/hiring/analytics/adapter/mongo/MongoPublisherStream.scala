@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.errors.AnalyticsError
+import cats.data.EitherT
 import cats.effect.{Async, Clock, Outcome}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
@@ -33,13 +34,15 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
     * Preserve its retry rules: rerun the body for transient transaction failures and retry commit for an unknown commit
     * result, within Mongo's documented transaction callback retry window.
     */
-  def transaction[F[_]: Async: Clock, A](session: ClientSession)(work: F[A]): F[A] =
+  def transaction[F[_]: Async: Clock, A](
+      session: ClientSession
+  )(work: EitherT[F, AnalyticsError, A]): EitherT[F, AnalyticsError, A] =
     transaction(session)(work)(Clock[F])
 
   def transaction[F[_]: Async, A](session: ClientSession)(
-      work: F[A]
-  )(clock: Clock[F]): F[A] =
-    clock.monotonic.flatMap { startedAt =>
+      work: EitherT[F, AnalyticsError, A]
+  )(clock: Clock[F]): EitherT[F, AnalyticsError, A] =
+    EitherT(clock.monotonic.flatMap { startedAt =>
       val deadline = startedAt + settings.mongoTransactionWindow
 
       def beforeDeadline: F[Boolean] = clock.monotonic.map(_ < deadline)
@@ -61,15 +64,18 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
           case error => Async[F].raiseError(error)
         }
 
-      def runOnce: F[A] = {
-        val transaction = Async[F].delay(session.startTransaction()) *> work.flatTap(_ => commit)
+      def runOnce: F[Either[AnalyticsError, A]] = {
+        val transaction = Async[F].delay(session.startTransaction()) *> work.value.flatMap {
+          case success @ Right(_) => commit.as(success)
+          case failure @ Left(_)  => abortIfActive.as(failure)
+        }
         transaction.guaranteeCase {
           case Outcome.Succeeded(_) => Async[F].unit
           case _                    => abortIfActive
         }
       }
 
-      def run: F[A] = runOnce.handleErrorWith {
+      def run: F[Either[AnalyticsError, A]] = runOnce.handleErrorWith {
         case retry: RetryTransaction =>
           beforeDeadline.flatMap(if _ then Async[F].defer(run) else Async[F].raiseError(retry.getCause))
         case error: MongoException =>
@@ -78,7 +84,7 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
         case NonFatal(error)       => Async[F].raiseError(error)
       }
       run
-    }
+    })
 
   private final case class RetryTransaction(cause: MongoException)
       extends RuntimeException("retry Mongo transaction", cause)

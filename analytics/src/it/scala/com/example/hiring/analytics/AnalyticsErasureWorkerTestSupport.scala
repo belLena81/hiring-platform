@@ -8,7 +8,7 @@ import com.example.hiring.analytics.adapter.mongo.{
   MongoAnalyticsReportPublisher,
   MongoHmacKeyRetirementAuthorizationStore
 }
-import com.example.hiring.analytics.adapter.spark.{AnalyticsErasureWorker, DeltaManifestStore, HiringAnalyticsBatch}
+import com.example.hiring.analytics.adapter.spark.{AnalyticsErasureWorker, DeltaAnalyticsErasureLakehouse}
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsReportPublisher}
@@ -51,13 +51,10 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
     val lock = new MongoAnalyticsLakehouseLock(database, clock, AnalyticsTestOperationalConfig.streams)
     val markers =
       new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer, streams = AnalyticsTestOperationalConfig.streams)
-    val batch = new HiringAnalyticsBatch[IO](
+    val maintenance = new DeltaAnalyticsErasureLakehouse[IO](
       paths,
       pseudonymizer,
-      markers,
       clock,
-      publisher,
-      new DeltaManifestStore[IO](paths),
       lock,
       new MongoHmacKeyRetirementAuthorizationStore[IO](database, AnalyticsTestOperationalConfig.streams),
       AnalyticsTestOperationalConfig.operational,
@@ -76,7 +73,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       paths,
       publisher,
       markers,
-      batch,
+      maintenance,
       lock,
       clock,
       Slf4jLogger.getLogger[IO],

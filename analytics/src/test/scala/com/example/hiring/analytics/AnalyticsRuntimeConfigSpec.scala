@@ -1,4 +1,5 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
@@ -119,12 +120,29 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(loaded.common.kafka.bootstrapServers, "localhost:9092")
     assertEquals(loaded.common.kafka.securityProtocol, "SASL_SSL")
     assertEquals(loaded.common.kafka.allowPlaintext, false)
+    assertEquals(loaded.common.lakehouseRoot, "file:///tmp/hiring-analytics")
     assertEquals(loaded.common.mongoDatabase, "hiring")
     assertEquals(loaded.common.operational.reportReservationTtlDays, 90)
     assertEquals(loaded.common.operational.mongoTransactionWindowSeconds, 120)
     assertEquals(loaded.common.operational.maximumErasureEvidenceFiles, 100000)
     assertEquals(loaded.common.operational.mongoPublisherBufferSize, 256)
     assert(!loaded.toString.contains(key))
+  }
+
+  test("runtime composition resolves validated lakehouse roots into service paths") {
+    val paths = AppModule
+      .resolveLakehousePaths("file:///tmp/hiring-analytics")
+      .toOption
+      .getOrElse(fail("expected valid lakehouse paths"))
+    assertEquals(paths.bronze, "file:///tmp/hiring-analytics/bronze/operational_events")
+
+    val error = AppModule
+      .resolveLakehousePaths(" ")
+      .swap
+      .toOption
+      .getOrElse(fail("expected invalid lakehouse root"))
+    assert(error.isInstanceOf[AnalyticsError.InvalidConfiguration])
+    assertEquals(error.getMessage, "lakehouse root must be non-empty")
   }
 
   test("operational retention and runtime bounds load environment overrides and reject non-positive values") {
@@ -260,6 +278,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       .getOrElse(fail("expected valid audit config"))
     assertEquals(audit.mongoDatabase, "hiring")
     assertEquals(audit.sparkMaster, "local[*]")
+    assertEquals(audit.lakehouseRoot, "file:///tmp/hiring-analytics")
     assertEquals(audit.kafkaBarrierOffset, None)
     assertEquals(audit.writers.managed, Vector.empty)
     assertEquals(audit.operational.mongoPublisherBufferSize, 256)

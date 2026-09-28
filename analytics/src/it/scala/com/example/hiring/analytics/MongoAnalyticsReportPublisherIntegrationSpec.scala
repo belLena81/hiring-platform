@@ -195,6 +195,15 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val malformed =
         publisher.reserve(asRunId("malformed"), asFingerprint("range-malformed"), now).attempt.unsafeRunSync()
       assert(malformed.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+      val invalidStateRun = publisher
+        .reserve(asRunId("invalid-state"), asFingerprint("range-invalid-state"), now)
+        .unsafeRunSync()
+      database
+        .getCollection("analytics_report_runs")
+        .updateOne(new Document("_id", "invalid-state"), Updates.set("state", "Unexpected"))
+      val invalidState =
+        publisher.publish(invalidStateRun, report, expiry).attempt.unsafeRunSync()
+      assert(invalidState.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()
       reactiveClient.close()

@@ -2,6 +2,7 @@ package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.spark.{
   AnalyticsKeyContinuityStage,
+  DeltaAnalyticsErasureLakehouse,
   DeltaManifestStore,
   HiringAnalyticsBatch,
   KeyContinuityStagePorts,
@@ -68,6 +69,21 @@ private[analytics] object AnalyticsBatchTestSupport {
       clock,
       reportPublisher,
       manifests.getOrElse(new DeltaManifestStore[IO](paths)),
+      lakehouseLock,
+      AnalyticsTestOperationalConfig.operational,
+      sparkExecution,
+      newMaintenance(paths, pseudonymizer, clock)
+    )
+
+  def newMaintenance(
+      paths: AnalyticsLakehousePaths,
+      pseudonymizer: SubjectPseudonymizer,
+      clock: Clock[IO] = Clock[IO]
+  ): DeltaAnalyticsErasureLakehouse[IO] =
+    new DeltaAnalyticsErasureLakehouse[IO](
+      paths,
+      pseudonymizer,
+      clock,
       lakehouseLock,
       retirementStore,
       AnalyticsTestOperationalConfig.operational,

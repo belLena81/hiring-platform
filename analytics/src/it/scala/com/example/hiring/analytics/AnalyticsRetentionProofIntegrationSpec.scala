@@ -489,23 +489,15 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
         val pseudonymizer =
           AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
-        val batch = AnalyticsBatchTestSupport.newBatch(
-          paths,
-          pseudonymizer,
-          new MongoActiveDeletionMarkerSource[IO](
-            reactiveDb,
-            pseudonymizer,
-            streams = AnalyticsTestOperationalConfig.streams
-          )
-        )
+        val maintenance = AnalyticsBatchTestSupport.newMaintenance(paths, pseudonymizer)
         val markers =
           new MongoActiveDeletionMarkerSource[IO](
             reactiveDb,
             pseudonymizer,
             streams = AnalyticsTestOperationalConfig.streams
           ).activeSubjectTokens(spark).unsafeRunSync()
-        batch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
-        batch.verifyFilesAbsent(spark, evidence).unsafeRunSync()
+        maintenance.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
+        maintenance.verifyFilesAbsent(spark, evidence).unsafeRunSync()
       } finally spark.stop()
       assertEquals(db.getCollection("analytics_erasure_completions").countDocuments(Filters.eq("_id", subjectId)), 1L)
       assertEquals(db.getCollection("event_outbox").countDocuments(Filters.in("subjectIds", subjectId)), 0L)

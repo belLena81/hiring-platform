@@ -12,6 +12,7 @@ import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.*
 
 import cats.effect.Async
+import cats.data.EitherT
 import cats.data.Chain
 import cats.syntax.all.*
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
@@ -344,16 +345,19 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
         MongoSession.resource(client, streams).use { session =>
           streams
             .transaction(session) {
-              matchedUpdate(
-                session,
-                requests,
-                ownedClaim(claim, now),
-                Updates.inc(AnalyticsCollections.Fields.DeltaEvidenceRevision, 1L)
-              ).flatMap { ownership =>
-                if (!ownership || prepared.isEmpty) Async[F].pure(toErasureUpdate(ownership))
-                else streams.drain(deltaEvidence.bulkWrite(session, prepared)).as(ErasureUpdate.Applied)
-              }
+              EitherT.liftF[F, AnalyticsError, ErasureUpdate](
+                matchedUpdate(
+                  session,
+                  requests,
+                  ownedClaim(claim, now),
+                  Updates.inc(AnalyticsCollections.Fields.DeltaEvidenceRevision, 1L)
+                ).flatMap { ownership =>
+                  if (!ownership || prepared.isEmpty) Async[F].pure(toErasureUpdate(ownership))
+                  else streams.drain(deltaEvidence.bulkWrite(session, prepared)).as(ErasureUpdate.Applied)
+                }
+              )
             }
+            .rethrowT
         }
       }
     }

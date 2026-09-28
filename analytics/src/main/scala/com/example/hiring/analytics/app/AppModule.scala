@@ -22,9 +22,16 @@ object AppModule {
   final case class BatchProgram[F[_]] private[app] (run: F[AnalyticsPublication])
   final case class WorkerProgram[F[_]] private[app] (run: F[Unit])
 
+  private[analytics] def resolveLakehousePaths(root: String): Either[AnalyticsError, AnalyticsLakehousePaths] =
+    AnalyticsLakehousePaths
+      .from(root)
+      .toEither
+      .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+
   def batch[F[_]: Async: Clock](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] = {
     val common = settings.common
     for {
+      paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
       (spark, client, sparkExecution) <- sparkMongo[F](
         common.mongoUri,
         common.sparkMaster,
@@ -34,18 +41,28 @@ object AppModule {
     } yield {
       val streams = new MongoPublisherStream(common.operational)
       val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution)
-      val job = new HiringAnalyticsBatch[F](
-        common.lakehousePaths,
+      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
+      val maintenance = new DeltaAnalyticsErasureLakehouse[F](
+        paths,
         common.pseudonymizer,
-        markers,
         Clock[F],
-        new MongoAnalyticsReportPublisher[F](client, database, common.operational),
-        new DeltaManifestStore[F](common.lakehousePaths),
-        new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams),
+        lock,
         new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
         common.operational,
         sparkExecution,
         Slf4jLogger.getLogger[F]
+      )
+      val job = new HiringAnalyticsBatch[F](
+        paths,
+        common.pseudonymizer,
+        markers,
+        Clock[F],
+        new MongoAnalyticsReportPublisher[F](client, database, common.operational),
+        new DeltaManifestStore[F](paths),
+        lock,
+        common.operational,
+        sparkExecution,
+        maintenance
       )
       BatchProgram(job.run(spark, new KafkaOffsetRangeSource[F](common.kafka, sparkExecution), settings.manifest))
     }
@@ -54,6 +71,7 @@ object AppModule {
   def worker[F[_]: Async: Clock: Temporal](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] = {
     val common = settings.common
     for {
+      paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
       (spark, client, sparkExecution) <- sparkMongo[F](
         common.mongoUri,
         common.sparkMaster,
@@ -61,19 +79,15 @@ object AppModule {
       )
       database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
     } yield {
-      val paths = common.lakehousePaths
       val streams = new MongoPublisherStream(common.operational)
       val store = new MongoAnalyticsErasureWorkerStore[F](client, database, streams)
       val publisher = new MongoAnalyticsReportPublisher[F](client, database, common.operational)
       val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
       val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution)
-      val batch = new HiringAnalyticsBatch[F](
+      val maintenance = new DeltaAnalyticsErasureLakehouse[F](
         paths,
         common.pseudonymizer,
-        markers,
         Clock[F],
-        publisher,
-        new DeltaManifestStore[F](paths),
         lock,
         new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
         common.operational,
@@ -91,7 +105,7 @@ object AppModule {
         paths,
         publisher,
         markers,
-        batch,
+        maintenance,
         lock,
         Clock[F],
         Slf4jLogger.getLogger[F],

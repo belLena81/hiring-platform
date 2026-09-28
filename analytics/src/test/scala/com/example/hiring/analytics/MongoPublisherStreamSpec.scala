@@ -11,6 +11,7 @@ import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.effect.{Clock, IO}
+import cats.data.EitherT
 import cats.effect.unsafe.implicits.global
 import cats.effect.syntax.all.*
 import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
@@ -86,7 +87,9 @@ final class MongoPublisherStreamSpec extends FunSuite {
         }
       )
       .asInstanceOf[ClientSession]
-    val transaction = AnalyticsTestOperationalConfig.streams.transaction(session)(IO.pure(1))(clock)
+    val transaction = AnalyticsTestOperationalConfig.streams
+      .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.pure(1)))(clock)
+      .rethrowT
     assertEquals(reads.get(), 0)
     transaction.attempt.unsafeRunSync()
     assertEquals(reads.get(), 1)
@@ -109,7 +112,8 @@ final class MongoPublisherStreamSpec extends FunSuite {
 
     val result =
       AnalyticsTestOperationalConfig.streams
-        .transaction(session)(IO.pure(1))(cutoffClock(reads))
+        .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.pure(1)))(cutoffClock(reads))
+        .rethrowT
         .attempt
         .unsafeRunSync()
 
@@ -136,7 +140,8 @@ final class MongoPublisherStreamSpec extends FunSuite {
 
     val result =
       AnalyticsTestOperationalConfig.streams
-        .transaction(session)(IO.pure(1))(cutoffClock(reads))
+        .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.pure(1)))(cutoffClock(reads))
+        .rethrowT
         .attempt
         .unsafeRunSync()
 
@@ -160,12 +165,41 @@ final class MongoPublisherStreamSpec extends FunSuite {
     val expected = AnalyticsError.InvalidConfiguration("expected analytics failure")
 
     val result = AnalyticsTestOperationalConfig.streams
-      .transaction(session)(IO.raiseError[Int](expected))
+      .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.raiseError(expected)))
+      .rethrowT
       .attempt
       .unsafeRunSync()
 
     assertEquals(result.swap.toOption, Some(expected))
     assertEquals(aborts.get(), 1)
+  }
+
+  test("typed transaction failures abort without committing and remain in EitherT") {
+    val aborts = new AtomicInteger(0)
+    val commits = new AtomicInteger(0)
+    val session = sessionProxy { (method, _) =>
+      method match {
+        case "startTransaction"     => null
+        case "hasActiveTransaction" => java.lang.Boolean.TRUE
+        case "abortTransaction"     =>
+          aborts.incrementAndGet()
+          completedPublisher
+        case "commitTransaction" =>
+          commits.incrementAndGet()
+          completedPublisher
+        case _ => null
+      }
+    }
+    val expected = AnalyticsError.InvalidConfiguration("expected typed failure")
+
+    val result = AnalyticsTestOperationalConfig.streams
+      .transaction(session)(EitherT.leftT[IO, Int](expected))
+      .value
+      .unsafeRunSync()
+
+    assertEquals(result, Left(expected))
+    assertEquals(aborts.get(), 1)
+    assertEquals(commits.get(), 0)
   }
 
   test("publisher creation is lazy, demand is bounded, and take cancellation reaches the subscription") {

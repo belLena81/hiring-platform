@@ -937,8 +937,13 @@ class AnalyticsTransformsSpec extends FunSuite {
       DataFrameDeletionMarkerSource[IO](markers),
       fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
     )
+    val maintenance = AnalyticsBatchTestSupport.newMaintenance(
+      paths,
+      pseudonymizer,
+      fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
+    )
     intercept[AnalyticsError.LakehouseFailure] {
-      deletionBatch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
+      maintenance.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
     }
     val deletionRun = validatedManifest(
       "erasure-with-bad-range",
@@ -952,7 +957,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(spark.read.format("delta").load(paths.silver).count(), 9L)
     assertEquals(spark.read.format("delta").load(paths.quarantine).count(), 0L)
     assertEquals(spark.read.format("delta").load(paths.funnelGold).count(), 0L)
-    deletionBatch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
+    maintenance.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
   }
 
   test("data frame source honors the manifest offset boundary") {
@@ -1727,20 +1732,19 @@ class AnalyticsTransformsSpec extends FunSuite {
       .write
       .format("delta")
       .save(paths.silver)
-    val batch =
-      newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerFrame(Seq("subject-deleted"))))
+    val maintenance = AnalyticsBatchTestSupport.newMaintenance(paths, pseudonymizer)
 
-    val affectedFiles = batch.captureMarkedFiles(spark, markerFrame(Seq("subject-deleted"))).unsafeRunSync()
+    val affectedFiles = maintenance.captureMarkedFiles(spark, markerFrame(Seq("subject-deleted"))).unsafeRunSync()
     assertEquals(affectedFiles.size, 1)
     val affectedPath = new org.apache.hadoop.fs.Path(affectedFiles.head)
     val fileSystem = affectedPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
     assert(fileSystem.exists(affectedPath))
     intercept[AnalyticsError.PhysicalReclamationUnverified.type](
-      batch.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
+      maintenance.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
     )
 
     assert(fileSystem.delete(affectedPath, false))
-    batch.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
+    maintenance.verifyFilesAbsent(spark, affectedFiles).unsafeRunSync()
   }
 
   test("erasure marker matching shares array, scalar, and unattributed row semantics") {
@@ -1802,15 +1806,15 @@ class AnalyticsTransformsSpec extends FunSuite {
       .format("delta")
       .save(paths.bronze)
     val markerRows = markerFrame(Seq("subject-not-present"))
-    val initialBatch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerRows))
+    val initialMaintenance = AnalyticsBatchTestSupport.newMaintenance(paths, pseudonymizer)
     val firstVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
-    assertEquals(initialBatch.countMarkedRows(spark, markerRows).unsafeRunSync(), 0L)
+    assertEquals(initialMaintenance.countMarkedRows(spark, markerRows).unsafeRunSync(), 0L)
 
     val initialEvidence =
-      initialBatch.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
+      initialMaintenance.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
     assert(initialEvidence.nonEmpty)
-    initialBatch.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
-    val firstRetired = initialBatch.checkpointPurgedRawLogs(spark).unsafeRunSync()
+    initialMaintenance.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
+    val firstRetired = initialMaintenance.checkpointPurgedRawLogs(spark).unsafeRunSync()
     val firstCheckpointVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
     assert(
       firstCheckpointVersion > firstVersion,
@@ -1822,13 +1826,13 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
 
     // Model worker reconstruction and exact retry after a crash following checkpointing.
-    val restartedBatch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerRows))
+    val restartedMaintenance = AnalyticsBatchTestSupport.newMaintenance(paths, pseudonymizer)
     val retryEvidence =
-      restartedBatch.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
+      restartedMaintenance.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
     val retryJson = retryEvidence.filter(_.endsWith(".json"))
     assert(retryJson.nonEmpty, "retry capture should include the current baseline commit")
-    restartedBatch.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
-    val retryRetired = restartedBatch.checkpointPurgedRawLogs(spark).unsafeRunSync()
+    restartedMaintenance.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
+    val retryRetired = restartedMaintenance.checkpointPurgedRawLogs(spark).unsafeRunSync()
     val retryCheckpointVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
     assert(retryCheckpointVersion > firstCheckpointVersion, "a restarted retry must establish a later boundary")
     assert(retryJson.forall(retryRetired.contains), "retry baseline JSON must be older than the new clean checkpoint")
@@ -1855,9 +1859,9 @@ class AnalyticsTransformsSpec extends FunSuite {
       .option("delta.dataSkippingNumIndexedCols", "32")
       .save(rawPath)
     val markerRows = markerFrame(Seq("subject-deleted"))
-    val batch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerRows))
+    val maintenance = AnalyticsBatchTestSupport.newMaintenance(paths, pseudonymizer)
 
-    val beforePurge = batch.captureMarkedFiles(spark, markerRows).unsafeRunSync()
+    val beforePurge = maintenance.captureMarkedFiles(spark, markerRows).unsafeRunSync()
     val legacyLogs = beforePurge.filter(_.contains("/_delta_log/"))
     assert(legacyLogs.nonEmpty)
     val jsonLogs = legacyLogs.filter(_.endsWith(".json"))
@@ -1880,8 +1884,8 @@ class AnalyticsTransformsSpec extends FunSuite {
     val legacyStats = legacyMapper.readTree(legacyAdd.get("stats").asText())
     assert(legacyStats.path("minValues").has("rawValue"), "legacy AddFile stats must include rawValue")
 
-    batch.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
-    val retiredLogs = batch.checkpointPurgedRawLogs(spark).unsafeRunSync()
+    maintenance.applyDeletionMarkers(spark, markerRows).unsafeRunSync()
+    val retiredLogs = maintenance.checkpointPurgedRawLogs(spark).unsafeRunSync()
     assert(retiredLogs.contains(legacyJson))
     val baselineVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, rawPath).update().version
     val baselineFiles = fileSystem
@@ -1906,8 +1910,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       .format("delta")
       .mode("append")
       .save(rawPath)
-    batch.checkpointRawTableLogs(spark).unsafeRunSync()
-    batch.verifyFilesAbsent(spark, retiredLogs).unsafeRunSync()
+    maintenance.checkpointRawTableLogs(spark).unsafeRunSync()
+    maintenance.verifyFilesAbsent(spark, retiredLogs).unsafeRunSync()
     assert(fileSystem.exists(new org.apache.hadoop.fs.Path(legacyJson)) == false)
   }
 }

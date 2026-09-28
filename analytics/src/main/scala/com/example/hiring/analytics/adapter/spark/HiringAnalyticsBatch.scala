@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
-import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, KafkaConnection}
+import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
   AnalyticsReportOutput,
@@ -21,12 +20,10 @@ import com.example.hiring.analytics.service.batch.{
   BoundedOperationalEventSource,
   ManifestStore
 }
-import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 
 import cats.effect.{Async, Clock, Resource}
 import cats.data.NonEmptyChain
 import cats.syntax.all.*
-import org.typelevel.log4cats.Logger
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, concat, lit, sha2, struct, to_json, when}
@@ -35,7 +32,6 @@ import org.apache.spark.sql.types.StructType
 
 import java.sql.Timestamp
 import java.time.Instant
-import java.util.UUID
 import scala.util.control.NonFatal
 
 /** Delta batch writer with idempotent natural keys. A completed manifest is written only after Bronze, Silver,
@@ -49,12 +45,10 @@ final class HiringAnalyticsBatch[F[_]: Async](
     reportPublisher: AnalyticsReportPublisher[F],
     manifestStore: ManifestStore[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
-    retirementStore: HmacKeyRetirementAuthorizationStore[F],
     operational: AnalyticsOperationalSettings,
     override protected val sparkExecution: SparkBlockingExecution[F],
-    logger: Logger[F]
-) extends LakehouseOperation[F]
-    with AnalyticsErasureLakehouse[F] {
+    maintenance: AnalyticsBatchMaintenance[F]
+) extends LakehouseOperation[F] {
   override protected val async: Async[F] = Async[F]
   private val F = Async[F]
   private val retention = operational.retention
@@ -87,7 +81,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
           for {
             _ <- validateMarkerColumns(markerTokens)
             activeMarkerCount <- lakehouse(markerTokens.count())
-            _ <- validateHmacConfigurationLocked(spark)
+            _ <- maintenance.validateHmacConfigurationLocked(spark)
             reservedAt <- now
             fingerprint <- F.fromEither(
               RangeFingerprint
@@ -97,8 +91,8 @@ final class HiringAnalyticsBatch[F[_]: Async](
             reservation <- reportPublisher.reserve(manifest.runId, fingerprint, reservedAt)
             result <-
               for {
-                _ <- configureRawTablePrivacy(spark)
-                _ <- if (activeMarkerCount > 0L) applyActiveDeletions(spark, markerTokens) else F.unit
+                _ <- maintenance.configureRawTables(spark)
+                _ <- if (activeMarkerCount > 0L) maintenance.applyActiveDeletions(spark, markerTokens) else F.unit
                 result <- runWithMarkers(
                   spark,
                   source,
@@ -119,50 +113,6 @@ final class HiringAnalyticsBatch[F[_]: Async](
       else F.raiseError(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
     }
 
-  /** Raw Bronze and quarantine keep replay data, but their Delta logs must not index raw values. */
-  private def configureRawTablePrivacy(spark: SparkSession): F[Unit] = lakehouse {
-    val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafetyDays} days"
-    val desiredLogRetention = s"interval ${retention.deltaLogRetentionDays} days"
-    val rawPaths = Set(paths.bronze, paths.quarantine)
-    val tables = Vector(
-      paths.bronze,
-      paths.quarantine,
-      paths.silver,
-      paths.funnelGold,
-      paths.timeToHireGold,
-      paths.skillsGold
-    )
-    spark.conf.set(
-      "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
-      desiredVacuumRetention
-    )
-    spark.conf.set("spark.databricks.delta.properties.defaults.logRetentionDuration", desiredLogRetention)
-    spark.conf.set(
-      "spark.databricks.delta.retentionDurationCheck.enabled",
-      retention.deltaVacuumSafetyCheckEnabled.toString
-    )
-    tables.foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, path)) {
-        val escaped = path.replace("`", "``")
-        val properties = DeltaTable
-          .forPath(spark, path)
-          .detail()
-          .select("properties")
-          .head()
-          .getAs[scala.collection.Map[String, String]]("properties")
-        val desired = Map(
-          "delta.deletedFileRetentionDuration" -> desiredVacuumRetention,
-          "delta.logRetentionDuration" -> desiredLogRetention
-        ) ++ (if (rawPaths.contains(path)) Map("delta.dataSkippingNumIndexedCols" -> "0") else Map.empty)
-        val changes = desired.filter { case (key, value) => properties.get(key).forall(_ != value) }
-        if (changes.nonEmpty) {
-          val rendered = changes.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
-          spark.sql(s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES ($rendered)")
-        }
-      }
-    }
-  }
-
   private val stageExecution = new SparkExecution[F] {
     override def apply[A](work: => A): F[A] = lakehouse(work)
     override def either[A](work: => Either[AnalyticsError, A]): F[A] = lakehouseEither(work)
@@ -176,81 +126,6 @@ final class HiringAnalyticsBatch[F[_]: Async](
     override def readOrEmpty(spark: SparkSession, path: String, schema: StructType): F[DataFrame] =
       readDeltaOrEmpty(spark, path, schema)
   }
-  private val keyContinuityStage = new AnalyticsKeyContinuityStage(
-    KeyContinuityStagePorts(
-      paths,
-      pseudonymizer,
-      stageExecution,
-      clock,
-      new KeyRetirementLookup[F] {
-        override def list(lakehouseRoot: String) = retirementStore.list(lakehouseRoot)
-      }
-    )
-  )
-
-  private def validateHmacConfigurationLocked(spark: SparkSession): F[Unit] =
-    keyContinuityStage.validateHmacConfiguration(spark)
-
-  override def validateHmacConfiguration(spark: SparkSession): F[Unit] =
-    lakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked(spark))
-
-  private def applyActiveDeletions(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
-    for {
-      deletionTime <- now
-      _ <- expire(spark, paths.bronze, deletionTime)
-      _ <- expire(spark, paths.quarantine, deletionTime)
-      _ <- expire(spark, paths.silver, deletionTime)
-      _ <- erasureStage.purgeMarkedSubjectRows(spark, paths.bronze, markerTokens)
-      _ <- erasureStage.purgeMarkedSubjectRows(spark, paths.quarantine, markerTokens)
-      _ <- erasureStage.purgeMarkedSubjectRows(spark, paths.silver, markerTokens)
-      _ <- rebuildGoldFromStoredSilver(spark)
-      _ <- vacuumExpiredFiles(spark).void
-    } yield ()
-
-  override def applyDeletionMarkers(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
-    configureRawTablePrivacy(spark) *> applyActiveDeletions(spark, markerTokens)
-
-  override def reclaimRetainedFiles(spark: SparkSession): F[Long] =
-    configureRawTablePrivacy(spark) *> vacuumExpiredFiles(spark).flatTap(_ => checkpointRawTableLogs(spark))
-
-  override def rebuildGoldAndExtractReport(spark: SparkSession, asOf: Instant): F[AnalyticsReportOutput] =
-    rebuildGoldFromStoredSilver(spark) *> extractReport(spark, asOf)
-
-  private val erasureStage = new AnalyticsBatchErasureStage(
-    ErasureStagePorts(paths, stageExecution, configureRawTablePrivacy, operational.maximumErasureEvidenceFiles)
-  )
-
-  override def verifyMarkedSubjectsAbsent(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
-    erasureStage.verifyMarkedSubjectsAbsent(spark, markerTokens)
-
-  override def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): F[Long] =
-    erasureStage.countMarkedRows(spark, markerTokens)
-
-  override def captureMarkedFiles(spark: SparkSession, markerTokens: DataFrame): F[Vector[String]] =
-    erasureStage.captureMarkedFiles(spark, markerTokens)
-
-  override def checkpointPurgedRawLogs(spark: SparkSession): F[Vector[String]] =
-    erasureStage.checkpointPurgedRawLogs(spark)
-
-  override def verifyFilesAbsent(spark: SparkSession, files: Vector[String]): F[Unit] =
-    erasureStage.verifyFilesAbsent(spark, files)
-
-  override def checkpointRawTableLogs(spark: SparkSession): F[Unit] =
-    erasureStage.checkpointRawTableLogs(spark)
-
-  override def purgeMarkedSubjectRows(spark: SparkSession, path: String, markerTokens: DataFrame): F[Unit] =
-    erasureStage.purgeMarkedSubjectRows(spark, path, markerTokens)
-
-  /** Deletion is applied to rebuildable Gold immediately, even if the new Kafka range later quality-blocks. */
-  private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
-    lakehouse(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
-      case true =>
-        lakehouse(spark.read.format("delta").load(paths.silver)).flatMap(
-          AnalyticsGoldStage.rebuild(paths, _, sparkExecution)
-        )
-      case false => AnalyticsGoldStage.clear(spark, paths, sparkExecution)
-    }
-
   private val ingestionStage = new AnalyticsBatchIngestionStage(
     IngestionStagePorts(paths, pseudonymizer, stageExecution, manifestStore, deltaWriter, clock, retention)
   )
@@ -282,7 +157,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
       silver <- silverStage.mergeSilver(prepared, bronze.startedAt)
       silverSchema <- lakehouse(silver.schema)
       completedAt <- now
-      _ <- expireStored(spark, bronze.startedAt)
+      _ <- maintenance.expireStored(spark, bronze.startedAt)
       outcome <- finishRun(
         spark,
         manifest,
@@ -305,49 +180,6 @@ final class HiringAnalyticsBatch[F[_]: Async](
       prepared.quarantinedRecords,
       prepared.conflictingEventIds
     )
-
-  private def expireStored(spark: SparkSession, startedAt: Instant): F[Unit] =
-    for {
-      _ <- expire(spark, paths.bronze, startedAt)
-      _ <- expire(spark, paths.quarantine, startedAt)
-      _ <- expire(spark, paths.silver, startedAt)
-    } yield ()
-
-  private def vacuumExpiredFiles(spark: SparkSession): F[Long] =
-    Vector(
-      paths.bronze,
-      paths.quarantine,
-      paths.silver,
-      paths.funnelGold,
-      paths.timeToHireGold,
-      paths.skillsGold
-    ).foldLeft(F.pure(0L)) { (removedFiles, path) =>
-      removedFiles.flatMap { count =>
-        lakehouse(DeltaTable.isDeltaTable(spark, path)).flatMap {
-          case false => F.pure(count)
-          case true  =>
-            val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
-            DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, sparkExecution).use { _ =>
-              lakehouse {
-                spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
-                spark.read
-                  .format("delta")
-                  .load(temporaryPath)
-                  .write
-                  .format("delta")
-                  .mode("overwrite")
-                  .option("overwriteSchema", "true")
-                  .save(path)
-                // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
-                count + DeltaTable.forPath(spark, path).vacuum().count()
-              }
-            }
-        }
-      }
-    }.handleErrorWith { error =>
-      logger.error(s"lakehouse expired-file vacuum failed (${error.getClass.getSimpleName})") *>
-        F.raiseError(error)
-    }
 
   private def finishRun(
       spark: SparkSession,
@@ -419,42 +251,6 @@ final class HiringAnalyticsBatch[F[_]: Async](
       )
     ).otherwise(sha2(col("rawValue"), 256))
 
-  private def expire(spark: SparkSession, path: String, now: Instant): F[Unit] = lakehouse {
-    if (DeltaTable.isDeltaTable(spark, path))
-      DeltaTable.forPath(spark, path).delete(col("expiresAt") <= lit(Timestamp.from(now)))
-  }
-
-}
-
-private[analytics] object DeltaPurgeRewrite {
-  def temporaryPath[F[_]: Async](
-      spark: SparkSession,
-      temporaryPath: String,
-      sparkExecution: SparkBlockingExecution[F] =
-        SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
-  ): Resource[F, Unit] =
-    Resource
-      .make(
-        sparkExecution {
-          val path = new org.apache.hadoop.fs.Path(temporaryPath)
-          (path.getFileSystem(spark.sparkContext.hadoopConfiguration), path)
-        }
-      ) { case (fileSystem, path) =>
-        sparkExecution {
-          val removed = fileSystem.delete(path, true)
-          if (!removed && fileSystem.exists(path))
-            throw new java.io.IOException("temporary purge rewrite path remains")
-        }
-      }
-      .void
-}
-
-private[analytics] object KafkaRecordColumns {
-  def validate[F[_]: Async](schema: StructType): F[Unit] = {
-    val required = Set("topic", "partition", "offset", "timestamp", "value")
-    val missing = required.diff(schema.fieldNames.toSet).toVector.sorted
-    if (missing.isEmpty) Async[F].unit else Async[F].raiseError(AnalyticsError.InvalidSourceSchema(missing))
-  }
 }
 
 /** Bounded batch entry point. Runtime settings and the explicit offset range load from HOCON. */

@@ -2,7 +2,6 @@ package com.example.hiring.analytics.config
 
 import com.example.hiring.analytics.domain.{AnalyticsRunManifest, PartitionOffsetRange, RunId, SubjectPseudonymizer}
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.data.ValidatedNec
 import cats.effect.Async
@@ -31,7 +30,7 @@ final case class AnalyticsCommonSettings(
     mongoDatabase: AnalyticsNonBlank,
     sparkMaster: AnalyticsNonBlank,
     kafka: KafkaConnection,
-    lakehousePaths: AnalyticsLakehousePaths,
+    lakehouseRoot: AnalyticsNonBlank,
     pseudonymizer: SubjectPseudonymizer,
     operational: AnalyticsOperationalSettings
 ) {
@@ -76,7 +75,7 @@ private[analytics] final case class AnalyticsKeyRetirementAuditSettings(
     mongoUri: AnalyticsNonBlank,
     mongoDatabase: AnalyticsNonBlank,
     sparkMaster: AnalyticsNonBlank,
-    lakehousePaths: AnalyticsLakehousePaths,
+    lakehouseRoot: AnalyticsNonBlank,
     operational: AnalyticsOperationalSettings,
     retiringKeyId: AnalyticsNonBlank,
     kafkaBarrierOffset: Option[Long],
@@ -362,10 +361,6 @@ object AnalyticsRuntimeConfig {
       root <- required(raw.lakehouse.root, "analytics.lakehouse.root").toEither.leftMap(errors =>
         AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; "))
       )
-      paths <- AnalyticsLakehousePaths
-        .from(root)
-        .toEither
-        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
       retiringKeyId <- required(settings.retiringKeyId, "analytics.key-retirement-audit.retiring-key-id").toEither
         .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
       operationalSettings <- complete(operational(raw.operational))
@@ -373,7 +368,7 @@ object AnalyticsRuntimeConfig {
       mongoUri,
       mongoDatabase,
       sparkMaster,
-      paths,
+      root,
       operationalSettings,
       retiringKeyId,
       settings.kafka.barrierOffset,
@@ -416,10 +411,7 @@ object AnalyticsRuntimeConfig {
         security._2
       )
     ).andThen(KafkaConnection.validate)
-    val paths = raw.lakehouse.root match {
-      case Some(root) => AnalyticsLakehousePaths.from(root)
-      case None       => "analytics.lakehouse.root is required".invalidNec
-    }
+    val lakehouseRoot = required(raw.lakehouse.root, "analytics.lakehouse.root")
     val pseudonymizer = SubjectPseudonymizer.validateFromBase64(
       raw.hmac.secretBase64,
       raw.hmac.keyId.getOrElse("hmac-v1"),
@@ -433,7 +425,7 @@ object AnalyticsRuntimeConfig {
       required(raw.mongo.database, "analytics.mongo.database"),
       required(raw.spark.master, "analytics.spark.master"),
       kafka,
-      paths,
+      lakehouseRoot,
       pseudonymizer,
       operationalSettings
     ).mapN(AnalyticsCommonSettings.apply)
