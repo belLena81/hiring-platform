@@ -4,14 +4,17 @@ import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureWorkerStore
 import com.example.hiring.analytics.domain.AccountSubjectId
+import com.example.hiring.analytics.service.erasure.ErasureUpdate
 
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all.*
 
 /** Local operator utility. It exposes only fixed failure labels and requires an observed attempt count to requeue. */
 object AnalyticsErasureRepairMain extends IOApp {
-  private[analytics] def requeueExitCode(updated: Boolean): ExitCode =
-    if (updated) ExitCode.Success else ExitCode.Error
+  private[analytics] def requeueExitCode(updated: ErasureUpdate): ExitCode = updated match {
+    case ErasureUpdate.Applied   => ExitCode.Success
+    case ErasureUpdate.LeaseLost => ExitCode.Error
+  }
 
   override def run(args: List[String]): IO[ExitCode] = args match {
     case "inspect" :: limitText :: Nil =>
@@ -36,14 +39,15 @@ object AnalyticsErasureRepairMain extends IOApp {
         case None          => IO.println("usage: requeue <request-id> <observed-attempt-count>").as(ExitCode.Error)
         case Some(attempt) =>
           AccountSubjectId.from(requestId) match {
-            case Left(_) => IO.println("invalid repair request identity").as(ExitCode.Error)
+            case Left(_)          => IO.println("invalid repair request identity").as(ExitCode.Error)
             case Right(subjectId) =>
               program { store =>
                 IO.realTimeInstant.flatMap(now => store.requeueRepair(subjectId, attempt, now)).flatMap {
-                  case true  => IO.println("requeued the matching repair request").as(requeueExitCode(updated = true))
-                  case false =>
+                  case ErasureUpdate.Applied =>
+                    IO.println("requeued the matching repair request").as(requeueExitCode(ErasureUpdate.Applied))
+                  case ErasureUpdate.LeaseLost =>
                     IO.println("request state, attempt count, or lease changed; no update made")
-                      .as(requeueExitCode(updated = false))
+                      .as(requeueExitCode(ErasureUpdate.LeaseLost))
                 }
               }
           }

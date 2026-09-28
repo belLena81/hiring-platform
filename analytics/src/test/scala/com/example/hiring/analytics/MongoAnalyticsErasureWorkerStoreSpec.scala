@@ -117,8 +117,14 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
   }
 
   test("a rejected repair compare-and-set is reported as an unsuccessful command") {
-    assertEquals(AnalyticsErasureRepairMain.requeueExitCode(updated = true), cats.effect.ExitCode.Success)
-    assertEquals(AnalyticsErasureRepairMain.requeueExitCode(updated = false), cats.effect.ExitCode.Error)
+    assertEquals(
+      AnalyticsErasureRepairMain.requeueExitCode(ErasureUpdate.Applied),
+      cats.effect.ExitCode.Success
+    )
+    assertEquals(
+      AnalyticsErasureRepairMain.requeueExitCode(ErasureUpdate.LeaseLost),
+      cats.effect.ExitCode.Error
+    )
   }
 
   test("lease compare-and-set filter binds request, processing state, current token, and unexpired lease") {

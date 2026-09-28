@@ -87,7 +87,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
         }
 
   /** Explicitly requeues one observed repair request without altering its durable phase or progress. */
-  def requeueRepair(requestId: AccountSubjectId, expectedAttempt: Int, now: Instant): F[Boolean] =
+  def requeueRepair(requestId: AccountSubjectId, expectedAttempt: Int, now: Instant): F[ErasureUpdate] =
     if (expectedAttempt < 1)
       Async[F].raiseError(AnalyticsError.InvalidConfiguration("invalid repair request identity"))
     else
@@ -112,7 +112,10 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
             Updates.set(AnalyticsCollections.Fields.RepairRequired, false),
             Updates.unset(AnalyticsCollections.Fields.FailureCategory)
           )
-        )
+        ).map {
+          case true  => ErasureUpdate.Applied
+          case false => ErasureUpdate.LeaseLost
+        }
       }
 
   /** Atomically claims at most `limit` oldest eligible requests. */

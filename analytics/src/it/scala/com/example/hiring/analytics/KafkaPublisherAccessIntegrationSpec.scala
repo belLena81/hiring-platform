@@ -461,7 +461,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           assert(pendingWasObservedDuringOutage.get(), "the request was not observed pending during the broker outage")
         assertEquals(request.getString("state"), "Processing")
         assertEquals(request.getString("receiptId"), receiptId)
-        assertEquals(store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)).unsafeRunSync(), None)
+        assertEquals(
+          store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)).unsafeRunSync(),
+          None
+        )
         assertEquals(database.getCollection("event_outbox").countDocuments(), 1L)
       } finally polling.cancel.unsafeRunSync()
     } finally {

@@ -1,3 +1,4 @@
+/** Spark-only privacy transforms. Raw identifiers exist only in the input frame before `silver`. */
 package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
@@ -10,23 +11,9 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import org.apache.spark.sql.DataFrame
-import org.apache.spark.sql.functions.{
-  array,
-  array_distinct,
-  array_intersect,
-  col,
-  concat,
-  filter as arrayFilter,
-  flatten,
-  lit,
-  size,
-  trim,
-  udf,
-  when,
-  transform
-}
-import org.apache.spark.sql.types.{ArrayType, StringType}
+import org.apache.spark.sql.{DataFrame, Row}
+import org.apache.spark.sql.functions.{array, array_intersect, col, lit, size}
+import org.apache.spark.sql.types.{ArrayType, StringType, StructField}
 
 /** Deterministically maps an operational subject identifier to a versioned, opaque token.
   *
@@ -35,43 +22,59 @@ import org.apache.spark.sql.types.{ArrayType, StringType}
   */
 object AnalyticsSubjectPrivacy {
   private val SubjectTokenColumn = "subjectToken"
+  private val SubjectTokensColumn = "subjectTokens"
 
   /** Candidate identity takes precedence for application events. Events without a candidate use the authenticated actor
     * identifier, ensuring every valid operational event has one token.
     */
   def withSubjectToken(events: DataFrame, pseudonymizer: SubjectPseudonymizer): DataFrame = {
-    val tokenize = udf(
-      (value: String) => Option(value).filter(_.trim.nonEmpty).map(pseudonymizer.token),
-      StringType
-    )
-    val tokenizeAll = udf(
-      (value: String) =>
-        Option(value)
+    val source = events.drop(SubjectTokenColumn, SubjectTokensColumn)
+    val schema = source.schema
+      .add(StructField(SubjectTokenColumn, StringType, nullable = true))
+      .add(StructField(SubjectTokensColumn, ArrayType(StringType, containsNull = false), nullable = false))
+    val actorIndex = source.schema.fieldIndex("actorId")
+    val eventTypeIndex = source.schema.fieldIndex("eventType")
+    val payloadIndex = source.schema.fieldIndex("payload")
+    val tokenFactory = pseudonymizer.primaryTokenFactory
+
+    val rows = source.rdd.mapPartitions { partition =>
+      val tokenizer = tokenFactory.partitionTokenizer()
+      partition.map { row =>
+        val payload = Option(row.getAs[Row](payloadIndex))
+        val candidateId = payload.flatMap(value => Option(value.getAs[String]("candidateId"))).fold("")(_.trim)
+        val actorId = Option(row.getAs[String](actorIndex))
+        val eventType = Option(row.getAs[String](eventTypeIndex))
+        val searchKind = payload.flatMap(value => Option(value.getAs[String]("searchKind")))
+        val candidateSearch = searchKind.contains("candidateMatches")
+
+        val actorToken = actorId.filter(_.trim.nonEmpty).map(value => tokenValue(tokenizer.primaryToken(value)))
+        val candidateToken = Option.when(candidateId.nonEmpty)(tokenValue(tokenizer.primaryToken(candidateId)))
+        val searchResultIds =
+          if (!candidateSearch) Vector.empty
+          else
+            eventType match {
+              case Some(value) if value == AnalyticsEventType.SearchPerformed.wire =>
+                payload
+                  .flatMap(result => Option(result.getAs[Seq[Row]]("results")))
+                  .toVector
+                  .flatten
+                  .flatMap(result => Option(result.getAs[String]("resultId")))
+              case Some(value) if value == AnalyticsEventType.SearchResultClicked.wire =>
+                payload.flatMap(result => Option(result.getAs[String]("resultId"))).toVector
+              case _ => Vector.empty
+            }
+        val tokens = (actorToken.toVector ++ candidateToken.toVector ++ searchResultIds
           .filter(_.trim.nonEmpty)
-          .fold(Vector.empty[String])(value => Vector(pseudonymizer.tokenForNewRows(value))),
-      ArrayType(StringType, containsNull = false)
-    )
-    val candidateId = trim(col("payload.candidateId"))
-    val actorToken = tokenize(col("actorId"))
-    val candidateToken = tokenize(candidateId)
-    val candidateSearch = col("payload.searchKind") === lit("candidateMatches")
-    val emptyTokens = array().cast(ArrayType(StringType, containsNull = true))
-    val candidateResultTokens = when(
-      col("eventType") === lit(AnalyticsEventType.SearchPerformed.wire) && candidateSearch,
-      transform(col("payload.results"), result => tokenizeAll(result.getField("resultId")))
-    ).when(
-      col("eventType") === lit(AnalyticsEventType.SearchResultClicked.wire) && candidateSearch,
-      array(tokenizeAll(col("payload.resultId")))
-    ).otherwise(array().cast(ArrayType(ArrayType(StringType, containsNull = false), containsNull = true)))
-    val candidateIdentityTokens = when(candidateId =!= lit(""), tokenizeAll(candidateId))
-      .otherwise(array().cast(ArrayType(StringType, containsNull = false)))
-    val tokenArrays = concat(array(tokenizeAll(col("actorId")), candidateIdentityTokens), candidateResultTokens)
-    val allTokens = array_distinct(arrayFilter(flatten(tokenArrays), token => token.isNotNull))
-    val subject = when(candidateId =!= lit(""), candidateToken).otherwise(actorToken)
-    events
-      .withColumn(SubjectTokenColumn, subject)
-      .withColumn("subjectTokens", allTokens)
+          .map(value => tokenValue(tokenizer.primaryToken(value)))).distinct.map(_.value)
+        val subjectToken = candidateToken.orElse(actorToken).map(_.value).orNull
+        Row.fromSeq(row.toSeq ++ Seq(subjectToken, tokens))
+      }
+    }
+    source.sparkSession.createDataFrame(rows, schema)
   }
+
+  private def tokenValue(result: Either[String, SubjectToken]): SubjectToken =
+    result.fold(error => throw new IllegalArgumentException(error), identity)
 
   /** Removes data for active erasure markers before it can be merged into Silver. Marker sources expose only the
     * already-HMACed token; this transform has no persistence or Mongo dependency.
@@ -82,12 +85,12 @@ object AnalyticsSubjectPrivacy {
   ): Either[AnalyticsError, DataFrame] = {
     val missing = Vector(
       Option.when(!events.columns.contains(SubjectTokenColumn))(SubjectTokenColumn),
-      Option.when(!events.columns.contains("subjectTokens"))("subjectTokens"),
+      Option.when(!events.columns.contains(SubjectTokensColumn))(SubjectTokensColumn),
       Option.when(!activeMarkerTokens.columns.contains(SubjectTokenColumn))(SubjectTokenColumn)
     ).flatten
     if (missing.nonEmpty) Left(AnalyticsError.InvalidSourceSchema(missing.distinct))
     else {
-      val eventTokens = col("subjectTokens")
+      val eventTokens = col(SubjectTokensColumn)
       val activeTokens = activeMarkerTokens
         .select(col(SubjectTokenColumn).as("activeSubjectToken"))
         .filter(col("activeSubjectToken").isNotNull)
@@ -104,12 +107,9 @@ object AnalyticsSubjectPrivacy {
 
   def emptyMarkers(events: DataFrame): DataFrame =
     events.sparkSession.createDataFrame(
-      events.sparkSession.sparkContext.emptyRDD[org.apache.spark.sql.Row],
+      events.sparkSession.sparkContext.emptyRDD[Row],
       org.apache.spark.sql.types.StructType(
-        Seq(
-          org.apache.spark.sql.types
-            .StructField(SubjectTokenColumn, org.apache.spark.sql.types.StringType, nullable = false)
-        )
+        Seq(StructField(SubjectTokenColumn, StringType, nullable = false))
       )
     )
 }

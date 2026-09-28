@@ -96,7 +96,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val requests = database.getCollection("analytics_erasure_requests")
     val source = new MongoActiveDeletionMarkerSource[IO](
       reactiveMongoClient.getDatabase(database.getName),
-      pseudonymizer,
+      pseudonymizer
     )
     val retainedSubject = UUID.randomUUID().toString
     requests.insertOne(
@@ -113,7 +113,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       .activeSubjectTokens(spark)
       .flatMap(frame => IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet))
       .unsafeRunSync()
-    assertEquals(retainedOnly, Set(pseudonymizer.token(retainedSubject)))
+    assertEquals(retainedOnly, Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, retainedSubject)))
 
     val pendingSubject = UUID.randomUUID().toString
     requests.insertOne(new Document("_id", pendingSubject).append("state", "Pending"))
@@ -130,9 +130,9 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     assertEquals(
       tokens,
       Set(
-        pseudonymizer.token(retainedSubject),
-        pseudonymizer.token(pendingSubject),
-        pseudonymizer.token(processingSubject)
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, retainedSubject),
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, pendingSubject),
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, processingSubject)
       )
     )
   }
@@ -148,7 +148,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       )
     val source = new MongoActiveDeletionMarkerSource[IO](
       reactiveMongoClient.getDatabase(database.getName),
-      pseudonymizer,
+      pseudonymizer
     )
 
     val error = intercept[AnalyticsError](source.activeSubjectTokens(spark).unsafeRunSync())

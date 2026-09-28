@@ -62,6 +62,9 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
   private def applicationCreated(eventId: String): String =
     s"""{"eventId":"$eventId","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-24T12:00:00Z","aggregateType":"Application","aggregateId":"application-$eventId","actorId":"candidate-$eventId","payload":{"applicationId":"application-$eventId","candidateId":"candidate-$eventId","jobId":"job-$eventId","newStatus":"Accepted"}}"""
 
+  private def localKafkaConnection(bootstrapServers: String): KafkaConnection =
+    KafkaConnection(bootstrapServers, securityProtocol = "SASL_PLAINTEXT", allowPlaintext = true)
+
   test("the production fencer fences an open transaction and read_committed hides its record") {
     val kafka = new KafkaContainer(image)
     kafka.start()
@@ -84,7 +87,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .send(new ProducerRecord(topic, "subject", applicationCreated("aborted-before-fence")))
         .get(30, java.util.concurrent.TimeUnit.SECONDS)
 
-      val connection = KafkaConnection(kafka.getBootstrapServers)
+      val connection = localKafkaConnection(kafka.getBootstrapServers)
       val openTransactionManifest = AnalyticsRunManifest
         .validated(
           "open-transaction-it-" + UUID.randomUUID().toString,
@@ -102,7 +105,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       )
 
       KafkaProducerFencer[IO]
-        .fence(KafkaConnection(kafka.getBootstrapServers), Vector(transactionalId))
+        .fence(localKafkaConnection(kafka.getBootstrapServers), Vector(transactionalId))
         .unsafeRunSync()
 
       val staleCommit = try {
@@ -153,11 +156,16 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
           Files.createTempDirectory("analytics-read-committed").toUri.toString.stripSuffix("/")
         )
       val markers = AnalyticsSubjectPrivacy.emptyMarkers(spark.range(0L).toDF())
-      val publication = AnalyticsBatchTestSupport.newBatch(
-        paths,
-        AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-kafka-fencing-secret".padTo(32, 'x').getBytes("UTF-8")),
-        DataFrameDeletionMarkerSource(markers)
-      ).run(spark, new KafkaOffsetRangeSource(connection), manifest).unsafeRunSync()
+      val publication = AnalyticsBatchTestSupport
+        .newBatch(
+          paths,
+          AnalyticsTestSubjectPseudonymizer.fromSecret(
+            "analytics-kafka-fencing-secret".padTo(32, 'x').getBytes("UTF-8")
+          ),
+          DataFrameDeletionMarkerSource(markers)
+        )
+        .run(spark, new KafkaOffsetRangeSource(connection), manifest)
+        .unsafeRunSync()
       assertEquals(publication.bronzeRecords, 1L)
       assertEquals(publication.validRecords, 1L)
       assertEquals(publication.quarantinedRecords, 0L)

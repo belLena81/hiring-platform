@@ -123,12 +123,16 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
       .mode("overwrite")
       .save(paths.silver)
     val oldToken = audit(paths)
-    assert(oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"), "assertion failed")
+    assert(
+      oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"),
+      "assertion failed"
+    )
   }
 
   if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
-    val firstLock = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](reactiveDatabase, Clock[IO])
+    val firstLock =
+      new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](reactiveDatabase, Clock[IO])
     val secondLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         reactivePeerMongo.getDatabase(database.getName),

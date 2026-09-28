@@ -226,15 +226,19 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           .format("delta")
           .mode("errorifexists")
           .save(paths.hmacKeyRegistry)
-        val token = pseudonymizer.tokenForNewRows(OldSubjectId)
-        spark
-          .createDataFrame(List(eventRow(token, at)).asJava, silverSchema)
-          .write
-          .format("delta")
-          .mode("errorifexists")
-          .save(paths.silver)
-        fixtureRecord(spark, paths, at, "old-primary-silver-staged")
-        captureOldPaths(spark, paths, at)
+        pseudonymizer
+          .typedToken(OldSubjectId)
+          .leftMap(AnalyticsError.InvalidConfiguration.apply)
+          .flatMap { typedToken =>
+            spark
+              .createDataFrame(List(eventRow(typedToken.value, at)).asJava, silverSchema)
+              .write
+              .format("delta")
+              .mode("errorifexists")
+              .save(paths.silver)
+            fixtureRecord(spark, paths, at, "old-primary-silver-staged")
+            captureOldPaths(spark, paths, at)
+          }
       }
   }
 
@@ -250,16 +254,20 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         (),
         AnalyticsError.InvalidConfiguration("old-key fixture is missing")
       )
-      .map { _ =>
-        val token = pseudonymizer.tokenForNewRows(NewControlSubjectId)
-        spark
-          .createDataFrame(List(eventRow(token, at)).asJava, silverSchema)
-          .write
-          .format("delta")
-          .mode("append")
-          .save(paths.silver)
-        fixtureRecord(spark, paths, at, "new-primary-control-staged")
-        ()
+      .flatMap { _ =>
+        pseudonymizer
+          .typedToken(NewControlSubjectId)
+          .leftMap(AnalyticsError.InvalidConfiguration.apply)
+          .map { typedToken =>
+            spark
+              .createDataFrame(List(eventRow(typedToken.value, at)).asJava, silverSchema)
+              .write
+              .format("delta")
+              .mode("append")
+              .save(paths.silver)
+            fixtureRecord(spark, paths, at, "new-primary-control-staged")
+            ()
+          }
       }
   }
 
@@ -519,11 +527,13 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           fixtureRecord(spark, paths, at, "old-primary-log-cleaned")
         }
       }
-      controlToken = pseudonymizer.tokenForNewRows(NewControlSubjectId)
+      controlToken <- pseudonymizer
+        .typedToken(NewControlSubjectId)
+        .leftMap(AnalyticsError.InvalidConfiguration.apply)
       controlCount = spark.read
         .format("delta")
         .load(paths.silver)
-        .filter(col("subjectToken") === controlToken)
+        .filter(col("subjectToken") === controlToken.value)
         .limit(1)
         .count()
       _ <- Either.cond(

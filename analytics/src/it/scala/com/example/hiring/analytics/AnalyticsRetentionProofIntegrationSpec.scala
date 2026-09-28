@@ -495,7 +495,10 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           .getString("state"),
         "Published"
       )
-      assert(db.getCollection("analytics_report_snapshots").find(Filters.eq("_id", "current")).first() != null, "assertion failed")
+      assert(
+        db.getCollection("analytics_report_snapshots").find(Filters.eq("_id", "current")).first() != null,
+        "assertion failed"
+      )
       println(
         "RETENTION_PROOF_VERIFIED request=" + subjectId + " exactCapturedPathsAbsent=" + evidence.size +
           " completionCount=1 report=Published"

@@ -311,7 +311,8 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         )
       val publisher =
         new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
-      val claim = ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
+      val claim =
+        ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
         reservation <- publisher.reserve(
@@ -412,7 +413,8 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         )
       val publisher =
         new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
-      val claim = ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
+      val claim =
+        ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
         reservation <- publisher.reserve(

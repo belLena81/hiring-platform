@@ -318,14 +318,14 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](client: MongoClien
         .resource(client)
         .use { session =>
           val requestFilter = Filters.and(
-            Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId),
+            Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
             Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Processing.persistedName),
             Filters.eq(AnalyticsCollections.Fields.LeaseToken, claim.leaseToken),
             Filters.gt(AnalyticsCollections.Fields.LeaseUntil, Date.from(completedAt)),
             Filters.eq(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
           )
           val nonReadyOther = Filters.and(
-            Filters.ne(AnalyticsCollections.Fields.Id, claim.requestId),
+            Filters.ne(AnalyticsCollections.Fields.Id, claim.requestId.value),
             Filters.in(
               AnalyticsCollections.Fields.State,
               ErasureRequestState.Pending.persistedName,
@@ -350,7 +350,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](client: MongoClien
             }
             user <- lift(
               MongoPublisherStream.optional(
-                users.find(session, Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId)).first()
+                users.find(session, Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value)).first()
               )
             )
             userDoc <- result(user.toRight(AnalyticsError.ErasureNotReady))
@@ -362,7 +362,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](client: MongoClien
                   .find(
                     session,
                     Filters.and(
-                      Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId),
+                      Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
                       Filters.eq(AnalyticsCollections.Fields.Deleted, true)
                     )
                   )
@@ -477,12 +477,12 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](client: MongoClien
             _ <- result(Either.cond(completed, (), AnalyticsError.ErasureNotReady))
             updates = receiptId.fold(
               Updates.combine(
-                Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId),
+                Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),
                 Updates.setOnInsert(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt))
               ): Bson
             )(id =>
               Updates.combine(
-                Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId),
+                Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),
                 Updates.setOnInsert(AnalyticsCollections.Fields.CompletedAt, Date.from(completedAt)),
                 Updates.setOnInsert(AnalyticsCollections.Fields.ReceiptId, id)
               )
@@ -491,7 +491,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](client: MongoClien
               MongoPublisherStream.one(
                 completion.updateOne(
                   session,
-                  Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId),
+                  Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value),
                   updates,
                   new UpdateOptions().upsert(true)
                 )

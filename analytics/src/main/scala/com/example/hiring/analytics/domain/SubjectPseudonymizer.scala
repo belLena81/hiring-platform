@@ -6,8 +6,6 @@ import io.github.iltotore.iron.*
 
 import java.nio.charset.StandardCharsets
 import java.util.Base64
-import scala.collection.mutable
-import scala.jdk.CollectionConverters.*
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
@@ -19,53 +17,72 @@ final class SubjectPseudonymizer private (
     primaryKey._1 -> primaryKey._2.clone(),
     previousKeys.map { case (version, key) => version -> key.clone() }*
   )
-  @transient private lazy val threadMacs: ThreadLocal[mutable.Map[String, Mac]] =
-    ThreadLocal.withInitial(() => mutable.Map.empty[String, Mac])
   val primaryKeyId: String = copiedKeys.head._1
   val keyIds: Set[String] = copiedKeys.iterator.map(_._1).toSet
   private[analytics] val keyVerifiers: Vector[(String, String)] = copiedKeys.toVector.map { key =>
-    val token = tokenFor("hiring-analytics-key-continuity-v1", key)
-    key._1 -> token.substring(key._1.length + 1)
+    val token = SubjectPseudonymizer.hmacToken(
+      "hiring-analytics-key-continuity-v1",
+      key,
+      SubjectPseudonymizer.newMac(key._2)
+    )
+    key._1 -> token.value.substring(key._1.length + 1)
   }
 
-  def typedToken(subjectId: String): Either[String, SubjectToken] = {
-    Option(subjectId)
-      .filter(_.nonEmpty)
-      .toRight("subject id must be non-empty")
-      .flatMap(id => SubjectToken.fromHmac(tokenFor(id, copiedKeys.head)))
-  }
+  def typedToken(subjectId: String): Either[String, SubjectToken] =
+    validateSubjectId(subjectId).map(id =>
+      SubjectPseudonymizer.hmacToken(id, copiedKeys.head, SubjectPseudonymizer.newMac(copiedKeys.head._2))
+    )
 
-  def token(subjectId: String): String = tokenFor(subjectId, copiedKeys.head)
-
-  /** Tokens written to new analytics rows use only the active primary key. */
-  def tokenForNewRows(subjectId: String): String = token(subjectId)
+  /** Creates a tokenizer whose mutable Mac instances are owned by one Spark partition. */
+  private[analytics] def primaryTokenFactory: SubjectPseudonymizer.PrimaryTokenFactory =
+    new SubjectPseudonymizer.PrimaryTokenFactory(copiedKeys.head)
 
   /** Tokens used to match existing rows include every configured primary/retiring key. */
-  def matchingTokens(subjectId: String): Either[String, Vector[String]] =
-    Option(subjectId)
-      .filter(_.nonEmpty)
-      .toRight("subject id must be non-empty")
-      .map(id => copiedKeys.toVector.map(key => tokenFor(id, key)))
+  def matchingTokens(subjectId: String): Either[String, Vector[SubjectToken]] =
+    validateSubjectId(subjectId).map(id =>
+      copiedKeys.toVector.map(key => SubjectPseudonymizer.hmacToken(id, key, SubjectPseudonymizer.newMac(key._2)))
+    )
 
-  private def tokenFor(subjectId: String, key: (String, Array[Byte])) = {
-    val mac = threadMacs
-      .get()
-      .getOrElseUpdate(
-        key._1, {
-          val initialized = Mac.getInstance(SubjectPseudonymizer.Algorithm)
-          initialized.init(new SecretKeySpec(key._2, SubjectPseudonymizer.Algorithm))
-          initialized
-        }
-      )
-    val digest = mac.doFinal(subjectId.getBytes(StandardCharsets.UTF_8))
-    key._1 + "_" + Base64.getUrlEncoder.withoutPadding().encodeToString(digest)
-  }
+  private def validateSubjectId(subjectId: String): Either[String, String] =
+    Option(subjectId).filter(_.nonEmpty).toRight("subject id must be non-empty")
 }
 
 object SubjectPseudonymizer {
   private val Algorithm = "HmacSHA256"
   private val KeyIdPattern = "[A-Za-z0-9-]{1,40}".r
   private val MinimumKeyBytes = 32
+
+  private def newMac(key: Array[Byte]): Mac = {
+    val initialized = Mac.getInstance(Algorithm)
+    initialized.init(new SecretKeySpec(key, Algorithm))
+    initialized
+  }
+
+  private def hmacToken(subjectId: String, key: (String, Array[Byte]), mac: Mac): SubjectToken = {
+    val digest = mac.doFinal(subjectId.getBytes(StandardCharsets.UTF_8))
+    val encoded = Base64.getUrlEncoder.withoutPadding().encodeToString(digest)
+    SubjectToken
+      .fromHmac(s"${key._1}_$encoded")
+      .fold(error => throw new IllegalStateException(error), identity)
+  }
+
+  private def validateSubjectId(subjectId: String): Either[String, String] =
+    Option(subjectId).filter(_.nonEmpty).toRight("subject id must be non-empty")
+
+  private[analytics] final class PrimaryTokenFactory private[SubjectPseudonymizer] (
+      primaryKey: (String, Array[Byte])
+  ) extends Serializable {
+    def partitionTokenizer(): PartitionTokenizer = new PartitionTokenizer(primaryKey)
+  }
+
+  private[analytics] final class PartitionTokenizer private[SubjectPseudonymizer] (
+      primaryKey: (String, Array[Byte])
+  ) {
+    private val mac = newMac(primaryKey._2)
+
+    def primaryToken(subjectId: String): Either[String, SubjectToken] =
+      validateSubjectId(subjectId).map(id => hmacToken(id, primaryKey, mac))
+  }
 
   def validatedKeyRing(
       primaryKeyId: String,

@@ -42,6 +42,7 @@ object AccountSubjectId {
     Either
       .catchNonFatal(java.util.UUID.fromString(value))
       .leftMap(_ => "account subject id must be a UUID")
+      .flatMap(uuid => Either.cond(uuid.toString == value, uuid, "account subject id must use canonical UUID form"))
 
   extension (value: AccountSubjectId) def value: String = value.toString
 }
@@ -90,12 +91,21 @@ enum AnalyticsApplicationStatus(val wire: String) {
   case Rejected extends AnalyticsApplicationStatus("Rejected")
 }
 
-final case class PartitionOffsetRange private (
-    topic: String,
-    partition: AnalyticsPartition,
-    startOffset: AnalyticsOffset,
-    endOffsetExclusive: AnalyticsOffset
-)
+final class PartitionOffsetRange private (
+    val topic: String,
+    val partition: AnalyticsPartition,
+    val startOffset: AnalyticsOffset,
+    val endOffsetExclusive: AnalyticsOffset
+) {
+  override def equals(other: Any): Boolean = other match {
+    case that: PartitionOffsetRange =>
+      topic == that.topic && partition == that.partition && startOffset == that.startOffset &&
+      endOffsetExclusive == that.endOffsetExclusive
+    case _ => false
+  }
+
+  override def hashCode(): Int = (topic, partition, startOffset, endOffsetExclusive).hashCode()
+}
 
 object PartitionOffsetRange {
   private[analytics] def partitionNumber(value: AnalyticsPartition): Int = value
@@ -149,7 +159,14 @@ object PartitionOffsetRange {
 
 }
 
-final case class AnalyticsRunManifest private (runId: RunId, offsetRanges: Vector[PartitionOffsetRange])
+final class AnalyticsRunManifest private (val runId: RunId, val offsetRanges: Vector[PartitionOffsetRange]) {
+  override def equals(other: Any): Boolean = other match {
+    case that: AnalyticsRunManifest => runId == that.runId && offsetRanges == that.offsetRanges
+    case _                          => false
+  }
+
+  override def hashCode(): Int = (runId, offsetRanges).hashCode()
+}
 
 object AnalyticsRunManifest {
   private def validateRanges(
@@ -174,7 +191,7 @@ object AnalyticsRunManifest {
       runId: ValidatedNec[String, RunId],
       ranges: ValidatedNec[String, Vector[PartitionOffsetRange]]
   ): ValidatedNec[String, AnalyticsRunManifest] =
-    (runId, ranges.andThen(validateRanges)).mapN(AnalyticsRunManifest.apply)
+    (runId, ranges.andThen(validateRanges)).mapN((id, validRanges) => new AnalyticsRunManifest(id, validRanges))
 
   def validated(rawRunId: String, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] =
     fromValidated(RunId.from(rawRunId), ranges.validNec)

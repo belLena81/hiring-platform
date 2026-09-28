@@ -137,7 +137,6 @@ private[analytics] object MongoActiveDeletionMarkerSource {
         Either.cond(validId, subjectId, AnalyticsError.MalformedMarker).flatMap { id =>
           pseudonymizer
             .matchingTokens(id)
-            .flatMap(_.traverse(SubjectToken.fromHmac))
             .leftMap(AnalyticsError.InvalidConfiguration.apply)
         }
       }

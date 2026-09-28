@@ -79,7 +79,11 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         ErasureBarrier[IO] {
     override def claim(now: Instant, leaseUntil: Instant, limit: Int): IO[Vector[ErasureClaim]] =
       state.update(value => value.copy(claims = value.claims + 1)).as(Vector.empty)
-    override def publisherDrainReady(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): IO[Boolean] =
+    override def publisherDrainReady(
+        subjectId: AccountSubjectId,
+        now: Instant,
+        deliveryTimeout: FiniteDuration
+    ): IO[Boolean] =
       IO.pure(false)
     override def transactionalIds(requestId: AccountSubjectId): IO[Vector[String]] = IO.pure(Vector.empty)
     override def purgeOutbox(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): IO[Boolean] =

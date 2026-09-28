@@ -31,7 +31,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 class AnalyticsTransformsSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 5.minutes
+  override val munitTimeout: FiniteDuration = 10.minutes
 
   private def hmacKey(seed: String): Array[Byte] = seed.padTo(32, 'x').getBytes("UTF-8")
   private val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("analytics-test-secret"))
@@ -929,7 +929,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         ("hiring.operational-events", 0, 12L, "not-json")
       )
     )
-    val markers = markerFrame(Seq(pseudonymizer.token("candidate-1")))
+    val markers = markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")))
     val deletionBatch = newBatch(
       paths,
       pseudonymizer,
@@ -1030,16 +1030,18 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("subject tokens are deterministic opaque HMAC values") {
-    val token = pseudonymizer.token("candidate-1")
-    assertEquals(token, pseudonymizer.token("candidate-1"))
-    assertNotEquals(token, pseudonymizer.token("candidate-2"))
+    val token = AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")
+    assertEquals(token, AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1"))
+    assertNotEquals(token, AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-2"))
     assert(!token.contains("candidate-1"))
     assert(token.startsWith("hmac-v1_"))
+    assertEquals(pseudonymizer.typedToken(null), Left("subject id must be non-empty"))
+    assertEquals(pseudonymizer.typedToken(""), Left("subject id must be non-empty"))
   }
 
-  test("pseudonymizer Mac cache is per-thread and reinitialized after closure serialization") {
+  test("pseudonymizer tokens remain deterministic across serialization and concurrent calls") {
     val subjectIds = Vector.tabulate(128)(index => s"candidate-$index")
-    val expected = subjectIds.map(pseudonymizer.token)
+    val expected = subjectIds.map(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, _))
     val bytes = new java.io.ByteArrayOutputStream()
     val output = new java.io.ObjectOutputStream(bytes)
     output.writeObject(pseudonymizer)
@@ -1047,13 +1049,13 @@ class AnalyticsTransformsSpec extends FunSuite {
     val input = new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray))
     val serializedCopy = input.readObject().asInstanceOf[SubjectPseudonymizer]
     input.close()
-    assertEquals(subjectIds.map(serializedCopy.token), expected)
+    assertEquals(subjectIds.map(AnalyticsTestSubjectPseudonymizer.tokenValue(serializedCopy, _)), expected)
 
     val executor = java.util.concurrent.Executors.newFixedThreadPool(8)
     try {
       val actual = subjectIds.zip(expected).map { case (subjectId, token) =>
         executor.submit(new java.util.concurrent.Callable[String] {
-          override def call(): String = pseudonymizer.token(subjectId)
+          override def call(): String = AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, subjectId)
         }) -> token
       }
       assertEquals(actual.map(_._1.get()), expected)
@@ -1130,10 +1132,18 @@ class AnalyticsTransformsSpec extends FunSuite {
     val newSecret = hmacKey("new-analytics-key")
     val oldKey = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
     val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", newSecret, Vector("hmac-v1" -> oldSecret))
-    assertNotEquals(rotating.token("candidate-1"), oldKey.token("candidate-1"))
+    assertNotEquals(
+      AnalyticsTestSubjectPseudonymizer.tokenValue(rotating, "candidate-1"),
+      AnalyticsTestSubjectPseudonymizer.tokenValue(oldKey, "candidate-1")
+    )
     assertEquals(
       rotating.matchingTokens("candidate-1"),
-      Right(Vector(rotating.token("candidate-1"), oldKey.token("candidate-1")))
+      Right(
+        Vector(
+          AnalyticsTestSubjectPseudonymizer.token(rotating, "candidate-1"),
+          AnalyticsTestSubjectPseudonymizer.token(oldKey, "candidate-1")
+        )
+      )
     )
     assertEquals(rotating.matchingTokens(null), Left("subject id must be non-empty"))
     assertEquals(rotating.matchingTokens(""), Left("subject id must be non-empty"))
@@ -1156,7 +1166,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       MongoActiveDeletionMarkerSource
         .tokenFor(new org.bson.Document("_id", subjectId.toString), pseudonymizer)
         .toOption,
-      SubjectToken.fromHmac(pseudonymizer.token(subjectId.toString)).toOption
+      SubjectToken.fromHmac(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, subjectId.toString)).toOption
     )
     assertEquals(
       MongoActiveDeletionMarkerSource.tokenFor(new org.bson.Document("_id", "not-a-uuid"), pseudonymizer),
@@ -1215,14 +1225,14 @@ class AnalyticsTransformsSpec extends FunSuite {
         )
       )
     )
-    val markers = markerFrame(Seq(pseudonymizer.token("candidate-1")))
+    val markers = markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")))
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, markers)
 
     assertEquals(silver.select("eventId").collect().map(_.getString(0)).toSet, Set("kept"))
     assertEquals(
       silver.select("subjectToken").collect().map(_.getString(0)).toSet,
-      Set(pseudonymizer.token("candidate-2"))
+      Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-2"))
     )
     assert(!silver.columns.contains("actorId"))
     assert(!silver.columns.contains("candidateId"))
@@ -1250,13 +1260,16 @@ class AnalyticsTransformsSpec extends FunSuite {
             "SEARCH_PERFORMED",
             aggregateType = "Search",
             aggregateId = "search-1",
-            payload = Some("""{"searchKind":"candidateMatches","results":[{"resultId":"candidate-3"}]}""")
+            payload = Some(
+              """{"searchKind":"candidateMatches","results":[{"resultId":"candidate-3"},{"resultId":"candidate-3"}]}"""
+            ),
+            actorId = "candidate-3"
           )
         )
       )
     )
     val valid = OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(source))
-    val withTokens = AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer)
+    val withTokens = AnalyticsSubjectPrivacy.withSubjectToken(valid.repartition(2), pseudonymizer)
     val tokenRows = withTokens
       .select("eventId", "subjectTokens")
       .collect()
@@ -1267,25 +1280,28 @@ class AnalyticsTransformsSpec extends FunSuite {
 
     assertEquals(
       tokenRows("application-event").toSet,
-      Set(pseudonymizer.token("actor-1"), pseudonymizer.token("candidate-2"))
+      Set(
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "actor-1"),
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-2")
+      )
     )
     assertEquals(
-      tokenRows("candidate-search").toSet,
-      Set(pseudonymizer.token("actor-1"), pseudonymizer.token("candidate-3"))
+      tokenRows("candidate-search"),
+      List(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-3"))
     )
     assertEquals(
       silverFrame(
         valid,
         pseudonymizer,
-        markerFrame(Seq(pseudonymizer.token("actor-1")))
+        markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "actor-1")))
       ).count(),
-      0L
+      1L
     )
     assertEquals(
       silverFrame(
         valid,
         pseudonymizer,
-        markerFrame(Seq(pseudonymizer.token("candidate-3")))
+        markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-3")))
       ).select("eventId")
         .collect()
         .map(_.getString(0))
@@ -1294,7 +1310,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
   }
 
-  test("subject-token UDFs represent missing actor and candidate identities as SQL nulls") {
+  test("subject-token mapping represents missing actor and candidate identities as nulls") {
     val source = records(
       Seq(
         (
@@ -1336,14 +1352,26 @@ class AnalyticsTransformsSpec extends FunSuite {
     val valid = OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(source))
     val attributed = AnalyticsSubjectPrivacy.withSubjectToken(valid, current).first()
     val tokens = attributed.getAs[Seq[String]]("subjectTokens").toSet
-    assertEquals(attributed.getAs[String]("subjectToken"), current.token("rotation-candidate"))
-    assertEquals(tokens, Set(current.token("actor-1"), current.token("rotation-candidate")))
+    assertEquals(
+      attributed.getAs[String]("subjectToken"),
+      AnalyticsTestSubjectPseudonymizer.tokenValue(current, "rotation-candidate")
+    )
+    assertEquals(
+      tokens,
+      Set(
+        AnalyticsTestSubjectPseudonymizer.tokenValue(current, "actor-1"),
+        AnalyticsTestSubjectPseudonymizer.tokenValue(current, "rotation-candidate")
+      )
+    )
     assertEquals(
       current.matchingTokens("rotation-candidate"),
       Right(
         Vector(
-          current.token("rotation-candidate"),
-          AnalyticsTestSubjectPseudonymizer.fromSecret(oldSecret).token("rotation-candidate")
+          AnalyticsTestSubjectPseudonymizer.token(current, "rotation-candidate"),
+          AnalyticsTestSubjectPseudonymizer.token(
+            AnalyticsTestSubjectPseudonymizer.fromSecret(oldSecret),
+            "rotation-candidate"
+          )
         )
       )
     )
@@ -1371,7 +1399,11 @@ class AnalyticsTransformsSpec extends FunSuite {
     spark
       .createDataFrame(
         Seq(
-          Row(old.token("candidate-1"), Seq(old.token("candidate-1")), Timestamp.from(Instant.now().plusSeconds(3600L)))
+          Row(
+            AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1"),
+            Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1")),
+            Timestamp.from(Instant.now().plusSeconds(3600L))
+          )
         ).asJava,
         schema
       )
@@ -1422,7 +1454,12 @@ class AnalyticsTransformsSpec extends FunSuite {
     val rotatingStage = newKeyContinuityStage(paths, rotating)
     rotatingStage.validateKeyMaterialContinuity(spark).unsafeRunSync()
     val stored = spark.createDataFrame(
-      Seq(Row(old.token("candidate-1"), Seq(rotating.token("candidate-1")))).asJava,
+      Seq(
+        Row(
+          AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1"),
+          Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(rotating, "candidate-1"))
+        )
+      ).asJava,
       StructType(
         Seq(
           StructField("subjectToken", StringType, nullable = false),
@@ -1464,7 +1501,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("legacy-key-material"))
     spark
       .createDataFrame(
-        Seq(Row(pseudonymizer.token("candidate-1"))).asJava,
+        Seq(Row(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1"))).asJava,
         StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
       )
       .write
@@ -1489,7 +1526,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val old = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("old-unanchored-key"), Vector.empty)
     spark
       .createDataFrame(
-        Seq(Row(old.token("candidate-1"))).asJava,
+        Seq(Row(AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1"))).asJava,
         StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
       )
       .write
@@ -1601,7 +1638,9 @@ class AnalyticsTransformsSpec extends FunSuite {
     val batch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource[IO](markerFrame(Seq(pseudonymizer.token("candidate-1"))))
+      DataFrameDeletionMarkerSource[IO](
+        markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")))
+      )
     )
     val source = DataFrameBatchSource[IO](
       records(

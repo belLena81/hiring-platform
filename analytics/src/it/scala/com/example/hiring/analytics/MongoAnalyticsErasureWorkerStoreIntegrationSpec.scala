@@ -665,8 +665,14 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       assertEquals(repair.attemptCount, 1)
       assertEquals(repair.failureCategory, ErasureFailureCategory.InvalidState.persistedName)
       assertEquals(store.claim(now.plusSeconds(2L), now.plusSeconds(62L), 1).unsafeRunSync(), Vector.empty)
-      assert(!store.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(3L)).unsafeRunSync(), "assertion failed")
-      assert(store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L)).unsafeRunSync(), "assertion failed")
+      assertEquals(
+        store.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(3L)).unsafeRunSync(),
+        ErasureUpdate.LeaseLost
+      )
+      assertEquals(
+        store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L)).unsafeRunSync(),
+        ErasureUpdate.Applied
+      )
       val resumed = store.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).unsafeRunSync().head
       assertEquals(resumed.phase, ErasurePhase.Requested)
       assertEquals(resumed.progress, 0)
@@ -760,7 +766,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       assertNotEquals(currentClaim.leaseToken, staleClaim.leaseToken)
       assertEquals(staleSaved, ErasureUpdate.LeaseLost)
       assertEquals(currentSaved, ErasureUpdate.Applied)
-      assertEquals(staleRequeue, false)
+      assertEquals(staleRequeue, ErasureUpdate.LeaseLost)
       assertEquals(observed.getInteger("attemptCount"), Integer.valueOf(1))
       assertEquals(observed.getString("failureCategory"), ErasureFailureCategory.InvalidState.persistedName)
       assertEquals(observed.getBoolean("repairRequired"), Boolean.box(true))
@@ -822,7 +828,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           )
         }
         liveLeaseRequeue <- store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(2L))
-        _ = assert(!liveLeaseRequeue, "operator requeue must reject a live lease")
+        _ = assertEquals(liveLeaseRequeue, ErasureUpdate.LeaseLost)
         _ <- IO.blocking {
           collection.updateOne(
             new Document("_id", requestId),
@@ -839,7 +845,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         _ <- firstReady.get *> secondReady.get *> gate.complete(())
         firstResult <- first.joinWithNever
         secondResult <- second.joinWithNever
-        _ = assertEquals(Vector(firstResult, secondResult).count(identity), 1)
+        _ = assertEquals(Vector(firstResult, secondResult).count(_ == ErasureUpdate.Applied), 1)
         retryClaim <- store.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).map(_.head)
         secondFailure <- store.recordFailure(
           retryClaim,
@@ -871,7 +877,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         result.unsafeRunSync()
       assertEquals(initial.phase, phase)
       assertEquals(initial.progress, progress)
-      assert(racingRequeue, "requeue must win while repair-required work remains unclaimable")
+      assertEquals(racingRequeue, ErasureUpdate.Applied)
       assertEquals(racingClaims.size + laterClaims.size, 1)
       val owner = (racingClaims ++ laterClaims).head
       assertEquals(owner.phase, phase)

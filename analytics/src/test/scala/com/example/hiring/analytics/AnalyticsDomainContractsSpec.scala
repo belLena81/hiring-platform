@@ -7,6 +7,7 @@ class AnalyticsDomainContractsSpec extends munit.FunSuite {
     val raw = "7b68ad01-b570-4de8-8ab9-564ae5dd0aa6"
     assertEquals(AccountSubjectId.from(raw).map(_.value), Right(raw))
     assert(AccountSubjectId.from("analytics-run-1").isLeft)
+    assert(AccountSubjectId.from("1-1-1-1-1").isLeft)
   }
 
   test("range fingerprints accept only lowercase SHA-256 hex values") {

@@ -165,8 +165,8 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID"),
       sys.env.get("HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64")
     )
-    val subjectToken = pseudonymizer.token(subjectId)
-    val controlToken = pseudonymizer.token(s"unrelated-deletion-proof-$nonce")
+    val subjectToken = AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, subjectId)
+    val controlToken = AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, s"unrelated-deletion-proof-$nonce")
     val root = new File(required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_ANALYTICS_DIR"))
     assert(
       root.isAbsolute && root.getCanonicalPath == root.getAbsolutePath,
