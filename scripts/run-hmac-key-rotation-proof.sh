@@ -177,7 +177,7 @@ old_fixture() {
       -e HIRING_HMAC_ROTATION_OLD_SECRET_BASE64 -e HIRING_HMAC_ROTATION_NEW_SECRET_BASE64 \
       -e ANALYTICS_KAFKA_USERNAME -e ANALYTICS_KAFKA_PASSWORD \
       --entrypoint sbt analytics-batch \
-      "runMain com.example.hiring.analytics.HmacKeyRetirementFixtureMain $action"
+      "runMain com.example.hiring.analytics.cli.HmacKeyRetirementFixtureMain $action"
   )
 }
 
@@ -197,7 +197,7 @@ new_fixture() {
       -e HIRING_HMAC_ROTATION_OLD_SECRET_BASE64 -e HIRING_HMAC_ROTATION_NEW_SECRET_BASE64 \
       -e ANALYTICS_KAFKA_USERNAME -e ANALYTICS_KAFKA_PASSWORD \
       --entrypoint sbt analytics-batch \
-      "runMain com.example.hiring.analytics.HmacKeyRetirementFixtureMain $action"
+      "runMain com.example.hiring.analytics.cli.HmacKeyRetirementFixtureMain $action"
   )
 }
 
@@ -218,7 +218,7 @@ host_authorization() {
     export HIRING_HMAC_ROTATION_NEW_IMAGE_ID="$new_image_id" HIRING_HMAC_ROTATION_NEW_UID="$new_uid"
     cd "$repo_root/analytics"
     sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 \
-      "runMain com.example.hiring.analytics.HmacKeyRetirementAuthorizationMain $action"
+      "runMain com.example.hiring.analytics.cli.HmacKeyRetirementAuthorizationMain $action"
   )
 }
 
@@ -586,7 +586,7 @@ restart_proof() {
   ANALYTICS_RUN_ID="$run_id" ANALYTICS_PARTITION="$partition" \
   ANALYTICS_START_OFFSET="$start_offset" ANALYTICS_END_OFFSET_EXCLUSIVE="$end_offset" \
     capture restart.log compose run --rm --no-deps --entrypoint sbt analytics-batch \
-      'runMain com.example.hiring.analytics.HiringAnalyticsBatchMain'
+      'runMain com.example.hiring.analytics.cli.HiringAnalyticsBatchMain'
   restarted_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   old_secret=''
   save_state

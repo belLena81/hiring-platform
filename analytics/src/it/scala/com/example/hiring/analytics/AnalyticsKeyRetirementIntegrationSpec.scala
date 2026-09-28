@@ -1,6 +1,16 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.adapter.spark.AnalyticsLakehousePaths
 import cats.effect.{Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
@@ -118,9 +128,9 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
 
   if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
-    val firstLock = new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
+    val firstLock = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
     val secondLock =
-      new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(
+      new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock(
         reactivePeerMongo.getDatabase(database.getName)
       )
     val result = (for {
@@ -210,7 +220,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           )
         ),
         now,
-        new com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
+        new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
       )
       .unsafeRunSync()
 

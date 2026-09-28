@@ -1,8 +1,17 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.batch.*
-import com.example.hiring.analytics.erasure.*
-import com.example.hiring.analytics.mongo.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
@@ -84,6 +93,22 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
 
       val result = for {
         older <- publisher.reserve("older", "range-older", now)
+        sameRange <- publisher.reserve("older", "range-older", now.plusMillis(1))
+        _ <- IO.raiseWhen(sameRange != older)(new AssertionError("same-range reservation was not idempotent"))
+        changedRange <- publisher.reserve("older", "range-changed", now.plusMillis(2)).attempt
+        _ <- IO.raiseWhen(!changedRange.swap.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
+          new AssertionError("a run ID was reused with a different range")
+        )
+        revisionAfterConflict <- IO.blocking(
+          database
+            .getCollection("analytics_report_control")
+            .find(new Document("_id", "analytics-report"))
+            .first()
+            .getLong("nextRevision")
+        )
+        _ <- IO.raiseWhen(revisionAfterConflict != older.revision)(
+          new AssertionError("idempotent/conflicting reservations leaked a revision increment")
+        )
         newer <- publisher.reserve("newer", "range-newer", now)
         _ <- publisher.publish(newer, report, expiry)
         stale <- publisher.publish(older, report.copy(asOf = now.plusMillis(1)), expiry).attempt

@@ -1,9 +1,44 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.mongo.MongoAnalyticsLakehouseLock
+import cats.effect.{Clock, IO}
+import cats.effect.unsafe.implicits.global
+import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
 import munit.FunSuite
+import com.mongodb.reactivestreams.client.MongoClients
+
+import java.util.concurrent.atomic.AtomicInteger
+import scala.concurrent.duration.*
 
 final class MongoAnalyticsLakehouseLockSpec extends FunSuite {
+  test("constructing a lock resource does not read its injected clock") {
+    val reads = new AtomicInteger(0)
+    val clock = new Clock[IO] {
+      override val applicative: cats.Applicative[IO] = summon[cats.Applicative[IO]]
+      override def realTime: IO[FiniteDuration] = IO.pure(0.seconds)
+      override def monotonic: IO[FiniteDuration] = IO.delay {
+        reads.incrementAndGet()
+        0.seconds
+      }
+    }
+    val client = MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1")
+    try {
+      val lock = new MongoAnalyticsLakehouseLock(client.getDatabase("analytics_lock_laziness"), clock)
+      val resource = lock.resource("file:///tmp/analytics-lock-laziness")
+      assert(resource != null)
+      assertEquals(reads.get(), 0)
+    } finally client.close()
+  }
+
   test("lakehouse mutex keys canonicalize URI scheme, authority casing, and trailing slashes") {
     val first = MongoAnalyticsLakehouseLock.lockId("s3a://BUCKET-a/lakehouse/")
     val equivalent = MongoAnalyticsLakehouseLock.lockId("S3A://bucket-a/lakehouse")

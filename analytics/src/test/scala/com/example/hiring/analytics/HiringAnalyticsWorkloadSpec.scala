@@ -1,8 +1,17 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.batch.*
-import com.example.hiring.analytics.erasure.*
-import com.example.hiring.analytics.mongo.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.Applicative
 import cats.effect.{Clock, IO, Resource}
@@ -157,7 +166,8 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
       markers <- IO.blocking(emptyMarkers(spark))
       plans <- IO.blocking {
         val valid = OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(raw))
-        val silver = OperationalEventTransforms.silver(valid, Pseudonymizer, markers)
+        val silver =
+          OperationalEventTransforms.silver(valid, Pseudonymizer, markers).fold(error => throw error, identity)
         (
           silver.queryExecution.executedPlan.toString,
           HiringGoldTransforms.wideFunnelDay(silver).queryExecution.executedPlan.toString

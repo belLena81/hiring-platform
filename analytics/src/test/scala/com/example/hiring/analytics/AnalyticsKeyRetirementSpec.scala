@@ -1,4 +1,14 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
 import munit.ScalaCheckSuite
 import org.scalacheck.Gen
@@ -113,7 +123,7 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
     val subject = "subject-123"
     val (withActive, count) = reduceMongoObservation(
       start,
-      com.example.hiring.analytics.mongo.AnalyticsCollections.ErasureRequests,
+      com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.ErasureRequests,
       new Document("_id", subject).append("state", "Pending"),
       "key-1",
       now,
@@ -125,7 +135,7 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
 
     val (withOutbox, _) = reduceMongoObservation(
       withActive,
-      com.example.hiring.analytics.mongo.AnalyticsCollections.EventOutbox,
+      com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.EventOutbox,
       new Document("subjectIds", java.util.Arrays.asList(subject)).append("subjectRefsVersion", 1),
       "key-1",
       now,
@@ -138,7 +148,7 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
     val initial = MongoScanState(0L, Set.empty, cats.data.Chain.empty)
     val (observed, _) = reduceMongoObservation(
       initial,
-      com.example.hiring.analytics.mongo.AnalyticsCollections.OutboxSubjectFences,
+      com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.OutboxSubjectFences,
       new Document("_id", "subject").append("leaseUntil", "not-a-date"),
       "key-1",
       now,

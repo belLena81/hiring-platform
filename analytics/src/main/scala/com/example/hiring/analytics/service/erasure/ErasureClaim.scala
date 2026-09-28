@@ -1,0 +1,51 @@
+package com.example.hiring.analytics.service.erasure
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
+
+import java.time.Instant
+
+final case class ErasureClaim(
+    requestId: String,
+    leaseToken: String,
+    leaseUntil: Instant,
+    phase: ErasurePhase,
+    progress: Int,
+    progressKey: Long,
+    attemptCount: Int = 0
+) {
+  def advanceTo(nextPhase: ErasurePhase): Either[String, ErasureClaim] =
+    phase.next match {
+      case Some(expected) if expected == nextPhase =>
+        Right(
+          copy(phase = nextPhase, progress = 0, progressKey = nextPhase.ordinal.toLong * ErasurePhase.ProgressPerPhase)
+        )
+      case _ => Left(s"${phase.persistedName} cannot advance to ${nextPhase.persistedName}")
+    }
+}
+
+/** Ordered durable stages; the worker owns the meaning and idempotent action of each stage. */
+enum ErasurePhase(val persistedName: String) {
+  case Requested extends ErasurePhase("Requested")
+  case PublisherDrained extends ErasurePhase("PublisherDrained")
+  case OutboxPurged extends ErasurePhase("OutboxPurged")
+  case DeltaPurged extends ErasurePhase("DeltaPurged")
+  case GoldRebuilt extends ErasurePhase("GoldRebuilt")
+  case ReadyToPublish extends ErasurePhase("ReadyToPublish")
+  case ReportPublished extends ErasurePhase("ReportPublished")
+
+  def next: Option[ErasurePhase] = ErasurePhase.values.lift(ordinal + 1)
+}
+
+object ErasurePhase {
+  val ProgressPerPhase: Int = 1000000
+
+  def fromString(value: String): Option[ErasurePhase] = values.find(_.persistedName == value)
+}

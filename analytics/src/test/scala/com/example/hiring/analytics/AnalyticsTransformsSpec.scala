@@ -1,14 +1,23 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.batch.*
-import com.example.hiring.analytics.erasure.*
-import com.example.hiring.analytics.mongo.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.{Clock, Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import munit.FunSuite
 import com.fasterxml.jackson.databind.ObjectMapper
-import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, lit}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.sql.types.{ArrayType, IntegerType, LongType, StringType, StructField, StructType, TimestampType}
@@ -93,6 +102,13 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   private def emptyMarkers = AnalyticsSubjectPrivacy.emptyMarkers(records(Seq.empty))
 
+  private def silverFrame(
+      valid: DataFrame,
+      pseudonymizer: SubjectPseudonymizer,
+      markers: DataFrame
+  ): DataFrame =
+    OperationalEventTransforms.silver(valid, pseudonymizer, markers).fold(error => fail(error.toString), identity)
+
   test("bronze deduplicates Kafka delivery by topic partition and offset") {
     val source = records(
       Seq(
@@ -117,7 +133,29 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val valid = OperationalEventTransforms.validEvents(parsed)
     assertEquals(OperationalEventTransforms.conflictingEventIds(valid).count(), 1L)
-    assertEquals(OperationalEventTransforms.silver(valid, pseudonymizer, emptyMarkers).count(), 0L)
+    assertEquals(silverFrame(valid, pseudonymizer, emptyMarkers).count(), 0L)
+  }
+
+  test("active marker exclusion reports each missing token column as a typed error") {
+    val parsed = OperationalEventTransforms.parseKafkaRecords(
+      records(Seq(("hiring.operational-events", 0, 1L, event("event-1", "APPLICATION_CREATED"))))
+    )
+    val events = AnalyticsSubjectPrivacy.withSubjectToken(
+      OperationalEventTransforms.validEvents(parsed),
+      pseudonymizer
+    )
+    assertEquals(
+      AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(events.drop("subjectToken"), emptyMarkers).left.toOption,
+      Some(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
+    )
+    assertEquals(
+      AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(events.drop("subjectTokens"), emptyMarkers).left.toOption,
+      Some(AnalyticsError.InvalidSourceSchema(Vector("subjectTokens")))
+    )
+    assertEquals(
+      AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(events, emptyMarkers.drop("subjectToken")).left.toOption,
+      Some(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
+    )
   }
 
   test("malformed envelopes are excluded from valid records") {
@@ -155,7 +193,6 @@ class AnalyticsTransformsSpec extends FunSuite {
         )
       )
     )
-
     assertEquals(OperationalEventTransforms.validEvents(parsed).count(), 0L)
     assertEquals(OperationalEventTransforms.malformedEvents(parsed).count(), 6L)
   }
@@ -174,7 +211,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         )
       )
     ) ++ Seq(("hiring.operational-events", 0, 11L, event("hired-1", "CANDIDATE_HIRED")))
-    val silver = OperationalEventTransforms.silver(
+    val silver = silverFrame(
       OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(events))),
       pseudonymizer,
       emptyMarkers
@@ -212,7 +249,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(created :+ oneAccepted))
     val silver =
-      OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
+      silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
     assertEquals(HiringGoldTransforms.wideFunnelDay(silver).count(), 0L)
   }
@@ -258,9 +295,9 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(lifecycle))
     val silver =
-      OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
+      silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHire(silver).unsafeRunSync().count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHireAction(silver).unsafeRunSync().count(), 0L)
   }
 
   test("ten eligible applications from one subject do not satisfy time-to-hire suppression") {
@@ -293,9 +330,9 @@ class AnalyticsTransformsSpec extends FunSuite {
     }
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(lifecycle))
     val silver =
-      OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
+      silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHire(silver).unsafeRunSync().count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHireAction(silver).unsafeRunSync().count(), 0L)
   }
 
   test("skill posting activity normalizes only created job skills and applies k anonymity") {
@@ -310,7 +347,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val update =
       ("hiring.operational-events", 0, 20L, event("update-1", "JOB_UPDATED", "Job", "job-update", Some(payload)))
-    val silver = OperationalEventTransforms.silver(
+    val silver = silverFrame(
       OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(created :+ update))),
       pseudonymizer,
       emptyMarkers
@@ -333,7 +370,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(created))
     val silver =
-      OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
+      silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
     assertEquals(HiringGoldTransforms.skillPostingActivity(silver).count(), 0L)
   }
@@ -371,13 +408,26 @@ class AnalyticsTransformsSpec extends FunSuite {
     assert(errors.contains("each topic partition may occur only once"))
   }
 
-  test("Kafka offset bounds are valid JSON without escaped structural quotes") {
+  test("Kafka offset JSON escapes topic strings and preserves the configured shape") {
     val ranges = Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 3L, 8L))
     assertEquals(KafkaOffsetRangeSource.assignJson(ranges), "{\"hiring.operational-events\":[0]}")
     assertEquals(KafkaOffsetRangeSource.offsetJson(ranges, _.startOffset), "{\"hiring.operational-events\":{\"0\":3}}")
     assertEquals(
       KafkaOffsetRangeSource.offsetJson(ranges, _.endOffsetExclusive),
       "{\"hiring.operational-events\":{\"0\":8}}"
+    )
+    val escaped = Vector(PartitionOffsetRange.unsafe("topic\"\\\n\u0001", 2, 3L, 8L))
+    assertEquals(KafkaOffsetRangeSource.assignJson(escaped), "{\"topic\\\"\\\\\\n\\u0001\":[2]}")
+    assertEquals(
+      KafkaOffsetRangeSource.offsetJson(escaped, _.startOffset),
+      "{\"topic\\\"\\\\\\n\\u0001\":{\"2\":3}}"
+    )
+  }
+
+  test("shared analytics SHA-256 encoding matches the lowercase UTF-8 vector") {
+    assertEquals(
+      AnalyticsDigest.sha256Hex("abc".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     )
   }
 
@@ -820,8 +870,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val seedParsed = OperationalEventTransforms.parseKafkaRecords(records(initialEvents))
     val seedAt = Instant.parse("2026-09-22T12:00:00Z")
-    val seedSilver = OperationalEventTransforms
-      .silver(OperationalEventTransforms.validEvents(seedParsed), pseudonymizer, emptyMarkers)
+    val seedSilver = silverFrame(OperationalEventTransforms.validEvents(seedParsed), pseudonymizer, emptyMarkers)
       .withColumn("ingestedAt", lit(Timestamp.from(seedAt)))
       .withColumn("expiresAt", lit(Timestamp.from(seedAt.plusSeconds(30L * 24L * 60L * 60L))))
     new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
@@ -1134,7 +1183,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val markers = markerFrame(Seq(pseudonymizer.token("candidate-1")))
     val silver =
-      OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(parsed), pseudonymizer, markers)
+      silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, markers)
 
     assertEquals(silver.select("eventId").collect().map(_.getString(0)).toSet, Set("kept"))
     assertEquals(
@@ -1191,23 +1240,19 @@ class AnalyticsTransformsSpec extends FunSuite {
       Set(pseudonymizer.token("actor-1"), pseudonymizer.token("candidate-3"))
     )
     assertEquals(
-      OperationalEventTransforms
-        .silver(
-          valid,
-          pseudonymizer,
-          markerFrame(Seq(pseudonymizer.token("actor-1")))
-        )
-        .count(),
+      silverFrame(
+        valid,
+        pseudonymizer,
+        markerFrame(Seq(pseudonymizer.token("actor-1")))
+      ).count(),
       0L
     )
     assertEquals(
-      OperationalEventTransforms
-        .silver(
-          valid,
-          pseudonymizer,
-          markerFrame(Seq(pseudonymizer.token("candidate-3")))
-        )
-        .select("eventId")
+      silverFrame(
+        valid,
+        pseudonymizer,
+        markerFrame(Seq(pseudonymizer.token("candidate-3")))
+      ).select("eventId")
         .collect()
         .map(_.getString(0))
         .toSet,

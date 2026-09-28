@@ -8,4 +8,4 @@ RUN sbt update
 
 COPY analytics/src ./src
 
-ENTRYPOINT ["sbt", "runMain com.example.hiring.analytics.HiringAnalyticsBatchMain"]
+ENTRYPOINT ["sbt", "runMain com.example.hiring.analytics.cli.HiringAnalyticsBatchMain"]

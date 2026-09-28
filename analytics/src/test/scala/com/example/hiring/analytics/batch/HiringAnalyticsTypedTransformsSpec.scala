@@ -1,7 +1,17 @@
-package com.example.hiring.analytics.batch
+package com.example.hiring.analytics.adapter.spark
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.{AnalyticsEventType, AnalyticsApplicationStatus}
-import com.example.hiring.analytics.AnalyticsError
+import com.example.hiring.analytics.domain.{AnalyticsEventType, AnalyticsApplicationStatus}
+import com.example.hiring.analytics.errors.AnalyticsError
 
 import munit.FunSuite
 import org.apache.spark.sql.{Row, SparkSession}
@@ -148,7 +158,7 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
       Seq("scala" -> 10L)
     )
 
-    val timeToHire = HiringGoldTransforms.timeToHire(silver).unsafeRunSync()
+    val timeToHire = HiringGoldTransforms.timeToHireAction(silver).unsafeRunSync()
     assertEquals(
       timeToHire.schema.fieldNames.toSeq,
       Seq("p50Hours", "p75Hours", "p90Hours", "p95Hours", "eligibleCount", "excludedCount")

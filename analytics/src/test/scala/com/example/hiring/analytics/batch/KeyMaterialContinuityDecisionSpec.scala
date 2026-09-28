@@ -1,6 +1,16 @@
-package com.example.hiring.analytics.batch
+package com.example.hiring.analytics.adapter.spark
+import com.example.hiring.analytics.service.keyretirement.*
+import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.adapter.mongo.*
+import com.example.hiring.analytics.adapter.kafka.*
+import com.example.hiring.analytics.adapter.local.*
+import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.HmacKeyRetirementAuthorization
+import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 
 import munit.ScalaCheckSuite
 import org.scalacheck.Gen
