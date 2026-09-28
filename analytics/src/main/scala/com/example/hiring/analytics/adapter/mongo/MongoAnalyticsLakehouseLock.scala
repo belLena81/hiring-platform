@@ -31,7 +31,8 @@ import scala.util.control.NonFatal
 /** Mongo mutex with no expiry or automatic takeover. A stale row must be cleared manually after its owner stops. */
 private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal](
     database: MongoDatabase,
-    clock: Clock[F]
+    clock: Clock[F],
+    streams: MongoPublisherStream
 ) extends AnalyticsLakehouseLock[F] {
   private val F = Async[F]
   import MongoAnalyticsLakehouseLock.*
@@ -58,7 +59,7 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
                     .append("ownerToken", owner)
                     .append("acquiredAt", java.util.Date.from(acquiredAt))
                 )
-              ).flatMap(MongoPublisherStream.one(_))
+              ).flatMap(streams.one(_))
             )
             .as(owner)
             .handleErrorWith {
@@ -79,7 +80,7 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
     }
 
   private def release(root: String, owner: String): F[Unit] = F.fromEither(lockId(root)).flatMap { id =>
-    MongoPublisherStream
+    streams
       .one(collection.deleteOne(new Document("_id", id).append("ownerToken", owner)))
       .flatMap(result =>
         F.raiseWhen(result.getDeletedCount != 1L)(

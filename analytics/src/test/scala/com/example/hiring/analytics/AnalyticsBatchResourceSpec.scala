@@ -26,6 +26,21 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.duration.*
 
 class AnalyticsBatchResourceSpec extends FunSuite {
+  test("Spark driver operations run on the dedicated execution context") {
+    val result = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+      .resource[IO]
+      .use { execution =>
+        for {
+          first <- execution(Thread.currentThread().getName)
+          second <- execution(Thread.currentThread().getName)
+        } yield (first, second)
+      }
+      .unsafeRunSync()
+
+    assertEquals(result._1, "analytics-spark-driver")
+    assertEquals(result._2, "analytics-spark-driver")
+  }
+
   test("process-local test lock serializes same-process access") {
     val root = java.nio.file.Files.createTempDirectory("analytics-lock").toUri.toString
     val result = AnalyticsLakehouseLock
@@ -74,16 +89,19 @@ class AnalyticsBatchResourceSpec extends FunSuite {
   }
 
   test("application resources close Spark and Mongo after a failed run") {
-    val acquired = new AtomicReference[Option[(SparkSession, MongoClient)]](None)
+    val acquired = new AtomicReference[
+      Option[(SparkSession, MongoClient, com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO])]
+    ](None)
     val resources = AppModule.managedSparkMongo[IO](
-      IO.blocking(
-        org.apache.spark.sql.classic.SparkSession
-          .builder()
-          .master("local[1]")
-          .appName("AnalyticsBatchResourceSpec")
-          .config("spark.ui.enabled", "false")
-          .getOrCreate()
-      ),
+      execution =>
+        execution {
+          org.apache.spark.sql.classic.SparkSession
+            .builder()
+            .master("local[1]")
+            .appName("AnalyticsBatchResourceSpec")
+            .config("spark.ui.enabled", "false")
+            .getOrCreate()
+        },
       IO.delay(MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200"))
     )
 
@@ -95,10 +113,32 @@ class AnalyticsBatchResourceSpec extends FunSuite {
       .unsafeRunSync()
 
     assert(result.isLeft)
-    val (spark, mongo) = acquired.get().getOrElse(fail("resources were not acquired"))
+    val (spark, mongo, sparkExecution) = acquired.get().getOrElse(fail("resources were not acquired"))
     assert(spark.sparkContext.isStopped)
+    assert(sparkExecution.isShutdown)
     assert(
-      MongoPublisherStream.stream[IO, String](mongo.listDatabaseNames()).compile.drain.attempt.unsafeRunSync().isLeft
+      AnalyticsTestOperationalConfig.streams
+        .stream[IO, String](mongo.listDatabaseNames())
+        .compile
+        .drain
+        .attempt
+        .unsafeRunSync()
+        .isLeft
     )
+  }
+
+  test("Spark driver execution context is released when Spark startup fails") {
+    val acquired =
+      new AtomicReference[Option[com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO]]](None)
+    val resources = AppModule.managedSparkMongo[IO](
+      execution =>
+        IO.delay(acquired.set(Some(execution))) *> IO.raiseError(new IllegalStateException("startup failed")),
+      IO.delay(MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200"))
+    )
+
+    val result = resources.use(_ => IO.unit).attempt.unsafeRunSync()
+
+    assert(result.isLeft)
+    assert(acquired.get().exists(_.isShutdown))
   }
 }

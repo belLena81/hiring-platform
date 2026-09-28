@@ -95,7 +95,11 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("lastRunId", "")
         )
       val publisher =
-        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+        new MongoAnalyticsReportPublisher[IO](
+          reactiveClient,
+          reactiveClient.getDatabase(database.getName),
+          operational = AnalyticsTestOperationalConfig.operational
+        )
       val now = Instant.now()
       val expiry = now.plusSeconds(3600L)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
@@ -218,7 +222,11 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           .append("lastRunId", "")
       )
       val publisher =
-        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+        new MongoAnalyticsReportPublisher[IO](
+          reactiveClient,
+          reactiveClient.getDatabase(database.getName),
+          operational = AnalyticsTestOperationalConfig.operational
+        )
       val admin = client.getDatabase("admin")
       def failOnce(command: String, errorCode: Int, label: String): Unit = {
         admin.runCommand(
@@ -310,7 +318,11 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("progressKey", key)
         )
       val publisher =
-        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+        new MongoAnalyticsReportPublisher[IO](
+          reactiveClient,
+          reactiveClient.getDatabase(database.getName),
+          operational = AnalyticsTestOperationalConfig.operational
+        )
       val claim =
         ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
@@ -412,7 +424,11 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           )
         )
       val publisher =
-        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+        new MongoAnalyticsReportPublisher[IO](
+          reactiveClient,
+          reactiveClient.getDatabase(database.getName),
+          operational = AnalyticsTestOperationalConfig.operational
+        )
       val claim =
         ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
@@ -487,7 +503,11 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("subjectIds", java.util.List.of(subjectId))
             .append("subjectRefsVersion", 1)
         )
-      val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+      val store = new MongoAnalyticsErasureWorkerStore[IO](
+        reactiveClient,
+        reactiveClient.getDatabase(database.getName),
+        streams = AnalyticsTestOperationalConfig.streams
+      )
       val result = for {
         claim <- store.claim(now, now.plusSeconds(360), 1).map(_.head)
         typedSubjectId = asAccountSubjectId(subjectId)

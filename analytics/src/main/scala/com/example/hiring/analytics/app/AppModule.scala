@@ -25,33 +25,36 @@ object AppModule {
   def batch[F[_]: Async: Clock](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] = {
     val common = settings.common
     for {
-      (spark, client) <- sparkMongo[F](
+      (spark, client, sparkExecution) <- sparkMongo[F](
         common.mongoUri,
         common.sparkMaster,
         appName = "hiring-analytics-batch"
       )
       database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
     } yield {
-      val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer)
+      val streams = new MongoPublisherStream(common.operational)
+      val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution)
       val job = new HiringAnalyticsBatch[F](
         common.lakehousePaths,
         common.pseudonymizer,
         markers,
         Clock[F],
-        new MongoAnalyticsReportPublisher[F](client, database),
+        new MongoAnalyticsReportPublisher[F](client, database, common.operational),
         new DeltaManifestStore[F](common.lakehousePaths),
-        new MongoAnalyticsLakehouseLock[F](database, Clock[F]),
-        new MongoHmacKeyRetirementAuthorizationStore[F](database),
+        new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams),
+        new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
+        common.operational,
+        sparkExecution,
         Slf4jLogger.getLogger[F]
       )
-      BatchProgram(job.run(spark, new KafkaOffsetRangeSource[F](common.kafka), settings.manifest))
+      BatchProgram(job.run(spark, new KafkaOffsetRangeSource[F](common.kafka, sparkExecution), settings.manifest))
     }
   }
 
   def worker[F[_]: Async: Clock: Temporal](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] = {
     val common = settings.common
     for {
-      (spark, client) <- sparkMongo[F](
+      (spark, client, sparkExecution) <- sparkMongo[F](
         common.mongoUri,
         common.sparkMaster,
         appName = "hiring-analytics-erasure-worker"
@@ -59,10 +62,11 @@ object AppModule {
       database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
     } yield {
       val paths = common.lakehousePaths
-      val store = new MongoAnalyticsErasureWorkerStore[F](client, database)
-      val publisher = new MongoAnalyticsReportPublisher[F](client, database)
-      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F])
-      val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer)
+      val streams = new MongoPublisherStream(common.operational)
+      val store = new MongoAnalyticsErasureWorkerStore[F](client, database, streams)
+      val publisher = new MongoAnalyticsReportPublisher[F](client, database, common.operational)
+      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
+      val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution)
       val batch = new HiringAnalyticsBatch[F](
         paths,
         common.pseudonymizer,
@@ -71,7 +75,9 @@ object AppModule {
         publisher,
         new DeltaManifestStore[F](paths),
         lock,
-        new MongoHmacKeyRetirementAuthorizationStore[F](database),
+        new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
+        common.operational,
+        sparkExecution,
         Slf4jLogger.getLogger[F]
       )
       val job = new AnalyticsErasureWorker[F](
@@ -90,7 +96,8 @@ object AppModule {
         Clock[F],
         Slf4jLogger.getLogger[F],
         KafkaProducerFencer[F],
-        KafkaRetentionAdapter.liveRetention[F]
+        KafkaRetentionAdapter.liveRetention[F],
+        common.operational.retention
       )
       WorkerProgram(job.run)
     }
@@ -100,7 +107,11 @@ object AppModule {
     for {
       client <- mongoClient[F](settings.common.mongoUri)
       database <- Resource.eval(mongoDatabase[F](client, settings.common.mongoDatabase))
-    } yield new MongoAnalyticsErasureWorkerStore[F](client, database)
+    } yield new MongoAnalyticsErasureWorkerStore[F](
+      client,
+      database,
+      new MongoPublisherStream(settings.common.operational)
+    )
 
   /** Shared resource boundary for operator diagnostics that need Spark and Mongo without batch services. */
   def sparkMongo[F[_]: Async](
@@ -108,26 +119,27 @@ object AppModule {
       sparkMaster: String,
       appName: String,
       sparkUiEnabled: Option[Boolean] = None
-  ): Resource[F, (SparkSession, MongoClient)] =
+  ): Resource[F, (SparkSession, MongoClient, SparkBlockingExecution[F])] =
     managedSparkMongo(
-      sparkSession[F](sparkMaster, appName, sparkUiEnabled),
+      execution => sparkSession(sparkMaster, appName, sparkUiEnabled, execution),
       Async[F].delay(MongoClients.create(mongoUri))
     )
 
   private[analytics] def managedSparkMongo[F[_]: Async](
-      acquireSpark: F[SparkSession],
+      acquireSpark: SparkBlockingExecution[F] => F[SparkSession],
       acquireMongo: F[MongoClient]
-  ): Resource[F, (SparkSession, MongoClient)] =
+  ): Resource[F, (SparkSession, MongoClient, SparkBlockingExecution[F])] =
     for {
-      spark <- Resource.make(acquireSpark.adaptError { case NonFatal(cause) =>
+      sparkExecution <- SparkBlockingExecution.resource[F]
+      spark <- Resource.make(acquireSpark(sparkExecution).adaptError { case NonFatal(cause) =>
         AnalyticsError.SparkStartupFailure(cause)
       })(session =>
-        Async[F].blocking(session.stop()).adaptError { case NonFatal(cause) =>
+        sparkExecution(session.stop()).adaptError { case NonFatal(cause) =>
           AnalyticsError.LakehouseFailure(cause)
         }
       )
       mongo <- mongoClientFrom[F](acquireMongo)
-    } yield (spark, mongo)
+    } yield (spark, mongo, sparkExecution)
 
   private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient] =
     mongoClientFrom(Async[F].delay(MongoClients.create(uri)))
@@ -153,9 +165,10 @@ object AppModule {
   private def sparkSession[F[_]: Async](
       master: String,
       appName: String,
-      sparkUiEnabled: Option[Boolean]
+      sparkUiEnabled: Option[Boolean],
+      sparkExecution: SparkBlockingExecution[F]
   ): F[SparkSession] =
-    Async[F].blocking {
+    sparkExecution {
       val builder = org.apache.spark.sql.classic.SparkSession
         .builder()
         .appName(appName)

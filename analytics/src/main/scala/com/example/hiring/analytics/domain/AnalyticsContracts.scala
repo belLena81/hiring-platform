@@ -9,14 +9,6 @@ import io.github.iltotore.iron.constraint.string.Match
 
 /** The analytics retention policy is intentionally separate from Kafka retention. */
 object AnalyticsRetention {
-  val BronzeDays: Int = 7
-  val QuarantineDays: Int = 7
-  val SilverDays: Int = 30
-  val GoldDays: Int = 30
-  val PublishedSnapshotDays: Int = 30
-  val DeletionMarkerDays: Int = 31
-  val DeltaVacuumSafetyDays: Int = 7
-  val DeltaLogRetentionDays: Int = 30
   val MinimumContributors: Long = 10L
 }
 

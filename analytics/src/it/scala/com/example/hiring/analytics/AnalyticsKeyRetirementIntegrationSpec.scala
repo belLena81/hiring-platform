@@ -132,11 +132,16 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
     val firstLock =
-      new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](reactiveDatabase, Clock[IO])
+      new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+        reactiveDatabase,
+        Clock[IO],
+        AnalyticsTestOperationalConfig.streams
+      )
     val secondLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         reactivePeerMongo.getDatabase(database.getName),
-        Clock[IO]
+        Clock[IO],
+        AnalyticsTestOperationalConfig.streams
       )
     val result = (for {
       firstEntered <- Deferred[IO, Unit]
@@ -225,7 +230,14 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           )
         ),
         now,
-        new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](reactiveDatabase, Clock[IO])
+        new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+          reactiveDatabase,
+          Clock[IO],
+          AnalyticsTestOperationalConfig.streams
+        ),
+        AnalyticsTestOperationalConfig.streams,
+        com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
       )
       .unsafeRunSync()
 

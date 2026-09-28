@@ -226,7 +226,11 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       val batch = AnalyticsBatchTestSupport.newBatch(
         paths,
         pseudonymizer,
-        new MongoActiveDeletionMarkerSource[IO](reactiveDb, pseudonymizer)
+        new MongoActiveDeletionMarkerSource[IO](
+          reactiveDb,
+          pseudonymizer,
+          streams = AnalyticsTestOperationalConfig.streams
+        )
       )
       val manifest = AnalyticsRunManifest
         .validated(
@@ -366,7 +370,11 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     val request = db.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first()
     assert(request != null, "assertion failed")
     assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
-    val barrier = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDb)
+    val barrier = new MongoAnalyticsErasureWorkerStore[IO](
+      reactiveClient,
+      reactiveDb,
+      streams = AnalyticsTestOperationalConfig.streams
+    )
       .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("worker must persist its Kafka barrier"))
@@ -427,7 +435,11 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     assert(request != null, "assertion failed")
     val purgedAt =
       Option(request.getDate("deltaPurgedAt")).map(_.toInstant).getOrElse(fail("DeltaPurged timestamp is missing"))
-    val barrier = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDb)
+    val barrier = new MongoAnalyticsErasureWorkerStore[IO](
+      reactiveClient,
+      reactiveDb,
+      streams = AnalyticsTestOperationalConfig.streams
+    )
       .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("Kafka barrier is missing"))
@@ -438,7 +450,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         barrier
       )
       .unsafeRunSync()
-    val deltaDeadline = purgedAt.plusSeconds(AnalyticsRetention.DeltaLogRetentionDays.toLong * 86400L)
+    val deltaDeadline =
+      purgedAt.plusSeconds(AnalyticsTestOperationalConfig.operational.retention.deltaLogRetentionDays.toLong * 86400L)
     val deltaPassed = !Instant.now().isBefore(deltaDeadline)
     val evidence = db
       .getCollection("analytics_erasure_delta_files")
@@ -479,10 +492,18 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         val batch = AnalyticsBatchTestSupport.newBatch(
           paths,
           pseudonymizer,
-          new MongoActiveDeletionMarkerSource[IO](reactiveDb, pseudonymizer)
+          new MongoActiveDeletionMarkerSource[IO](
+            reactiveDb,
+            pseudonymizer,
+            streams = AnalyticsTestOperationalConfig.streams
+          )
         )
         val markers =
-          new MongoActiveDeletionMarkerSource[IO](reactiveDb, pseudonymizer).activeSubjectTokens(spark).unsafeRunSync()
+          new MongoActiveDeletionMarkerSource[IO](
+            reactiveDb,
+            pseudonymizer,
+            streams = AnalyticsTestOperationalConfig.streams
+          ).activeSubjectTokens(spark).unsafeRunSync()
         batch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
         batch.verifyFilesAbsent(spark, evidence).unsafeRunSync()
       } finally spark.stop()

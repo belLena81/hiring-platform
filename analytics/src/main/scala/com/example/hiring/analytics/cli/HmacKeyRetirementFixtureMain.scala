@@ -112,7 +112,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
     } yield result
 
-  private def eventRow(token: String, at: Instant): Row = {
+  private def eventRow(token: String, at: Instant, silverRetentionDays: Int): Row = {
     val eventId = UUID.randomUUID().toString
     Row(
       eventId,
@@ -127,7 +127,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       token,
       Seq(token).asJava,
       "0" * 64,
-      Timestamp.from(at.plusSeconds(30L * 86400L))
+      Timestamp.from(at.plus(java.time.Duration.ofDays(silverRetentionDays.toLong)))
     )
   }
 
@@ -205,7 +205,8 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
-      at: Instant
+      at: Instant,
+      retention: AnalyticsRetentionSettings
   ): Either[AnalyticsError, Unit] = {
     Either
       .cond(
@@ -231,7 +232,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           .leftMap(AnalyticsError.InvalidConfiguration.apply)
           .flatMap { typedToken =>
             spark
-              .createDataFrame(List(eventRow(typedToken.value, at)).asJava, silverSchema)
+              .createDataFrame(List(eventRow(typedToken.value, at, retention.silverDays)).asJava, silverSchema)
               .write
               .format("delta")
               .mode("errorifexists")
@@ -246,7 +247,8 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
-      at: Instant
+      at: Instant,
+      retention: AnalyticsRetentionSettings
   ): Either[AnalyticsError, Unit] = {
     Either
       .cond(
@@ -260,7 +262,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           .leftMap(AnalyticsError.InvalidConfiguration.apply)
           .map { typedToken =>
             spark
-              .createDataFrame(List(eventRow(typedToken.value, at)).asJava, silverSchema)
+              .createDataFrame(List(eventRow(typedToken.value, at, retention.silverDays)).asJava, silverSchema)
               .write
               .format("delta")
               .mode("append")
@@ -363,18 +365,21 @@ object HmacKeyRetirementFixtureMain extends IOApp {
     }
   }
 
-  private def printStageStatus(spark: SparkSession, paths: AnalyticsLakehousePaths): Either[AnalyticsError, Unit] =
+  private def stageStatusOutput(
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths
+  ): Either[AnalyticsError, Vector[String]] =
     for {
       oldRow <- stageTime(spark, paths, "old-primary-silver-staged")
       oldEvent <- stageTime(spark, paths, "old-primary-event-published")
       newControl <- stageTime(spark, paths, "new-primary-control-staged")
       newEvent <- stageTime(spark, paths, "new-primary-event-published")
-    } yield {
-      println(s"OLD_ROW_STAGED=${oldRow.nonEmpty}")
-      println(s"OLD_EVENT_PUBLISHED=${oldEvent.nonEmpty}")
-      println(s"NEW_CONTROL_STAGED=${newControl.nonEmpty}")
-      println(s"NEW_EVENT_PUBLISHED=${newEvent.nonEmpty}")
-    }
+    } yield Vector(
+      s"OLD_ROW_STAGED=${oldRow.nonEmpty}",
+      s"OLD_EVENT_PUBLISHED=${oldEvent.nonEmpty}",
+      s"NEW_CONTROL_STAGED=${newControl.nonEmpty}",
+      s"NEW_EVENT_PUBLISHED=${newEvent.nonEmpty}"
+    )
 
   private def publishNewEvent(
       spark: SparkSession,
@@ -439,29 +444,35 @@ object HmacKeyRetirementFixtureMain extends IOApp {
   }
 
   private def requireRetirementAuthorization(root: String, oldKeyId: String): IO[Unit] =
-    IO.blocking(ConfigSource.default.at("analytics.mongo").load[RawMongo]).flatMap {
-      case Right(raw) =>
-        for {
-          uri <- IO.fromEither(required("analytics.mongo.uri", raw.uri))
-          database <- IO.fromEither(required("analytics.mongo.database", raw.database))
-          _ <- Resource.fromAutoCloseable(IO.delay(MongoClients.create(uri))).use { client =>
-            new MongoHmacKeyRetirementAuthorizationStore[IO](client.getDatabase(database)).list(root).flatMap { rows =>
-              IO.raiseUnless(rows.exists(_.keyId == oldKeyId))(
-                AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")
-              )
+    AnalyticsRuntimeConfig.loadOperational[IO].flatMap { operational =>
+      IO.blocking(ConfigSource.default.at("analytics.mongo").load[RawMongo]).flatMap {
+        case Right(raw) =>
+          for {
+            uri <- IO.fromEither(required("analytics.mongo.uri", raw.uri))
+            database <- IO.fromEither(required("analytics.mongo.database", raw.database))
+            _ <- Resource.fromAutoCloseable(IO.delay(MongoClients.create(uri))).use { client =>
+              val streams = new MongoPublisherStream(operational)
+              new MongoHmacKeyRetirementAuthorizationStore[IO](client.getDatabase(database), streams)
+                .list(root)
+                .flatMap { rows =>
+                  IO.raiseUnless(rows.exists(_.keyId == oldKeyId))(
+                    AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")
+                  )
+                }
             }
-          }
-        } yield ()
-      case Left(_) => IO.raiseError(AnalyticsError.InvalidConfiguration("analytics.mongo settings are missing"))
+          } yield ()
+        case Left(_) => IO.raiseError(AnalyticsError.InvalidConfiguration("analytics.mongo settings are missing"))
+      }
     }
 
-  /** Performs only elapsed maintenance; Delta's default seven-day VACUUM and 30-day log cleanup are not shortened. */
+  /** Performs maintenance only after each configured physical retention horizon has elapsed. */
   private def maintain(
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
       oldKeyId: String,
-      at: Instant
+      at: Instant,
+      retention: AnalyticsRetentionSettings
   ): Either[AnalyticsError, Unit] =
     for {
       control <- stageTime(spark, paths, "new-primary-control-staged")
@@ -473,7 +484,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       staged <- stageTime(spark, paths, "old-primary-silver-staged")
       stagedAt <- staged.toRight(AnalyticsError.InvalidConfiguration("old-key fixture stage timestamp is missing"))
       _ <- Either.cond(
-        !at.isBefore(stagedAt.plusSeconds(30L * 86400L)),
+        !at.isBefore(stagedAt.plus(java.time.Duration.ofDays(retention.silverDays.toLong))),
         (),
         AnalyticsError.InvalidConfiguration("old-key Silver retention has not elapsed")
       )
@@ -509,14 +520,22 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       }
       reclaimed <- stageTime(spark, paths, "old-primary-data-reclaimed")
       _ <- Right[AnalyticsError, Unit](()).map { _ =>
-        if (!at.isBefore(expiredAt.plusSeconds(7L * 86400L)) && reclaimed.isEmpty) {
+        if (
+          !at.isBefore(
+            expiredAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.toLong))
+          ) && reclaimed.isEmpty
+        ) {
           DeltaTable.forPath(spark, paths.silver).vacuum().count()
           fixtureRecord(spark, paths, at, "old-primary-data-reclaimed")
         }
       }
       logCleaned <- stageTime(spark, paths, "old-primary-log-cleaned")
       _ <- Right[AnalyticsError, Unit](()).map { _ =>
-        if (!at.isBefore(expiredAt.plusSeconds(30L * 86400L)) && logCleaned.isEmpty) {
+        if (
+          !at.isBefore(
+            expiredAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.toLong))
+          ) && logCleaned.isEmpty
+        ) {
           val tableIdentifier = paths.silver.replace("`", "``")
           spark.sql(
             s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES " +
@@ -558,6 +577,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                 AnalyticsError.InvalidConfiguration("key-retirement fixture HOCON is missing or malformed")
               )
           }
+        operational <- AnalyticsRuntimeConfig.loadOperational[IO]
         standardRoot <- IO.blocking(ConfigSource.default.at("analytics.lakehouse.root").load[String])
         root <- IO.fromEither(
           required(
@@ -578,31 +598,49 @@ object HmacKeyRetirementFixtureMain extends IOApp {
             requireRetirementAuthorization(root, raw.oldKeyId.getOrElse(""))
           else IO.unit
         at <- Clock[IO].realTimeInstant
-        _ <- Resource
-          .make(
-            IO.blocking(
-              org.apache.spark.sql.classic.SparkSession
-                .builder()
-                .appName("hiring-hmac-retirement-fixture")
-                .master(master)
-                .config("spark.ui.enabled", "false")
-                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-                .getOrCreate()
-            )
-          )(spark => IO.blocking(spark.stop()))
-          .use { spark =>
-            IO.blocking {
-              if (action == "stage-old") stageOld(spark, paths, pseudonymizer, at)
-              else if (action == "publish-old-event") publishOldEvent(spark, paths, raw, at)
-              else if (action == "seed-new-control") seedNewControl(spark, paths, pseudonymizer, at)
-              else if (action == "publish-new-event") publishNewEvent(spark, paths, raw, at)
-              else if (action == "new-event-range")
-                newEventRange(spark, paths).map(range => println("NEW_EVENT_RANGE=" + range))
-              else if (action == "stage-status") printStageStatus(spark, paths)
-              else maintain(spark, paths, pseudonymizer, raw.oldKeyId.getOrElse(""), at)
-            }.flatMap(IO.fromEither(_))
-          }
+        _ <- SparkBlockingExecution.resource[IO].use { sparkExecution =>
+          Resource
+            .make(
+              sparkExecution {
+                org.apache.spark.sql.classic.SparkSession
+                  .builder()
+                  .appName("hiring-hmac-retirement-fixture")
+                  .master(master)
+                  .config("spark.ui.enabled", "false")
+                  .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+                  .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+                  .config(
+                    "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
+                    s"interval ${operational.retention.deltaVacuumSafetyDays} days"
+                  )
+                  .config(
+                    "spark.databricks.delta.properties.defaults.logRetentionDuration",
+                    s"interval ${operational.retention.deltaLogRetentionDays} days"
+                  )
+                  .config(
+                    "spark.databricks.delta.retentionDurationCheck.enabled",
+                    operational.retention.deltaVacuumSafetyCheckEnabled.toString
+                  )
+                  .getOrCreate()
+              }
+            )(spark => sparkExecution(spark.stop()))
+            .use { spark =>
+              sparkExecution {
+                if (action == "stage-old")
+                  stageOld(spark, paths, pseudonymizer, at, operational.retention).map(_ => Vector.empty)
+                else if (action == "publish-old-event") publishOldEvent(spark, paths, raw, at).map(_ => Vector.empty)
+                else if (action == "seed-new-control")
+                  seedNewControl(spark, paths, pseudonymizer, at, operational.retention).map(_ => Vector.empty)
+                else if (action == "publish-new-event") publishNewEvent(spark, paths, raw, at).map(_ => Vector.empty)
+                else if (action == "new-event-range")
+                  newEventRange(spark, paths).map(range => Vector("NEW_EVENT_RANGE=" + range))
+                else if (action == "stage-status") stageStatusOutput(spark, paths)
+                else
+                  maintain(spark, paths, pseudonymizer, raw.oldKeyId.getOrElse(""), at, operational.retention)
+                    .map(_ => Vector.empty)
+              }.flatMap(IO.fromEither(_)).flatMap(_.traverse_(IO.println))
+            }
+        }
         _ <- logger.info(s"HMAC retirement fixture $action at $at")
       } yield ExitCode.Success).handleErrorWith {
         case error: AnalyticsError => logger.error(error.getMessage).as(ExitCode.Error)

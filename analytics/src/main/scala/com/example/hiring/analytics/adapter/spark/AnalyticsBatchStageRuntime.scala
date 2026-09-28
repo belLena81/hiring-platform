@@ -4,6 +4,7 @@ import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, ManifestStore}
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import cats.effect.Async
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.types.StructType
@@ -53,7 +54,8 @@ private[spark] final case class IngestionStagePorts[F[_]](
     execution: SparkExecution[F],
     manifestStore: ManifestStore[F],
     deltaWriter: DeltaWriter[F],
-    clock: cats.effect.Clock[F]
+    clock: cats.effect.Clock[F],
+    retention: AnalyticsRetentionSettings
 )
 
 private[spark] final case class SilverStagePorts[F[_]](
@@ -62,7 +64,8 @@ private[spark] final case class SilverStagePorts[F[_]](
     execution: SparkExecution[F],
     deltaWriter: DeltaWriter[F],
     deltaReader: DeltaReader[F],
-    quarantineId: QuarantineId
+    quarantineId: QuarantineId,
+    retention: AnalyticsRetentionSettings
 )
 
 private[analytics] final case class KeyContinuityStagePorts[F[_]](

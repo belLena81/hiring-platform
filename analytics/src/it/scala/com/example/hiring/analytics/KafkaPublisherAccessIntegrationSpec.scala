@@ -140,7 +140,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .insertOne(
           new Document("_id", requestId).append("deleted", true)
         )
-      val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDatabase)
+      val store = new MongoAnalyticsErasureWorkerStore[IO](
+        reactiveClient,
+        reactiveDatabase,
+        streams = AnalyticsTestOperationalConfig.streams
+      )
       val worker = AnalyticsErasureWorkerTestSupport.worker(
         null,
         reactiveDatabase,
@@ -150,7 +154,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         topic,
         AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase)
+        new MongoAnalyticsReportPublisher[IO](
+          reactiveClient,
+          reactiveDatabase,
+          operational = AnalyticsTestOperationalConfig.operational
+        )
       )
       val result = (for {
         claim <- store.claim(requestedAt, requestedAt.plusSeconds(60L), 1).map(_.head)
@@ -197,7 +205,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           topic,
           AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-          new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase),
+          new MongoAnalyticsReportPublisher[IO](
+            reactiveClient,
+            reactiveDatabase,
+            operational = AnalyticsTestOperationalConfig.operational
+          ),
           producerFencer = uncertainFencer
         )
         uncertainFailure <- uncertainWorker.process(reclaimed, reservation).attempt
@@ -233,7 +245,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           topic,
           AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-          new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase),
+          new MongoAnalyticsReportPublisher[IO](
+            reactiveClient,
+            reactiveDatabase,
+            operational = AnalyticsTestOperationalConfig.operational
+          ),
           producerFencer = correctFencer
         )
         retryFailure <- retryWorker.process(retryClaim, reservation).attempt
@@ -333,7 +349,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .getCollection("event_outbox")
         .insertOne(new Document("_id", UUID.randomUUID().toString).append("subjectIds", java.util.List.of(requestId)))
 
-      val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDatabase)
+      val store = new MongoAnalyticsErasureWorkerStore[IO](
+        reactiveClient,
+        reactiveDatabase,
+        streams = AnalyticsTestOperationalConfig.streams
+      )
       val attempts = new AtomicInteger(0)
       val firstFailure = new AtomicReference[Throwable](null)
       val pendingWasObservedDuringOutage = new AtomicBoolean(false)

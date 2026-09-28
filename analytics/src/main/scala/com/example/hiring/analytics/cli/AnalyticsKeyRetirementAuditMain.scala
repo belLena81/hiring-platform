@@ -193,42 +193,51 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
   private def program: IO[ExitCode] =
     load.flatMap(raw => IO.fromEither(decode(raw).leftMap(AnalyticsError.InvalidConfiguration.apply))).flatMap {
       inputs =>
-        AppModule
-          .sparkMongo[IO](
-            inputs.mongoUri,
-            inputs.sparkMaster,
-            appName = "hiring-analytics-key-retirement-audit",
-            sparkUiEnabled = Some(false)
-          )
-          .use { case (spark, client) =>
-            for {
-              now <- Clock[IO].realTimeInstant
-              database = client.getDatabase(inputs.mongoDatabase)
-              result <- AnalyticsKeyRetirement.audit(
-                spark,
-                inputs.paths,
-                database,
-                inputs.retiringKeyId,
-                inputs.retention,
-                inputs.writers,
-                now,
-                new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, Clock[IO])
-              )
-              code <- result match {
-                case Right(summary) =>
-                  logger.warn(summary.operatorEvidence + "; exit status is not approval to remove a key") *>
+        AnalyticsRuntimeConfig.loadOperational[IO].flatMap { operational =>
+          AppModule
+            .sparkMongo[IO](
+              inputs.mongoUri,
+              inputs.sparkMaster,
+              appName = "hiring-analytics-key-retirement-audit",
+              sparkUiEnabled = Some(false)
+            )
+            .use { case (spark, client, sparkExecution) =>
+              for {
+                now <- Clock[IO].realTimeInstant
+                database = client.getDatabase(inputs.mongoDatabase)
+                streams = new MongoPublisherStream(operational)
+                result <- AnalyticsKeyRetirement.audit(
+                  spark,
+                  inputs.paths,
+                  database,
+                  inputs.retiringKeyId,
+                  inputs.retention,
+                  inputs.writers,
+                  now,
+                  new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+                    database,
+                    Clock[IO],
+                    streams
+                  ),
+                  streams,
+                  sparkExecution
+                )
+                code <- result match {
+                  case Right(summary) =>
+                    logger.warn(summary.operatorEvidence + "; exit status is not approval to remove a key") *>
+                      logger
+                        .info(
+                          s"key-retirement diagnostic scanned ${summary.deltaFilesScanned} Delta files and ${summary.mongoDocumentsScanned} Mongo documents"
+                        )
+                        .as(ExitCode.Success)
+                  case Left(blockers) =>
                     logger
-                      .info(
-                        s"key-retirement diagnostic scanned ${summary.deltaFilesScanned} Delta files and ${summary.mongoDocumentsScanned} Mongo documents"
-                      )
-                      .as(ExitCode.Success)
-                case Left(blockers) =>
-                  logger
-                    .warn("key-retirement diagnostic blocked: " + blockers.toNonEmptyList.toList.mkString("; "))
-                    .as(ExitCode.Error)
-              }
-            } yield code
-          }
+                      .warn("key-retirement diagnostic blocked: " + blockers.toNonEmptyList.toList.mkString("; "))
+                      .as(ExitCode.Error)
+                }
+              } yield code
+            }
+        }
     }
 
   override def run(args: List[String]): IO[ExitCode] =

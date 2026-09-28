@@ -53,7 +53,7 @@ private[spark] final class AnalyticsBatchIngestionStage[F[_]: Async](ports: Inge
         deltaWriter.withExpiry(
           OperationalEventTransforms.bronze(safeToPersist),
           startedAt,
-          AnalyticsRetention.BronzeDays
+          retention.bronzeDays
         )
       )
       recordCount <- blocking(raw.count())

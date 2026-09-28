@@ -41,6 +41,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
     logger: Logger[F],
     producerFencer: TransactionalProducerFencer[F],
     kafkaRetention: KafkaRetention[F],
+    retention: AnalyticsRetentionSettings,
     leaseDuration: FiniteDuration = 90.seconds,
     deliveryTimeout: FiniteDuration = 30.seconds,
     pollInterval: FiniteDuration = 5.seconds
@@ -53,7 +54,6 @@ final class AnalyticsErasureWorker[F[_]: Async](
       _ <- queue.preflight
       _ <- lakehouse.validateHmacConfiguration(spark)
       _ <- kafkaRetention.capture(kafka, topic)
-      _ <- Async[F].blocking(spark.range(1L).count()).void
       current <- now
       until <- leaseUntil
       _ <- queue.heartbeat(current, until)
@@ -234,7 +234,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
             } yield result
           }
           completedAt <- now
-          expiry = completedAt.plusSeconds(AnalyticsRetention.PublishedSnapshotDays.toLong * 86400L)
+          expiry = completedAt.plusSeconds(retention.publishedSnapshotDays.toLong * 86400L)
           _ <- publisher.publishErasure(refreshed, report, expiry, claim, completedAt)
           _ <- logger.info("analytics erasure completed and the snapshot was safely revealed")
         } yield Right(())
@@ -303,9 +303,10 @@ final class AnalyticsErasureWorker[F[_]: Async](
     for {
       current <- now
       kafkaExpired <- kafkaRetention.retentionPassed(kafka, barrier)
-      deltaExpired = !current.isBefore(
-        deltaPurgedAt.plusSeconds(AnalyticsRetention.DeltaLogRetentionDays.toLong * 86400L)
-      )
+      dataDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.toLong))
+      logDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.toLong))
+      deltaDeadline = if (dataDeadline.isAfter(logDeadline)) dataDeadline else logDeadline
+      deltaExpired = !current.isBefore(deltaDeadline)
     } yield kafkaExpired && deltaExpired
 
   private def defer(claim: ErasureClaim, delay: FiniteDuration): F[Unit] =

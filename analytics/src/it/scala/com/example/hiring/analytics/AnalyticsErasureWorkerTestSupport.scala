@@ -48,8 +48,9 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       kafkaRetention: KafkaRetention[IO] =
         com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter.liveRetention[IO]
   ): AnalyticsErasureWorker[IO] = {
-    val lock = new MongoAnalyticsLakehouseLock(database, clock)
-    val markers = new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer)
+    val lock = new MongoAnalyticsLakehouseLock(database, clock, AnalyticsTestOperationalConfig.streams)
+    val markers =
+      new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer, streams = AnalyticsTestOperationalConfig.streams)
     val batch = new HiringAnalyticsBatch[IO](
       paths,
       pseudonymizer,
@@ -58,7 +59,10 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       publisher,
       new DeltaManifestStore[IO](paths),
       lock,
-      new MongoHmacKeyRetirementAuthorizationStore[IO](database),
+      new MongoHmacKeyRetirementAuthorizationStore[IO](database, AnalyticsTestOperationalConfig.streams),
+      AnalyticsTestOperationalConfig.operational,
+      com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+        .forTests[IO](scala.concurrent.ExecutionContext.parasitic),
       Slf4jLogger.getLogger[IO]
     )
     new AnalyticsErasureWorker[IO](
@@ -78,6 +82,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       Slf4jLogger.getLogger[IO],
       producerFencer,
       kafkaRetention,
+      AnalyticsTestOperationalConfig.operational.retention,
       leaseDuration,
       deliveryTimeout,
       pollInterval

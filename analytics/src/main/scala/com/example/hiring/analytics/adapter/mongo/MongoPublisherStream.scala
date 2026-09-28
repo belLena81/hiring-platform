@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.adapter.mongo
 
+import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.errors.AnalyticsError
 import cats.effect.{Async, Clock, Outcome}
 import cats.effect.syntax.all.*
@@ -13,13 +14,11 @@ import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 /** FS2 boundary for Mongo's cold Reactive Streams publishers. */
-private[analytics] object MongoPublisherStream {
-  private val BufferSize = 256
-
+private[analytics] final class MongoPublisherStream(settings: AnalyticsOperationalSettings) {
   def stream[F[_]: Async, A](publisher: => Publisher[A]): Stream[F, A] =
     Stream
       .eval(Async[F].delay(publisher))
-      .flatMap(value => fs2.interop.reactivestreams.fromPublisher[F, A](value, BufferSize))
+      .flatMap(value => fs2.interop.reactivestreams.fromPublisher[F, A](value, settings.mongoPublisherBufferSize))
 
   def optional[F[_]: Async, A](publisher: => Publisher[A]): F[Option[A]] = stream[F, A](publisher).compile.last
 
@@ -41,7 +40,7 @@ private[analytics] object MongoPublisherStream {
       work: F[A]
   )(clock: Clock[F]): F[A] =
     clock.monotonic.flatMap { startedAt =>
-      val deadline = startedAt + 120.seconds
+      val deadline = startedAt + settings.mongoTransactionWindow
 
       def beforeDeadline: F[Boolean] = clock.monotonic.map(_ < deadline)
 

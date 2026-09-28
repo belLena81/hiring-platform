@@ -193,6 +193,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
       noFencing,
       noRetention,
+      AnalyticsTestOperationalConfig.operational.retention,
       leaseDuration,
       1.second,
       1.second

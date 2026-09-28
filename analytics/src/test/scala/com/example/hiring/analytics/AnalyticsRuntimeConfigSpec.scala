@@ -63,6 +63,32 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |    start-offset = ${?ANALYTICS_START_OFFSET}
     |    end-offset-exclusive = ${?ANALYTICS_END_OFFSET_EXCLUSIVE}
     |  }
+    |  operational {
+    |    retention {
+    |      bronze-days = 7
+    |      bronze-days = ${?ANALYTICS_RETENTION_BRONZE_DAYS}
+    |      quarantine-days = 7
+    |      quarantine-days = ${?ANALYTICS_RETENTION_QUARANTINE_DAYS}
+    |      silver-days = 30
+    |      silver-days = ${?ANALYTICS_RETENTION_SILVER_DAYS}
+    |      published-snapshot-days = 30
+    |      published-snapshot-days = ${?ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS}
+    |      deletion-marker-days = 31
+    |      deletion-marker-days = ${?ANALYTICS_RETENTION_DELETION_MARKER_DAYS}
+    |      delta-vacuum-safety-days = 7
+    |      delta-vacuum-safety-days = ${?ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY_DAYS}
+    |      delta-log-retention-days = 30
+    |      delta-log-retention-days = ${?ANALYTICS_RETENTION_DELTA_LOG_RETENTION_DAYS}
+    |    }
+    |    report-reservation-ttl-days = 90
+    |    report-reservation-ttl-days = ${?ANALYTICS_REPORT_RESERVATION_TTL_DAYS}
+    |    mongo-transaction-window-seconds = 120
+    |    mongo-transaction-window-seconds = ${?ANALYTICS_MONGO_TRANSACTION_WINDOW_SECONDS}
+    |    maximum-erasure-evidence-files = 100000
+    |    maximum-erasure-evidence-files = ${?ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES}
+    |    mongo-publisher-buffer-size = 256
+    |    mongo-publisher-buffer-size = ${?ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE}
+    |  }
     |}
     |""".stripMargin
 
@@ -78,7 +104,68 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(loaded.common.kafka.securityProtocol, "SASL_SSL")
     assertEquals(loaded.common.kafka.allowPlaintext, false)
     assertEquals(loaded.common.mongoDatabase, "hiring")
+    assertEquals(loaded.common.operational.reportReservationTtlDays, 90)
+    assertEquals(loaded.common.operational.mongoTransactionWindowSeconds, 120)
+    assertEquals(loaded.common.operational.maximumErasureEvidenceFiles, 100000)
+    assertEquals(loaded.common.operational.mongoPublisherBufferSize, 256)
     assert(!loaded.toString.contains(key))
+  }
+
+  test("operational retention and runtime bounds load environment overrides and reject non-positive values") {
+    val configured = AnalyticsRuntimeConfig
+      .operationalFromHocon(
+        hocon,
+        Map(
+          "ANALYTICS_RETENTION_BRONZE_DAYS" -> "14",
+          "ANALYTICS_RETENTION_QUARANTINE_DAYS" -> "12",
+          "ANALYTICS_RETENTION_SILVER_DAYS" -> "60",
+          "ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS" -> "15",
+          "ANALYTICS_RETENTION_DELETION_MARKER_DAYS" -> "20",
+          "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY_DAYS" -> "3",
+          "ANALYTICS_RETENTION_DELTA_LOG_RETENTION_DAYS" -> "10",
+          "ANALYTICS_REPORT_RESERVATION_TTL_DAYS" -> "45",
+          "ANALYTICS_MONGO_TRANSACTION_WINDOW_SECONDS" -> "30",
+          "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "8000",
+          "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "64"
+        )
+      )
+      .toOption
+      .getOrElse(fail("expected valid operational config"))
+    assertEquals(configured.retention.bronzeDays, 14)
+    assertEquals(configured.retention.quarantineDays, 12)
+    assertEquals(configured.retention.silverDays, 60)
+    assertEquals(configured.retention.publishedSnapshotDays, 15)
+    assertEquals(configured.retention.deletionMarkerDays, 20)
+    assertEquals(configured.retention.deltaVacuumSafetyDays, 3)
+    assertEquals(configured.retention.deltaVacuumSafetyCheckEnabled, false)
+    assertEquals(configured.retention.deltaLogRetentionDays, 10)
+    assertEquals(configured.reportReservationTtlDays, 45)
+    assertEquals(configured.mongoTransactionWindowSeconds, 30)
+    assertEquals(configured.maximumErasureEvidenceFiles, 8000)
+    assertEquals(configured.mongoPublisherBufferSize, 64)
+
+    val invalid = AnalyticsRuntimeConfig.operationalFromHocon(
+      hocon,
+      Map("ANALYTICS_RETENTION_BRONZE_DAYS" -> "0", "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "-1")
+    )
+    val message = invalid.swap.toOption.getOrElse(fail("expected rejected operational settings")).getMessage
+    assert(message.contains("retention.bronze-days must be greater than zero"))
+    assert(message.contains("mongo-publisher-buffer-size must be between one and"))
+
+    val evidenceOverflow = AnalyticsRuntimeConfig.operationalFromHocon(
+      hocon,
+      Map("ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> Int.MaxValue.toString)
+    )
+    assert(evidenceOverflow.isLeft)
+
+    val safeVacuum = AnalyticsRuntimeConfig
+      .operationalFromHocon(
+        hocon,
+        Map("ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY_DAYS" -> "7")
+      )
+      .toOption
+      .getOrElse(fail("expected valid Delta vacuum config"))
+    assertEquals(safeVacuum.retention.deltaVacuumSafetyCheckEnabled, true)
   }
 
   test("Kafka configuration allows plaintext only with an explicit opt-in") {

@@ -1,11 +1,10 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
-import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, KafkaConnection}
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
   AnalyticsReportOutput,
-  AnalyticsRetention,
   AnalyticsRunManifest,
   RangeFingerprint,
   SubjectPseudonymizer
@@ -51,12 +50,14 @@ final class HiringAnalyticsBatch[F[_]: Async](
     manifestStore: ManifestStore[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
     retirementStore: HmacKeyRetirementAuthorizationStore[F],
+    operational: AnalyticsOperationalSettings,
+    override protected val sparkExecution: SparkBlockingExecution[F],
     logger: Logger[F]
 ) extends LakehouseOperation[F]
     with AnalyticsErasureLakehouse[F] {
   override protected val async: Async[F] = Async[F]
   private val F = Async[F]
-  private val MaximumErasureEvidenceFiles = 100000
+  private val retention = operational.retention
   private def now: F[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
 
   private def persistManifest(
@@ -118,15 +119,29 @@ final class HiringAnalyticsBatch[F[_]: Async](
       else F.raiseError(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
     }
 
-  /** A new primary HMAC key cannot split contributor identity while unexpired Silver rows use an older key. */
   /** Raw Bronze and quarantine keep replay data, but their Delta logs must not index raw values. */
   private def configureRawTablePrivacy(spark: SparkSession): F[Unit] = lakehouse {
-    spark.conf.set("spark.databricks.delta.properties.defaults.dataSkippingNumIndexedCols", "0")
-    spark.conf.set(
-      "spark.databricks.delta.properties.defaults.logRetentionDuration",
-      s"interval ${AnalyticsRetention.DeltaLogRetentionDays} days"
+    val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafetyDays} days"
+    val desiredLogRetention = s"interval ${retention.deltaLogRetentionDays} days"
+    val rawPaths = Set(paths.bronze, paths.quarantine)
+    val tables = Vector(
+      paths.bronze,
+      paths.quarantine,
+      paths.silver,
+      paths.funnelGold,
+      paths.timeToHireGold,
+      paths.skillsGold
     )
-    Vector(paths.bronze, paths.quarantine).foreach { path =>
+    spark.conf.set(
+      "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
+      desiredVacuumRetention
+    )
+    spark.conf.set("spark.databricks.delta.properties.defaults.logRetentionDuration", desiredLogRetention)
+    spark.conf.set(
+      "spark.databricks.delta.retentionDurationCheck.enabled",
+      retention.deltaVacuumSafetyCheckEnabled.toString
+    )
+    tables.foreach { path =>
       if (DeltaTable.isDeltaTable(spark, path)) {
         val escaped = path.replace("`", "``")
         val properties = DeltaTable
@@ -135,15 +150,15 @@ final class HiringAnalyticsBatch[F[_]: Async](
           .select("properties")
           .head()
           .getAs[scala.collection.Map[String, String]]("properties")
-        val desiredLogRetention = s"interval ${AnalyticsRetention.DeltaLogRetentionDays} days"
-        if (
-          properties.get("delta.dataSkippingNumIndexedCols").forall(_ != "0") ||
-          properties.get("delta.logRetentionDuration").forall(_ != desiredLogRetention)
-        )
-          spark.sql(
-            s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES " +
-              s"('delta.dataSkippingNumIndexedCols' = '0', 'delta.logRetentionDuration' = '$desiredLogRetention')"
-          )
+        val desired = Map(
+          "delta.deletedFileRetentionDuration" -> desiredVacuumRetention,
+          "delta.logRetentionDuration" -> desiredLogRetention
+        ) ++ (if (rawPaths.contains(path)) Map("delta.dataSkippingNumIndexedCols" -> "0") else Map.empty)
+        val changes = desired.filter { case (key, value) => properties.get(key).forall(_ != value) }
+        if (changes.nonEmpty) {
+          val rendered = changes.map { case (key, value) => s"'$key' = '$value'" }.mkString(", ")
+          spark.sql(s"ALTER TABLE delta.`$escaped` SET TBLPROPERTIES ($rendered)")
+        }
       }
     }
   }
@@ -202,7 +217,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
     rebuildGoldFromStoredSilver(spark) *> extractReport(spark, asOf)
 
   private val erasureStage = new AnalyticsBatchErasureStage(
-    ErasureStagePorts(paths, stageExecution, configureRawTablePrivacy, MaximumErasureEvidenceFiles)
+    ErasureStagePorts(paths, stageExecution, configureRawTablePrivacy, operational.maximumErasureEvidenceFiles)
   )
 
   override def verifyMarkedSubjectsAbsent(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
@@ -230,12 +245,14 @@ final class HiringAnalyticsBatch[F[_]: Async](
   private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
     lakehouse(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
       case true =>
-        lakehouse(spark.read.format("delta").load(paths.silver)).flatMap(AnalyticsGoldStage.rebuild(paths, _))
-      case false => AnalyticsGoldStage.clear(spark, paths)
+        lakehouse(spark.read.format("delta").load(paths.silver)).flatMap(
+          AnalyticsGoldStage.rebuild(paths, _, sparkExecution)
+        )
+      case false => AnalyticsGoldStage.clear(spark, paths, sparkExecution)
     }
 
   private val ingestionStage = new AnalyticsBatchIngestionStage(
-    IngestionStagePorts(paths, pseudonymizer, stageExecution, manifestStore, deltaWriter, clock)
+    IngestionStagePorts(paths, pseudonymizer, stageExecution, manifestStore, deltaWriter, clock, retention)
   )
   private val silverStage = new AnalyticsBatchSilverStage(
     SilverStagePorts(
@@ -246,7 +263,8 @@ final class HiringAnalyticsBatch[F[_]: Async](
       deltaReader,
       new QuarantineId {
         override def apply(): Column = quarantineId
-      }
+      },
+      retention
     )
   )
 
@@ -309,7 +327,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
           case false => F.pure(count)
           case true  =>
             val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
-            DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath).use { _ =>
+            DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, sparkExecution).use { _ =>
               lakehouse {
                 spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
                 spark.read
@@ -347,18 +365,18 @@ final class HiringAnalyticsBatch[F[_]: Async](
     else
       for {
         allSilver <- readDeltaOrEmpty(spark, paths.silver, silverSchema)
-        _ <- AnalyticsGoldStage.rebuild(paths, allSilver)
+        _ <- AnalyticsGoldStage.rebuild(paths, allSilver, sparkExecution)
         report <- extractReport(spark, completedAt)
         _ <- reportPublisher.publish(
           reservation,
           report,
-          completedAt.plusSeconds(AnalyticsRetention.PublishedSnapshotDays.toLong * 86400L)
+          completedAt.plusSeconds(retention.publishedSnapshotDays.toLong * 86400L)
         )
         _ <- persistManifest(spark, manifest, "PUBLISHED", completedAt.toString)
       } yield AnalyticsRunOutcome.Published
 
   private def extractReport(spark: SparkSession, asOf: Instant): F[AnalyticsReportOutput] =
-    AnalyticsGoldStage.extract(spark, paths, asOf)
+    AnalyticsGoldStage.extract(spark, paths, asOf, sparkExecution)
 
   private def rangeFingerprint(manifest: AnalyticsRunManifest): String = {
     val canonical = manifest.offsetRanges
@@ -389,8 +407,8 @@ final class HiringAnalyticsBatch[F[_]: Async](
 
   private def addExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame =
     frame
-      .withColumn("ingestedAt", lit(Timestamp.from(now)))
-      .withColumn("expiresAt", lit(Timestamp.from(now.plusSeconds(days.toLong * 24L * 60L * 60L))))
+      .withColumn(Columns.IngestedAt, lit(Timestamp.from(now)))
+      .withColumn(Columns.ExpiresAt, lit(Timestamp.from(now.plus(java.time.Duration.ofDays(days.toLong)))))
 
   private def quarantineId: Column =
     when(
@@ -409,15 +427,20 @@ final class HiringAnalyticsBatch[F[_]: Async](
 }
 
 private[analytics] object DeltaPurgeRewrite {
-  def temporaryPath[F[_]: Async](spark: SparkSession, temporaryPath: String): Resource[F, Unit] =
+  def temporaryPath[F[_]: Async](
+      spark: SparkSession,
+      temporaryPath: String,
+      sparkExecution: SparkBlockingExecution[F] =
+        SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+  ): Resource[F, Unit] =
     Resource
       .make(
-        Async[F].blocking {
+        sparkExecution {
           val path = new org.apache.hadoop.fs.Path(temporaryPath)
           (path.getFileSystem(spark.sparkContext.hadoopConfiguration), path)
         }
       ) { case (fileSystem, path) =>
-        Async[F].blocking {
+        sparkExecution {
           val removed = fileSystem.delete(path, true)
           if (!removed && fileSystem.exists(path))
             throw new java.io.IOException("temporary purge rewrite path remains")

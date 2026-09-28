@@ -32,12 +32,15 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     kafka: KafkaConnection,
     topic: String,
     writerSettings: LocalHmacKeyWriterExclusion.Settings,
+    operational: AnalyticsOperationalSettings,
+    streams: MongoPublisherStream,
     clock: Clock[F],
-    mutex: AnalyticsLakehouseLock[F]
+    mutex: AnalyticsLakehouseLock[F],
+    override protected val sparkExecution: SparkBlockingExecution[F]
 ) extends LakehouseOperation[F] {
   override protected val async: Async[F] = Async[F]
-  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database)
-  private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database)
+  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database, streams)
+  private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database, streams)
   private val kafkaVolumeName = writerSettings.volumeName.stripSuffix("_hmac-rotation-analytics") +
     "_hmac-rotation-kafka"
 
@@ -237,8 +240,16 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
         AnalyticsError.InvalidConfiguration("Kafka retention has not passed the captured retirement barrier")
       )
       now <- clock.realTimeInstant
-      dataDeadline = preparation.capturedAt.plusSeconds(7L * 86400L)
-      finalDeadline = preparation.capturedAt.plusSeconds(30L * 86400L)
+      dataDeadline = preparation.capturedAt.plus(
+        java.time.Duration.ofDays(operational.retention.deltaVacuumSafetyDays.toLong)
+      )
+      logsDeadline = preparation.capturedAt.plus(
+        java.time.Duration.ofDays(operational.retention.deltaLogRetentionDays.toLong)
+      )
+      reportsDeadline = preparation.capturedAt.plus(
+        java.time.Duration.ofDays(operational.retention.publishedSnapshotDays.toLong)
+      )
+      finalDeadline = List(dataDeadline, logsDeadline, reportsDeadline).max
       _ <- Async[F].raiseWhen(now.isBefore(finalDeadline))(
         AnalyticsError.InvalidConfiguration("HMAC key retirement physical-retention horizon has not elapsed")
       )
@@ -273,10 +284,20 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
           )
         ),
         AnalyticsKeyRetirement.RetentionHorizon(Some(dataDeadline), "persisted-retirement-preparation"),
-        AnalyticsKeyRetirement.RetentionHorizon(Some(finalDeadline), "persisted-retirement-preparation"),
-        AnalyticsKeyRetirement.RetentionHorizon(Some(finalDeadline), "persisted-retirement-preparation")
+        AnalyticsKeyRetirement.RetentionHorizon(Some(logsDeadline), "persisted-retirement-preparation"),
+        AnalyticsKeyRetirement.RetentionHorizon(Some(reportsDeadline), "persisted-retirement-preparation")
       )
-      audited <- AnalyticsKeyRetirement.auditUnderLock[F](spark, paths, database, keyId, retention, writers, now)
+      audited <- AnalyticsKeyRetirement.auditUnderLock[F](
+        spark,
+        paths,
+        database,
+        keyId,
+        retention,
+        writers,
+        now,
+        streams,
+        sparkExecution
+      )
       _ <- verifyCapturedPhysicalPaths(expectedPresent = false)
       summary <- Async[F].fromEither(
         audited.leftMap(blockers =>

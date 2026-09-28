@@ -29,11 +29,14 @@ final class ErasureFailurePolicySpec extends FunSuite {
 
   test("invalid state goes to repair immediately and unknown failures have fewer retries") {
     val invalid = ErasureFailurePolicy.decide(AnalyticsError.InvalidGoldSchema, 1)
+    val invalidSilver = ErasureFailurePolicy.decide(AnalyticsError.InvalidSilverSchema, 1)
     val unknownRetry = ErasureFailurePolicy.decide(new IllegalStateException("arbitrary detail"), 2)
     val unknownExhausted = ErasureFailurePolicy.decide(new IllegalStateException("arbitrary detail"), 3)
 
     assertEquals(invalid.category, ErasureFailureCategory.InvalidState)
     assertEquals(invalid.retryAfter, None)
+    assertEquals(invalidSilver.category, ErasureFailureCategory.InvalidState)
+    assertEquals(invalidSilver.retryAfter, None)
     assertEquals(unknownRetry.category, ErasureFailureCategory.Unknown)
     assertEquals(unknownRetry.retryAfter, Some(10.seconds))
     assertEquals(unknownExhausted.retryAfter, None)

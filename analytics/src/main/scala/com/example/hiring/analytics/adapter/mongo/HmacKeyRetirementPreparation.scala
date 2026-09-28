@@ -328,7 +328,10 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
     } yield observed
 }
 
-private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Async](database: MongoDatabase) {
+private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Async](
+    database: MongoDatabase,
+    streams: MongoPublisherStream
+) {
   private val collection = database
     .getCollection("analytics_hmac_key_retirement_preparations", classOf[Document])
     .withReadConcern(ReadConcern.MAJORITY)
@@ -349,7 +352,7 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
       _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(value.lineage, value.lineage))(
         AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
       )
-      _ <- MongoPublisherStream
+      _ <- streams
         .drain {
           collection.insertOne(
             new Document("_id", id(value.lakehouseId, value.keyId))
@@ -383,7 +386,7 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
 
   def read(root: String, keyId: String): F[Option[HmacKeyRetirementPreparation]] =
     Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
-      MongoPublisherStream
+      streams
         .optional[F, Document](collection.find(new Document("_id", id(lakehouseId, keyId))).first())
         .flatMap {
           case Some(document) =>

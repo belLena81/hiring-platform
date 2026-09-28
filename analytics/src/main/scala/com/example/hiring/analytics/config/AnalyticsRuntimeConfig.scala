@@ -30,7 +30,8 @@ final case class AnalyticsCommonSettings(
     sparkMaster: AnalyticsNonBlank,
     kafka: KafkaConnection,
     lakehousePaths: AnalyticsLakehousePaths,
-    pseudonymizer: SubjectPseudonymizer
+    pseudonymizer: SubjectPseudonymizer,
+    operational: AnalyticsOperationalSettings
 ) {
   override def toString: String = "AnalyticsCommonSettings([REDACTED])"
 }
@@ -74,13 +75,30 @@ object AnalyticsRuntimeConfig {
       startOffset: Option[Long],
       endOffsetExclusive: Option[Long]
   )
+  private final case class RawRetention(
+      bronzeDays: Int,
+      quarantineDays: Int,
+      silverDays: Int,
+      publishedSnapshotDays: Int,
+      deletionMarkerDays: Int,
+      deltaVacuumSafetyDays: Int,
+      deltaLogRetentionDays: Int
+  )
+  private final case class RawOperational(
+      retention: RawRetention,
+      reportReservationTtlDays: Int,
+      mongoTransactionWindowSeconds: Int,
+      maximumErasureEvidenceFiles: Int,
+      mongoPublisherBufferSize: Int
+  )
   private final case class RawAnalytics(
       mongo: RawMongo,
       spark: RawSpark,
       kafka: RawKafka,
       lakehouse: RawLakehouse,
       hmac: RawHmac,
-      batch: RawBatch
+      batch: RawBatch,
+      operational: RawOperational
   )
 
   @nowarn("cat=deprecation")
@@ -100,6 +118,8 @@ object AnalyticsRuntimeConfig {
   private given ConfigReader[RawKafka] = KebabCaseConfigReader.derive[RawKafka]
   private given ConfigReader[RawHmac] = KebabCaseConfigReader.derive[RawHmac]
   private given ConfigReader[RawBatch] = KebabCaseConfigReader.derive[RawBatch]
+  private given ConfigReader[RawRetention] = KebabCaseConfigReader.derive[RawRetention]
+  private given ConfigReader[RawOperational] = KebabCaseConfigReader.derive[RawOperational]
   private given ConfigReader[RawAnalytics] = KebabCaseConfigReader.derive[RawAnalytics]
 
   def loadBatch[F[_]: Async]: F[AnalyticsBatchSettings] =
@@ -107,6 +127,15 @@ object AnalyticsRuntimeConfig {
 
   def loadWorker[F[_]: Async]: F[AnalyticsWorkerSettings] =
     load[F].flatMap(raw => Async[F].fromEither(worker(raw)))
+
+  def loadOperational[F[_]: Async]: F[AnalyticsOperationalSettings] =
+    Async[F].blocking(ConfigSource.default.at("analytics.operational").load[RawOperational]).flatMap {
+      case Right(raw) => Async[F].fromEither(complete(operational(raw)))
+      case Left(_)    =>
+        Async[F].raiseError(
+          AnalyticsError.InvalidConfiguration("analytics operational configuration is missing or malformed")
+        )
+    }
 
   def batchFromHocon(
       value: String,
@@ -119,6 +148,28 @@ object AnalyticsRuntimeConfig {
       environment: Map[String, String] = Map.empty
   ): Either[AnalyticsError, AnalyticsWorkerSettings] =
     resolve(value, environment).flatMap(worker)
+
+  def operationalFromHocon(
+      value: String,
+      environment: Map[String, String] = Map.empty
+  ): Either[AnalyticsError, AnalyticsOperationalSettings] =
+    for {
+      config <- Either
+        .catchNonFatal(ConfigFactory.parseString(value, ConfigParseOptions.defaults().setAllowMissing(false)))
+        .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics HOCON configuration is malformed"))
+      resolved <- Either
+        .catchNonFatal(
+          config.withFallback(ConfigFactory.parseMap(environment.asJava)).resolve(ConfigResolveOptions.noSystem())
+        )
+        .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics configuration substitutions are invalid"))
+      raw <- ConfigSource
+        .fromConfig(resolved)
+        .at("analytics.operational")
+        .load[RawOperational]
+        .left
+        .map(_ => AnalyticsError.InvalidConfiguration("analytics operational configuration is missing or malformed"))
+      settings <- complete(operational(raw))
+    } yield settings
 
   private def load[F[_]: Async]: F[RawAnalytics] =
     Async[F].blocking(ConfigSource.default.at("analytics").load[RawAnalytics]).flatMap {
@@ -219,6 +270,7 @@ object AnalyticsRuntimeConfig {
       raw.hmac.previousKeyId,
       raw.hmac.previousSecretBase64
     )
+    val operationalSettings = operational(raw.operational)
 
     (
       mongoUri,
@@ -226,8 +278,36 @@ object AnalyticsRuntimeConfig {
       required(raw.spark.master, "analytics.spark.master"),
       kafka,
       paths,
-      pseudonymizer
+      pseudonymizer,
+      operationalSettings
     ).mapN(AnalyticsCommonSettings.apply)
+  }
+
+  private def operational(raw: RawOperational): ValidatedNec[String, AnalyticsOperationalSettings] = {
+    val retention = (
+      positive(raw.retention.bronzeDays, "analytics.operational.retention.bronze-days"),
+      positive(raw.retention.quarantineDays, "analytics.operational.retention.quarantine-days"),
+      positive(raw.retention.silverDays, "analytics.operational.retention.silver-days"),
+      positive(raw.retention.publishedSnapshotDays, "analytics.operational.retention.published-snapshot-days"),
+      positive(raw.retention.deletionMarkerDays, "analytics.operational.retention.deletion-marker-days"),
+      positive(raw.retention.deltaVacuumSafetyDays, "analytics.operational.retention.delta-vacuum-safety-days"),
+      positive(raw.retention.deltaLogRetentionDays, "analytics.operational.retention.delta-log-retention-days")
+    ).mapN(AnalyticsRetentionSettings.apply)
+    (
+      retention,
+      positive(raw.reportReservationTtlDays, "analytics.operational.report-reservation-ttl-days"),
+      positive(raw.mongoTransactionWindowSeconds, "analytics.operational.mongo-transaction-window-seconds"),
+      positiveAtMost(
+        raw.maximumErasureEvidenceFiles,
+        Int.MaxValue - 1,
+        "analytics.operational.maximum-erasure-evidence-files"
+      ),
+      positiveAtMost(
+        raw.mongoPublisherBufferSize,
+        AnalyticsOperationalSettings.MaximumMongoPublisherBufferSize,
+        "analytics.operational.mongo-publisher-buffer-size"
+      )
+    ).mapN(AnalyticsOperationalSettings.apply)
   }
 
   private def kafkaSecurity(raw: RawAnalytics): ValidatedNec[String, (String, Boolean)] = {
@@ -245,6 +325,12 @@ object AnalyticsRuntimeConfig {
 
   private def integer(value: Option[Int], field: String): ValidatedNec[String, Int] =
     value.toValidNec(s"$field is required")
+
+  private def positive(value: Int, field: String): ValidatedNec[String, Int] =
+    Either.cond(value > 0, value, s"$field must be greater than zero").toValidatedNec
+
+  private def positiveAtMost(value: Int, maximum: Int, field: String): ValidatedNec[String, Int] =
+    Either.cond(value > 0 && value <= maximum, value, s"$field must be between one and $maximum").toValidatedNec
 
   private def long(value: Option[Long], field: String): ValidatedNec[String, Long] =
     value.toValidNec(s"$field is required")

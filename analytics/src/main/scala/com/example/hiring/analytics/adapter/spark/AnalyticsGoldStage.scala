@@ -25,26 +25,26 @@ import java.time.Instant
 private[spark] object AnalyticsGoldStage {
   private val MaximumReportRows = 10000
   private val FunnelSchema = Vector(
-    "day" -> DataTypes.TimestampType,
-    "created" -> DataTypes.LongType,
-    "accepted" -> DataTypes.LongType,
-    "declined" -> DataTypes.LongType,
-    "interview" -> DataTypes.LongType,
-    "hired" -> DataTypes.LongType,
-    "rejected" -> DataTypes.LongType
+    Columns.Day -> DataTypes.TimestampType,
+    Columns.Created -> DataTypes.LongType,
+    Columns.Accepted -> DataTypes.LongType,
+    Columns.Declined -> DataTypes.LongType,
+    Columns.Interview -> DataTypes.LongType,
+    Columns.Hired -> DataTypes.LongType,
+    Columns.Rejected -> DataTypes.LongType
   )
   private val TimeToHireSchema = Vector(
-    "p50Hours" -> DataTypes.DoubleType,
-    "p75Hours" -> DataTypes.DoubleType,
-    "p90Hours" -> DataTypes.DoubleType,
-    "p95Hours" -> DataTypes.DoubleType,
-    "eligibleCount" -> DataTypes.LongType,
-    "excludedCount" -> DataTypes.LongType
+    Columns.P50Hours -> DataTypes.DoubleType,
+    Columns.P75Hours -> DataTypes.DoubleType,
+    Columns.P90Hours -> DataTypes.DoubleType,
+    Columns.P95Hours -> DataTypes.DoubleType,
+    Columns.EligibleCount -> DataTypes.LongType,
+    Columns.ExcludedCount -> DataTypes.LongType
   )
   private val SkillsSchema = Vector(
-    "day" -> DataTypes.TimestampType,
-    "skill" -> DataTypes.StringType,
-    "postings" -> DataTypes.LongType
+    Columns.Day -> DataTypes.TimestampType,
+    Columns.Skill -> DataTypes.StringType,
+    Columns.Postings -> DataTypes.LongType
   )
 
   private[spark] def validateOutputSchema(
@@ -55,41 +55,54 @@ private[spark] object AnalyticsGoldStage {
     Either.cond(fields == expected, (), AnalyticsError.InvalidGoldSchema)
   }
 
-  def rebuild[F[_]: Async](paths: AnalyticsLakehousePaths, silver: DataFrame): F[Unit] =
+  def rebuild[F[_]: Async](
+      paths: AnalyticsLakehousePaths,
+      silver: DataFrame,
+      sparkExecution: SparkBlockingExecution[F]
+  ): F[Unit] =
     for {
-      funnel <- lakehouse[F, DataFrame](HiringGoldTransforms.wideFunnelDay(silver))
-      _ <- write(funnel, paths.funnelGold)
-      timeToHire <- lakehouseIO[F, DataFrame](HiringGoldTransforms.timeToHireAction[F](silver))
-      _ <- write(timeToHire, paths.timeToHireGold)
-      skills <- lakehouse[F, DataFrame](HiringGoldTransforms.skillPostingActivity(silver))
-      _ <- write(skills, paths.skillsGold)
+      funnel <- lakehouse[F, DataFrame](HiringGoldTransforms.wideFunnelDay(silver), sparkExecution)
+      _ <- write(funnel, paths.funnelGold, sparkExecution)
+      timeToHire <- lakehouseIO[F, DataFrame](HiringGoldTransforms.timeToHireAction[F](silver, sparkExecution))
+      _ <- write(timeToHire, paths.timeToHireGold, sparkExecution)
+      skills <- lakehouse[F, DataFrame](HiringGoldTransforms.skillPostingActivity(silver), sparkExecution)
+      _ <- write(skills, paths.skillsGold, sparkExecution)
     } yield ()
 
-  def clear[F[_]: Async](spark: SparkSession, paths: AnalyticsLakehousePaths): F[Unit] = lakehouse[F, Unit] {
-    Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
-    }
-  }
+  def clear[F[_]: Async](
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths,
+      sparkExecution: SparkBlockingExecution[F]
+  ): F[Unit] = lakehouse[F, Unit](
+    {
+      Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
+        if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
+      }
+    },
+    sparkExecution
+  )
 
   def extract[F[_]: Async](
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
-      asOf: Instant
+      asOf: Instant,
+      sparkExecution: SparkBlockingExecution[F] =
+        SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
   ): F[AnalyticsReportOutput] =
     for {
-      funnelRows <- rows(spark, paths.funnelGold, FunnelSchema)
+      funnelRows <- rows(spark, paths.funnelGold, FunnelSchema, sparkExecution)
       funnel = funnelRows.map(row =>
         AnalyticsFunnelDayOutput(
-          row.getAs[Timestamp]("day").toInstant,
-          row.getAs[Long]("created"),
-          row.getAs[Long]("accepted"),
-          row.getAs[Long]("declined"),
-          row.getAs[Long]("interview"),
-          row.getAs[Long]("hired"),
-          row.getAs[Long]("rejected")
+          row.getAs[Timestamp](Columns.Day).toInstant,
+          row.getAs[Long](Columns.Created),
+          row.getAs[Long](Columns.Accepted),
+          row.getAs[Long](Columns.Declined),
+          row.getAs[Long](Columns.Interview),
+          row.getAs[Long](Columns.Hired),
+          row.getAs[Long](Columns.Rejected)
         )
       )
-      timeRows <- rows(spark, paths.timeToHireGold, TimeToHireSchema)
+      timeRows <- rows(spark, paths.timeToHireGold, TimeToHireSchema, sparkExecution)
       _ <-
         if (timeRows.size > 1)
           Async[F].raiseError[Unit](
@@ -98,20 +111,20 @@ private[spark] object AnalyticsGoldStage {
         else Async[F].unit
       timeToHire = timeRows.headOption.map(row =>
         AnalyticsTimeToHireOutput(
-          row.getAs[Double]("p50Hours"),
-          row.getAs[Double]("p75Hours"),
-          row.getAs[Double]("p90Hours"),
-          row.getAs[Double]("p95Hours"),
-          row.getAs[Long]("eligibleCount"),
-          row.getAs[Long]("excludedCount")
+          row.getAs[Double](Columns.P50Hours),
+          row.getAs[Double](Columns.P75Hours),
+          row.getAs[Double](Columns.P90Hours),
+          row.getAs[Double](Columns.P95Hours),
+          row.getAs[Long](Columns.EligibleCount),
+          row.getAs[Long](Columns.ExcludedCount)
         )
       )
-      skillRows <- rows(spark, paths.skillsGold, SkillsSchema)
+      skillRows <- rows(spark, paths.skillsGold, SkillsSchema, sparkExecution)
       skills = skillRows.map(row =>
         AnalyticsSkillPostingDayOutput(
-          row.getAs[Timestamp]("day").toInstant,
-          row.getAs[String]("skill"),
-          row.getAs[Long]("postings")
+          row.getAs[Timestamp](Columns.Day).toInstant,
+          row.getAs[String](Columns.Skill),
+          row.getAs[Long](Columns.Postings)
         )
       )
     } yield AnalyticsReportOutput(asOf, funnel, timeToHire, skills)
@@ -119,15 +132,19 @@ private[spark] object AnalyticsGoldStage {
   private def rows[F[_]: Async](
       spark: SparkSession,
       path: String,
-      expected: Vector[(String, DataType)]
+      expected: Vector[(String, DataType)],
+      sparkExecution: SparkBlockingExecution[F]
   ): F[Vector[Row]] =
-    lakehouseEither[F, Vector[Row]] {
-      if (!DeltaTable.isDeltaTable(spark, path)) Right(Vector.empty)
-      else {
-        val frame = spark.read.format("delta").load(path)
-        validateOutputSchema(frame.schema, expected).map(_ => frame.limit(MaximumReportRows + 1).collect().toVector)
-      }
-    }.flatMap { result =>
+    lakehouseEither[F, Vector[Row]](
+      {
+        if (!DeltaTable.isDeltaTable(spark, path)) Right(Vector.empty)
+        else {
+          val frame = spark.read.format("delta").load(path)
+          validateOutputSchema(frame.schema, expected).map(_ => frame.limit(MaximumReportRows + 1).collect().toVector)
+        }
+      },
+      sparkExecution
+    ).flatMap { result =>
       if (result.size > MaximumReportRows)
         Async[F].raiseError(
           AnalyticsError.LakehouseFailure(new IllegalStateException(s"report output exceeds $MaximumReportRows rows"))
@@ -136,16 +153,22 @@ private[spark] object AnalyticsGoldStage {
       else Async[F].pure(result)
     }
 
-  private def write[F[_]: Async](frame: DataFrame, path: String): F[Unit] =
-    lakehouse[F, Unit](frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path))
+  private def write[F[_]: Async](frame: DataFrame, path: String, sparkExecution: SparkBlockingExecution[F]): F[Unit] =
+    lakehouse[F, Unit](
+      frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path),
+      sparkExecution
+    )
 
-  private def lakehouse[F[_]: Async, A](work: => A): F[A] =
-    adapt(Async[F].blocking(work))
+  private def lakehouse[F[_]: Async, A](work: => A, sparkExecution: SparkBlockingExecution[F]): F[A] =
+    adapt(sparkExecution(work))
 
   private def lakehouseIO[F[_]: Async, A](work: F[A]): F[A] = adapt(work)
 
-  private def lakehouseEither[F[_]: Async, A](work: => Either[AnalyticsError, A]): F[A] =
-    lakehouse[F, Either[AnalyticsError, A]](work).flatMap(Async[F].fromEither)
+  private def lakehouseEither[F[_]: Async, A](
+      work: => Either[AnalyticsError, A],
+      sparkExecution: SparkBlockingExecution[F]
+  ): F[A] =
+    lakehouse[F, Either[AnalyticsError, A]](work, sparkExecution).flatMap(Async[F].fromEither)
 
   private def adapt[F[_]: Async, A](work: F[A]): F[A] = work.handleErrorWith {
     case error: AnalyticsError              => Async[F].raiseError(error)

@@ -32,7 +32,11 @@ final class MongoAnalyticsLakehouseLockSpec extends FunSuite {
     }
     val client = MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1")
     try {
-      val lock = new MongoAnalyticsLakehouseLock(client.getDatabase("analytics_lock_laziness"), clock)
+      val lock = new MongoAnalyticsLakehouseLock(
+        client.getDatabase("analytics_lock_laziness"),
+        clock,
+        AnalyticsTestOperationalConfig.streams
+      )
       val resource = lock.resource("file:///tmp/analytics-lock-laziness")
       assert(resource != null)
       assertEquals(reads.get(), 0)

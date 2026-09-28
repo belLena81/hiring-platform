@@ -17,7 +17,6 @@ import cats.syntax.all.*
 import com.mongodb.reactivestreams.client.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
 import fs2.Stream
-import com.example.hiring.analytics.adapter.mongo.MongoCursorStream
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.bson.Document
@@ -29,54 +28,60 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Reads pending account-erasure requests before an analytics run can mutate Delta data. */
-final class MongoActiveDeletionMarkerSource[F[_]: Async: Clock](
+private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Clock](
     database: MongoDatabase,
     pseudonymizer: SubjectPseudonymizer,
+    streams: MongoPublisherStream,
+    sparkExecution: SparkBlockingExecution[F] =
+      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic),
     private[analytics] val maximumPendingMarkers: Int = MongoActiveDeletionMarkerSource.MaximumPendingMarkers
 ) extends ActiveDeletionMarkerSource[F] {
   private val requestCollection = com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.ErasureRequests
 
   private def activeRequests(now: Instant): Stream[F, Document] =
-    MongoCursorStream[F, Document](
-      database
-        .getCollection(requestCollection, classOf[Document])
-        .find(
-          Filters.or(
-            Filters.in(
-              AnalyticsCollections.Fields.State,
-              ErasureRequestState.Pending.persistedName,
-              ErasureRequestState.Processing.persistedName
-            ),
-            Filters.and(
-              Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
-              Filters.or(
-                Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
-                Filters.expr(
-                  new Document(
-                    "$ne",
-                    List(
-                      new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
-                      "date"
-                    ).asJava
+    streams
+      .stream[F, Document](
+        database
+          .getCollection(requestCollection, classOf[Document])
+          .find(
+            Filters.or(
+              Filters.in(
+                AnalyticsCollections.Fields.State,
+                ErasureRequestState.Pending.persistedName,
+                ErasureRequestState.Processing.persistedName
+              ),
+              Filters.and(
+                Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
+                Filters.or(
+                  Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
+                  Filters.expr(
+                    new Document(
+                      "$ne",
+                      List(
+                        new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
+                        "date"
+                      ).asJava
+                    )
                   )
                 )
               )
             )
           )
-        )
-        .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
-        .batchSize(256)
-    ).handleErrorWith {
-      case error: AnalyticsError => Stream.raiseError[F](error)
-      case cause                 => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
-    }
+          .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
+          // Mongo's server-cursor batch hint is separate from the FS2 demand buffer configured on streams.
+          .batchSize(256)
+      )
+      .handleErrorWith {
+        case error: AnalyticsError => Stream.raiseError[F](error)
+        case cause                 => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
+      }
 
   override def activeSubjectTokens(spark: SparkSession): F[DataFrame] =
     for {
       _ <- Async[F].raiseWhen(maximumPendingMarkers <= 0)(
         AnalyticsError.InvalidConfiguration("maximum pending marker count must be positive")
       )
-      collectionExists <- com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
+      collectionExists <- streams
         .optional(database.listCollections().filter(Filters.eq("name", requestCollection)).first())
         .map(_.isDefined)
         .adaptError {
@@ -97,21 +102,20 @@ final class MongoActiveDeletionMarkerSource[F[_]: Async: Clock](
         AnalyticsError.MarkerLimitExceeded(maximumPendingMarkers)
       )
       distinctTokens = tokens.flatten.distinct
-      frame <- Async[F]
-        .blocking(
-          spark.createDataFrame(
-            distinctTokens.map(token => Row(token.value)).asJava,
-            StructType(
-              Seq(
-                StructField(
-                  com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.Fields.SubjectToken,
-                  StringType,
-                  nullable = false
-                )
+      frame <- sparkExecution(
+        spark.createDataFrame(
+          distinctTokens.map(token => Row(token.value)).asJava,
+          StructType(
+            Seq(
+              StructField(
+                com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.Fields.SubjectToken,
+                StringType,
+                nullable = false
               )
             )
           )
         )
+      )
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)

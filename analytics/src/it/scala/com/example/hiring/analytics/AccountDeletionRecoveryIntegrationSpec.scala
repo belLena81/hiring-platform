@@ -284,8 +284,16 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       val test = resources.use { case (client, reactiveClient, spark, root) =>
         val database = client.getDatabase(databaseName)
         val reactiveDatabase = reactiveClient.getDatabase(databaseName)
-        val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDatabase)
-        val publisher = new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase)
+        val store = new MongoAnalyticsErasureWorkerStore[IO](
+          reactiveClient,
+          reactiveDatabase,
+          streams = AnalyticsTestOperationalConfig.streams
+        )
+        val publisher = new MongoAnalyticsReportPublisher[IO](
+          reactiveClient,
+          reactiveDatabase,
+          operational = AnalyticsTestOperationalConfig.operational
+        )
         for {
           claimedFixture <- IO.blocking(
             database

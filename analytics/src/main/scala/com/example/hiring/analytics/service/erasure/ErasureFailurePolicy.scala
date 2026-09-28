@@ -17,8 +17,8 @@ private[analytics] object ErasureFailurePolicy {
       case _: AnalyticsError.SourceReadFailure | _: AnalyticsError.LakehouseFailure |
           _: AnalyticsError.SparkStartupFailure =>
         ErasureFailureCategory.TransientSource
-      case AnalyticsError.MalformedMarker | AnalyticsError.InvalidGoldSchema | _: AnalyticsError.InvalidConfiguration |
-          AnalyticsError.PhysicalReclamationUnverified =>
+      case AnalyticsError.MalformedMarker | AnalyticsError.InvalidSilverSchema | AnalyticsError.InvalidGoldSchema |
+          _: AnalyticsError.InvalidConfiguration | AnalyticsError.PhysicalReclamationUnverified =>
         ErasureFailureCategory.InvalidState
       case _ => ErasureFailureCategory.Unknown
     }

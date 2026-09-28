@@ -16,23 +16,22 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import munit.FunSuite
 import cats.effect.IO
 import org.apache.spark.sql.{Row, SparkSession}
-import org.apache.spark.sql.types.{DataTypes, StructType}
+import org.apache.spark.sql.types.{ArrayType, DataTypes, StringType, StructField, StructType}
 import cats.effect.unsafe.implicits.global
 
 import java.sql.Timestamp
 import java.nio.file.Files
 import java.time.Instant
 import scala.concurrent.duration.*
-import scala.reflect.runtime.universe.TypeTag
 
-class HiringAnalyticsTypedTransformsSpec extends FunSuite {
+class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 5.minutes
+  private val sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
 
-  private given TypeTag[SilverHiringEvent] = SparkProductTypeTag[SilverHiringEvent]
   private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
     .builder()
     .master("local[2]")
-    .appName("HiringAnalyticsTypedTransformsSpec")
+    .appName("HiringAnalyticsSchemaContractsSpec")
     .config("spark.ui.enabled", "false")
     .config("spark.sql.shuffle.partitions", "2")
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -42,78 +41,87 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
   override def afterAll(): Unit =
     if (!spark.sparkContext.isStopped) spark.stop()
 
-  test("Silver and Gold Dataset boundaries retain persisted columns and aggregate metrics") {
-    import spark.implicits.*
+  private val SilverSchema = StructType(
+    Seq(
+      StructField("eventId", StringType, nullable = true),
+      StructField("eventType", StringType, nullable = true),
+      StructField("occurredAt", DataTypes.TimestampType, nullable = true),
+      StructField("aggregateType", StringType, nullable = true),
+      StructField("aggregateId", StringType, nullable = true),
+      StructField("applicationId", StringType, nullable = true),
+      StructField("jobId", StringType, nullable = true),
+      StructField("newStatus", StringType, nullable = true),
+      StructField("jobSkills", ArrayType(StringType), nullable = true),
+      StructField("subjectToken", StringType, nullable = true),
+      StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = true),
+      StructField("eventFingerprint", StringType, nullable = true)
+    )
+  )
 
+  private def silverEvents(): org.apache.spark.sql.DataFrame = {
     val start = Instant.parse("2026-01-01T10:00:00Z")
-    val subjects = (1 to 10).map(i => s"token-$i")
-    val events = subjects.zipWithIndex.flatMap { case (token, index) =>
+    val rows = (1 to 10).toVector.flatMap { index =>
       val suffix = index.toString
-      Seq(
-        SilverHiringEvent(
-          Some(s"created-$suffix"),
-          Some(AnalyticsEventType.ApplicationCreated.wire),
-          Some(ts(start)),
-          Some("Application"),
-          Some(s"application-$suffix"),
-          Some(s"application-$suffix"),
-          Some(s"job-$suffix"),
-          None,
-          None,
-          Some(token),
+      val token = s"token-$suffix"
+      Vector(
+        Row(
+          s"created-$suffix",
+          AnalyticsEventType.ApplicationCreated.wire,
+          ts(start),
+          "Application",
+          s"application-$suffix",
+          s"application-$suffix",
+          s"job-$suffix",
+          null,
+          null,
+          token,
           Seq(token),
-          Some(s"fingerprint-created-$suffix")
+          s"fingerprint-created-$suffix"
         ),
-        SilverHiringEvent(
-          Some(s"hired-$suffix"),
-          Some(AnalyticsEventType.ApplicationStatusChanged.wire),
-          Some(ts(start.plusSeconds(3600))),
-          Some("Application"),
-          Some(s"application-$suffix"),
-          Some(s"application-$suffix"),
-          Some(s"job-$suffix"),
-          Some(AnalyticsApplicationStatus.Hired.wire),
-          None,
-          Some(token),
+        Row(
+          s"hired-$suffix",
+          AnalyticsEventType.ApplicationStatusChanged.wire,
+          ts(start.plusSeconds(3600)),
+          "Application",
+          s"application-$suffix",
+          s"application-$suffix",
+          s"job-$suffix",
+          AnalyticsApplicationStatus.Hired.wire,
+          null,
+          token,
           Seq(token),
-          Some(s"fingerprint-hired-$suffix")
+          s"fingerprint-hired-$suffix"
         ),
-        SilverHiringEvent(
-          Some(s"job-$suffix"),
-          Some(AnalyticsEventType.JobCreated.wire),
-          Some(ts(start)),
-          Some("Job"),
-          Some(s"job-$suffix"),
-          None,
-          Some(s"job-$suffix"),
-          None,
-          Some(Seq("Scala")),
-          Some(token),
+        Row(
+          s"job-$suffix",
+          AnalyticsEventType.JobCreated.wire,
+          ts(start),
+          "Job",
+          s"job-$suffix",
+          null,
+          s"job-$suffix",
+          null,
+          Seq("Scala"),
+          token,
           Seq(token),
-          Some(s"fingerprint-job-$suffix")
+          s"fingerprint-job-$suffix"
         )
       )
     }
-    val silver = events.toDS().toDF()
-    val persistedSilver = OperationalEventTransforms.typedSilver(silver)
+    spark.createDataFrame(spark.sparkContext.parallelize(rows), SilverSchema)
+  }
 
-    assertEquals(
-      persistedSilver.schema.fieldNames.toSeq,
-      Seq(
-        "eventId",
-        "eventType",
-        "occurredAt",
-        "aggregateType",
-        "aggregateId",
-        "applicationId",
-        "jobId",
-        "newStatus",
-        "jobSkills",
-        "subjectToken",
-        "subjectTokens",
-        "eventFingerprint"
+  test("Silver schema validation and Gold transforms preserve columns and aggregate metrics") {
+    import spark.implicits.*
+
+    val silver = silverEvents()
+    val persistedSilver = OperationalEventTransforms
+      .validateSilverSchema(silver)
+      .fold(
+        error => fail(error.toString),
+        identity
       )
-    )
+    assertEquals(persistedSilver.schema.fieldNames.toSeq, SilverSchema.fieldNames.toSeq)
     assertEquals(
       persistedSilver.schema.fields.map(_.dataType.simpleString).toSeq,
       Seq(
@@ -132,6 +140,16 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
       )
     )
     assertEquals(persistedSilver.count(), 30L)
+
+    val storedSilver = silver
+      .withColumn(Columns.IngestedAt, org.apache.spark.sql.functions.current_timestamp())
+      .withColumn(Columns.ExpiresAt, org.apache.spark.sql.functions.current_timestamp())
+    assert(OperationalEventTransforms.validateSilverSchema(storedSilver).isRight)
+    val unexpectedSuffix = silver.withColumn("unexpected", org.apache.spark.sql.functions.lit("value"))
+    assertEquals(
+      OperationalEventTransforms.validateSilverSchema(unexpectedSuffix).swap.toOption,
+      Some(AnalyticsError.InvalidSilverSchema)
+    )
 
     val funnel = HiringGoldTransforms.funnelActivity(silver)
     assertEquals(funnel.schema.fieldNames.toSeq, Seq("day", "eventType", "newStatus", "contributingApplications"))
@@ -162,7 +180,7 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
       Seq("scala" -> 10L)
     )
 
-    val timeToHire = HiringGoldTransforms.timeToHireAction[IO](silver).unsafeRunSync()
+    val timeToHire = HiringGoldTransforms.timeToHireAction[IO](silver, sparkExecution).unsafeRunSync()
     assertEquals(
       timeToHire.schema.fieldNames.toSeq,
       Seq("p50Hours", "p75Hours", "p90Hours", "p95Hours", "eligibleCount", "excludedCount")
@@ -173,6 +191,38 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
     )
     assertEquals(timeToHire.head().getAs[Long]("eligibleCount"), 10L)
     assertEquals(timeToHire.head().getAs[Long]("excludedCount"), 0L)
+  }
+
+  test("Silver schema validation rejects field order and type drift") {
+    val silver = silverEvents()
+    val reordered = silver.select(
+      "eventType",
+      "eventId",
+      "occurredAt",
+      "aggregateType",
+      "aggregateId",
+      "applicationId",
+      "jobId",
+      "newStatus",
+      "jobSkills",
+      "subjectToken",
+      "subjectTokens",
+      "eventFingerprint"
+    )
+    val wrongType = silver.withColumn("occurredAt", org.apache.spark.sql.functions.lit("not-a-timestamp"))
+
+    assertEquals(
+      OperationalEventTransforms.validateSilverSchema(reordered).swap.toOption,
+      Some(AnalyticsError.InvalidSilverSchema)
+    )
+    assertEquals(
+      OperationalEventTransforms.validateSilverSchema(wrongType).swap.toOption,
+      Some(AnalyticsError.InvalidSilverSchema)
+    )
+    assertEquals(
+      intercept[AnalyticsError](HiringGoldTransforms.funnelActivity(wrongType)),
+      AnalyticsError.InvalidSilverSchema
+    )
   }
 
   test("report extraction schema contract detects field and type drift") {
@@ -201,7 +251,7 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
     )
     frame.write.format("delta").save(paths.funnelGold)
 
-    val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH).attempt.unsafeRunSync()
+    val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH, sparkExecution).attempt.unsafeRunSync()
     assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
   }
 
@@ -218,7 +268,7 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
     )
     frame.write.format("delta").save(paths.timeToHireGold)
 
-    val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH).attempt.unsafeRunSync()
+    val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH, sparkExecution).attempt.unsafeRunSync()
     assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
   }
 

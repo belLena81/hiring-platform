@@ -33,6 +33,7 @@ import scala.jdk.CollectionConverters.*
 class AnalyticsTransformsSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 10.minutes
 
+  private val sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
   private def hmacKey(seed: String): Array[Byte] = seed.padTo(32, 'x').getBytes("UTF-8")
   private val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("analytics-test-secret"))
   private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
@@ -298,7 +299,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver).unsafeRunSync().count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver, sparkExecution).unsafeRunSync().count(), 0L)
   }
 
   test("ten eligible applications from one subject do not satisfy time-to-hire suppression") {
@@ -333,7 +334,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver).unsafeRunSync().count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver, sparkExecution).unsafeRunSync().count(), 0L)
   }
 
   test("skill posting activity normalizes only created job skills and applies k anonymity") {
@@ -377,8 +378,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("offset manifests reject impossible or duplicated partition ranges") {
-    assertEquals(AnalyticsRetention.BronzeDays, 7)
-    assertEquals(AnalyticsRetention.SilverDays, 30)
+    assertEquals(AnalyticsTestOperationalConfig.operational.retention.bronzeDays, 7)
+    assertEquals(AnalyticsTestOperationalConfig.operational.retention.silverDays, 30)
     assert(PartitionOffsetRange.from("topic", 0, 5L, 4L).isInvalid)
     assert(
       AnalyticsRunManifest
@@ -1108,6 +1109,9 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("lakehouse operation boundary preserves typed errors and adapts thrown failures") {
     class Boundary extends LakehouseOperation[IO] {
       override protected val async: cats.effect.Async[IO] = cats.effect.Async[IO]
+      override protected val sparkExecution =
+        com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
       def run[A](work: => A): IO[A] = lakehouse(work)
       def runIO[A](work: IO[A]): IO[A] = lakehouseIO(work)
       def runEither[A](work: => Either[AnalyticsError, A]): IO[A] = lakehouseEither(work)

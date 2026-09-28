@@ -57,7 +57,8 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       kafka: KafkaConnection,
       topic: String,
       keyId: String,
-      docker: LocalHmacKeyWriterExclusion.Settings
+      docker: LocalHmacKeyWriterExclusion.Settings,
+      operational: AnalyticsOperationalSettings
   )
 
   private given ConfigReader[RawMongo] = ConfigReader.forProduct2("uri", "database")(RawMongo.apply)
@@ -94,7 +95,10 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
   private def required(name: String, value: Option[String]): Either[AnalyticsError, String] =
     value.filter(_.trim.nonEmpty).toRight(AnalyticsError.InvalidConfiguration(s"$name is required"))
 
-  private def decode(raw: RawSettings): Either[AnalyticsError, Settings] =
+  private def decode(
+      raw: RawSettings,
+      operational: AnalyticsOperationalSettings
+  ): Either[AnalyticsError, Settings] =
     for {
       mongoUri <- required("retirement.mongo.uri", raw.mongo.uri)
       database <- required("retirement.mongo.database", raw.mongo.database)
@@ -134,14 +138,16 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       connection,
       topic,
       keyId,
-      LocalHmacKeyWriterExclusion.Settings(volume, oldImage, oldImageId, oldUid, newImage, newImageId, newUid)
+      LocalHmacKeyWriterExclusion.Settings(volume, oldImage, oldImageId, oldUid, newImage, newImageId, newUid),
+      operational
     )
 
   private def program(action: String): IO[Unit] =
     IO.blocking(ConfigSource.default.at("analytics.key-retirement-authorization").load[RawSettings])
       .flatMap {
-        case Right(raw) => IO.fromEither(decode(raw))
-        case Left(_)    =>
+        case Right(raw) =>
+          AnalyticsRuntimeConfig.loadOperational[IO].flatMap(value => IO.fromEither(decode(raw, value)))
+        case Left(_) =>
           IO.raiseError(
             AnalyticsError.InvalidConfiguration("key-retirement authorization HOCON is missing or malformed")
           )
@@ -154,9 +160,10 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
             appName = "hiring-hmac-key-retirement",
             sparkUiEnabled = Some(false)
           )
-          .use { case (spark, mongo) =>
+          .use { case (spark, mongo, sparkExecution) =>
             val database = mongo.getDatabase(settings.database)
             val clock = Clock[IO]
+            val streams = new MongoPublisherStream(settings.operational)
             val coordinator = new HmacKeyRetirementCoordinator[IO](
               spark,
               settings.paths,
@@ -164,8 +171,11 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
               settings.kafka,
               settings.topic,
               settings.docker,
+              settings.operational,
+              streams,
               clock,
-              new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, clock)
+              new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, clock, streams),
+              sparkExecution
             )
             action match {
               case "prepare"   => coordinator.prepare(settings.keyId).void

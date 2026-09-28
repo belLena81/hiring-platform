@@ -150,7 +150,11 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("transactionalIds", java.util.List.of("hiring-publisher-test"))
             .append("requestedAt", Date.from(requestedAt))
         )
-      val store = new MongoAnalyticsErasureWorkerStore[IO](reactive(client), reactive(client).getDatabase(databaseName))
+      val store = new MongoAnalyticsErasureWorkerStore[IO](
+        reactive(client),
+        reactive(client).getDatabase(databaseName),
+        streams = AnalyticsTestOperationalConfig.streams
+      )
       val barrier = KafkaRetentionBarrier(
         "hiring.operational-events",
         Vector(
@@ -193,7 +197,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         restartedDatabase = restartedClient.getDatabase(databaseName)
         restartedStore = new MongoAnalyticsErasureWorkerStore[IO](
           reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName)
+          reactive(restartedClient).getDatabase(databaseName),
+          streams = AnalyticsTestOperationalConfig.streams
         )
         claimResult <- Deferred[IO, Either[Throwable, Vector[ErasureClaim]]]
         claimFiber <- restartedStore
@@ -307,7 +312,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       assertEquals(
         new MongoAnalyticsErasureWorkerStore[IO](
           reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName)
+          reactive(restartedClient).getDatabase(databaseName),
+          streams = AnalyticsTestOperationalConfig.streams
         )
           .readBarrier(asAccountSubjectId(requestId))
           .attempt
@@ -398,9 +404,17 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         .getOrCreate()
 
       val firstStore =
-        new MongoAnalyticsErasureWorkerStore[IO](reactive(client), reactive(client).getDatabase(databaseName))
+        new MongoAnalyticsErasureWorkerStore[IO](
+          reactive(client),
+          reactive(client).getDatabase(databaseName),
+          streams = AnalyticsTestOperationalConfig.streams
+        )
       val firstPublisher =
-        new MongoAnalyticsReportPublisher[IO](reactive(client), reactive(client).getDatabase(databaseName))
+        new MongoAnalyticsReportPublisher[IO](
+          reactive(client),
+          reactive(client).getDatabase(databaseName),
+          operational = AnalyticsTestOperationalConfig.operational
+        )
       val firstWorker = AnalyticsErasureWorkerTestSupport.worker(
         spark,
         reactive(client).getDatabase(databaseName),
@@ -440,11 +454,13 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         restartedDatabase = restartedClient.getDatabase(databaseName)
         restartedStore = new MongoAnalyticsErasureWorkerStore[IO](
           reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName)
+          reactive(restartedClient).getDatabase(databaseName),
+          streams = AnalyticsTestOperationalConfig.streams
         )
         restartedPublisher = new MongoAnalyticsReportPublisher[IO](
           reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName)
+          reactive(restartedClient).getDatabase(databaseName),
+          operational = AnalyticsTestOperationalConfig.operational
         )
         _ <- IO.delay(retentionHasPassed.set(true))
         resumedClaim <- restartedStore.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
@@ -570,7 +586,11 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("subjectRefsVersion", 1)
         )
       val store =
-        new MongoAnalyticsErasureWorkerStore[IO](reactive(client), reactive(client).getDatabase(database.getName))
+        new MongoAnalyticsErasureWorkerStore[IO](
+          reactive(client),
+          reactive(client).getDatabase(database.getName),
+          streams = AnalyticsTestOperationalConfig.streams
+        )
       val failedFencer = new TransactionalProducerFencer[IO] {
         override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
           IO.raiseError(new IllegalStateException("simulated broker fencing failure"))
@@ -653,7 +673,11 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("requestedAt", Date.from(now))
       )
       val store =
-        new MongoAnalyticsErasureWorkerStore[IO](reactive(client), reactive(client).getDatabase(database.getName))
+        new MongoAnalyticsErasureWorkerStore[IO](
+          reactive(client),
+          reactive(client).getDatabase(database.getName),
+          streams = AnalyticsTestOperationalConfig.streams
+        )
       val claim = store.claim(now, now.plusSeconds(60L), 1).unsafeRunSync().head
       val saved = store
         .recordFailure(claim, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
@@ -731,11 +755,16 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("requestedAt", Date.from(now))
       )
       val staleStore =
-        new MongoAnalyticsErasureWorkerStore[IO](reactive(staleClient), reactive(staleClient).getDatabase(databaseName))
+        new MongoAnalyticsErasureWorkerStore[IO](
+          reactive(staleClient),
+          reactive(staleClient).getDatabase(databaseName),
+          streams = AnalyticsTestOperationalConfig.streams
+        )
       val currentStore =
         new MongoAnalyticsErasureWorkerStore[IO](
           reactive(currentClient),
-          reactive(currentClient).getDatabase(databaseName)
+          reactive(currentClient).getDatabase(databaseName),
+          streams = AnalyticsTestOperationalConfig.streams
         )
       val staleClaim = currentStore.claim(now, now.plusSeconds(1), 1).unsafeRunSync().head
       val result = for {
@@ -813,7 +842,11 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("lastPublishedRevision", 3L)
       )
       val store =
-        new MongoAnalyticsErasureWorkerStore[IO](reactive(client), reactive(client).getDatabase(database.getName))
+        new MongoAnalyticsErasureWorkerStore[IO](
+          reactive(client),
+          reactive(client).getDatabase(database.getName),
+          streams = AnalyticsTestOperationalConfig.streams
+        )
       val result = for {
         initial <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
         saved <- store.recordFailure(initial, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))

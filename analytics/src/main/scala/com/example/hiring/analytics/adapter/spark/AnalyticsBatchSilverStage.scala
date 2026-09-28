@@ -50,7 +50,7 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("INVALID_OPERATIONAL_EVENT_ENVELOPE")),
           bronze.startedAt,
-          AnalyticsRetention.QuarantineDays
+          retention.quarantineDays
         )
       )
       malformedCount <- blocking(malformed.count())
@@ -86,7 +86,7 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
             .withColumn("quarantineId", quarantineId())
             .withColumn("quarantineReason", lit("CONFLICTING_EVENT_ID")),
           bronze.startedAt,
-          AnalyticsRetention.QuarantineDays
+          retention.quarantineDays
         )
       )
       conflictingRecords <- blocking(conflictQuarantine.count())
@@ -123,7 +123,7 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
         deltaWriter.withExpiry(
           prepared.incomingSilver.join(prepared.conflicts, Seq("eventId"), "left_anti"),
           startedAt,
-          AnalyticsRetention.SilverDays
+          retention.silverDays
         )
       )
       _ <- deltaWriter.merge(silver, paths.silver, "target.eventId = source.eventId")

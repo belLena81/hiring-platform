@@ -57,8 +57,10 @@ private[analytics] object HmacKeyRetirementAuthorizationBson {
 }
 
 /** Immutable Mongo record, read with majority concern and inserted with majority+journal acknowledgement. */
-private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: Async](database: MongoDatabase)
-    extends HmacKeyRetirementAuthorizationStore[F] {
+private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: Async](
+    database: MongoDatabase,
+    streams: MongoPublisherStream
+) extends HmacKeyRetirementAuthorizationStore[F] {
   private val collection = database
     .getCollection("analytics_hmac_key_retirements", classOf[Document])
     .withReadConcern(ReadConcern.MAJORITY)
@@ -71,7 +73,7 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
 
   override def list(root: String): F[Vector[HmacKeyRetirementAuthorization]] =
     Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
-      MongoPublisherStream
+      streams
         .stream[F, Document](collection.find(new Document("lakehouseId", lakehouseId)))
         .compile
         .toVector
@@ -90,7 +92,7 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
       _ <- Async[F].raiseUnless(checked.lakehouseId == expectedLakehouse)(
         AnalyticsError.InvalidConfiguration("HMAC key retirement authorization targets another lakehouse")
       )
-      _ <- MongoPublisherStream
+      _ <- streams
         .drain {
           collection.insertOne(
             new Document("_id", id(checked))

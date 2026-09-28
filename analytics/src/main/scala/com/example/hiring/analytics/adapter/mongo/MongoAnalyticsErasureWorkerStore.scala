@@ -29,6 +29,7 @@ import scala.util.control.NonFatal
 final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
     client: MongoClient,
     database: MongoDatabase,
+    streams: MongoPublisherStream,
     collectionName: String = MongoAnalyticsErasureWorkerStore.RequestCollection
 ) extends ErasureQueue[F],
       ErasureProgress[F],
@@ -69,7 +70,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
     if (limit <= 0 || limit > MaximumClaimPageSize)
       Async[F].raiseError(AnalyticsError.InvalidConfiguration("repair inspection limit is out of bounds"))
     else
-      MongoPublisherStream
+      streams
         .stream(
           requests
             .find(Filters.eq(AnalyticsCollections.Fields.RepairRequired, true))
@@ -176,11 +177,11 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       val options = new FindOneAndUpdateOptions()
         .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt, AnalyticsCollections.Fields.Id))
         .returnDocument(ReturnDocument.AFTER)
-      MongoPublisherStream
+      streams
         .optional(requests.findOneAndUpdate(nonFinalizer, update, options))
         .flatMap {
           case some @ Some(_) => Async[F].pure(some)
-          case None           => MongoPublisherStream.optional(requests.findOneAndUpdate(finalizer, update, options))
+          case None           => streams.optional(requests.findOneAndUpdate(finalizer, update, options))
         }
     }.flatMap(document =>
       Async[F].fromEither(document.traverse(decodeClaim(_).toRight(AnalyticsError.MalformedMarker)))
@@ -192,7 +193,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       now: Instant,
       deliveryTimeout: scala.concurrent.duration.FiniteDuration
   ): F[Boolean] = mongo {
-    MongoPublisherStream
+    streams
       .optional(fences.find(Filters.eq(AnalyticsCollections.Fields.Id, subjectId.value)).first())
       .map {
         case None        => false
@@ -207,7 +208,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
 
   /** IDs are copied into the durable request in the account deletion transaction. */
   def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo {
-    MongoPublisherStream
+    streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first())
       .map(_.toRight(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing")))
       .map(_.flatMap { request =>
@@ -249,10 +250,10 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
               AnalyticsCollections.Fields.SubjectIds,
               java.util.Collections.singletonList(subjectId.value)
             )
-            MongoPublisherStream.drain(outbox.deleteMany(filter)).as(filter)
+            streams.drain(outbox.deleteMany(filter)).as(filter)
           }
         }.flatMap { filter =>
-          MongoPublisherStream.stream(outbox.find(filter).limit(1)).take(1).compile.count.flatMap {
+          streams.stream(outbox.find(filter).limit(1)).take(1).compile.count.flatMap {
             case count if count > 0L => Async[F].pure(false)
             case _                   => outboxValidation.as(true)
           }
@@ -275,7 +276,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   }
 
   def readBarrier(requestId: AccountSubjectId): F[Option[KafkaRetentionBarrier]] = mongo {
-    MongoPublisherStream
+    streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first())
       .map(
         _.traverse(document =>
@@ -340,8 +341,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       val prepared = operations
 
       mongo {
-        MongoSession.resource(client).use { session =>
-          MongoPublisherStream
+        MongoSession.resource(client, streams).use { session =>
+          streams
             .transaction(session) {
               matchedUpdate(
                 session,
@@ -350,7 +351,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
                 Updates.inc(AnalyticsCollections.Fields.DeltaEvidenceRevision, 1L)
               ).flatMap { ownership =>
                 if (!ownership || prepared.isEmpty) Async[F].pure(toErasureUpdate(ownership))
-                else MongoPublisherStream.drain(deltaEvidence.bulkWrite(session, prepared)).as(ErasureUpdate.Applied)
+                else streams.drain(deltaEvidence.bulkWrite(session, prepared)).as(ErasureUpdate.Applied)
               }
             }
         }
@@ -358,7 +359,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
     }
 
   def readDeltaFiles(requestId: AccountSubjectId): F[Vector[String]] =
-    MongoPublisherStream
+    streams
       .stream(
         deltaEvidence.find(Filters.eq(AnalyticsCollections.Fields.RequestId, requestId.value))
       )
@@ -377,7 +378,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       }
 
   def readAffectedRows(requestId: AccountSubjectId): F[Long] = mongo {
-    MongoPublisherStream
+    streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first())
       .flatMap(document =>
         Async[F].fromEither(
@@ -393,7 +394,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   }
 
   def readDeltaGeneration(requestId: AccountSubjectId): F[Option[Long]] = mongo {
-    MongoPublisherStream
+    streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first())
       .flatMap(document =>
         Async[F].fromEither(
@@ -408,7 +409,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   }
 
   def readDeltaPurgedAt(requestId: AccountSubjectId): F[Option[Instant]] = mongo {
-    MongoPublisherStream
+    streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first())
       .flatMap(document =>
         Async[F].fromEither(
@@ -483,7 +484,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       ),
       Filters.ne(AnalyticsCollections.Fields.Phase, ErasurePhase.ReadyToPublish.persistedName)
     )
-    MongoPublisherStream
+    streams
       .stream(requests.find(filter).limit(1))
       .take(1)
       .compile
@@ -545,7 +546,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       Async[F].raiseError(AnalyticsError.InvalidConfiguration("heartbeat expiry must follow current time"))
     else
       mongo {
-        MongoPublisherStream.drain(
+        streams.drain(
           heartbeats.updateOne(
             Filters.eq(AnalyticsCollections.Fields.Id, HeartbeatId),
             Updates.combine(
@@ -572,7 +573,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       AnalyticsCollections.OutboxSubjectFences,
       AnalyticsCollections.Users
     )
-    MongoPublisherStream.stream(database.listCollectionNames()).compile.toVector.flatMap { collectedNames =>
+    streams.stream(database.listCollectionNames()).compile.toVector.flatMap { collectedNames =>
       val missing = required.diff(collectedNames.toSet)
       val collectionValidation = Either.cond(
         missing.isEmpty,
@@ -587,7 +588,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
 
   private def migrationValidation: F[Unit] = {
     val ledger = database.getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
-    MongoPublisherStream
+    streams
       .optional(
         ledger
           .find(Filters.eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.OutboxSubjectReferences))
@@ -615,7 +616,7 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   }
 
   private def outboxValidation: F[Unit] =
-    MongoPublisherStream
+    streams
       .optional(outbox.find(unverifiedOutboxFilter).limit(1).first())
       .flatMap(row =>
         Either
@@ -690,14 +691,14 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
     else Filters.eq(AnalyticsCollections.Fields.ProgressKey, value)
 
   private def matchedUpdate(collection: MongoCollection[Document], filter: Bson, update: Bson): F[Boolean] =
-    MongoPublisherStream.one(collection.updateOne(filter, update)).map(_.getMatchedCount == 1L)
+    streams.one(collection.updateOne(filter, update)).map(_.getMatchedCount == 1L)
 
   private def matchedUpdate(
       session: ClientSession,
       collection: MongoCollection[Document],
       filter: Bson,
       update: Bson
-  ): F[Boolean] = MongoPublisherStream.one(collection.updateOne(session, filter, update)).map(_.getMatchedCount == 1L)
+  ): F[Boolean] = streams.one(collection.updateOne(session, filter, update)).map(_.getMatchedCount == 1L)
 
   private def mongo[A](work: => F[A]): F[A] =
     Async[F].defer(work).adaptError {

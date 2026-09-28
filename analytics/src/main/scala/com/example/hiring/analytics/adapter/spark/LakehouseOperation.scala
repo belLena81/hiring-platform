@@ -8,8 +8,9 @@ import scala.util.control.NonFatal
 /** Shared boundary for blocking Spark/Delta operations and their expected analytics failures. */
 private[analytics] trait LakehouseOperation[F[_]: Async] {
   protected def async: Async[F]
+  protected def sparkExecution: SparkBlockingExecution[F]
 
-  protected final def lakehouse[A](work: => A): F[A] = adaptLakehouseErrors(async.blocking(work))
+  protected final def lakehouse[A](work: => A): F[A] = adaptLakehouseErrors(sparkExecution(work))
 
   protected final def lakehouseIO[A](work: F[A]): F[A] = adaptLakehouseErrors(work)
 

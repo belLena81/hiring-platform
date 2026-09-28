@@ -21,7 +21,11 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Reads exactly the offsets named by a manifest; it never starts a streaming query. */
-final class KafkaOffsetRangeSource[F[_]: Async](connection: KafkaConnection) extends BoundedOperationalEventSource[F] {
+private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
+    connection: KafkaConnection,
+    sparkExecution: SparkBlockingExecution[F] =
+      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+) extends BoundedOperationalEventSource[F] {
   override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
     AnalyticsOffsetRanges.verifyCommittedKafkaRange(frame, manifest)
 
@@ -30,22 +34,20 @@ final class KafkaOffsetRangeSource[F[_]: Async](connection: KafkaConnection) ext
       _ <- Async[F].fromEither(KafkaConnection.validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply))
       _ <- AnalyticsOffsetRanges.requireNonEmpty(manifest)
       _ <- KafkaOffsetRangeSource.verifyAvailable(connection, manifest)
-      frame <- Async[F]
-        .blocking {
-          spark.read
-            .format("kafka")
-            .option("kafka.bootstrap.servers", connection.bootstrapServers)
-            .options(KafkaClientProperties.sparkOptions(connection))
-            .option("assign", KafkaOffsetRangeSource.assignJson(manifest.offsetRanges))
-            .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
-            .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
-            .option("failOnDataLoss", "true")
-            .load()
-        }
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+      frame <- sparkExecution {
+        spark.read
+          .format("kafka")
+          .option("kafka.bootstrap.servers", connection.bootstrapServers)
+          .options(KafkaClientProperties.sparkOptions(connection))
+          .option("assign", KafkaOffsetRangeSource.assignJson(manifest.offsetRanges))
+          .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
+          .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
+          .option("failOnDataLoss", "true")
+          .load()
+      }.adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+      }
     } yield frame
 }
 
@@ -145,31 +147,33 @@ object KafkaOffsetRangeSource {
 }
 
 /** Test and backfill adapter. Its frame must have Kafka's topic, partition, offset, timestamp and value columns. */
-final case class DataFrameBatchSource[F[_]: Async](records: DataFrame) extends BoundedOperationalEventSource[F] {
+private[analytics] final case class DataFrameBatchSource[F[_]: Async](
+    records: DataFrame,
+    sparkExecution: SparkBlockingExecution[F] =
+      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+) extends BoundedOperationalEventSource[F] {
   override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
     AnalyticsOffsetRanges.verify(frame, manifest)
 
   override def read(spark: SparkSession, manifest: AnalyticsRunManifest): F[DataFrame] =
     AnalyticsOffsetRanges.requireNonEmpty(manifest) *>
-      Async[F]
-        .blocking(records.schema)
+      sparkExecution(records.schema)
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
         }
         .flatMap(KafkaRecordColumns.validate) *>
-      Async[F]
-        .blocking {
-          val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
-            condition || (
-              col("topic") === lit(range.topic) &&
-                col("partition") === lit(range.partition) &&
-                col("offset") >= lit(range.startOffset) &&
-                col("offset") < lit(range.endOffsetExclusive)
-            )
-          }
-          records.filter(inManifest)
+      sparkExecution {
+        val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
+          condition || (
+            col("topic") === lit(range.topic) &&
+              col("partition") === lit(range.partition) &&
+              col("offset") >= lit(range.startOffset) &&
+              col("offset") < lit(range.endOffsetExclusive)
+          )
         }
+        records.filter(inManifest)
+      }
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)

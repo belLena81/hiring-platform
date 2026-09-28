@@ -13,7 +13,7 @@ import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.*
 
 import cats.effect.Async
-import org.apache.spark.sql.{Column, DataFrame, Dataset}
+import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{
   col,
   count,
@@ -32,47 +32,40 @@ import org.apache.spark.sql.functions.{
   unix_timestamp,
   when
 }
-import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
-
-import java.sql.Timestamp
-import scala.reflect.runtime.universe.TypeTag
-
-/** Typed contracts at the persisted Silver and derived Gold boundaries. Option fields preserve nullable Spark columns.
-  */
-private[spark] final case class SilverHiringEvent(
-    eventId: Option[String],
-    eventType: Option[String],
-    occurredAt: Option[Timestamp],
-    aggregateType: Option[String],
-    aggregateId: Option[String],
-    applicationId: Option[String],
-    jobId: Option[String],
-    newStatus: Option[String],
-    jobSkills: Option[Seq[String]],
-    subjectToken: Option[String],
-    subjectTokens: Seq[String],
-    eventFingerprint: Option[String]
-)
+import org.apache.spark.sql.types.{ArrayType, DataType, DataTypes, StringType, StructField, StructType}
 
 object OperationalEventTransforms {
-  private given TypeTag[SilverHiringEvent] = SparkProductTypeTag[SilverHiringEvent]
+  private val SilverSchema: Vector[(String, DataType)] = Vector(
+    Columns.EventId -> StringType,
+    Columns.EventType -> StringType,
+    Columns.OccurredAt -> DataTypes.TimestampType,
+    Columns.AggregateType -> StringType,
+    Columns.AggregateId -> StringType,
+    Columns.ApplicationId -> StringType,
+    Columns.JobId -> StringType,
+    Columns.NewStatus -> StringType,
+    Columns.JobSkills -> ArrayType(StringType),
+    Columns.SubjectToken -> StringType,
+    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false),
+    Columns.EventFingerprint -> StringType
+  )
 
   private val PayloadSchema: StructType = StructType(
     Seq(
-      StructField("applicationId", StringType, nullable = true),
-      StructField("candidateId", StringType, nullable = true),
-      StructField("jobId", StringType, nullable = true),
-      StructField("newStatus", StringType, nullable = true),
-      StructField("searchKind", StringType, nullable = true),
+      StructField(Columns.ApplicationId, StringType, nullable = true),
+      StructField(Columns.CandidateId, StringType, nullable = true),
+      StructField(Columns.JobId, StringType, nullable = true),
+      StructField(Columns.NewStatus, StringType, nullable = true),
+      StructField(Columns.SearchKind, StringType, nullable = true),
       StructField(
-        "results",
-        ArrayType(StructType(Seq(StructField("resultId", StringType, nullable = true)))),
+        Columns.Results,
+        ArrayType(StructType(Seq(StructField(Columns.ResultId, StringType, nullable = true)))),
         nullable = true
       ),
-      StructField("resultId", StringType, nullable = true),
+      StructField(Columns.ResultId, StringType, nullable = true),
       StructField(
-        "job",
-        StructType(Seq(StructField("skills", ArrayType(StringType), nullable = true))),
+        Columns.Job,
+        StructType(Seq(StructField(Columns.Skills, ArrayType(StringType), nullable = true))),
         nullable = true
       )
     )
@@ -80,13 +73,13 @@ object OperationalEventTransforms {
 
   val EnvelopeSchema: StructType = StructType(
     Seq(
-      StructField("eventId", StringType, nullable = true),
-      StructField("eventType", StringType, nullable = true),
-      StructField("occurredAt", StringType, nullable = true),
-      StructField("aggregateType", StringType, nullable = true),
-      StructField("aggregateId", StringType, nullable = true),
-      StructField("actorId", StringType, nullable = true),
-      StructField("payload", PayloadSchema, nullable = true)
+      StructField(Columns.EventId, StringType, nullable = true),
+      StructField(Columns.EventType, StringType, nullable = true),
+      StructField(Columns.OccurredAt, StringType, nullable = true),
+      StructField(Columns.AggregateType, StringType, nullable = true),
+      StructField(Columns.AggregateId, StringType, nullable = true),
+      StructField(Columns.ActorId, StringType, nullable = true),
+      StructField(Columns.Payload, PayloadSchema, nullable = true)
     )
   )
 
@@ -98,49 +91,49 @@ object OperationalEventTransforms {
     */
   def parseKafkaRecords(records: DataFrame): DataFrame = {
     val parsed = records
-      .withColumn("rawValue", col("value").cast(StringType))
-      .withColumn("envelope", from_json(col("rawValue"), EnvelopeSchema))
+      .withColumn(Columns.RawValue, col(Columns.Value).cast(StringType))
+      .withColumn(Columns.Envelope, from_json(col(Columns.RawValue), EnvelopeSchema))
     parsed.select(
-      col("topic"),
-      col("partition"),
-      col("offset"),
-      col("timestamp").as("kafkaTimestamp"),
-      col("rawValue"),
-      col("envelope.eventId"),
-      col("envelope.eventType"),
-      to_timestamp(col("envelope.occurredAt")).as("occurredAt"),
-      col("envelope.aggregateType"),
-      col("envelope.aggregateId"),
-      col("envelope.actorId"),
-      col("envelope.payload").as("payload")
+      col(Columns.Topic),
+      col(Columns.Partition),
+      col(Columns.Offset),
+      col(Columns.Timestamp).as(Columns.KafkaTimestamp),
+      col(Columns.RawValue),
+      col(Columns.EnvelopeEventId),
+      col(Columns.EnvelopeEventType),
+      to_timestamp(col(Columns.EnvelopeOccurredAt)).as(Columns.OccurredAt),
+      col(Columns.EnvelopeAggregateType),
+      col(Columns.EnvelopeAggregateId),
+      col(Columns.EnvelopeActorId),
+      col(Columns.EnvelopePayload).as(Columns.Payload)
     )
   }
 
   def bronze(records: DataFrame): DataFrame =
-    records.dropDuplicates("topic", "partition", "offset")
+    records.dropDuplicates(Columns.Topic, Columns.Partition, Columns.Offset)
 
   def validEvents(parsed: DataFrame): DataFrame =
     parsed.filter(
       requiredEnvelopeFields &&
-        col("eventType").isin(EventTypes*) &&
-        col("aggregateType").isin(AggregateTypes*)
+        col(Columns.EventType).isin(EventTypes*) &&
+        col(Columns.AggregateType).isin(AggregateTypes*)
     )
 
   def malformedEvents(parsed: DataFrame): DataFrame =
     parsed.filter(
       !(requiredEnvelopeFields &&
-        col("eventType").isin(EventTypes*) &&
-        col("aggregateType").isin(AggregateTypes*))
+        col(Columns.EventType).isin(EventTypes*) &&
+        col(Columns.AggregateType).isin(AggregateTypes*))
     )
 
   /** Event IDs are idempotency keys. Same bytes are duplicates; different bytes are conflicts. */
   def conflictingEventIds(valid: DataFrame): DataFrame =
     valid
-      .withColumn("eventFingerprint", sha2(col("rawValue"), 256))
-      .groupBy("eventId")
-      .agg(countDistinct(col("eventFingerprint")).as("distinctPayloads"))
-      .filter(col("distinctPayloads") > lit(1))
-      .select("eventId")
+      .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+      .groupBy(Columns.EventId)
+      .agg(countDistinct(col(Columns.EventFingerprint)).as(Columns.DistinctPayloads))
+      .filter(col(Columns.DistinctPayloads) > lit(1))
+      .select(Columns.EventId)
 
   /** Creates the privacy-safe Silver shape. Callers must supply active deletion marker tokens; marker filtering occurs
     * before this frame reaches a Delta merge.
@@ -152,104 +145,113 @@ object OperationalEventTransforms {
   ): Either[AnalyticsError, DataFrame] = {
     val conflicts = conflictingEventIds(valid)
     val privacySafe = AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(
-      AnalyticsSubjectPrivacy.withSubjectToken(valid.join(conflicts, Seq("eventId"), "left_anti"), pseudonymizer),
+      AnalyticsSubjectPrivacy.withSubjectToken(valid.join(conflicts, Seq(Columns.EventId), "left_anti"), pseudonymizer),
       activeMarkerTokens
     )
-    privacySafe.map { safe =>
+    privacySafe.flatMap { safe =>
       val selected = safe
-        .dropDuplicates("eventId")
-        .withColumn("applicationId", col("payload.applicationId"))
-        .withColumn("jobId", col("payload.jobId"))
-        .withColumn("newStatus", col("payload.newStatus"))
-        .withColumn("jobSkills", col("payload.job.skills"))
-        .withColumn("eventFingerprint", sha2(col("rawValue"), 256))
+        .dropDuplicates(Columns.EventId)
+        .withColumn(Columns.ApplicationId, col(Columns.PayloadApplicationId))
+        .withColumn(Columns.JobId, col(Columns.PayloadJobId))
+        .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
+        .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
+        .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
         // Silver is a derived, 30-day analytics dataset: it does not retain raw envelopes,
         // candidate identifiers, or actor identifiers.
         .select(
-          "eventId",
-          "eventType",
-          "occurredAt",
-          "aggregateType",
-          "aggregateId",
-          "applicationId",
-          "jobId",
-          "newStatus",
-          "jobSkills",
-          "subjectToken",
-          "subjectTokens",
-          "eventFingerprint"
+          Columns.EventId,
+          Columns.EventType,
+          Columns.OccurredAt,
+          Columns.AggregateType,
+          Columns.AggregateId,
+          Columns.ApplicationId,
+          Columns.JobId,
+          Columns.NewStatus,
+          Columns.JobSkills,
+          Columns.SubjectToken,
+          Columns.SubjectTokens,
+          Columns.EventFingerprint
         )
       validateSilverSchema(selected)
     }
   }
 
-  /** Decodes persisted Silver rows against the case-class schema, then returns the original DataFrame shape. This is a
-    * schema-drift check at the Silver boundary; Gold aggregations remain DataFrame-based.
+  /** Validates the persisted Silver column order and data types before returning the original DataFrame shape.
     */
-  private def validateSilverSchema(silver: DataFrame): DataFrame =
-    typedSilver(silver).toDF()
-
-  private[spark] def typedSilver(silver: DataFrame): Dataset[SilverHiringEvent] = {
-    import silver.sparkSession.implicits.*
-    silver.as[SilverHiringEvent]
+  private[analytics] def validateSilverSchema(silver: DataFrame): Either[AnalyticsError, DataFrame] = {
+    val fields = silver.schema.fields.toVector.map(field => field.name -> field.dataType.simpleString)
+    val expected = SilverSchema.map { case (name, dataType) => name -> dataType.simpleString }
+    val lifecycleSuffix = Vector(
+      Columns.IngestedAt -> DataTypes.TimestampType.simpleString,
+      Columns.ExpiresAt -> DataTypes.TimestampType.simpleString
+    )
+    val validShape = fields == expected || fields == expected ++ lifecycleSuffix
+    Either.cond(validShape, silver, AnalyticsError.InvalidSilverSchema)
   }
 
+  private[analytics] def requireSilverSchema(silver: DataFrame): DataFrame =
+    validateSilverSchema(silver).fold(error => throw error, identity)
+
   private def requiredEnvelopeFields: Column =
-    Seq("eventId", "eventType", "occurredAt", "aggregateType", "aggregateId", "actorId")
+    Seq(
+      Columns.EventId,
+      Columns.EventType,
+      Columns.OccurredAt,
+      Columns.AggregateType,
+      Columns.AggregateId,
+      Columns.ActorId
+    )
       .map(name => col(name).isNotNull)
       .reduce(_ && _) &&
-      Seq("eventId", "aggregateId")
+      Seq(Columns.EventId, Columns.AggregateId)
         .map(name => col(name).rlike("\\S"))
         .reduce(_ && _) &&
-      length(trim(col("actorId"))) > lit(0) &&
-      col("payload").isNotNull
+      length(trim(col(Columns.ActorId))) > lit(0) &&
+      col(Columns.Payload).isNotNull
 }
 
 object HiringGoldTransforms {
-  private given TypeTag[SilverHiringEvent] = SparkProductTypeTag[SilverHiringEvent]
-
   private val ApplicationCreated = AnalyticsEventType.ApplicationCreated.wire
   private val ApplicationStatusChanged = AnalyticsEventType.ApplicationStatusChanged.wire
   private val JobCreated = AnalyticsEventType.JobCreated.wire
   private val Hired = AnalyticsApplicationStatus.Hired.wire
 
-  private def typedSilver(silver: DataFrame): Dataset[SilverHiringEvent] =
-    OperationalEventTransforms.typedSilver(silver)
-
   private def applicationLifecycle(silver: DataFrame): DataFrame =
-    silver.filter(col("eventType").isin(ApplicationCreated, ApplicationStatusChanged))
+    OperationalEventTransforms
+      .requireSilverSchema(silver)
+      .filter(col(Columns.EventType).isin(ApplicationCreated, ApplicationStatusChanged))
 
   /** The CANDIDATE_HIRED event duplicates the Hired status transition and is deliberately excluded. */
   def funnelActivity(silver: DataFrame): DataFrame = {
-    val result = applicationLifecycle(typedSilver(silver).toDF())
-      .withColumn("day", date_trunc("day", col("occurredAt")))
-      .groupBy("day", "eventType", "newStatus")
+    val result = applicationLifecycle(silver)
+      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+      .groupBy(Columns.Day, Columns.EventType, Columns.NewStatus)
       .agg(
-        countDistinct(col("applicationId")).as("contributingApplications"),
-        countDistinct(col("subjectToken")).as("contributingSubjects")
+        countDistinct(col(Columns.ApplicationId)).as(Columns.ContributingApplications),
+        countDistinct(col(Columns.SubjectToken)).as(Columns.ContributingSubjects)
       )
-      .filter(col("contributingSubjects") >= lit(AnalyticsRetention.MinimumContributors))
-      .drop("contributingSubjects")
+      .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
+      .drop(Columns.ContributingSubjects)
     result
   }
 
   /** Only JOB_CREATED snapshots contribute; updates and close events never alter this metric. */
   def skillPostingActivity(silver: DataFrame): DataFrame = {
-    val result = typedSilver(silver)
-      .toDF()
-      .filter(col("eventType") === lit(JobCreated))
-      .withColumn("day", date_trunc("day", col("occurredAt")))
-      .withColumn("rawSkill", explode(col("jobSkills")))
-      .withColumn("skill", lower(trim(col("rawSkill"))))
-      .filter(length(col("skill")) > lit(0))
-      .dropDuplicates("eventId", "aggregateId", "skill")
-      .groupBy("day", "skill")
+    val result = OperationalEventTransforms
+      .requireSilverSchema(silver)
+      .filter(col(Columns.EventType) === lit(JobCreated))
+      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+      .withColumn(Columns.RawSkill, explode(col(Columns.JobSkills)))
+      .withColumn(Columns.Skill, lower(trim(col(Columns.RawSkill))))
+      .filter(length(col(Columns.Skill)) > lit(0))
+      .dropDuplicates(Columns.EventId, Columns.AggregateId, Columns.Skill)
+      .groupBy(Columns.Day, Columns.Skill)
       .agg(
-        countDistinct(col("eventId")).as("postings"),
-        countDistinct(col("subjectToken")).as("contributingSubjects")
+        countDistinct(col(Columns.EventId)).as(Columns.Postings),
+        countDistinct(col(Columns.SubjectToken)).as(Columns.ContributingSubjects)
       )
-      .filter(col("contributingSubjects") >= lit(AnalyticsRetention.MinimumContributors))
-      .drop("contributingSubjects")
+      .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
+      .drop(Columns.ContributingSubjects)
     result
   }
 
@@ -259,21 +261,21 @@ object HiringGoldTransforms {
   /** Wide daily shape consumed by the operational AnalyticsFunnelDay projection. */
   def wideFunnelDay(silver: DataFrame): DataFrame = {
     val statusCells = AnalyticsApplicationStatus.values.toSeq.map { status =>
-      status.wire.toLowerCase(java.util.Locale.ROOT) -> (col("newStatus") === lit(status.wire))
+      status.wire.toLowerCase(java.util.Locale.ROOT) -> (col(Columns.NewStatus) === lit(status.wire))
     }
-    val cells = ("created" -> (col("eventType") === lit(ApplicationCreated))) +: statusCells
+    val cells = (Columns.Created -> (col(Columns.EventType) === lit(ApplicationCreated))) +: statusCells
     val subjectCounts = cells.map { case (name, matches) =>
-      countDistinct(when(matches, col("subjectToken"))).as(s"${name}Subjects")
+      countDistinct(when(matches, col(Columns.SubjectToken))).as(s"${name}Subjects")
     }
     val applicationCounts = cells.map { case (name, matches) =>
-      countDistinct(when(matches, col("applicationId"))).as(name)
+      countDistinct(when(matches, col(Columns.ApplicationId))).as(name)
     }
     val counts = subjectCounts ++ applicationCounts
     val subjectColumns = cells.map { case (name, _) => s"${name}Subjects" }
 
-    val result = applicationLifecycle(typedSilver(silver).toDF())
-      .withColumn("day", date_trunc("day", col("occurredAt")))
-      .groupBy("day")
+    val result = applicationLifecycle(silver)
+      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+      .groupBy(Columns.Day)
       .agg(counts.head, counts.tail*)
       .filter(
         subjectColumns
@@ -285,38 +287,46 @@ object HiringGoldTransforms {
   }
 
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
-  def timeToHireAction[F[_]: Async](silver: DataFrame): F[DataFrame] = Async[F].blocking {
-    val lifecycle = applicationLifecycle(typedSilver(silver).toDF())
-      .groupBy("applicationId", "subjectToken")
+  def timeToHireAction[F[_]: Async](
+      silver: DataFrame,
+      sparkExecution: SparkBlockingExecution[F]
+  ): F[DataFrame] = sparkExecution {
+    val lifecycle = applicationLifecycle(silver)
+      .groupBy(Columns.ApplicationId, Columns.SubjectToken)
       .agg(
-        min(when(col("eventType") === lit(ApplicationCreated), col("occurredAt"))).as("createdAt"),
-        min(when(col("newStatus") === lit(Hired), col("occurredAt"))).as("hiredAt")
+        min(when(col(Columns.EventType) === lit(ApplicationCreated), col(Columns.OccurredAt))).as(Columns.CreatedAt),
+        min(when(col(Columns.NewStatus) === lit(Hired), col(Columns.OccurredAt))).as(Columns.HiredAt)
       )
     val eligible = lifecycle
-      .filter(col("createdAt").isNotNull && col("hiredAt").isNotNull)
-      .withColumn("hours", (unix_timestamp(col("hiredAt")) - unix_timestamp(col("createdAt"))) / lit(3600.0))
-      .filter(col("hours") >= lit(0.0))
-    val eligibleSubjects = eligible.select("subjectToken").distinct().count()
+      .filter(col(Columns.CreatedAt).isNotNull && col(Columns.HiredAt).isNotNull)
+      .withColumn(
+        Columns.Hours,
+        (unix_timestamp(col(Columns.HiredAt)) - unix_timestamp(col(Columns.CreatedAt))) / lit(3600.0)
+      )
+      .filter(col(Columns.Hours) >= lit(0.0))
+    val eligibleSubjects = eligible.select(Columns.SubjectToken).distinct().count()
     val excludedSubjects = lifecycle
-      .join(eligible.select("applicationId").distinct(), Seq("applicationId"), "left_anti")
-      .select("subjectToken")
+      .join(eligible.select(Columns.ApplicationId).distinct(), Seq(Columns.ApplicationId), "left_anti")
+      .select(Columns.SubjectToken)
       .distinct()
       .count()
     val result = eligible
       .agg(
-        percentile_approx(col("hours"), lit(0.5), lit(10000)).as("p50Hours"),
-        percentile_approx(col("hours"), lit(0.75), lit(10000)).as("p75Hours"),
-        percentile_approx(col("hours"), lit(0.9), lit(10000)).as("p90Hours"),
-        percentile_approx(col("hours"), lit(0.95), lit(10000)).as("p95Hours"),
-        count(lit(1)).as("eligibleApplications")
+        percentile_approx(col(Columns.Hours), lit(0.5), lit(10000)).as(Columns.P50Hours),
+        percentile_approx(col(Columns.Hours), lit(0.75), lit(10000)).as(Columns.P75Hours),
+        percentile_approx(col(Columns.Hours), lit(0.9), lit(10000)).as(Columns.P90Hours),
+        percentile_approx(col(Columns.Hours), lit(0.95), lit(10000)).as(Columns.P95Hours),
+        count(lit(1)).as(Columns.EligibleApplications)
       )
-      .withColumn("eligibleCount", lit(eligibleSubjects))
-      .withColumn("excludedCount", lit(excludedSubjects))
+      .withColumn(Columns.EligibleCount, lit(eligibleSubjects))
+      .withColumn(Columns.ExcludedCount, lit(excludedSubjects))
       .filter(
-        col("eligibleCount") >= lit(AnalyticsRetention.MinimumContributors) &&
-          (col("excludedCount") === lit(0) || col("excludedCount") >= lit(AnalyticsRetention.MinimumContributors))
+        col(Columns.EligibleCount) >= lit(AnalyticsRetention.MinimumContributors) &&
+          (col(Columns.ExcludedCount) === lit(0) || col(Columns.ExcludedCount) >= lit(
+            AnalyticsRetention.MinimumContributors
+          ))
       )
-      .drop("eligibleApplications")
+      .drop(Columns.EligibleApplications)
     result
   }
 }

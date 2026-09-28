@@ -86,7 +86,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
         }
       )
       .asInstanceOf[ClientSession]
-    val transaction = MongoPublisherStream.transaction(session)(IO.pure(1))(clock)
+    val transaction = AnalyticsTestOperationalConfig.streams.transaction(session)(IO.pure(1))(clock)
     assertEquals(reads.get(), 0)
     transaction.attempt.unsafeRunSync()
     assertEquals(reads.get(), 1)
@@ -108,7 +108,10 @@ final class MongoPublisherStreamSpec extends FunSuite {
     }
 
     val result =
-      MongoPublisherStream.transaction(session)(IO.pure(1))(cutoffClock(reads)).attempt.unsafeRunSync()
+      AnalyticsTestOperationalConfig.streams
+        .transaction(session)(IO.pure(1))(cutoffClock(reads))
+        .attempt
+        .unsafeRunSync()
 
     assert(result.isLeft)
     assertEquals(starts.get(), 1)
@@ -132,7 +135,10 @@ final class MongoPublisherStreamSpec extends FunSuite {
     }
 
     val result =
-      MongoPublisherStream.transaction(session)(IO.pure(1))(cutoffClock(reads)).attempt.unsafeRunSync()
+      AnalyticsTestOperationalConfig.streams
+        .transaction(session)(IO.pure(1))(cutoffClock(reads))
+        .attempt
+        .unsafeRunSync()
 
     assert(result.isLeft)
     assertEquals(commits.get(), 1)
@@ -153,7 +159,10 @@ final class MongoPublisherStreamSpec extends FunSuite {
     }
     val expected = AnalyticsError.InvalidConfiguration("expected analytics failure")
 
-    val result = MongoPublisherStream.transaction(session)(IO.raiseError[Int](expected)).attempt.unsafeRunSync()
+    val result = AnalyticsTestOperationalConfig.streams
+      .transaction(session)(IO.raiseError[Int](expected))
+      .attempt
+      .unsafeRunSync()
 
     assertEquals(result.swap.toOption, Some(expected))
     assertEquals(aborts.get(), 1)
@@ -197,7 +206,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
       }
     }
 
-    val stream = MongoPublisherStream.stream[IO, Int] {
+    val stream = AnalyticsTestOperationalConfig.streams.stream[IO, Int] {
       publisherEvaluations.incrementAndGet()
       publisher
     }

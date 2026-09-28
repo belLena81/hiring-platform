@@ -96,7 +96,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val requests = database.getCollection("analytics_erasure_requests")
     val source = new MongoActiveDeletionMarkerSource[IO](
       reactiveMongoClient.getDatabase(database.getName),
-      pseudonymizer
+      pseudonymizer,
+      streams = AnalyticsTestOperationalConfig.streams
     )
     val retainedSubject = UUID.randomUUID().toString
     requests.insertOne(
@@ -148,7 +149,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       )
     val source = new MongoActiveDeletionMarkerSource[IO](
       reactiveMongoClient.getDatabase(database.getName),
-      pseudonymizer
+      pseudonymizer,
+      streams = AnalyticsTestOperationalConfig.streams
     )
 
     val error = intercept[AnalyticsError](source.activeSubjectTokens(spark).unsafeRunSync())
@@ -164,7 +166,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       pseudonymizer,
       new MongoActiveDeletionMarkerSource[IO](
         reactiveMongoClient.getDatabase(missingCollectionDatabase.getName),
-        pseudonymizer
+        pseudonymizer,
+        streams = AnalyticsTestOperationalConfig.streams
       )
     )
     val missingManifest = manifest("missing-markers")
@@ -189,7 +192,11 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val malformedBatch = AnalyticsBatchTestSupport.newBatch(
       malformedPaths,
       pseudonymizer,
-      new MongoActiveDeletionMarkerSource[IO](reactiveMongoClient.getDatabase(malformedDatabase.getName), pseudonymizer)
+      new MongoActiveDeletionMarkerSource[IO](
+        reactiveMongoClient.getDatabase(malformedDatabase.getName),
+        pseudonymizer,
+        streams = AnalyticsTestOperationalConfig.streams
+      )
     )
 
     val malformedError = intercept[AnalyticsError](
@@ -214,7 +221,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val markers = new MongoActiveDeletionMarkerSource[IO](
       reactiveMongoClient.getDatabase(database.getName),
       pseudonymizer,
-      maximumPendingMarkers = 1
+      maximumPendingMarkers = 1,
+      streams = AnalyticsTestOperationalConfig.streams
     )
     val batch = AnalyticsBatchTestSupport.newBatch(paths, pseudonymizer, markers)
     val overflowManifest = manifest("overflow-markers")
@@ -246,7 +254,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
         pseudonymizer,
         new MongoActiveDeletionMarkerSource[IO](
           unavailableReactiveClient.getDatabase(s"unavailable_${UUID.randomUUID()}"),
-          pseudonymizer
+          pseudonymizer,
+          streams = AnalyticsTestOperationalConfig.streams
         )
       )
       val unavailableManifest = manifest("unavailable-markers")
@@ -275,7 +284,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val database = closedClient.getDatabase("closed_markers")
     closedClient.close()
 
-    val source = new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer)
+    val source =
+      new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer, streams = AnalyticsTestOperationalConfig.streams)
     val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeSubjectTokens(spark).unsafeRunSync())
     assert(failure.getCause.isInstanceOf[IllegalStateException], "assertion failed")
   }

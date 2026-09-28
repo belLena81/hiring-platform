@@ -50,6 +50,9 @@ private[analytics] object AnalyticsBatchTestSupport {
     ) = IO.unit
   }
 
+  private val sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+    .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+
   def newBatch(
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
@@ -67,6 +70,8 @@ private[analytics] object AnalyticsBatchTestSupport {
       manifests.getOrElse(new DeltaManifestStore[IO](paths)),
       lakehouseLock,
       retirementStore,
+      AnalyticsTestOperationalConfig.operational,
+      sparkExecution,
       Slf4jLogger.getLogger[IO]
     )
 
