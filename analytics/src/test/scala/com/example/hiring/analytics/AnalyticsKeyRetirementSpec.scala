@@ -31,7 +31,7 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
   )
 
   private val completeWriterInventory = WriterInventory(
-    observedAt = now.minusSeconds(1),
+    observedAt = Some(now.minusSeconds(1)),
     coverageReference = "operator-inventory-2026-10-25",
     managed = Vector(WriterRecord("analytics-batch", WriterDisposition.Stopped, "job-stop-record")),
     unmanaged = Vector(WriterRecord("external-delta-jobs", WriterDisposition.AccessRevoked, "acl-audit-record"))
@@ -67,7 +67,7 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
 
   test("an empty or stale writer inventory cannot authorize retirement") {
     val empty = completeWriterInventory.copy(
-      observedAt = now.plusSeconds(1),
+      observedAt = Some(now.plusSeconds(1)),
       coverageReference = "",
       managed = Vector.empty,
       unmanaged = Vector.empty
@@ -78,8 +78,10 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
   }
 
   test("writer evidence older than one hour blocks the audit") {
-    val stale = completeWriterInventory.copy(observedAt = now.minusSeconds(3601))
+    val stale = completeWriterInventory.copy(observedAt = Some(now.minusSeconds(3601)))
     assert(messages(validateWriters(stale, now)).exists(_.contains("fresh operator-attested coverage evidence")))
+    val missing = completeWriterInventory.copy(observedAt = None)
+    assert(messages(validateWriters(missing, now)).exists(_.contains("fresh operator-attested coverage evidence")))
   }
 
   test("erasure request states fail closed unless completion retention has elapsed") {

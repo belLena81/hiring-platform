@@ -254,7 +254,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
         AnalyticsError.InvalidConfiguration("HMAC key retirement physical-retention horizon has not elapsed")
       )
       writers = AnalyticsKeyRetirement.WriterInventory(
-        now,
+        Some(now),
         "docker-volume:" + writerSettings.volumeName,
         Vector(
           AnalyticsKeyRetirement.WriterRecord(

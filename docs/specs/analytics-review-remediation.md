@@ -99,6 +99,20 @@
 | AR-18 | Given a Mongo publisher transaction or analytics adapter failure, when the operation runs, then there is one effect error channel, transaction work returns `F[A]`, retries/abort behavior is preserved, and `AnalyticsError` is preserved before generic throwable mapping. | `MongoPublisherStreamSpec`, source checks for nested `F[Either]`, analytics compile/test. |
 | AR-19 | Given process-local serialization of a lakehouse root, when fibers contend or a waiting fiber is cancelled, then Cats Effect semaphore permits serialize entry and cancellation releases no unacquired permit and does not block a worker thread. | Same-root serialization and waiter-cancellation cases in `AnalyticsBatchResourceSpec`. |
 
+## Mongo POJO codec review point (2026-09-28)
+
+- Scope: replace hand-written BSON field decoding in the analytics Mongo adapters with the official reactive driver's `PojoCodecProvider`; keep the current Reactive Streams driver, FS2 publisher bridge, and Mongo operation semantics.
+- Contract: persistence DTOs are adapter-only. Stored field names/types and optional defaults remain unchanged. Report records use driver POJO views with `BsonValue` fields so validation preserves exact BSON type distinctions; unknown report fields are captured and re-emitted. Existing manual readers remain for heterogeneous erasure/marker documents where they enforce strict type/default/state validation that ordinary typed POJO fields can weaken. Atomic filters/updates and transaction/retry behavior remain in the existing store/publisher methods.
+- Non-goals: mongo4cats, main hiring persistence, persisted schema migration, and reducing lifecycle/business logic merely to hit a line-count target.
+
+| ID | Given / When / Then | Evidence |
+|---|---|---|
+| AR-21 | Given report control, run, and snapshot reads, when the adapter loads them, then the official POJO registry uses one persistence record model and removes the three custom `DocumentViewCodec` wrappers while retaining exact BSON-type and report-field validation. | POJO codec and record-mapper unit cases; Mongo publisher integration tests. |
+| AR-22 | Given report records with missing optional fields, BSON nulls, int32/int64 mismatches, and unknown fields, when decoded and re-encoded, then defaults, malformed-type rejection, and unknown-field preservation match the previous behavior. | Codec compatibility cases and report publisher integration coverage. |
+| AR-23 | Given the report POJO collection views, when publisher and worker operations execute, then query predicates, update documents, write ordering, transaction/retry behavior, and resource ownership remain unchanged. The FS2 bridge and strict manual readers for heterogeneous erasure/marker records remain in place. | Existing publisher bridge, report publisher, and erasure store suites. |
+
+- Status: in progress. Current tree has custom decoders across report, erasure, marker, and HMAC retirement adapters, plus three manually registered report view codecs. The broad helper replacement was narrowed after a driver-level probe showed default POJO numeric fields can widen BSON int32 and immutable creator DTOs did not capture extra fields; strict `BsonValue` report mapping preserves these existing contracts. The erasure adapter's lease/CAS and recovery code is outside the expected codec-only line reduction.
+
 ## Amendment checkpoint
 
 - Completed: ports and value types moved to inward packages; wildcard imports removed from domain/service/config; ArchUnit layer rule added; batch source extracted from the original god file; Mongo transaction uses `F[A]`; keyed process-local lock uses `cats.effect.std.Semaphore` with `Resource` permits.

@@ -215,7 +215,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           reports = AnalyticsKeyRetirement.RetentionHorizon(Some(now.minusSeconds(1)), "test-reports")
         ),
         AnalyticsKeyRetirement.WriterInventory(
-          observedAt = now.minusSeconds(1),
+          observedAt = Some(now.minusSeconds(1)),
           coverageReference = "test-operator-inventory",
           managed = Vector(
             AnalyticsKeyRetirement

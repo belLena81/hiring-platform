@@ -13,6 +13,7 @@ import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
 import io.github.iltotore.iron.constraint.string.Blank
 import _root_.pureconfig.*
+import pureconfig.error.UserValidationFailed
 import pureconfig.generic.derivation.{
   ConfigReaderDerivation,
   CoproductConfigReaderDerivation,
@@ -21,6 +22,7 @@ import pureconfig.generic.derivation.{
 import scala.annotation.nowarn
 import scala.deriving.Mirror
 import scala.jdk.CollectionConverters.*
+import java.time.Instant
 
 type AnalyticsNonBlank = String :| Not[Blank]
 
@@ -46,6 +48,46 @@ final case class AnalyticsWorkerSettings(
     fencerKafka: KafkaConnection
 ) {
   override def toString: String = "AnalyticsWorkerSettings([REDACTED])"
+}
+
+private[analytics] enum AnalyticsAuditWriterDisposition {
+  case Stopped, AccessRevoked, Active, Unknown
+}
+
+private[analytics] final case class AnalyticsAuditWriter(
+    identity: Option[AnalyticsNonBlank],
+    disposition: Option[AnalyticsAuditWriterDisposition],
+    evidenceReference: Option[AnalyticsNonBlank]
+)
+
+private[analytics] final case class AnalyticsAuditHorizon(
+    retainedUntil: Option[Instant],
+    evidenceReference: Option[AnalyticsNonBlank]
+)
+
+private[analytics] final case class AnalyticsAuditWriterInventory(
+    observedAt: Option[Instant],
+    coverageReference: Option[AnalyticsNonBlank],
+    managed: Vector[AnalyticsAuditWriter],
+    unmanaged: Vector[AnalyticsAuditWriter]
+)
+
+private[analytics] final case class AnalyticsKeyRetirementAuditSettings(
+    mongoUri: AnalyticsNonBlank,
+    mongoDatabase: AnalyticsNonBlank,
+    sparkMaster: AnalyticsNonBlank,
+    lakehousePaths: AnalyticsLakehousePaths,
+    operational: AnalyticsOperationalSettings,
+    retiringKeyId: AnalyticsNonBlank,
+    kafkaBarrierOffset: Option[Long],
+    kafkaEarliestAvailableOffset: Option[Long],
+    kafkaEvidenceReference: Option[AnalyticsNonBlank],
+    deltaData: AnalyticsAuditHorizon,
+    deltaLogs: AnalyticsAuditHorizon,
+    reports: AnalyticsAuditHorizon,
+    writers: AnalyticsAuditWriterInventory
+) {
+  override def toString: String = "AnalyticsKeyRetirementAuditSettings([REDACTED])"
 }
 
 /** Loads the runtime configuration once, validates it without effects, and only then starts Spark/Mongo resources. */
@@ -91,6 +133,34 @@ object AnalyticsRuntimeConfig {
       maximumErasureEvidenceFiles: Int,
       mongoPublisherBufferSize: Int
   )
+  private final case class RawAuditKafka(
+      barrierOffset: Option[Long],
+      earliestAvailableOffset: Option[Long],
+      evidenceReference: Option[AnalyticsNonBlank]
+  )
+  private final case class RawAuditHorizon(
+      retainedUntil: Option[Instant],
+      evidenceReference: Option[AnalyticsNonBlank]
+  )
+  private final case class RawAuditWriter(
+      identity: Option[AnalyticsNonBlank],
+      disposition: Option[AnalyticsAuditWriterDisposition],
+      evidenceReference: Option[AnalyticsNonBlank]
+  )
+  private final case class RawAuditWriters(
+      observedAt: Option[Instant],
+      coverageReference: Option[AnalyticsNonBlank],
+      managed: Vector[RawAuditWriter],
+      unmanaged: Vector[RawAuditWriter]
+  )
+  private final case class RawKeyRetirementAudit(
+      retiringKeyId: Option[AnalyticsNonBlank],
+      kafka: RawAuditKafka,
+      deltaData: RawAuditHorizon,
+      deltaLogs: RawAuditHorizon,
+      reports: RawAuditHorizon,
+      writers: RawAuditWriters
+  )
   private final case class RawAnalytics(
       mongo: RawMongo,
       spark: RawSpark,
@@ -98,7 +168,8 @@ object AnalyticsRuntimeConfig {
       lakehouse: RawLakehouse,
       hmac: RawHmac,
       batch: RawBatch,
-      operational: RawOperational
+      operational: RawOperational,
+      keyRetirementAudit: Option[RawKeyRetirementAudit]
   )
 
   @nowarn("cat=deprecation")
@@ -120,6 +191,23 @@ object AnalyticsRuntimeConfig {
   private given ConfigReader[RawBatch] = KebabCaseConfigReader.derive[RawBatch]
   private given ConfigReader[RawRetention] = KebabCaseConfigReader.derive[RawRetention]
   private given ConfigReader[RawOperational] = KebabCaseConfigReader.derive[RawOperational]
+  private given ConfigReader[Instant] = ConfigReader[String].emap { value =>
+    Either
+      .catchNonFatal(Instant.parse(value))
+      .leftMap(_ => UserValidationFailed("must be an ISO-8601 UTC timestamp"))
+  }
+  private given ConfigReader[AnalyticsAuditWriterDisposition] = ConfigReader[String].emap {
+    case "stopped"        => Right(AnalyticsAuditWriterDisposition.Stopped)
+    case "access-revoked" => Right(AnalyticsAuditWriterDisposition.AccessRevoked)
+    case "active"         => Right(AnalyticsAuditWriterDisposition.Active)
+    case "unknown"        => Right(AnalyticsAuditWriterDisposition.Unknown)
+    case _                => Left(UserValidationFailed("must be stopped, access-revoked, active, or unknown"))
+  }
+  private given ConfigReader[RawAuditKafka] = KebabCaseConfigReader.derive[RawAuditKafka]
+  private given ConfigReader[RawAuditHorizon] = KebabCaseConfigReader.derive[RawAuditHorizon]
+  private given ConfigReader[RawAuditWriter] = KebabCaseConfigReader.derive[RawAuditWriter]
+  private given ConfigReader[RawAuditWriters] = KebabCaseConfigReader.derive[RawAuditWriters]
+  private given ConfigReader[RawKeyRetirementAudit] = KebabCaseConfigReader.derive[RawKeyRetirementAudit]
   private given ConfigReader[RawAnalytics] = KebabCaseConfigReader.derive[RawAnalytics]
 
   def loadBatch[F[_]: Async]: F[AnalyticsBatchSettings] =
@@ -127,6 +215,9 @@ object AnalyticsRuntimeConfig {
 
   def loadWorker[F[_]: Async]: F[AnalyticsWorkerSettings] =
     load[F].flatMap(raw => Async[F].fromEither(worker(raw)))
+
+  def loadKeyRetirementAudit[F[_]: Async]: F[AnalyticsKeyRetirementAuditSettings] =
+    load[F].flatMap(raw => Async[F].fromEither(keyRetirementAudit(raw)))
 
   def loadOperational[F[_]: Async]: F[AnalyticsOperationalSettings] =
     Async[F].blocking(ConfigSource.default.at("analytics.operational").load[RawOperational]).flatMap {
@@ -148,6 +239,12 @@ object AnalyticsRuntimeConfig {
       environment: Map[String, String] = Map.empty
   ): Either[AnalyticsError, AnalyticsWorkerSettings] =
     resolve(value, environment).flatMap(worker)
+
+  private[analytics] def keyRetirementAuditFromHocon(
+      value: String,
+      environment: Map[String, String] = Map.empty
+  ): Either[AnalyticsError, AnalyticsKeyRetirementAuditSettings] =
+    resolve(value, environment).flatMap(keyRetirementAudit)
 
   def operationalFromHocon(
       value: String,
@@ -237,6 +334,65 @@ object AnalyticsRuntimeConfig {
             .map(AnalyticsWorkerSettings(settings, topic, _))
         }
     )
+
+  private def keyRetirementAudit(
+      raw: RawAnalytics
+  ): Either[AnalyticsError, AnalyticsKeyRetirementAuditSettings] = {
+    val audit = raw.keyRetirementAudit.toRight(
+      AnalyticsError.InvalidConfiguration("analytics key-retirement-audit configuration is missing or malformed")
+    )
+    for {
+      settings <- audit
+      mongoUri <- required(raw.mongo.uri, "analytics.mongo.uri")
+        .andThen { uri =>
+          Either
+            .catchNonFatal(new ConnectionString(uri))
+            .leftMap(_ => "analytics.mongo.uri is invalid")
+            .toValidatedNec
+            .as(uri)
+        }
+        .toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+      mongoDatabase <- required(raw.mongo.database, "analytics.mongo.database").toEither.leftMap(errors =>
+        AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; "))
+      )
+      sparkMaster <- required(raw.spark.master, "analytics.spark.master").toEither.leftMap(errors =>
+        AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; "))
+      )
+      root <- required(raw.lakehouse.root, "analytics.lakehouse.root").toEither.leftMap(errors =>
+        AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; "))
+      )
+      paths <- AnalyticsLakehousePaths
+        .from(root)
+        .toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+      retiringKeyId <- required(settings.retiringKeyId, "analytics.key-retirement-audit.retiring-key-id").toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+      operationalSettings <- complete(operational(raw.operational))
+    } yield AnalyticsKeyRetirementAuditSettings(
+      mongoUri,
+      mongoDatabase,
+      sparkMaster,
+      paths,
+      operationalSettings,
+      retiringKeyId,
+      settings.kafka.barrierOffset,
+      settings.kafka.earliestAvailableOffset,
+      settings.kafka.evidenceReference,
+      AnalyticsAuditHorizon(settings.deltaData.retainedUntil, settings.deltaData.evidenceReference),
+      AnalyticsAuditHorizon(settings.deltaLogs.retainedUntil, settings.deltaLogs.evidenceReference),
+      AnalyticsAuditHorizon(settings.reports.retainedUntil, settings.reports.evidenceReference),
+      AnalyticsAuditWriterInventory(
+        settings.writers.observedAt,
+        settings.writers.coverageReference,
+        settings.writers.managed.map(auditWriter),
+        settings.writers.unmanaged.map(auditWriter)
+      )
+    )
+  }
+
+  private def auditWriter(raw: RawAuditWriter): AnalyticsAuditWriter =
+    AnalyticsAuditWriter(raw.identity, raw.disposition, raw.evidenceReference)
 
   private def common(raw: RawAnalytics): ValidatedNec[String, AnalyticsCommonSettings] = {
     val mongoUri = required(raw.mongo.uri, "analytics.mongo.uri").andThen { uri =>

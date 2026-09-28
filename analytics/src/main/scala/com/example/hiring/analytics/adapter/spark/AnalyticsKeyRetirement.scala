@@ -48,7 +48,7 @@ private[analytics] object AnalyticsKeyRetirement {
 
   /** Inventory references must point to operator evidence covering deployments, jobs, and unmanaged writers. */
   final case class WriterInventory(
-      observedAt: Instant,
+      observedAt: Option[Instant],
       coverageReference: String,
       managed: Vector[WriterRecord],
       unmanaged: Vector[WriterRecord]
@@ -275,13 +275,14 @@ private[analytics] object AnalyticsKeyRetirement {
   }
 
   private[analytics] def validateWriters(inventory: WriterInventory, now: Instant): ValidatedNec[String, Unit] = {
-    val freshnessReasons =
-      if (
-        inventory.observedAt.isAfter(now) || inventory.observedAt.isBefore(now.minus(MaximumWriterEvidenceAge)) ||
-        inventory.coverageReference.trim.isEmpty
-      )
+    val freshnessReasons = inventory.observedAt match {
+      case Some(observedAt)
+          if !observedAt.isAfter(now) && !observedAt.isBefore(now.minus(MaximumWriterEvidenceAge)) &&
+            inventory.coverageReference.trim.nonEmpty =>
+        Chain.empty[String]
+      case _ =>
         Chain.one("managed and unmanaged Delta writer inventory lacks fresh operator-attested coverage evidence")
-      else Chain.empty[String]
+    }
     val all = inventory.managed ++ inventory.unmanaged
     val identityReasons =
       if (all.isEmpty) Chain.one("writer inventory contains no individually accounted writer identities")

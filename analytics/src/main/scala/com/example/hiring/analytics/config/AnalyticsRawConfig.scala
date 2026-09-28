@@ -24,38 +24,6 @@ private[analytics] object AnalyticsRawConfig {
         }
   }
 
-  given ConfigReader[Int] = ConfigReader.fromCursor { cursor =>
-    cursor.asInt match {
-      case success @ Right(_) => success
-      case Left(_)            =>
-        cursor.asString.flatMap(value =>
-          cursor.scopeFailure(value.toIntOption.toRight(UserValidationFailed("must be an integer")))
-        )
-    }
-  }
-  given ConfigReader[Long] = ConfigReader.fromCursor { cursor =>
-    cursor.asLong match {
-      case success @ Right(_) => success
-      case Left(_)            =>
-        cursor.asString.flatMap(value =>
-          cursor.scopeFailure(value.toLongOption.toRight(UserValidationFailed("must be an integer")))
-        )
-    }
-  }
-  given ConfigReader[Boolean] = ConfigReader.fromCursor { cursor =>
-    cursor.asString match {
-      case Right(value) =>
-        cursor.scopeFailure(
-          value.toLowerCase match {
-            case "true"  => Right(true)
-            case "false" => Right(false)
-            case _       => Left(UserValidationFailed("must be true or false"))
-          }
-        )
-      case Left(_) => cursor.asBoolean
-    }
-  }
-
   final case class Mongo(uri: Option[AnalyticsNonBlank], database: Option[AnalyticsNonBlank]) derives ConfigReader
   final case class Spark(master: Option[AnalyticsNonBlank]) derives ConfigReader
   final case class Lakehouse(root: Option[AnalyticsNonBlank]) derives ConfigReader

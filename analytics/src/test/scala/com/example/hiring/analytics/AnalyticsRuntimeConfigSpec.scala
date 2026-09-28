@@ -1,6 +1,5 @@
 package com.example.hiring.analytics
 import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.cli.AnalyticsKeyRetirementAuditMain
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
@@ -63,7 +62,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |    start-offset = ${?ANALYTICS_START_OFFSET}
     |    end-offset-exclusive = ${?ANALYTICS_END_OFFSET_EXCLUSIVE}
     |  }
-    |  operational {
+|  operational {
     |    retention {
     |      bronze-days = 7
     |      bronze-days = ${?ANALYTICS_RETENTION_BRONZE_DAYS}
@@ -88,8 +87,25 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |    maximum-erasure-evidence-files = ${?ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES}
     |    mongo-publisher-buffer-size = 256
     |    mongo-publisher-buffer-size = ${?ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE}
-    |  }
-    |}
+|  }
+|  key-retirement-audit {
+|    retiring-key-id = ${?ANALYTICS_RETIRING_KEY_ID}
+|    kafka {
+|      barrier-offset = ${?ANALYTICS_RETIRING_KAFKA_BARRIER_OFFSET}
+|      earliest-available-offset = ${?ANALYTICS_RETIRING_KAFKA_EARLIEST_OFFSET}
+|      evidence-reference = "kafka-barrier-evidence"
+|    }
+|    delta-data { retained-until = "2026-09-27T00:00:00Z", evidence-reference = "delta-data-evidence" }
+|    delta-logs { retained-until = "2026-09-27T00:00:00Z", evidence-reference = "delta-logs-evidence" }
+|    reports { retained-until = "2026-09-27T00:00:00Z", evidence-reference = "report-evidence" }
+|    writers {
+|      observed-at = "2026-09-27T00:00:00Z"
+|      coverage-reference = "writer-coverage"
+|      managed = [{ identity = "batch", disposition = "stopped", evidence-reference = "stop-record" }]
+|      unmanaged = []
+|    }
+|  }
+|}
     |""".stripMargin
 
   test("batch settings load service and run inputs through HOCON substitutions") {
@@ -216,7 +232,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       hocon,
       settings ++ Map(
         "ANALYTICS_KAFKA_SECURITY_PROTOCOL" -> "SASL_PLAINTEXT",
-        "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "yes"
+        "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "perhaps"
       )
     )
     assert(malformedFlag.isLeft)
@@ -238,7 +254,52 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       AnalyticsRuntimeConfig.batchFromHocon(packaged, settings).toOption.getOrElse(fail("expected packaged config"))
     assertEquals(loaded.common.sparkMaster, "local[*]")
     assertEquals(loaded.manifest.offsetRanges.head.topic, "hiring.operational-events")
-    assertEquals(AnalyticsKeyRetirementAuditMain.validateAuditHocon(packaged), Right(()))
+    val audit = AnalyticsRuntimeConfig
+      .keyRetirementAuditFromHocon(packaged, settings + ("ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1"))
+      .toOption
+      .getOrElse(fail("expected valid audit config"))
+    assertEquals(audit.mongoDatabase, "hiring")
+    assertEquals(audit.sparkMaster, "local[*]")
+    assertEquals(audit.kafkaBarrierOffset, None)
+    assertEquals(audit.writers.managed, Vector.empty)
+    assertEquals(audit.operational.mongoPublisherBufferSize, 256)
+
+    val credentialedAudit = AnalyticsRuntimeConfig
+      .keyRetirementAuditFromHocon(
+        packaged,
+        settings ++ Map(
+          "ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1",
+          "MONGODB_URI" -> "mongodb://audit-user:audit-secret@localhost:27017/?replicaSet=rs0"
+        )
+      )
+      .toOption
+      .getOrElse(fail("expected valid credentialed audit config"))
+    assert(!credentialedAudit.toString.contains("audit-user"))
+    assert(!credentialedAudit.toString.contains("audit-secret"))
+  }
+
+  test("key-retirement audit config decodes typed evidence and rejects malformed typed fields") {
+    val audit = AnalyticsRuntimeConfig
+      .keyRetirementAuditFromHocon(
+        hocon,
+        settings ++ Map(
+          "ANALYTICS_RETIRING_KEY_ID" -> "hmac-v1",
+          "ANALYTICS_RETIRING_KAFKA_BARRIER_OFFSET" -> "12",
+          "ANALYTICS_RETIRING_KAFKA_EARLIEST_OFFSET" -> "12"
+        )
+      )
+      .toOption
+      .getOrElse(fail("expected valid audit config"))
+    assertEquals(audit.kafkaBarrierOffset, Some(12L))
+    assertEquals(audit.kafkaEarliestAvailableOffset, Some(12L))
+    assertEquals(audit.deltaData.retainedUntil, Some(java.time.Instant.parse("2026-09-27T00:00:00Z")))
+    assertEquals(audit.writers.observedAt, Some(java.time.Instant.parse("2026-09-27T00:00:00Z")))
+    assertEquals(audit.writers.managed.head.disposition, Some(AnalyticsAuditWriterDisposition.Stopped))
+
+    val malformedTimestamp = hocon.replace("2026-09-27T00:00:00Z", "invalid-timestamp")
+    assert(AnalyticsRuntimeConfig.keyRetirementAuditFromHocon(malformedTimestamp, settings).isLeft)
+    val malformedDisposition = hocon.replace("disposition = \"stopped\"", "disposition = \"invalid\"")
+    assert(AnalyticsRuntimeConfig.keyRetirementAuditFromHocon(malformedDisposition, settings).isLeft)
   }
 
   test("worker settings validate a separate fencer connection") {

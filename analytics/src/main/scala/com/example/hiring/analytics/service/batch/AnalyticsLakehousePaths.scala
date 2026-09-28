@@ -6,7 +6,9 @@ import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
 import io.github.iltotore.iron.constraint.string.Blank
 
-final class AnalyticsLakehousePaths private (val root: String) {
+type LakehouseRoot = String :| Not[Blank]
+
+final class AnalyticsLakehousePaths private (val root: LakehouseRoot) {
   private val normalizedRoot = root.stripSuffix("/")
   val bronze: String = s"$normalizedRoot/bronze/operational_events"
   val silver: String = s"$normalizedRoot/silver/operational_events"
@@ -24,7 +26,7 @@ object AnalyticsLakehousePaths {
       .refineEither[Not[Blank]]
       .leftMap(_ => "lakehouse root must be non-empty")
       .toValidatedNec
-      .map(_ => new AnalyticsLakehousePaths(root))
+      .map(validRoot => new AnalyticsLakehousePaths(validRoot))
 
   private[analytics] def unsafe(root: String): AnalyticsLakehousePaths =
     from(root).toEither

@@ -88,31 +88,43 @@ final class AnalyticsErasureWorker[F[_]: Async](
       reservation <- publisher.reserve(runId, fingerprint, current)
       _ <- process(claim, reservation)
     } yield ()
+    withLease(claim)(work).handleErrorWith(handleClaimError(claim))
+  }
+
+  private[analytics] def withLease(claim: ErasureClaim)(work: F[Unit]): F[Unit] =
     Async[F]
-      .race(work, renewForever(claim))
-      .flatMap {
-        case Left(_)  => Async[F].unit
-        case Right(_) => Async[F].raiseError(AnalyticsError.ErasureNotReady)
-      }
-      .handleErrorWith {
-        case AnalyticsError.ErasureDeferred => Async[F].unit
-        case AnalyticsError.ErasureNotReady =>
-          now.flatMap(progress.releaseForOtherRequests(claim, _)).flatMap(requireApplied)
-        case error =>
-          val nextAttempt = claim.attemptCount + 1
-          val decision = ErasureFailurePolicy.decide(error, nextAttempt)
-          now.flatMap { current =>
-            val scheduled = decision.retryAfter.map(delay => current.plusMillis(delay.toMillis))
-            progress.recordFailure(claim, decision.category, nextAttempt, scheduled, current).flatMap {
-              case ErasureUpdate.Applied =>
-                logger.error(
-                  "analytics erasure failed; persisted category=" + decision.category.persistedName + ", attempt=" + nextAttempt
-                )
-              case ErasureUpdate.LeaseLost =>
-                logger.warn("analytics erasure failure could not be recorded because the lease is no longer owned")
-            }
+      .background(renewForever(claim))
+      .use(heartbeat =>
+        Async[F]
+          .race(work, heartbeat.flatMap(_.embedNever))
+          .flatMap {
+            case Left(_)  => Async[F].unit
+            case Right(_) => Async[F].raiseError(AnalyticsError.ErasureNotReady)
           }
+      )
+
+  private def handleClaimError(claim: ErasureClaim)(error: Throwable): F[Unit] =
+    error match {
+      case AnalyticsError.ErasureDeferred => Async[F].unit
+      case AnalyticsError.ErasureNotReady =>
+        now.flatMap(progress.releaseForOtherRequests(claim, _)).flatMap(requireApplied)
+      case failure => recordFailure(claim, failure)
+    }
+
+  private def recordFailure(claim: ErasureClaim, error: Throwable): F[Unit] = {
+    val nextAttempt = claim.attemptCount + 1
+    val decision = ErasureFailurePolicy.decide(error, nextAttempt)
+    now.flatMap { current =>
+      val scheduled = decision.retryAfter.map(delay => current.plusMillis(delay.toMillis))
+      progress.recordFailure(claim, decision.category, nextAttempt, scheduled, current).flatMap {
+        case ErasureUpdate.Applied =>
+          logger.error(
+            "analytics erasure failed; persisted category=" + decision.category.persistedName + ", attempt=" + nextAttempt
+          )
+        case ErasureUpdate.LeaseLost =>
+          logger.warn("analytics erasure failure could not be recorded because the lease is no longer owned")
       }
+    }
   }
 
   private[analytics] def renewForever(claim: ErasureClaim): F[Nothing] =

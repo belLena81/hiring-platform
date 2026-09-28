@@ -1,120 +1,96 @@
 package com.example.hiring.analytics.adapter.mongo
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
+import com.example.hiring.analytics.domain.{RangeFingerprint, RunId}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
-
-import org.bson.{BsonReader, BsonWriter, Document}
-import org.bson.codecs.{Codec, DecoderContext, DocumentCodec, EncoderContext}
-import org.bson.codecs.configuration.{CodecRegistries, CodecRegistry}
 import cats.syntax.all.*
+import org.bson.{BsonValue, Document}
 
 import java.util.Date
 
-/** Typed views of the stable report metadata. The underlying document is retained so encoding preserves every existing
-  * BSON field, including fields that this adapter does not read.
-  */
+/** Validates driver-decoded report records before they enter report publication logic. */
 private[analytics] object MongoAnalyticsReportRecords {
-  final case class Run(reservation: AnalyticsReportReservation, state: String, document: Document)
+  type Record = MongoPojoCodecs.ReportRecord
+
+  final case class Run(reservation: AnalyticsReportReservation, state: String)
   final case class Control(
       generation: Long,
       nextRevision: Option[Long],
       lastPublishedRevision: Long,
       lastRunId: Option[String],
       state: String,
-      document: Document
+      extraFields: Document
   )
   final case class Snapshot(
       generation: Long,
       revision: Long,
       runId: RunId,
       expiresAt: Option[Date],
-      document: Document
+      extraFields: Document
   ) {
     def matches(reservation: AnalyticsReportReservation): Boolean =
       generation == reservation.generation && revision == reservation.revision && runId == reservation.runId
   }
 
-  final case class DecodedRun(value: Either[AnalyticsError, Run], document: Document)
-  final case class DecodedControl(value: Either[AnalyticsError, Control], document: Document)
-  final case class DecodedSnapshot(value: Either[AnalyticsError, Snapshot], document: Document)
-
   private val malformed = AnalyticsError.InvalidConfiguration("analytics report record is malformed")
 
-  private given BsonDecoder[Run] = BsonDecoder.instance { document =>
-    import BsonValueDecoder.given
+  private def required[A](value: BsonValue)(read: BsonValue => Option[A]): Either[AnalyticsError, A] =
+    Option(value).filterNot(_.isNull).flatMap(read).toRight(malformed)
+
+  private def optional[A](value: BsonValue)(read: BsonValue => Option[A]): Either[AnalyticsError, Option[A]] =
+    Option(value).filterNot(_.isNull) match {
+      case None        => Right(None)
+      case Some(value) => read(value).map(Some(_)).toRight(malformed)
+    }
+
+  private def string(value: BsonValue): Option[String] =
+    Option(value).filter(_.isString).map(_.asString().getValue)
+  private def int64(value: BsonValue): Option[Long] =
+    Option(value).filter(_.isInt64).map(_.asInt64().getValue)
+  private def date(value: BsonValue): Option[Date] =
+    Option(value).filter(_.isDateTime).map(v => new Date(v.asDateTime().getValue))
+
+  def decodeRun(record: Record): Either[AnalyticsError, Run] =
     for {
-      id <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.Id, malformed)
-      fingerprint <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RangeFingerprint, malformed)
+      id <- required(record.getId)(string)
+      fingerprint <- required(record.getRangeFingerprint)(string)
       runId <- RunId.from(id).toEither.leftMap(_ => malformed)
       rangeFingerprint <- RangeFingerprint.from(fingerprint).leftMap(_ => malformed)
-      generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
-      revision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Revision, malformed)
-      state <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.State, malformed)
-    } yield Run(AnalyticsReportReservation(runId, rangeFingerprint, generation, revision), state, document)
-  }
+      generation <- required(record.getGeneration)(int64)
+      revision <- required(record.getRevision)(int64)
+      state <- required(record.getState)(string).flatMap { value =>
+        Either.cond(Set("Reserved", "Published").contains(value), value, malformed)
+      }
+    } yield Run(AnalyticsReportReservation(runId, rangeFingerprint, generation, revision), state)
 
-  private given BsonDecoder[Control] = BsonDecoder.instance { document =>
-    import BsonValueDecoder.given
+  def decodeControl(record: Record): Either[AnalyticsError, Control] =
     for {
-      generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
-      nextRevision <- BsonDecoder.optional[Long](document, AnalyticsCollections.Fields.NextRevision, malformed)
-      lastRevision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.LastPublishedRevision, malformed)
-      lastRunId <- BsonDecoder.optional[String](document, AnalyticsCollections.Fields.LastRunId, malformed)
-      state <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.State, malformed)
-    } yield Control(generation, nextRevision, lastRevision, lastRunId, state, document)
-  }
+      generation <- required(record.getGeneration)(int64)
+      nextRevision <- optional(record.getNextRevision)(int64)
+      lastRevision <- required(record.getLastPublishedRevision)(int64)
+      lastRunId <- optional(record.getLastRunId)(string)
+      state <- required(record.getState)(string)
+    } yield Control(
+      generation,
+      nextRevision,
+      lastRevision,
+      lastRunId,
+      state,
+      Option(record.getExtraFields).getOrElse(new Document())
+    )
 
-  private given BsonDecoder[Snapshot] = BsonDecoder.instance { document =>
-    import BsonValueDecoder.given
+  def decodeSnapshot(record: Record): Either[AnalyticsError, Snapshot] =
     for {
-      generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
-      revision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Revision, malformed)
-      rawRunId <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RunId, malformed)
+      generation <- required(record.getGeneration)(int64)
+      revision <- required(record.getRevision)(int64)
+      rawRunId <- required(record.getRunId)(string)
       runId <- RunId.from(rawRunId).toEither.leftMap(_ => malformed)
-      expiresAt <- BsonDecoder.optional[Date](document, AnalyticsCollections.Fields.ExpiresAt, malformed)
-    } yield Snapshot(generation, revision, runId, expiresAt, document)
-  }
-
-  private[analytics] def decodeRun(document: Document): Either[AnalyticsError, Run] = BsonDecoder[Run].decode(document)
-  private[analytics] def decodeControl(document: Document): Either[AnalyticsError, Control] =
-    BsonDecoder[Control].decode(document)
-
-  private def control(document: Document): Either[AnalyticsError, Control] = decodeControl(document)
-  private def snapshot(document: Document): Either[AnalyticsError, Snapshot] = BsonDecoder[Snapshot].decode(document)
-
-  private class DocumentViewCodec[A](clazz: Class[A], wrap: Document => A, unwrap: A => Document) extends Codec[A] {
-    private val documentCodec = new DocumentCodec()
-    override def getEncoderClass: Class[A] = clazz
-    override def decode(reader: BsonReader, context: DecoderContext): A =
-      wrap(documentCodec.decode(reader, context))
-    override def encode(writer: BsonWriter, value: A, context: EncoderContext): Unit =
-      documentCodec.encode(writer, unwrap(value), context)
-  }
-
-  def registry(parent: CodecRegistry): CodecRegistry = CodecRegistries.fromRegistries(
-    CodecRegistries.fromCodecs(
-      new DocumentViewCodec(classOf[DecodedRun], document => DecodedRun(decodeRun(document), document), _.document),
-      new DocumentViewCodec(
-        classOf[DecodedControl],
-        document => DecodedControl(control(document), document),
-        _.document
-      ),
-      new DocumentViewCodec(
-        classOf[DecodedSnapshot],
-        document => DecodedSnapshot(snapshot(document), document),
-        _.document
-      )
-    ),
-    parent
-  )
+      expiresAt <- optional(record.getExpiresAt)(date)
+    } yield Snapshot(
+      generation,
+      revision,
+      runId,
+      expiresAt,
+      Option(record.getExtraFields).getOrElse(new Document())
+    )
 }

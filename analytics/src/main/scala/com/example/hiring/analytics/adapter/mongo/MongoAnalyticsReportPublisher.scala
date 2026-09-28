@@ -41,16 +41,19 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
   private val control = database.getCollection(AnalyticsCollections.ReportControl, classOf[Document])
   private val reservations = database.getCollection(AnalyticsCollections.ReportRuns, classOf[Document])
   private val snapshots = database.getCollection(AnalyticsCollections.ReportSnapshots, classOf[Document])
-  private val reportCodecs = MongoAnalyticsReportRecords.registry(database.getCodecRegistry)
-  private val typedControl = database
-    .getCollection(AnalyticsCollections.ReportControl, classOf[DecodedControl])
-    .withCodecRegistry(reportCodecs)
-  private val typedReservations = database
-    .getCollection(AnalyticsCollections.ReportRuns, classOf[DecodedRun])
-    .withCodecRegistry(reportCodecs)
-  private val typedSnapshots = database
-    .getCollection(AnalyticsCollections.ReportSnapshots, classOf[DecodedSnapshot])
-    .withCodecRegistry(reportCodecs)
+  private val pojoDatabase = database.withCodecRegistry(MongoPojoCodecs.registry)
+  private val typedControl = pojoDatabase.getCollection(
+    AnalyticsCollections.ReportControl,
+    classOf[MongoPojoCodecs.ReportRecord]
+  )
+  private val typedReservations = pojoDatabase.getCollection(
+    AnalyticsCollections.ReportRuns,
+    classOf[MongoPojoCodecs.ReportRecord]
+  )
+  private val typedSnapshots = pojoDatabase.getCollection(
+    AnalyticsCollections.ReportSnapshots,
+    classOf[MongoPojoCodecs.ReportRecord]
+  )
 
   private type Result[A] = EitherT[F, AnalyticsError, A]
   private def lift[A](io: F[A]): Result[A] = EitherT.liftF(io)
@@ -78,7 +81,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
       updatedControl <- result(
         updated.toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
       )
-      updatedValue <- result(updatedControl.value)
+      updatedValue <- result(MongoAnalyticsReportRecords.decodeControl(updatedControl))
       revision <- result(
         updatedValue.nextRevision.toRight(
           AnalyticsError.InvalidConfiguration("analytics report control is unavailable")
@@ -91,7 +94,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
       .optional(typedReservations.find(Filters.eq(AnalyticsCollections.Fields.Id, runId.value)).first())
       .flatMap {
         case Some(previous) =>
-          F.fromEither(previous.value).flatMap { record =>
+          F.fromEither(MongoAnalyticsReportRecords.decodeRun(previous)).flatMap { record =>
             val existing = record.reservation
             if (existing.rangeFingerprint != rangeFingerprint)
               F.raiseError(AnalyticsError.RunIdRangeConflict(runId.value))
@@ -109,7 +112,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
                   controlRecord <- result(
                     current.toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
                   )
-                  decoded <- result(controlRecord.value)
+                  decoded <- result(MongoAnalyticsReportRecords.decodeControl(controlRecord))
                   refreshed <-
                     if (decoded.generation <= existing.generation && decoded.lastPublishedRevision < existing.revision)
                       EitherT.pure[F, AnalyticsError](existing)
@@ -205,7 +208,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
             reservedRecord <- result(
               reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
             )
-            decoded <- result(reservedRecord.value)
+            decoded <- result(MongoAnalyticsReportRecords.decodeRun(reservedRecord))
             _ <- result(
               Either.cond(
                 decoded.reservation == reservation,
@@ -219,7 +222,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
               )
             )
             stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
-            decodedState <- result(stateRecord.value)
+            decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
             _ <- result(
               Either.cond(
                 decodedState.generation == reservation.generation &&
@@ -234,9 +237,16 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
                 typedSnapshots.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first()
               )
             )
-            snapshot <- result(snapshotRecord.traverse(_.value))
+            snapshot <- result(snapshotRecord.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
             alreadyPublished = decodedState.lastPublishedRevision == reservation.revision &&
               decodedState.lastRunId.getOrElse("") == reservation.runId.value
+            _ <- result(
+              Either.cond(
+                decoded.state == "Reserved" || (decoded.state == "Published" && alreadyPublished),
+                (),
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
+              )
+            )
             _ <-
               if (
                 alreadyPublished && snapshot
@@ -384,7 +394,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
               )
             )
             reservedRecord <- result(reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
-            reservedValue <- result(reservedRecord.value)
+            reservedValue <- result(MongoAnalyticsReportRecords.decodeRun(reservedRecord))
             _ <- result(
               Either.cond(
                 reservedValue.reservation == reservation && reservedValue.state == "Reserved",
@@ -398,7 +408,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
               )
             )
             stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
-            decodedState <- result(stateRecord.value)
+            decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
             _ <- result(
               Either.cond(
                 decodedState.generation == reservation.generation && Set("Hidden", "Published")

@@ -4,6 +4,7 @@ import com.example.hiring.analytics.adapter.kafka.TransactionalProducerFencer
 import com.example.hiring.analytics.adapter.spark.{AnalyticsErasureLakehouse, AnalyticsErasureWorker}
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 
@@ -71,10 +72,58 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("claim work owns its heartbeat and lease loss interrupts the work") {
+    for {
+      completedState <- Ref.of[IO, Counters](Counters())
+      claim = ErasureClaim(
+        AccountSubjectId.from("00000000-0000-0000-0000-000000000001").toOption.get,
+        "lease",
+        Instant.EPOCH,
+        ErasurePhase.Requested,
+        0,
+        0L
+      )
+      completedWorker = testWorker(completedState, ErasureUpdate.Applied, leaseDuration = 3.seconds)
+      completedCounts <- TestControl.executeEmbed {
+        completedWorker.withLease(claim)(IO.unit) *> IO.sleep(4.seconds) *> completedState.get
+      }
+      _ = assertEquals(completedCounts.renewals, 0)
+      _ = assertEquals(completedCounts.heartbeats, 0)
+      lostState <- Ref.of[IO, Counters](Counters())
+      lostWorker = testWorker(lostState, ErasureUpdate.LeaseLost, leaseDuration = 3.seconds)
+      (lostOutcome, lostCounts) <- TestControl.executeEmbed {
+        lostWorker.withLease(claim)(IO.never).attempt.flatMap(outcome => lostState.get.map(outcome -> _))
+      }
+      _ = assertEquals(lostOutcome.left.toOption, Some(AnalyticsError.ErasureNotReady))
+      _ = assertEquals(lostCounts.renewals, 1)
+      _ = assertEquals(lostCounts.heartbeats, 0)
+      renewalFailure = new RuntimeException("renewal failed")
+      failedRenewalState <- Ref.of[IO, Counters](Counters())
+      failedRenewalWorker = testWorker(
+        failedRenewalState,
+        ErasureUpdate.Applied,
+        leaseDuration = 3.seconds,
+        renewalFailure = Some(renewalFailure)
+      )
+      (failedRenewalOutcome, failedRenewalCounts) <- TestControl.executeEmbed {
+        failedRenewalWorker
+          .withLease(claim)(IO.never)
+          .attempt
+          .flatMap(outcome => failedRenewalState.get.map(outcome -> _))
+      }
+      _ = assert(failedRenewalOutcome.left.toOption.exists(_ eq renewalFailure))
+      _ = assertEquals(failedRenewalCounts.renewals, 1)
+      _ = assertEquals(failedRenewalCounts.heartbeats, 0)
+    } yield ()
+  }
+
   private final case class Counters(claims: Int = 0, heartbeats: Int = 0, renewals: Int = 0)
 
-  private final class TestErasureStore(state: Ref[IO, Counters], renewal: ErasureUpdate)
-      extends ErasureQueue[IO],
+  private final class TestErasureStore(
+      state: Ref[IO, Counters],
+      renewal: ErasureUpdate,
+      renewalFailure: Option[Throwable]
+  ) extends ErasureQueue[IO],
         ErasureProgress[IO],
         ErasureBarrier[IO] {
     override def claim(now: Instant, leaseUntil: Instant, limit: Int): IO[Vector[ErasureClaim]] =
@@ -119,7 +168,9 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     ): IO[ErasureUpdate] = IO.pure(renewal)
     override def defer(claim: ErasureClaim, resumeAt: Instant, now: Instant): IO[ErasureUpdate] = IO.pure(renewal)
     override def renew(claim: ErasureClaim, now: Instant, leaseUntil: Instant): IO[ErasureUpdate] =
-      state.update(value => value.copy(renewals = value.renewals + 1)).as(renewal)
+      state.update(value => value.copy(renewals = value.renewals + 1)) *> renewalFailure.fold(IO.pure(renewal))(
+        IO.raiseError
+      )
     override def advance(claim: ErasureClaim, phase: ErasurePhase, progress: Int, now: Instant): IO[ErasureUpdate] =
       IO.pure(renewal)
   }
@@ -127,9 +178,10 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
   private def testWorker(
       state: Ref[IO, Counters],
       renewal: ErasureUpdate,
-      leaseDuration: FiniteDuration = 90.seconds
+      leaseDuration: FiniteDuration = 90.seconds,
+      renewalFailure: Option[Throwable] = None
   ): AnalyticsErasureWorker[IO] = {
-    val store = new TestErasureStore(state, renewal)
+    val store = new TestErasureStore(state, renewal, renewalFailure)
     val lock: AnalyticsLakehouseLock[IO] = (_: String) => Resource.pure[IO, Unit](())
     val markers: ActiveDeletionMarkerSource[IO] = (_: SparkSession) => IO.pure(null.asInstanceOf[DataFrame])
     val lakehouse = new AnalyticsErasureLakehouse[IO] {
