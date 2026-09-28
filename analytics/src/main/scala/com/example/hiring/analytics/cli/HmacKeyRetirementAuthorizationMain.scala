@@ -28,7 +28,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       bootstrapServers: Option[String],
       username: Option[String],
       password: Option[String],
-      securityProtocol: Option[String],
+      securityProtocol: Option[KafkaSecurityProtocol],
       allowPlaintext: Option[Boolean],
       topic: Option[String]
   )
@@ -124,7 +124,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
             bootstrap,
             raw.kafka.username.filter(_.nonEmpty),
             raw.kafka.password.filter(_.nonEmpty),
-            raw.kafka.securityProtocol.getOrElse("SASL_SSL"),
+            raw.kafka.securityProtocol.getOrElse(KafkaSecurityProtocol.SaslSsl),
             raw.kafka.allowPlaintext.getOrElse(false)
           )
         )
@@ -161,27 +161,28 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
             sparkUiEnabled = Some(false)
           )
           .use { case (spark, mongo, sparkExecution) =>
-            val database = mongo.getDatabase(settings.database)
-            val clock = Clock[IO]
-            val streams = new MongoPublisherStream(settings.operational)
-            val coordinator = new HmacKeyRetirementCoordinator[IO](
-              spark,
-              settings.paths,
-              database,
-              settings.kafka,
-              settings.topic,
-              settings.docker,
-              settings.operational,
-              streams,
-              clock,
-              new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, clock, streams),
-              sparkExecution
-            )
-            action match {
-              case "prepare"   => coordinator.prepare(settings.keyId).void
-              case "authorize" => coordinator.authorize(settings.keyId).void
-              case _           =>
-                IO.raiseError(AnalyticsError.InvalidConfiguration("retirement action must be prepare or authorize"))
+            mongo.getDatabase(settings.database).flatMap { database =>
+              val clock = Clock[IO]
+              val streams = new MongoPublisherStream(settings.operational)
+              val coordinator = new HmacKeyRetirementCoordinator[IO](
+                spark,
+                settings.paths,
+                database,
+                settings.kafka,
+                settings.topic,
+                settings.docker,
+                settings.operational,
+                streams,
+                clock,
+                new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, clock, streams),
+                sparkExecution
+              )
+              action match {
+                case "prepare"   => coordinator.prepare(settings.keyId).void
+                case "authorize" => coordinator.authorize(settings.keyId).void
+                case _           =>
+                  IO.raiseError(AnalyticsError.InvalidConfiguration("retirement action must be prepare or authorize"))
+              }
             }
           }
       }

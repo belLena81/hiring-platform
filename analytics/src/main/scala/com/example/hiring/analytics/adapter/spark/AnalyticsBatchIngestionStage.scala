@@ -5,6 +5,7 @@ import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.Async
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
@@ -39,7 +40,7 @@ private[spark] final class AnalyticsBatchIngestionStage[F[_]: Async](ports: Inge
         deltaWriter.withExpiry(
           OperationalEventTransforms.bronze(safeToPersist),
           startedAt,
-          retention.bronzeDays
+          retention.bronzeDays.value
         )
       )
       recordCount <- blocking(raw.count())

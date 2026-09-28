@@ -10,6 +10,7 @@ import com.mongodb.ConnectionString
 import com.typesafe.config.{Config, ConfigFactory, ConfigParseOptions, ConfigResolveOptions}
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.any.Not
+import io.github.iltotore.iron.constraint.numeric.Positive
 import io.github.iltotore.iron.constraint.string.Blank
 import _root_.pureconfig.*
 import pureconfig.error.UserValidationFailed
@@ -21,6 +22,7 @@ import pureconfig.generic.derivation.{
 import scala.annotation.nowarn
 import scala.deriving.Mirror
 import scala.jdk.CollectionConverters.*
+import scala.concurrent.duration.*
 import java.time.Instant
 
 type AnalyticsNonBlank = String :| Not[Blank]
@@ -101,7 +103,7 @@ object AnalyticsRuntimeConfig {
       password: Option[AnalyticsNonBlank],
       topic: Option[AnalyticsNonBlank],
       fencer: RawFencer,
-      securityProtocol: Option[AnalyticsNonBlank],
+      securityProtocol: Option[KafkaSecurityProtocol],
       allowPlaintext: Option[Boolean]
   )
   private final case class RawHmac(
@@ -300,14 +302,16 @@ object AnalyticsRuntimeConfig {
       .from(raw.batch.runId.getOrElse(""))
       .leftMap(_ => "analytics.batch.run-id must be non-empty")
       .toValidatedNec
-    val ranges = PartitionOffsetRange
-      .fromValidated(
+    val ranges = (
         present(raw.kafka.topic, "analytics.kafka.topic"),
         integer(raw.batch.partition, "analytics.batch.partition"),
         long(raw.batch.startOffset, "analytics.batch.start-offset"),
         long(raw.batch.endOffsetExclusive, "analytics.batch.end-offset-exclusive")
       )
-      .map(Vector(_))
+      .mapN((topic, partition, startOffset, endOffset) => (topic, partition, startOffset, endOffset))
+      .andThen { case (topic, partition, startOffset, endOffset) =>
+        PartitionOffsetRange.from(topic, partition, startOffset, endOffset).map(Vector(_))
+      }
     val manifest = AnalyticsRunManifest.fromValidated(runId, ranges)
     complete((common(raw), manifest).mapN(AnalyticsBatchSettings.apply))
 
@@ -441,10 +445,16 @@ object AnalyticsRuntimeConfig {
       positive(raw.retention.deltaVacuumSafetyDays, "analytics.operational.retention.delta-vacuum-safety-days"),
       positive(raw.retention.deltaLogRetentionDays, "analytics.operational.retention.delta-log-retention-days")
     ).mapN(AnalyticsRetentionSettings.apply)
+    val reportReservationTtl = positive(raw.reportReservationTtlDays, "analytics.operational.report-reservation-ttl-days")
+      .map(value => value.value.toLong.days)
+    val mongoTransactionWindow = positive(
+      raw.mongoTransactionWindowSeconds,
+      "analytics.operational.mongo-transaction-window-seconds"
+    ).map(value => value.value.toLong.seconds)
     (
       retention,
-      positive(raw.reportReservationTtlDays, "analytics.operational.report-reservation-ttl-days"),
-      positive(raw.mongoTransactionWindowSeconds, "analytics.operational.mongo-transaction-window-seconds"),
+      reportReservationTtl,
+      mongoTransactionWindow,
       positiveAtMost(
         raw.maximumErasureEvidenceFiles,
         Int.MaxValue - 1,
@@ -458,8 +468,9 @@ object AnalyticsRuntimeConfig {
     ).mapN(AnalyticsOperationalSettings.apply)
   }
 
-  private def kafkaSecurity(raw: RawAnalytics): ValidatedNec[String, (String, Boolean)] = {
-    (raw.kafka.securityProtocol.getOrElse("SASL_SSL"), raw.kafka.allowPlaintext.getOrElse(false)).validNec[String]
+  private def kafkaSecurity(raw: RawAnalytics): ValidatedNec[String, (KafkaSecurityProtocol, Boolean)] = {
+    (raw.kafka.securityProtocol.getOrElse(KafkaSecurityProtocol.SaslSsl), raw.kafka.allowPlaintext.getOrElse(false))
+      .validNec[String]
   }
 
   private def required(value: Option[AnalyticsNonBlank], field: String): ValidatedNec[String, AnalyticsNonBlank] =
@@ -474,8 +485,8 @@ object AnalyticsRuntimeConfig {
   private def integer(value: Option[Int], field: String): ValidatedNec[String, Int] =
     value.toValidNec(s"$field is required")
 
-  private def positive(value: Int, field: String): ValidatedNec[String, Int] =
-    Either.cond(value > 0, value, s"$field must be greater than zero").toValidatedNec
+  private def positive(value: Int, field: String): ValidatedNec[String, AnalyticsPositiveInt] =
+    value.refineEither[Positive].leftMap(_ => s"$field must be greater than zero").toValidatedNec
 
   private def positiveAtMost(value: Int, maximum: Int, field: String): ValidatedNec[String, Int] =
     Either.cond(value > 0 && value <= maximum, value, s"$field must be between one and $maximum").toValidatedNec

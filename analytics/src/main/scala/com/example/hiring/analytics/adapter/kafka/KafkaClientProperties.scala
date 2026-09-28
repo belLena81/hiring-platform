@@ -14,7 +14,7 @@ private[analytics] object KafkaClientProperties {
       .left
       .map(_ => AnalyticsError.InvalidConfiguration("Kafka connection settings are invalid"))
       .flatMap { validated =>
-        val transport = Map("security.protocol" -> validated.securityProtocol)
+        val transport = Map("security.protocol" -> validated.securityProtocol.kafkaValue)
         (validated.saslUsername, validated.saslPassword) match {
           case (Some(username), Some(password)) =>
             Right(

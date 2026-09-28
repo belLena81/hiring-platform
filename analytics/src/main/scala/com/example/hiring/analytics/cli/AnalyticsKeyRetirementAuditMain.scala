@@ -96,12 +96,12 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
           .use { case (spark, client, sparkExecution) =>
             for {
               now <- Clock[IO].realTimeInstant
-              database = client.getDatabase(inputs.mongoDatabase)
+              database <- client.getDatabase(inputs.mongoDatabase)
               streams = new MongoPublisherStream(inputs.operational)
               result <- AnalyticsKeyRetirement.audit(
                 spark,
                 inputs.paths,
-                database,
+                database.underlying,
                 inputs.retiringKeyId,
                 inputs.retention,
                 inputs.writers,

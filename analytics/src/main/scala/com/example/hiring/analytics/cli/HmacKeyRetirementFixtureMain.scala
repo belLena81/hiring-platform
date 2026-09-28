@@ -14,6 +14,7 @@ import com.example.hiring.analytics.config.KafkaConnection
 
 import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.functions.col
@@ -30,7 +31,6 @@ import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.kafka.common.serialization.StringSerializer
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
-import com.mongodb.reactivestreams.client.MongoClients
 
 /** Opt-in local fixture. It preserves the named-volume lakehouse and uses the real wall clock. */
 object HmacKeyRetirementFixtureMain extends IOApp {
@@ -47,7 +47,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       bootstrapServers: Option[String],
       username: Option[String],
       password: Option[String],
-      securityProtocol: Option[String],
+      securityProtocol: Option[KafkaSecurityProtocol],
       allowPlaintext: Option[Boolean],
       topic: Option[String]
   )
@@ -232,7 +232,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           .leftMap(AnalyticsError.InvalidConfiguration.apply)
           .flatMap { typedToken =>
             spark
-              .createDataFrame(List(eventRow(typedToken.value, at, retention.silverDays)).asJava, silverSchema)
+              .createDataFrame(List(eventRow(typedToken.value, at, retention.silverDays.value)).asJava, silverSchema)
               .write
               .format("delta")
               .mode("errorifexists")
@@ -262,7 +262,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           .leftMap(AnalyticsError.InvalidConfiguration.apply)
           .map { typedToken =>
             spark
-              .createDataFrame(List(eventRow(typedToken.value, at, retention.silverDays)).asJava, silverSchema)
+              .createDataFrame(List(eventRow(typedToken.value, at, retention.silverDays.value)).asJava, silverSchema)
               .write
               .format("delta")
               .mode("append")
@@ -298,7 +298,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
             bootstrap,
             config.username.filter(_.nonEmpty),
             config.password.filter(_.nonEmpty),
-            config.securityProtocol.getOrElse("SASL_SSL"),
+            config.securityProtocol.getOrElse(KafkaSecurityProtocol.SaslSsl),
             config.allowPlaintext.getOrElse(false)
           )
         )
@@ -406,7 +406,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
             bootstrap,
             config.username.filter(_.nonEmpty),
             config.password.filter(_.nonEmpty),
-            config.securityProtocol.getOrElse("SASL_SSL"),
+            config.securityProtocol.getOrElse(KafkaSecurityProtocol.SaslSsl),
             config.allowPlaintext.getOrElse(false)
           )
         )
@@ -450,14 +450,16 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           for {
             uri <- IO.fromEither(required("analytics.mongo.uri", raw.uri))
             database <- IO.fromEither(required("analytics.mongo.database", raw.database))
-            _ <- Resource.fromAutoCloseable(IO.delay(MongoClients.create(uri))).use { client =>
-              val streams = new MongoPublisherStream(operational)
-              new MongoHmacKeyRetirementAuthorizationStore[IO](client.getDatabase(database), streams)
-                .list(root)
-                .flatMap { rows =>
-                  IO.raiseUnless(rows.exists(_.keyId == oldKeyId))(
-                    AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")
-                  )
+            _ <- com.example.hiring.analytics.app.AppModule.mongoClient[IO](uri).use { client =>
+              client.getDatabase(database).flatMap { db =>
+                val streams = new MongoPublisherStream(operational)
+                new MongoHmacKeyRetirementAuthorizationStore[IO](db, streams)
+                  .list(root)
+                  .flatMap { rows =>
+                    IO.raiseUnless(rows.exists(_.keyId == oldKeyId))(
+                      AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")
+                    )
+                  }
                 }
             }
           } yield ()
@@ -484,7 +486,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       staged <- stageTime(spark, paths, "old-primary-silver-staged")
       stagedAt <- staged.toRight(AnalyticsError.InvalidConfiguration("old-key fixture stage timestamp is missing"))
       _ <- Either.cond(
-        !at.isBefore(stagedAt.plus(java.time.Duration.ofDays(retention.silverDays.toLong))),
+        !at.isBefore(stagedAt.plus(java.time.Duration.ofDays(retention.silverDays.value.toLong))),
         (),
         AnalyticsError.InvalidConfiguration("old-key Silver retention has not elapsed")
       )
@@ -522,7 +524,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       _ <- Right[AnalyticsError, Unit](()).map { _ =>
         if (
           !at.isBefore(
-            expiredAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.toLong))
+            expiredAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.value.toLong))
           ) && reclaimed.isEmpty
         ) {
           DeltaTable.forPath(spark, paths.silver).vacuum().count()
@@ -533,7 +535,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       _ <- Right[AnalyticsError, Unit](()).map { _ =>
         if (
           !at.isBefore(
-            expiredAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.toLong))
+            expiredAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.value.toLong))
           ) && logCleaned.isEmpty
         ) {
           val tableIdentifier = paths.silver.replace("`", "``")
@@ -611,11 +613,11 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                   .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                   .config(
                     "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
-                    s"interval ${operational.retention.deltaVacuumSafetyDays} days"
+                    s"interval ${operational.retention.deltaVacuumSafetyDays.value} days"
                   )
                   .config(
                     "spark.databricks.delta.properties.defaults.logRetentionDuration",
-                    s"interval ${operational.retention.deltaLogRetentionDays} days"
+                    s"interval ${operational.retention.deltaLogRetentionDays.value} days"
                   )
                   .config(
                     "spark.databricks.delta.retentionDurationCheck.enabled",

@@ -60,7 +60,12 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
   override def list(root: String): F[Vector[HmacKeyRetirementAuthorization]] =
     Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
       collection
-        .flatMap(value => streams.stream(value.find(new Document("lakehouseId", lakehouseId)).boundedStream).compile.toVector)
+        .flatMap(value =>
+          streams
+            .stream(capacity => value.find(new Document("lakehouseId", lakehouseId)).boundedStream(capacity))
+            .compile
+            .toVector
+        )
         .flatMap(_.traverse(decode).liftTo[F])
         .adaptError {
           case error: AnalyticsError => error

@@ -24,6 +24,7 @@ import com.example.hiring.analytics.service.erasure.KafkaRetentionBarrier
 import cats.effect.{Async, Clock, Temporal}
 import cats.Monad
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.Logger
 
@@ -253,7 +254,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
             } yield result
           }
           completedAt <- now
-          expiry = completedAt.plusSeconds(retention.publishedSnapshotDays.toLong * 86400L)
+          expiry = completedAt.plusSeconds(retention.publishedSnapshotDays.value.toLong * 86400L)
           _ <- publisher.publishErasure(refreshed, report, expiry, claim, completedAt)
           _ <- logger.info("analytics erasure completed and the snapshot was safely revealed")
         } yield Right(())
@@ -322,8 +323,8 @@ final class AnalyticsErasureWorker[F[_]: Async](
     for {
       current <- now
       kafkaExpired <- kafkaRetention.retentionPassed(kafka, barrier)
-      dataDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.toLong))
-      logDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.toLong))
+      dataDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.value.toLong))
+      logDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.value.toLong))
       deltaDeadline = if (dataDeadline.isAfter(logDeadline)) dataDeadline else logDeadline
       deltaExpired = !current.isBefore(deltaDeadline)
     } yield kafkaExpired && deltaExpired

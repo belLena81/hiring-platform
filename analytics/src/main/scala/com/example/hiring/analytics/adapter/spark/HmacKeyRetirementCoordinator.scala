@@ -19,7 +19,8 @@ import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAutho
 
 import cats.effect.kernel.{Async, Clock}
 import cats.syntax.all.*
-import com.mongodb.reactivestreams.client.MongoDatabase
+import io.github.iltotore.iron.*
+import mongo4cats.database.MongoDatabase
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
 
@@ -31,7 +32,7 @@ import scala.util.control.NonFatal
 private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     spark: SparkSession,
     paths: AnalyticsLakehousePaths,
-    database: MongoDatabase,
+    database: MongoDatabase[F],
     kafka: KafkaConnection,
     topic: String,
     writerSettings: LocalHmacKeyWriterExclusion.Settings,
@@ -41,7 +42,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     mutex: AnalyticsLakehouseLock[F],
     override protected val sparkExecution: SparkExecution[F]
 ) extends LakehouseOperation[F] {
-  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database, streams)
+  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database.underlying, streams)
   private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database, streams)
   private val kafkaVolumeName = writerSettings.volumeName.stripSuffix("_hmac-rotation-analytics") +
     "_hmac-rotation-kafka"
@@ -243,13 +244,13 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       )
       now <- clock.realTimeInstant
       dataDeadline = preparation.capturedAt.plus(
-        java.time.Duration.ofDays(operational.retention.deltaVacuumSafetyDays.toLong)
+        java.time.Duration.ofDays(operational.retention.deltaVacuumSafetyDays.value.toLong)
       )
       logsDeadline = preparation.capturedAt.plus(
-        java.time.Duration.ofDays(operational.retention.deltaLogRetentionDays.toLong)
+        java.time.Duration.ofDays(operational.retention.deltaLogRetentionDays.value.toLong)
       )
       reportsDeadline = preparation.capturedAt.plus(
-        java.time.Duration.ofDays(operational.retention.publishedSnapshotDays.toLong)
+        java.time.Duration.ofDays(operational.retention.publishedSnapshotDays.value.toLong)
       )
       finalDeadline = List(dataDeadline, logsDeadline, reportsDeadline).max
       _ <- Async[F].raiseWhen(now.isBefore(finalDeadline))(
@@ -292,7 +293,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       audited <- AnalyticsKeyRetirement.auditUnderLock[F](
         spark,
         paths,
-        database,
+        database.underlying,
         keyId,
         retention,
         writers,

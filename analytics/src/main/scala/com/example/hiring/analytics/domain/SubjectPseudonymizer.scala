@@ -29,7 +29,7 @@ final class SubjectPseudonymizer private (
   }
 
   def typedToken(subjectId: String): Either[String, SubjectToken] =
-    validateSubjectId(subjectId).map(id =>
+    SubjectPseudonymizer.validateSubjectId(subjectId).map(id =>
       SubjectPseudonymizer.hmacToken(id, copiedKeys.head, SubjectPseudonymizer.newMac(copiedKeys.head._2))
     )
 
@@ -39,12 +39,9 @@ final class SubjectPseudonymizer private (
 
   /** Tokens used to match existing rows include every configured primary/retiring key. */
   def matchingTokens(subjectId: String): Either[String, Vector[SubjectToken]] =
-    validateSubjectId(subjectId).map(id =>
+    SubjectPseudonymizer.validateSubjectId(subjectId).map(id =>
       copiedKeys.toVector.map(key => SubjectPseudonymizer.hmacToken(id, key, SubjectPseudonymizer.newMac(key._2)))
     )
-
-  private def validateSubjectId(subjectId: String): Either[String, String] =
-    Option(subjectId).filter(_.nonEmpty).toRight("subject id must be non-empty")
 }
 
 object SubjectPseudonymizer {

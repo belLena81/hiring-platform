@@ -14,6 +14,7 @@ import com.example.hiring.analytics.service.erasure.ErasureRequestState
 import cats.data.EitherT
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
 import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.MongoCollection as ReactiveMongoCollection
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -404,6 +405,12 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           _ <- result(Either.cond(fence.nonEmpty, (), AnalyticsError.ErasureNotReady))
           nonReadyCount <- lift(streams.one(erasureRequests.countDocuments(session.underlying, nonReadyOther)))
           _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.ErasureNotReady))
+          currentSnapshotRecord <- lift(
+            streams.optional(
+              typedSnapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
+            )
+          )
+          currentSnapshot <- result(currentSnapshotRecord.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
           reserved <- lift(
             streams.optional(
               typedReservations
@@ -505,7 +512,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
                 Updates.set(
                   AnalyticsCollections.Fields.ExpiresAt,
                   Date.from(
-                    completedAt.plus(java.time.Duration.ofDays(operational.retention.deletionMarkerDays.toLong))
+                    completedAt.plus(java.time.Duration.ofDays(operational.retention.deletionMarkerDays.value.toLong))
                   )
                 ),
                 Updates.unset(AnalyticsCollections.Fields.LeaseToken),

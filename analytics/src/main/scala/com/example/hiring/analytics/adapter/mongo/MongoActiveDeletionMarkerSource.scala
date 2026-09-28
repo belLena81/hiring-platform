@@ -38,7 +38,7 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Cloc
       .eval(database.getCollection[Document](requestCollection, CodecRegistry.Default))
       .flatMap(collection =>
         streams.stream(
-          collection.find(
+          collection.underlying.find(
             Filters.or(
               Filters.in(
                 AnalyticsCollections.Fields.State,
@@ -64,7 +64,6 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Cloc
           )
           .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
           .batchSize(256)
-          .boundedStream
         )
       )
       .handleErrorWith {

@@ -15,6 +15,7 @@ import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.unsafe.implicits.global
 import cats.effect.{Clock, IO}
+import io.github.iltotore.iron.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.reactivestreams.client.{
@@ -455,7 +456,9 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       )
       .unsafeRunSync()
     val deltaDeadline =
-      purgedAt.plusSeconds(AnalyticsTestOperationalConfig.operational.retention.deltaLogRetentionDays.toLong * 86400L)
+      purgedAt.plusSeconds(
+        AnalyticsTestOperationalConfig.operational.retention.deltaLogRetentionDays.value.toLong * 86400L
+      )
     val deltaPassed = !Instant.now().isBefore(deltaDeadline)
     val evidence = db
       .getCollection("analytics_erasure_delta_files")

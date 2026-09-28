@@ -21,6 +21,7 @@ import com.example.hiring.analytics.service.batch.{
 import cats.effect.{Async, Clock, Resource}
 import cats.data.NonEmptyChain
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, concat, lit, sha2, struct, to_json, when}
@@ -193,7 +194,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
         _ <- reportPublisher.publish(
           reservation,
           report,
-          completedAt.plusSeconds(retention.publishedSnapshotDays.toLong * 86400L)
+          completedAt.plusSeconds(retention.publishedSnapshotDays.value.toLong * 86400L)
         )
         _ <- persistManifest(spark, manifest, "PUBLISHED", completedAt.toString)
       } yield AnalyticsRunOutcome.Published

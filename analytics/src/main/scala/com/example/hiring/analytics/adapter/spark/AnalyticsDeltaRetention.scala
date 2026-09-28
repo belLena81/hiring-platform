@@ -5,6 +5,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
 import cats.syntax.all.*
+import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, lit}
@@ -24,8 +25,8 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
   private val retention = operational.retention
 
   def configureRawTables(spark: SparkSession): F[Unit] = execution {
-    val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafetyDays} days"
-    val desiredLogRetention = s"interval ${retention.deltaLogRetentionDays} days"
+    val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafetyDays.value} days"
+    val desiredLogRetention = s"interval ${retention.deltaLogRetentionDays.value} days"
     val rawPaths = Set(paths.bronze, paths.quarantine)
     val tables = Vector(
       paths.bronze,

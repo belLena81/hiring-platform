@@ -120,25 +120,21 @@ object PartitionOffsetRange {
       partition: Int,
       startOffset: Long,
       endOffsetExclusive: Long
-  ): ValidatedNec[String, PartitionOffsetRange] =
-    fromValidated(topic.validNec, partition.validNec, startOffset.validNec, endOffsetExclusive.validNec)
-
-  def fromValidated(
-      topic: ValidatedNec[String, String],
-      partition: ValidatedNec[String, Int],
-      startOffset: ValidatedNec[String, Long],
-      endOffsetExclusive: ValidatedNec[String, Long]
   ): ValidatedNec[String, PartitionOffsetRange] = {
-    val validTopic = topic.andThen(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").toValidatedNec)
-    val validPartition = partition.andThen(
+    val topicValue = topic.validNec
+    val partitionValue = partition.validNec
+    val startValue = startOffset.validNec
+    val endValue = endOffsetExclusive.validNec
+    val validTopic = topicValue.andThen(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").toValidatedNec)
+    val validPartition = partitionValue.andThen(
       _.refineEither[Interval.Closed[0, 2147483647]].leftMap(_ => "partition must be non-negative").toValidatedNec
     )
-    val validStart = startOffset.andThen(
+    val validStart = startValue.andThen(
       _.refineEither[Interval.Closed[0L, 9223372036854775807L]]
         .leftMap(_ => "start offset must be non-negative")
         .toValidatedNec
     )
-    val validEnd = endOffsetExclusive.andThen(
+    val validEnd = endValue.andThen(
       _.refineEither[Interval.Closed[0L, 9223372036854775807L]]
         .leftMap(_ => "end offset must be non-negative")
         .toValidatedNec

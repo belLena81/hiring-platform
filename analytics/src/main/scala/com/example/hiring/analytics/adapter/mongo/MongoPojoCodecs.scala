@@ -1,8 +1,8 @@
 package com.example.hiring.analytics.adapter.mongo
 
 import com.mongodb.MongoClientSettings
-import org.bson.{BsonDocument, BsonDocumentCodec, BsonValue}
-import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
+import org.bson.{BsonDocument, BsonValue}
+import org.bson.codecs.{BsonDocumentCodec, Codec, DecoderContext, EncoderContext}
 import org.bson.codecs.configuration.{CodecProvider, CodecRegistries, CodecRegistry}
 import mongo4cats.codecs.MongoCodecProvider
 
@@ -19,11 +19,16 @@ private[analytics] object MongoPojoCodecs {
   private val reportRecordCodec = new Codec[ReportRecord] {
     override def getEncoderClass: Class[ReportRecord] = classOf[ReportRecord]
 
-    override def encode(writer: org.bson.BsonWriter, value: ReportRecord, context: EncoderContext): Unit =
-      documentCodec.encode(writer, BsonDocument(value.fields.asJava), context)
+    override def encode(writer: org.bson.BsonWriter, value: ReportRecord, context: EncoderContext): Unit = {
+      val document = new BsonDocument()
+      value.fields.foreach { case (name, fieldValue) => document.append(name, fieldValue) }
+      documentCodec.encode(writer, document, context)
+    }
 
     override def decode(reader: org.bson.BsonReader, context: DecoderContext): ReportRecord =
-      ReportRecord(documentCodec.decode(reader, context).asScala.toMap)
+      ReportRecord(
+        documentCodec.decode(reader, context).entrySet().asScala.iterator.map(entry => entry.getKey -> entry.getValue).toMap
+      )
   }
 
   val provider: MongoCodecProvider[ReportRecord] = new MongoCodecProvider[ReportRecord] {
