@@ -1,17 +1,21 @@
 package com.example.hiring.analytics.adapter.spark
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter
+import com.example.hiring.analytics.adapter.local.LocalHmacKeyWriterExclusion
+import com.example.hiring.analytics.adapter.mongo.HmacKeyRetirementKafkaLineage
+import com.example.hiring.analytics.adapter.mongo.HmacKeyRetirementKafkaOffsets
+import com.example.hiring.analytics.adapter.mongo.HmacKeyRetirementPreparation
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
+import com.example.hiring.analytics.adapter.mongo.MongoHmacKeyRetirementAuthorizationStore
+import com.example.hiring.analytics.adapter.mongo.MongoHmacKeyRetirementPreparationStore
+import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
+import com.example.hiring.analytics.config.AnalyticsOperationalSettings
+import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.service.erasure.KafkaRetentionBarrier
+import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 
 import cats.effect.kernel.{Async, Clock}
 import cats.syntax.all.*
@@ -21,7 +25,6 @@ import org.apache.spark.sql.SparkSession
 
 import java.net.URI
 import java.nio.file.{Files, LinkOption, Path}
-import java.time.Instant
 import scala.util.control.NonFatal
 
 /** Local operator workflow. Both steps hold the shared mutex and independently verify Docker writer exclusion. */
@@ -36,9 +39,8 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     streams: MongoPublisherStream,
     clock: Clock[F],
     mutex: AnalyticsLakehouseLock[F],
-    override protected val sparkExecution: SparkBlockingExecution[F]
+    override protected val sparkExecution: SparkExecution[F]
 ) extends LakehouseOperation[F] {
-  override protected val async: Async[F] = Async[F]
   private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database, streams)
   private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database, streams)
   private val kafkaVolumeName = writerSettings.volumeName.stripSuffix("_hmac-rotation-analytics") +

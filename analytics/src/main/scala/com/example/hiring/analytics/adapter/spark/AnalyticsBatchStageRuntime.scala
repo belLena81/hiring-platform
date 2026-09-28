@@ -1,11 +1,12 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.domain.AnalyticsReportOutput
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
-import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, ManifestStore}
 import com.example.hiring.analytics.config.AnalyticsRetentionSettings
-import cats.effect.Async
+
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.types.StructType
 import java.time.Instant
@@ -27,6 +28,8 @@ private[analytics] trait AnalyticsErasureLakehouse[F[_]] {
 
 /** Capabilities shared by Spark-backed stages; each stage receives only the subset it needs. */
 private[analytics] trait SparkExecution[F[_]] {
+
+  /** Evaluates blocking Spark work on its owned execution context. */
   def apply[A](work: => A): F[A]
   def either[A](work: => Either[AnalyticsError, A]): F[A]
 }

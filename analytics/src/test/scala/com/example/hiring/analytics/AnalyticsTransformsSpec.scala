@@ -435,8 +435,8 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("Kafka range reader defaults authenticated metadata and Spark settings to SASL_SSL") {
     val authenticated = KafkaConnection("kafka:9092", Some("analytics_reader"), Some("local-secret"))
-    val client = KafkaClientProperties.clientProperties(authenticated)
-    val spark = KafkaClientProperties.sparkOptions(authenticated)
+    val client = KafkaClientProperties.clientProperties(authenticated).toOption.get
+    val spark = KafkaClientProperties.sparkOptions(authenticated).toOption.get
     assertEquals(client.get("security.protocol"), Some("SASL_SSL"))
     assertEquals(client.get("sasl.mechanism"), Some("PLAIN"))
     assert(client.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
@@ -449,19 +449,25 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("Kafka SASL_PLAINTEXT requires explicit opt-in and reaches both client property sets") {
     val unapproved = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "SASL_PLAINTEXT")
     assert(KafkaConnection.validate(unapproved).isInvalid)
-    intercept[IllegalArgumentException](KafkaClientProperties.clientProperties(unapproved))
-    intercept[IllegalArgumentException](KafkaClientProperties.sparkOptions(unapproved))
+    assert(KafkaClientProperties.clientProperties(unapproved).isLeft)
+    assert(KafkaClientProperties.sparkOptions(unapproved).isLeft)
 
     val approved = unapproved.copy(allowPlaintext = true)
     assert(KafkaConnection.validate(approved).isValid)
-    assertEquals(KafkaClientProperties.clientProperties(approved).get("security.protocol"), Some("SASL_PLAINTEXT"))
-    assertEquals(KafkaClientProperties.sparkOptions(approved).get("kafka.security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(
+      KafkaClientProperties.clientProperties(approved).toOption.get.get("security.protocol"),
+      Some("SASL_PLAINTEXT")
+    )
+    assertEquals(
+      KafkaClientProperties.sparkOptions(approved).toOption.get.get("kafka.security.protocol"),
+      Some("SASL_PLAINTEXT")
+    )
   }
 
   test("Kafka rejects an unsupported security protocol") {
     val invalid = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "PLAINTEXT", allowPlaintext = true)
     assert(KafkaConnection.validate(invalid).isInvalid)
-    intercept[IllegalArgumentException](KafkaClientProperties.clientProperties(invalid))
+    assert(KafkaClientProperties.clientProperties(invalid).isLeft)
   }
 
   test("bounded batch persists replayable layers and quality-blocks Gold on malformed or conflicting records") {
@@ -1113,7 +1119,6 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("lakehouse operation boundary preserves typed errors and adapts thrown failures") {
     class Boundary extends LakehouseOperation[IO] {
-      override protected val async: cats.effect.Async[IO] = cats.effect.Async[IO]
       override protected val sparkExecution =
         com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
           .forTests[IO](scala.concurrent.ExecutionContext.parasitic)

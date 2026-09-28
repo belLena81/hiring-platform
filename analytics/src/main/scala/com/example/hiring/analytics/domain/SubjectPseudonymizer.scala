@@ -60,10 +60,7 @@ object SubjectPseudonymizer {
 
   private def hmacToken(subjectId: String, key: (String, Array[Byte]), mac: Mac): SubjectToken = {
     val digest = mac.doFinal(subjectId.getBytes(StandardCharsets.UTF_8))
-    val encoded = Base64.getUrlEncoder.withoutPadding().encodeToString(digest)
-    SubjectToken
-      .fromHmac(s"${key._1}_$encoded")
-      .fold(error => throw new IllegalStateException(error), identity)
+    SubjectToken.fromDigest(key._1, digest)
   }
 
   private def validateSubjectId(subjectId: String): Either[String, String] =
@@ -80,8 +77,8 @@ object SubjectPseudonymizer {
   ) {
     private val mac = newMac(primaryKey._2)
 
-    def primaryToken(subjectId: String): Either[String, SubjectToken] =
-      validateSubjectId(subjectId).map(id => hmacToken(id, primaryKey, mac))
+    def primaryToken(subjectId: String): SubjectToken =
+      hmacToken(subjectId, primaryKey, mac)
   }
 
   def validatedKeyRing(

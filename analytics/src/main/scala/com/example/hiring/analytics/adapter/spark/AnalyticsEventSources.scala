@@ -2,10 +2,8 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.KafkaConnection
-import com.example.hiring.analytics.domain.AnalyticsRunManifest
 import com.example.hiring.analytics.domain.{AnalyticsRunManifest, PartitionOffsetRange}
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, BoundedOperationalEventSource}
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
@@ -23,8 +21,7 @@ import scala.util.control.NonFatal
 /** Reads exactly the offsets named by a manifest; it never starts a streaming query. */
 private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
     connection: KafkaConnection,
-    sparkExecution: SparkBlockingExecution[F] =
-      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+    sparkExecution: SparkExecution[F]
 ) extends BoundedOperationalEventSource[F] {
   override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
     AnalyticsOffsetRanges.verifyCommittedKafkaRange(frame, manifest)
@@ -34,11 +31,12 @@ private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
       _ <- Async[F].fromEither(KafkaConnection.validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply))
       _ <- AnalyticsOffsetRanges.requireNonEmpty(manifest)
       _ <- KafkaOffsetRangeSource.verifyAvailable(connection, manifest)
+      options <- Async[F].fromEither(KafkaClientProperties.sparkOptions(connection))
       frame <- sparkExecution {
         spark.read
           .format("kafka")
           .option("kafka.bootstrap.servers", connection.bootstrapServers)
-          .options(KafkaClientProperties.sparkOptions(connection))
+          .options(options)
           .option("assign", KafkaOffsetRangeSource.assignJson(manifest.offsetRanges))
           .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
           .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
@@ -53,19 +51,20 @@ private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
 
 object KafkaOffsetRangeSource {
   private def consumer[F[_]: Async](connection: KafkaConnection): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
-    Resource.fromAutoCloseable(Async[F].blocking {
-      val settings = new Properties()
-      settings.setProperty("bootstrap.servers", connection.bootstrapServers)
-      settings.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
-      settings.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
-      settings.setProperty("enable.auto.commit", "false")
-      settings.setProperty("isolation.level", "read_committed")
-      settings.setProperty("default.api.timeout.ms", "10000")
-      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-        settings.setProperty(key, value)
-      }
-      new KafkaConsumer[Array[Byte], Array[Byte]](settings)
-    })
+    for {
+      clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
+      client <- Resource.fromAutoCloseable(Async[F].blocking {
+        val settings = new Properties()
+        settings.setProperty("bootstrap.servers", connection.bootstrapServers)
+        settings.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
+        settings.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
+        settings.setProperty("enable.auto.commit", "false")
+        settings.setProperty("isolation.level", "read_committed")
+        settings.setProperty("default.api.timeout.ms", "10000")
+        clientProperties.foreach { case (key, value) => settings.setProperty(key, value) }
+        new KafkaConsumer[Array[Byte], Array[Byte]](settings)
+      })
+    } yield client
 
   private[analytics] def verifyAvailable[F[_]: Async](
       connection: KafkaConnection,
@@ -149,8 +148,7 @@ object KafkaOffsetRangeSource {
 /** Test and backfill adapter. Its frame must have Kafka's topic, partition, offset, timestamp and value columns. */
 private[analytics] final case class DataFrameBatchSource[F[_]: Async](
     records: DataFrame,
-    sparkExecution: SparkBlockingExecution[F] =
-      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+    sparkExecution: SparkExecution[F]
 ) extends BoundedOperationalEventSource[F] {
   override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
     AnalyticsOffsetRanges.verify(frame, manifest)
@@ -178,4 +176,12 @@ private[analytics] final case class DataFrameBatchSource[F[_]: Async](
           case error: AnalyticsError => error
           case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
         }
+}
+
+private[analytics] object DataFrameBatchSource {
+  def apply[F[_]: Async](records: DataFrame): DataFrameBatchSource[F] =
+    new DataFrameBatchSource[F](
+      records,
+      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+    )
 }

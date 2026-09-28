@@ -1,7 +1,11 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.kafka.TransactionalProducerFencer
-import com.example.hiring.analytics.adapter.spark.{AnalyticsErasureLakehouse, AnalyticsErasureWorker}
+import com.example.hiring.analytics.adapter.spark.{
+  ActiveDeletionMarkerSource,
+  AnalyticsErasureLakehouse,
+  AnalyticsErasureWorker
+}
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError

@@ -11,7 +11,8 @@ import com.example.hiring.analytics.service.erasure.*
 
 import cats.effect.{Async, Clock, Resource, Temporal}
 import cats.syntax.all.*
-import com.mongodb.reactivestreams.client.{MongoClient, MongoClients, MongoDatabase}
+import mongo4cats.client.MongoClient
+import mongo4cats.database.MongoDatabase
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
@@ -133,16 +134,16 @@ object AppModule {
       sparkMaster: String,
       appName: String,
       sparkUiEnabled: Option[Boolean] = None
-  ): Resource[F, (SparkSession, MongoClient, SparkBlockingExecution[F])] =
+  ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     managedSparkMongo(
       execution => sparkSession(sparkMaster, appName, sparkUiEnabled, execution),
-      Async[F].delay(MongoClients.create(mongoUri))
+      mongoClient[F](mongoUri)
     )
 
   private[analytics] def managedSparkMongo[F[_]: Async](
       acquireSpark: SparkBlockingExecution[F] => F[SparkSession],
-      acquireMongo: F[MongoClient]
-  ): Resource[F, (SparkSession, MongoClient, SparkBlockingExecution[F])] =
+      acquireMongo: Resource[F, MongoClient[F]]
+  ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     for {
       sparkExecution <- SparkBlockingExecution.resource[F]
       spark <- Resource.make(acquireSpark(sparkExecution).adaptError { case NonFatal(cause) =>
@@ -152,26 +153,19 @@ object AppModule {
           AnalyticsError.LakehouseFailure(cause)
         }
       )
-      mongo <- mongoClientFrom[F](acquireMongo)
+      mongo <- acquireMongo
     } yield (spark, mongo, sparkExecution)
 
-  private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient] =
-    mongoClientFrom(Async[F].delay(MongoClients.create(uri)))
+  private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient[F]] =
+    MongoClient.fromConnectionString[F](uri).handleErrorWith {
+      case _: IllegalArgumentException =>
+        Resource.eval(Async[F].raiseError[MongoClient[F]](AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")))
+      case NonFatal(cause) =>
+        Resource.eval(Async[F].raiseError[MongoClient[F]](AnalyticsError.MongoConnectionFailure(cause)))
+    }
 
-  private def mongoClientFrom[F[_]: Async](acquire: F[MongoClient]): Resource[F, MongoClient] =
-    Resource.make(
-      acquire.adaptError {
-        case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
-        case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
-      }
-    )(client =>
-      Async[F].delay(client.close()).adaptError { case NonFatal(cause) =>
-        AnalyticsError.MongoConnectionFailure(cause)
-      }
-    )
-
-  private def mongoDatabase[F[_]: Async](client: MongoClient, name: String): F[MongoDatabase] =
-    Async[F].delay(client.getDatabase(name)).adaptError {
+  private def mongoDatabase[F[_]: Async](client: MongoClient[F], name: String): F[MongoDatabase[F]] =
+    client.getDatabase(name).adaptError {
       case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")
       case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
     }
@@ -180,7 +174,7 @@ object AppModule {
       master: String,
       appName: String,
       sparkUiEnabled: Option[Boolean],
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[SparkSession] =
     sparkExecution {
       val builder = org.apache.spark.sql.classic.SparkSession

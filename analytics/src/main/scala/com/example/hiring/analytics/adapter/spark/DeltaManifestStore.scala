@@ -2,7 +2,8 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.AnalyticsRunManifest
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, ManifestStore}
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+
 import cats.effect.Async
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable

@@ -1,27 +1,19 @@
 package com.example.hiring.analytics.adapter.mongo
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
+
+import com.example.hiring.analytics.domain.AnalyticsDigest
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 
 import cats.effect.{Async, Clock, Resource, Temporal}
 import cats.syntax.all.*
-import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.mongodb.MongoException
 import com.mongodb.WriteConcern
-import com.mongodb.reactivestreams.client.MongoDatabase
+import mongo4cats.codecs.CodecRegistry
+import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.net.URI
 import java.nio.charset.StandardCharsets
-import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
@@ -30,7 +22,7 @@ import scala.util.control.NonFatal
 
 /** Mongo mutex with no expiry or automatic takeover. A stale row must be cleared manually after its owner stops. */
 private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal](
-    database: MongoDatabase,
+    database: MongoDatabase[F],
     clock: Clock[F],
     streams: MongoPublisherStream
 ) extends AnalyticsLakehouseLock[F] {
@@ -38,10 +30,10 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
   import MongoAnalyticsLakehouseLock.*
 
   private val collection = database
-    .getCollection(CollectionName, classOf[Document])
-    .withWriteConcern(
+    .getCollection[Document](CollectionName, CodecRegistry.Default)
+    .map(_.withWriteConcern(
       WriteConcern.MAJORITY.withJournal(true).withWTimeout(WriteTimeout.toMillis, TimeUnit.MILLISECONDS)
-    )
+    ))
 
   override def resource(root: String): Resource[F, Unit] =
     Resource.make(acquire(root))(owner => release(root, owner)).void
@@ -52,15 +44,12 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
         clock.monotonic.flatMap { startedAt =>
           val deadline = startedAt + WaitTimeout
           def attempt(retryDelay: FiniteDuration): F[String] = clock.realTimeInstant
-            .flatMap(acquiredAt =>
-              F.delay(
-                collection.insertOne(
-                  new Document("_id", id)
-                    .append("ownerToken", owner)
-                    .append("acquiredAt", java.util.Date.from(acquiredAt))
-                )
-              ).flatMap(streams.one(_))
-            )
+            .flatMap(acquiredAt => collection.flatMap(_.insertOne(
+              new Document("_id", id)
+                .append("ownerToken", owner)
+                .append("acquiredAt", java.util.Date.from(acquiredAt)),
+              mongo4cats.models.collection.InsertOneOptions()
+            )))
             .as(owner)
             .handleErrorWith {
               case error: MongoException if error.getCode == 11000 =>
@@ -80,8 +69,11 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
     }
 
   private def release(root: String, owner: String): F[Unit] = F.fromEither(lockId(root)).flatMap { id =>
-    streams
-      .one(collection.deleteOne(new Document("_id", id).append("ownerToken", owner)))
+    collection
+      .flatMap(_.deleteOne(
+        new Document("_id", id).append("ownerToken", owner),
+        mongo4cats.models.collection.DeleteOptions()
+      ))
       .flatMap(result =>
         F.raiseWhen(result.getDeletedCount != 1L)(
           AnalyticsError.LakehouseFailure(new IllegalStateException("lakehouse mutex owner changed before release"))

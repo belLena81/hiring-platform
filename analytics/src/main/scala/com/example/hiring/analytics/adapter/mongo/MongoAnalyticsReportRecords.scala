@@ -3,8 +3,9 @@ package com.example.hiring.analytics.adapter.mongo
 import com.example.hiring.analytics.domain.{RangeFingerprint, RunId}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
+
 import cats.syntax.all.*
-import org.bson.{BsonValue, Document}
+import org.bson.BsonValue
 
 import java.util.Date
 
@@ -19,14 +20,14 @@ private[analytics] object MongoAnalyticsReportRecords {
       lastPublishedRevision: Long,
       lastRunId: Option[String],
       state: String,
-      extraFields: Document
+    extraFields: Map[String, BsonValue]
   )
   final case class Snapshot(
       generation: Long,
       revision: Long,
       runId: RunId,
       expiresAt: Option[Date],
-      extraFields: Document
+    extraFields: Map[String, BsonValue]
   ) {
     def matches(reservation: AnalyticsReportReservation): Boolean =
       generation == reservation.generation && revision == reservation.revision && runId == reservation.runId
@@ -52,45 +53,67 @@ private[analytics] object MongoAnalyticsReportRecords {
 
   def decodeRun(record: Record): Either[AnalyticsError, Run] =
     for {
-      id <- required(record.getId)(string)
-      fingerprint <- required(record.getRangeFingerprint)(string)
+      id <- required(record.get(AnalyticsCollections.Fields.Id))(string)
+      fingerprint <- required(record.get(AnalyticsCollections.Fields.RangeFingerprint))(string)
       runId <- RunId.from(id).toEither.leftMap(_ => malformed)
       rangeFingerprint <- RangeFingerprint.from(fingerprint).leftMap(_ => malformed)
-      generation <- required(record.getGeneration)(int64)
-      revision <- required(record.getRevision)(int64)
-      state <- required(record.getState)(string).flatMap { value =>
+      generation <- required(record.get(AnalyticsCollections.Fields.Generation))(int64)
+      revision <- required(record.get(AnalyticsCollections.Fields.Revision))(int64)
+      state <- required(record.get(AnalyticsCollections.Fields.State))(string).flatMap { value =>
         Either.cond(Set("Reserved", "Published").contains(value), value, malformed)
       }
     } yield Run(AnalyticsReportReservation(runId, rangeFingerprint, generation, revision), state)
 
   def decodeControl(record: Record): Either[AnalyticsError, Control] =
     for {
-      generation <- required(record.getGeneration)(int64)
-      nextRevision <- optional(record.getNextRevision)(int64)
-      lastRevision <- required(record.getLastPublishedRevision)(int64)
-      lastRunId <- optional(record.getLastRunId)(string)
-      state <- required(record.getState)(string)
+      generation <- required(record.get(AnalyticsCollections.Fields.Generation))(int64)
+      nextRevision <- optional(record.get(AnalyticsCollections.Fields.NextRevision))(int64)
+      lastRevision <- required(record.get(AnalyticsCollections.Fields.LastPublishedRevision))(int64)
+      lastRunId <- optional(record.get(AnalyticsCollections.Fields.LastRunId))(string)
+      state <- required(record.get(AnalyticsCollections.Fields.State))(string)
     } yield Control(
       generation,
       nextRevision,
       lastRevision,
       lastRunId,
       state,
-      Option(record.getExtraFields).getOrElse(new Document())
+      record.extraFields(
+        Set(
+          AnalyticsCollections.Fields.Id,
+          AnalyticsCollections.Fields.Generation,
+          AnalyticsCollections.Fields.NextRevision,
+          AnalyticsCollections.Fields.LastPublishedRevision,
+          AnalyticsCollections.Fields.LastRunId,
+          AnalyticsCollections.Fields.State
+        )
+      )
     )
 
   def decodeSnapshot(record: Record): Either[AnalyticsError, Snapshot] =
     for {
-      generation <- required(record.getGeneration)(int64)
-      revision <- required(record.getRevision)(int64)
-      rawRunId <- required(record.getRunId)(string)
+      generation <- required(record.get(AnalyticsCollections.Fields.Generation))(int64)
+      revision <- required(record.get(AnalyticsCollections.Fields.Revision))(int64)
+      rawRunId <- required(record.get(AnalyticsCollections.Fields.RunId))(string)
       runId <- RunId.from(rawRunId).toEither.leftMap(_ => malformed)
-      expiresAt <- optional(record.getExpiresAt)(date)
+      expiresAt <- optional(record.get(AnalyticsCollections.Fields.ExpiresAt))(date)
     } yield Snapshot(
       generation,
       revision,
       runId,
       expiresAt,
-      Option(record.getExtraFields).getOrElse(new Document())
+      record.extraFields(
+        Set(
+          AnalyticsCollections.Fields.Id,
+          AnalyticsCollections.Fields.State,
+          AnalyticsCollections.Fields.Generation,
+          AnalyticsCollections.Fields.Revision,
+          AnalyticsCollections.Fields.RunId,
+          AnalyticsCollections.Fields.ExpiresAt,
+          AnalyticsCollections.Fields.AsOf,
+          "funnel",
+          "skillPostingActivity",
+          "timeToHire"
+        )
+      )
     )
 }

@@ -1,20 +1,16 @@
 package com.example.hiring.analytics.adapter.mongo
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.*
-import com.example.hiring.analytics.adapter.mongo.{AnalyticsCollections, BsonDecoder, BsonValueDecoder}
+import com.example.hiring.analytics.adapter.spark.ActiveDeletionMarkerSource
+import com.example.hiring.analytics.adapter.spark.SparkExecution
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.domain.SubjectToken
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.erasure.ErasureRequestState
+
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
-import com.mongodb.reactivestreams.client.MongoDatabase
+import mongo4cats.codecs.CodecRegistry
+import mongo4cats.database.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
 import fs2.Stream
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
@@ -29,21 +25,20 @@ import scala.util.control.NonFatal
 
 /** Reads pending account-erasure requests before an analytics run can mutate Delta data. */
 private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Clock](
-    database: MongoDatabase,
+    database: MongoDatabase[F],
     pseudonymizer: SubjectPseudonymizer,
     streams: MongoPublisherStream,
-    sparkExecution: SparkBlockingExecution[F] =
-      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic),
+    sparkExecution: SparkExecution[F],
     private[analytics] val maximumPendingMarkers: Int = MongoActiveDeletionMarkerSource.MaximumPendingMarkers
 ) extends ActiveDeletionMarkerSource[F] {
   private val requestCollection = com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.ErasureRequests
 
   private def activeRequests(now: Instant): Stream[F, Document] =
-    streams
-      .stream[F, Document](
-        database
-          .getCollection(requestCollection, classOf[Document])
-          .find(
+    Stream
+      .eval(database.getCollection[Document](requestCollection, CodecRegistry.Default))
+      .flatMap(collection =>
+        streams.stream(
+          collection.find(
             Filters.or(
               Filters.in(
                 AnalyticsCollections.Fields.State,
@@ -68,8 +63,9 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Cloc
             )
           )
           .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
-          // Mongo's server-cursor batch hint is separate from the FS2 demand buffer configured on streams.
           .batchSize(256)
+          .boundedStream
+        )
       )
       .handleErrorWith {
         case error: AnalyticsError => Stream.raiseError[F](error)
@@ -81,13 +77,11 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Cloc
       _ <- Async[F].raiseWhen(maximumPendingMarkers <= 0)(
         AnalyticsError.InvalidConfiguration("maximum pending marker count must be positive")
       )
-      collectionExists <- streams
-        .optional(database.listCollections().filter(Filters.eq("name", requestCollection)).first())
-        .map(_.isDefined)
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.MarkerStorageFailure(cause)
-        }
+      collectionNames <- database.listCollectionNames.adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(cause)       => AnalyticsError.MarkerStorageFailure(cause)
+      }
+      collectionExists = collectionNames.exists(_ == requestCollection)
       _ <- Async[F].raiseUnless(collectionExists)(AnalyticsError.MissingMarkerCollection)
       now <- Clock[F].realTimeInstant
       tokens <- activeRequests(now)

@@ -7,11 +7,17 @@ import org.apache.spark.sql.SparkSession
 
 /** Owns the temporary Delta path used while rewriting retained data files. */
 private[analytics] object DeltaPurgeRewrite {
+  def temporaryPath[F[_]: Async](spark: SparkSession, temporaryPath: String): Resource[F, Unit] =
+    DeltaPurgeRewrite.temporaryPath[F](
+      spark,
+      temporaryPath,
+      SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+    )
+
   def temporaryPath[F[_]: Async](
       spark: SparkSession,
       temporaryPath: String,
-      sparkExecution: SparkBlockingExecution[F] =
-        SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+      sparkExecution: SparkExecution[F]
   ): Resource[F, Unit] =
     Resource
       .make(

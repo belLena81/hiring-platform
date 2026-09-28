@@ -1,15 +1,9 @@
 /** Spark-only privacy transforms. Raw identifiers exist only in the input frame before `silver`. */
 package com.example.hiring.analytics.adapter.spark
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
+
+import com.example.hiring.analytics.domain.AnalyticsEventType
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.errors.AnalyticsError
 
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.functions.{array, array_intersect, col, lit, size}
@@ -47,8 +41,8 @@ object AnalyticsSubjectPrivacy {
         val searchKind = payload.flatMap(value => Option(value.getAs[String]("searchKind")))
         val candidateSearch = searchKind.contains("candidateMatches")
 
-        val actorToken = actorId.filter(_.trim.nonEmpty).map(value => tokenValue(tokenizer.primaryToken(value)))
-        val candidateToken = Option.when(candidateId.nonEmpty)(tokenValue(tokenizer.primaryToken(candidateId)))
+        val actorToken = actorId.filter(_.trim.nonEmpty).map(tokenizer.primaryToken)
+        val candidateToken = Option.when(candidateId.nonEmpty)(tokenizer.primaryToken(candidateId))
         val searchResultIds =
           if (!candidateSearch) Vector.empty
           else
@@ -65,16 +59,13 @@ object AnalyticsSubjectPrivacy {
             }
         val tokens = (actorToken.toVector ++ candidateToken.toVector ++ searchResultIds
           .filter(_.trim.nonEmpty)
-          .map(value => tokenValue(tokenizer.primaryToken(value)))).distinct.map(_.value)
+          .map(tokenizer.primaryToken)).distinct.map(_.value)
         val subjectToken = candidateToken.orElse(actorToken).map(_.value).orNull
         Row.fromSeq(row.toSeq ++ Seq(subjectToken, tokens))
       }
     }
     source.sparkSession.createDataFrame(rows, schema)
   }
-
-  private def tokenValue(result: Either[String, SubjectToken]): SubjectToken =
-    result.fold(error => throw new IllegalArgumentException(error), identity)
 
   /** Removes data for active erasure markers before it can be merged into Silver. Marker sources expose only the
     * already-HMACed token; this transform has no persistence or Mongo dependency.

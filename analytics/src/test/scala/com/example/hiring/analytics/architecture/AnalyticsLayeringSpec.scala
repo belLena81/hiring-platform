@@ -33,6 +33,18 @@ final class AnalyticsLayeringSpec extends FunSuite {
     rule.check(analyticsClasses)
   }
 
+  test("domain, service, config, and errors do not depend on Spark") {
+    val analyticsClasses = new ClassFileImporter().importPackages("com.example.hiring.analytics")
+    val rule = noClasses()
+      .that()
+      .resideInAnyPackage("..domain..", "..service..", "..config..", "..errors..")
+      .should()
+      .dependOnClassesThat()
+      .resideInAnyPackage("org.apache.spark..")
+
+    rule.check(analyticsClasses)
+  }
+
   test("domain, service, and config use explicit internal analytics imports") {
     val sourceRoot = Paths.get("src/main/scala/com/example/hiring/analytics")
     List("domain", "service", "config").foreach { layer =>

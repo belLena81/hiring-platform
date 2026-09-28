@@ -1,28 +1,14 @@
 package com.example.hiring.analytics.adapter.spark
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.*
+import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.Async
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.delta.DeltaLog
 import org.apache.spark.sql.functions.*
-import org.apache.spark.sql.types.{StringType, StructField, StructType}
 
-import java.time.Instant
-import java.sql.Timestamp
-import scala.jdk.CollectionConverters.*
 import scala.util.Try
 
 /** Owns erasure matching, Delta evidence capture, checkpointing, and physical-presence verification. */

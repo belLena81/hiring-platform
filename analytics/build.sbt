@@ -9,6 +9,7 @@ lazy val circeVersion = "0.14.16"
 lazy val typesafeConfigVersion = "1.4.9"
 lazy val ironVersion = "3.3.2"
 lazy val catsRetryVersion = "4.0.0"
+lazy val mongo4catsVersion = "0.7.18"
 lazy val munitScalaCheckVersion = "1.3.1"
 lazy val archUnitVersion = "1.5.1"
 lazy val IntegrationTest = config("it") extend Test
@@ -43,6 +44,8 @@ lazy val analytics = (project in file("."))
       "io.github.iltotore" %% "iron" % ironVersion,
       "co.fs2" %% "fs2-core" % "3.14.0",
       "org.typelevel" %% "log4cats-slf4j" % "2.8.0",
+      "io.github.kirill5k" %% "mongo4cats-core" % mongo4catsVersion,
+      "io.github.kirill5k" %% "mongo4cats-circe" % mongo4catsVersion,
       "org.mongodb" % "mongodb-driver-reactivestreams" % "5.13.0",
       "org.mongodb" % "mongodb-driver-sync" % "5.13.0" % Test,
       "co.fs2" %% "fs2-reactive-streams" % "3.14.0",

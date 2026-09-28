@@ -50,7 +50,13 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
   ): AnalyticsErasureWorker[IO] = {
     val lock = new MongoAnalyticsLakehouseLock(database, clock, AnalyticsTestOperationalConfig.streams)
     val markers =
-      new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer, streams = AnalyticsTestOperationalConfig.streams)
+      new MongoActiveDeletionMarkerSource[IO](
+        database,
+        pseudonymizer,
+        streams = AnalyticsTestOperationalConfig.streams,
+        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+      )
     val maintenance = new DeltaAnalyticsErasureLakehouse[IO](
       paths,
       pseudonymizer,

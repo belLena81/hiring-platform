@@ -305,33 +305,33 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         .toEither
         .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
     } yield (connection, topic)
-    settings.map { case (connection, topic) =>
-      val properties = new Properties()
-      properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-      properties.setProperty("key.serializer", classOf[StringSerializer].getName)
-      properties.setProperty("value.serializer", classOf[StringSerializer].getName)
-      properties.setProperty("enable.idempotence", "true")
-      properties.setProperty("acks", "all")
-      properties.setProperty("delivery.timeout.ms", "30000")
-      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-        properties.setProperty(key, value)
+    settings.flatMap { case (connection, topic) =>
+      KafkaClientProperties.clientProperties(connection).map { clientProperties =>
+        val properties = new Properties()
+        properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+        properties.setProperty("key.serializer", classOf[StringSerializer].getName)
+        properties.setProperty("value.serializer", classOf[StringSerializer].getName)
+        properties.setProperty("enable.idempotence", "true")
+        properties.setProperty("acks", "all")
+        properties.setProperty("delivery.timeout.ms", "30000")
+        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        val eventId = UUID.randomUUID().toString
+        val jobId = UUID.randomUUID().toString
+        val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
+          s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$OldSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
+        val producer = new KafkaProducer[String, String](properties)
+        try {
+          val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
+          producer.flush()
+          fixtureRecord(
+            spark,
+            paths,
+            at,
+            "old-primary-event-published",
+            s"${metadata.topic()}:${metadata.partition()}:${metadata.offset() + 1L}"
+          )
+        } finally producer.close()
       }
-      val eventId = UUID.randomUUID().toString
-      val jobId = UUID.randomUUID().toString
-      val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
-        s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$OldSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
-      val producer = new KafkaProducer[String, String](properties)
-      try {
-        val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
-        producer.flush()
-        fixtureRecord(
-          spark,
-          paths,
-          at,
-          "old-primary-event-published",
-          s"${metadata.topic()}:${metadata.partition()}:${metadata.offset() + 1L}"
-        )
-      } finally producer.close()
     }
   }
 
@@ -413,33 +413,33 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         .toEither
         .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
     } yield (connection, topic)
-    settings.map { case (connection, topic) =>
-      val properties = new Properties()
-      properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-      properties.setProperty("key.serializer", classOf[StringSerializer].getName)
-      properties.setProperty("value.serializer", classOf[StringSerializer].getName)
-      properties.setProperty("enable.idempotence", "true")
-      properties.setProperty("acks", "all")
-      properties.setProperty("delivery.timeout.ms", "30000")
-      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-        properties.setProperty(key, value)
+    settings.flatMap { case (connection, topic) =>
+      KafkaClientProperties.clientProperties(connection).map { clientProperties =>
+        val properties = new Properties()
+        properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+        properties.setProperty("key.serializer", classOf[StringSerializer].getName)
+        properties.setProperty("value.serializer", classOf[StringSerializer].getName)
+        properties.setProperty("enable.idempotence", "true")
+        properties.setProperty("acks", "all")
+        properties.setProperty("delivery.timeout.ms", "30000")
+        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        val eventId = UUID.randomUUID().toString
+        val jobId = UUID.randomUUID().toString
+        val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
+          s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$NewControlSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
+        val producer = new KafkaProducer[String, String](properties)
+        try {
+          val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
+          producer.flush()
+          fixtureRecord(
+            spark,
+            paths,
+            at,
+            "new-primary-event-published",
+            s"${metadata.topic()}:${metadata.partition()}:${metadata.offset()}:${metadata.offset() + 1L}"
+          )
+        } finally producer.close()
       }
-      val eventId = UUID.randomUUID().toString
-      val jobId = UUID.randomUUID().toString
-      val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
-        s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$NewControlSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
-      val producer = new KafkaProducer[String, String](properties)
-      try {
-        val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
-        producer.flush()
-        fixtureRecord(
-          spark,
-          paths,
-          at,
-          "new-primary-event-published",
-          s"${metadata.topic()}:${metadata.partition()}:${metadata.offset()}:${metadata.offset() + 1L}"
-        )
-      } finally producer.close()
     }
   }
 

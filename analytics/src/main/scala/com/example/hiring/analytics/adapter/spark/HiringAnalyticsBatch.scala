@@ -10,15 +10,12 @@ import com.example.hiring.analytics.domain.{
 }
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{
-  ActiveDeletionMarkerSource,
   AnalyticsLakehouseLock,
   AnalyticsLakehousePaths,
   AnalyticsPublication,
   AnalyticsReportPublisher,
   AnalyticsReportReservation,
-  AnalyticsRunOutcome,
-  BoundedOperationalEventSource,
-  ManifestStore
+  AnalyticsRunOutcome
 }
 
 import cats.effect.{Async, Clock, Resource}
@@ -32,7 +29,6 @@ import org.apache.spark.sql.types.StructType
 
 import java.sql.Timestamp
 import java.time.Instant
-import scala.util.control.NonFatal
 
 /** Delta batch writer with idempotent natural keys. A completed manifest is written only after Bronze, Silver,
   * quarantine, and both rebuildable Gold datasets have been durably updated.
@@ -46,10 +42,9 @@ final class HiringAnalyticsBatch[F[_]: Async](
     manifestStore: ManifestStore[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
     operational: AnalyticsOperationalSettings,
-    override protected val sparkExecution: SparkBlockingExecution[F],
+    override protected val sparkExecution: SparkExecution[F],
     maintenance: AnalyticsBatchMaintenance[F]
 ) extends LakehouseOperation[F] {
-  override protected val async: Async[F] = Async[F]
   private val F = Async[F]
   private val retention = operational.retention
   private def now: F[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
@@ -113,10 +108,6 @@ final class HiringAnalyticsBatch[F[_]: Async](
       else F.raiseError(AnalyticsError.InvalidSourceSchema(Vector("subjectToken")))
     }
 
-  private val stageExecution = new SparkExecution[F] {
-    override def apply[A](work: => A): F[A] = lakehouse(work)
-    override def either[A](work: => Either[AnalyticsError, A]): F[A] = lakehouseEither(work)
-  }
   private val deltaWriter = new DeltaWriter[F] {
     override def merge(source: DataFrame, path: String, condition: String): F[Unit] =
       mergeDelta(source, path, condition)
@@ -127,13 +118,13 @@ final class HiringAnalyticsBatch[F[_]: Async](
       readDeltaOrEmpty(spark, path, schema)
   }
   private val ingestionStage = new AnalyticsBatchIngestionStage(
-    IngestionStagePorts(paths, pseudonymizer, stageExecution, manifestStore, deltaWriter, clock, retention)
+    IngestionStagePorts(paths, pseudonymizer, this, manifestStore, deltaWriter, clock, retention)
   )
   private val silverStage = new AnalyticsBatchSilverStage(
     SilverStagePorts(
       paths,
       pseudonymizer,
-      stageExecution,
+      this,
       deltaWriter,
       deltaReader,
       new QuarantineId {

@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{Async, Resource}
+import com.example.hiring.analytics.errors.AnalyticsError
 
 import java.util.concurrent.{Executors, ThreadFactory}
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
@@ -8,9 +9,13 @@ import scala.concurrent.{ExecutionContext, ExecutionContextExecutorService}
 /** Owns the bounded driver-side execution context used for synchronous Spark and Delta calls. */
 private[analytics] final class SparkBlockingExecution[F[_]] private (
     private val executionContext: ExecutionContext
-) {
-  def apply[A](work: => A)(using Async[F]): F[A] =
-    Async[F].evalOn(Async[F].delay(work), executionContext)
+)(using async: Async[F])
+    extends SparkExecution[F] {
+  override def apply[A](work: => A): F[A] =
+    async.evalOn(async.delay(work), executionContext)
+
+  override def either[A](work: => Either[AnalyticsError, A]): F[A] =
+    async.flatMap(apply(work))(async.fromEither)
 
   private[analytics] def isShutdown: Boolean = executionContext match {
     case service: ExecutionContextExecutorService => service.isShutdown
@@ -19,7 +24,7 @@ private[analytics] final class SparkBlockingExecution[F[_]] private (
 }
 
 private[analytics] object SparkBlockingExecution {
-  private[analytics] def forTests[F[_]](executionContext: ExecutionContext): SparkBlockingExecution[F] =
+  private[analytics] def forTests[F[_]: Async](executionContext: ExecutionContext): SparkBlockingExecution[F] =
     new SparkBlockingExecution[F](executionContext)
 
   def resource[F[_]: Async]: Resource[F, SparkBlockingExecution[F]] =

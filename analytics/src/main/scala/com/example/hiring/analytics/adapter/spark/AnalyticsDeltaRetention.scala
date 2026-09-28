@@ -19,7 +19,6 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
     paths: AnalyticsLakehousePaths,
     operational: AnalyticsOperationalSettings,
     execution: SparkExecution[F],
-    sparkExecution: SparkBlockingExecution[F],
     logger: Logger[F]
 ) {
   private val retention = operational.retention
@@ -86,7 +85,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
           case false => Async[F].pure(count)
           case true  =>
             val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-${UUID.randomUUID()}"
-            DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, sparkExecution).use { _ =>
+            DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, execution).use { _ =>
               execution {
                 spark.read.format("delta").load(path).write.format("delta").mode("overwrite").save(temporaryPath)
                 spark.read

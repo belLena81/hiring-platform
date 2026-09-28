@@ -1,16 +1,11 @@
 package com.example.hiring.analytics.adapter.spark
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.*
+import com.example.hiring.analytics.domain.AnalyticsAggregateType
+import com.example.hiring.analytics.domain.AnalyticsApplicationStatus
+import com.example.hiring.analytics.domain.AnalyticsEventType
+import com.example.hiring.analytics.domain.AnalyticsRetention
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.Async
 import org.apache.spark.sql.{Column, DataFrame}
@@ -289,7 +284,7 @@ object HiringGoldTransforms {
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
   def timeToHireAction[F[_]: Async](
       silver: DataFrame,
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[DataFrame] = sparkExecution {
     val lifecycle = applicationLifecycle(silver)
       .groupBy(Columns.ApplicationId, Columns.SubjectToken)

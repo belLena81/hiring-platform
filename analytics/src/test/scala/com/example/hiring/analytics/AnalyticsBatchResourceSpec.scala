@@ -33,12 +33,20 @@ class AnalyticsBatchResourceSpec extends FunSuite {
         for {
           first <- execution(Thread.currentThread().getName)
           second <- execution(Thread.currentThread().getName)
-        } yield (first, second)
+          expected <- execution.either(Right("expected result"))
+          rejected <- execution
+            .either[Unit](Left(AnalyticsError.InvalidConfiguration("expected rejection")))
+            .attempt
+          failed <- execution(throw new IllegalStateException("injected Spark failure")).attempt
+        } yield (first, second, expected, rejected, failed)
       }
       .unsafeRunSync()
 
     assertEquals(result._1, "analytics-spark-driver")
     assertEquals(result._2, "analytics-spark-driver")
+    assertEquals(result._3, "expected result")
+    assert(result._4.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+    assert(result._5.left.exists(_.isInstanceOf[IllegalStateException]))
   }
 
   test("process-local test lock serializes same-process access") {

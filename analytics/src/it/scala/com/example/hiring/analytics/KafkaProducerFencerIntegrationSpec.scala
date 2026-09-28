@@ -164,7 +164,15 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
           ),
           DataFrameDeletionMarkerSource(markers)
         )
-        .run(spark, new KafkaOffsetRangeSource(connection), manifest)
+        .run(
+          spark,
+          new KafkaOffsetRangeSource(
+            connection,
+            com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+              .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+          ),
+          manifest
+        )
         .unsafeRunSync()
       assertEquals(publication.bronzeRecords, 1L)
       assertEquals(publication.validRecords, 1L)

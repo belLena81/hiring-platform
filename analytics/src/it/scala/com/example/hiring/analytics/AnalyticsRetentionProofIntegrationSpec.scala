@@ -242,7 +242,11 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       val result = batch
         .run(
           spark,
-          new KafkaOffsetRangeSource(connection("analytics_reader", required("KAFKA_READER_PASSWORD"))),
+          new KafkaOffsetRangeSource(
+            connection("analytics_reader", required("KAFKA_READER_PASSWORD")),
+            com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+              .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+          ),
           manifest
         )
         .unsafeRunSync()

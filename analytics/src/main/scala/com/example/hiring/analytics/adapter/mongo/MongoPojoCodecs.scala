@@ -1,60 +1,40 @@
 package com.example.hiring.analytics.adapter.mongo
 
 import com.mongodb.MongoClientSettings
-import org.bson.{BsonValue, Document}
-import org.bson.codecs.configuration.{CodecRegistries, CodecRegistry}
-import org.bson.codecs.pojo.annotations.{BsonExtraElements, BsonProperty}
-import org.bson.codecs.pojo.PojoCodecProvider
+import org.bson.{BsonDocument, BsonDocumentCodec, BsonValue}
+import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
+import org.bson.codecs.configuration.{CodecProvider, CodecRegistries, CodecRegistry}
+import mongo4cats.codecs.MongoCodecProvider
 
-import scala.compiletime.uninitialized
+import scala.jdk.CollectionConverters.*
 
-/** Official driver POJO codecs for analytics Mongo persistence records. */
+/** Immutable BSON persistence record for analytics report documents. */
 private[analytics] object MongoPojoCodecs {
-  final class ReportRecord() {
-    private var idValue: BsonValue = uninitialized
-    private var rangeFingerprintValue: BsonValue = uninitialized
-    private var generationValue: BsonValue = uninitialized
-    private var revisionValue: BsonValue = uninitialized
-    private var nextRevisionValue: BsonValue = uninitialized
-    private var lastPublishedRevisionValue: BsonValue = uninitialized
-    private var lastRunIdValue: BsonValue = uninitialized
-    private var stateValue: BsonValue = uninitialized
-    private var runIdValue: BsonValue = uninitialized
-    private var expiresAtValue: BsonValue = uninitialized
-    private var extraFields: Document = uninitialized
-
-    @BsonProperty("_id") def getId: BsonValue = idValue
-    @BsonProperty("_id") def setId(value: BsonValue): Unit = idValue = value
-    @BsonProperty("rangeFingerprint") def getRangeFingerprint: BsonValue = rangeFingerprintValue
-    @BsonProperty("rangeFingerprint") def setRangeFingerprint(value: BsonValue): Unit = rangeFingerprintValue = value
-    @BsonProperty("generation") def getGeneration: BsonValue = generationValue
-    @BsonProperty("generation") def setGeneration(value: BsonValue): Unit = generationValue = value
-    @BsonProperty("revision") def getRevision: BsonValue = revisionValue
-    @BsonProperty("revision") def setRevision(value: BsonValue): Unit = revisionValue = value
-    @BsonProperty("nextRevision") def getNextRevision: BsonValue = nextRevisionValue
-    @BsonProperty("nextRevision") def setNextRevision(value: BsonValue): Unit = nextRevisionValue = value
-    @BsonProperty("lastPublishedRevision") def getLastPublishedRevision: BsonValue = lastPublishedRevisionValue
-    @BsonProperty("lastPublishedRevision")
-    def setLastPublishedRevision(value: BsonValue): Unit = lastPublishedRevisionValue = value
-    @BsonProperty("lastRunId") def getLastRunId: BsonValue = lastRunIdValue
-    @BsonProperty("lastRunId") def setLastRunId(value: BsonValue): Unit = lastRunIdValue = value
-    @BsonProperty("state") def getState: BsonValue = stateValue
-    @BsonProperty("state") def setState(value: BsonValue): Unit = stateValue = value
-    @BsonProperty("runId") def getRunId: BsonValue = runIdValue
-    @BsonProperty("runId") def setRunId(value: BsonValue): Unit = runIdValue = value
-    @BsonProperty("expiresAt") def getExpiresAt: BsonValue = expiresAtValue
-    @BsonProperty("expiresAt") def setExpiresAt(value: BsonValue): Unit = expiresAtValue = value
-    @BsonExtraElements def getExtraFields: Document = extraFields
-    def setExtraFields(value: Document): Unit = extraFields = value
+  final case class ReportRecord(fields: Map[String, BsonValue]) {
+    def get(name: String): BsonValue = fields.getOrElse(name, null)
+    def extraFields(known: Set[String]): Map[String, BsonValue] = fields.filterNot { case (name, _) => known(name) }
   }
 
-  private val provider = PojoCodecProvider
-    .builder()
-    .register(classOf[ReportRecord])
-    .build()
+  private val documentCodec = new BsonDocumentCodec()
+  private val reportRecordCodec = new Codec[ReportRecord] {
+    override def getEncoderClass: Class[ReportRecord] = classOf[ReportRecord]
+
+    override def encode(writer: org.bson.BsonWriter, value: ReportRecord, context: EncoderContext): Unit =
+      documentCodec.encode(writer, BsonDocument(value.fields.asJava), context)
+
+    override def decode(reader: org.bson.BsonReader, context: DecoderContext): ReportRecord =
+      ReportRecord(documentCodec.decode(reader, context).asScala.toMap)
+  }
+
+  val provider: MongoCodecProvider[ReportRecord] = new MongoCodecProvider[ReportRecord] {
+    override def get: CodecProvider = new CodecProvider {
+      override def get[T](clazz: Class[T], registry: CodecRegistry): Codec[T] =
+        if (classOf[ReportRecord].isAssignableFrom(clazz)) reportRecordCodec.asInstanceOf[Codec[T]] else null
+    }
+  }
 
   val registry: CodecRegistry = CodecRegistries.fromRegistries(
     MongoClientSettings.getDefaultCodecRegistry,
-    CodecRegistries.fromProviders(provider)
+    CodecRegistries.fromCodecs(reportRecordCodec)
   )
 }

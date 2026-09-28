@@ -46,15 +46,28 @@ object RangeFingerprint {
   extension (value: RangeFingerprint) def value: String = value
 }
 
-opaque type SubjectToken = String :| Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]
+final class SubjectToken private (private val tokenValue: String) {
+  override def equals(other: Any): Boolean = other match {
+    case token: SubjectToken => tokenValue == token.tokenValue
+    case _                   => false
+  }
+  override def hashCode(): Int = tokenValue.hashCode
+}
 
 object SubjectToken {
   def fromHmac(value: String): Either[String, SubjectToken] =
     value
       .refineEither[Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]]
       .leftMap(_ => "subject token has an invalid format")
+      .map(refined => new SubjectToken(refined.toString))
 
-  extension (token: SubjectToken) def value: String = token
+  /** Internal construction for a token produced by HmacSHA256 with a validated key ID. */
+  private[domain] def fromDigest(keyId: String, digest: Array[Byte]): SubjectToken = {
+    val encoded = java.util.Base64.getUrlEncoder.withoutPadding().encodeToString(digest)
+    new SubjectToken(s"${keyId}_$encoded")
+  }
+
+  extension (token: SubjectToken) def value: String = token.tokenValue
 }
 
 enum AnalyticsEventType(val wire: String) {

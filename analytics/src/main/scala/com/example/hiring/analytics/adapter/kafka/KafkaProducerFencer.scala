@@ -1,14 +1,4 @@
 package com.example.hiring.analytics.adapter.kafka
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.config.KafkaConnection
 
@@ -37,22 +27,21 @@ object KafkaProducerFencer {
       transactionalIds: Vector[String]
   )(afterSubmission: org.apache.kafka.common.KafkaFuture[Void] => F[Unit]): F[Unit] =
     if (transactionalIds.isEmpty) Async[F].unit
-    else {
-      val properties = new Properties()
-      properties.put("bootstrap.servers", connection.bootstrapServers)
-      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-        properties.setProperty(key, value)
+    else
+      Async[F].fromEither(KafkaClientProperties.clientProperties(connection)).flatMap { clientProperties =>
+        val properties = new Properties()
+        properties.put("bootstrap.servers", connection.bootstrapServers)
+        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        Resource
+          .make(Async[F].blocking(Admin.create(properties)))(admin =>
+            Async[F].blocking(admin.close(Duration.ofSeconds(5))).void
+          )
+          .use { admin =>
+            for {
+              result <- Async[F].blocking(admin.fenceProducers(transactionalIds.distinct.asJava).all())
+              _ <- afterSubmission(result)
+              _ <- Async[F].blocking(result.get()).void
+            } yield ()
+          }
       }
-      Resource
-        .make(Async[F].blocking(Admin.create(properties)))(admin =>
-          Async[F].blocking(admin.close(Duration.ofSeconds(5))).void
-        )
-        .use { admin =>
-          for {
-            result <- Async[F].blocking(admin.fenceProducers(transactionalIds.distinct.asJava).all())
-            _ <- afterSubmission(result)
-            _ <- Async[F].blocking(result.get()).void
-          } yield ()
-        }
-    }
 }

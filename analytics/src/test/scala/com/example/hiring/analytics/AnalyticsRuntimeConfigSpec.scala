@@ -233,7 +233,12 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       allowPlaintext = true
     )
     assert(KafkaConnection.validate(externalEndpoint).isInvalid)
-    intercept[IllegalArgumentException](KafkaClientProperties.clientProperties(externalEndpoint))
+    assert(
+      KafkaClientProperties.clientProperties(externalEndpoint).left.toOption.exists {
+        case _: AnalyticsError.InvalidConfiguration => true
+        case _                                      => false
+      }
+    )
   }
 
   test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {

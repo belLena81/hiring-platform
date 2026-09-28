@@ -1,8 +1,8 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.domain.AnalyticsReportOutput
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
-import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsLakehousePaths}
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
@@ -11,7 +11,6 @@ import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.functions.col
 import org.typelevel.log4cats.Logger
 
 import java.time.Instant
@@ -24,23 +23,17 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     lakehouseLock: AnalyticsLakehouseLock[F],
     retirementStore: HmacKeyRetirementAuthorizationStore[F],
     operational: AnalyticsOperationalSettings,
-    rawSparkExecution: SparkBlockingExecution[F],
+    override protected val sparkExecution: SparkExecution[F],
     logger: Logger[F]
 ) extends AnalyticsErasureLakehouse[F]
     with AnalyticsBatchMaintenance[F]
     with LakehouseOperation[F] {
-  override protected val async: Async[F] = Async[F]
-  override protected val sparkExecution: SparkBlockingExecution[F] = rawSparkExecution
-  private val blocking = new SparkExecution[F] {
-    override def apply[A](work: => A): F[A] = lakehouse(work)
-    override def either[A](work: => Either[AnalyticsError, A]): F[A] = lakehouseEither(work)
-  }
-  private val retention = new AnalyticsDeltaRetention[F](paths, operational, blocking, rawSparkExecution, logger)
+  private val retention = new AnalyticsDeltaRetention[F](paths, operational, this, logger)
   private val keyContinuity = new AnalyticsKeyContinuityStage(
     KeyContinuityStagePorts(
       paths,
       pseudonymizer,
-      blocking,
+      this,
       clock,
       new KeyRetirementLookup[F] {
         override def list(lakehouseRoot: String) = retirementStore.list(lakehouseRoot)
@@ -48,7 +41,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     )
   )
   private val erasure = new AnalyticsBatchErasureStage(
-    ErasureStagePorts(paths, blocking, retention.configureRawTables, operational.maximumErasureEvidenceFiles)
+    ErasureStagePorts(paths, this, retention.configureRawTables, operational.maximumErasureEvidenceFiles)
   )
 
   def validateHmacConfigurationLocked(spark: SparkSession): F[Unit] =
@@ -106,14 +99,14 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     } yield ()
 
   override def rebuildGoldAndExtractReport(spark: SparkSession, asOf: Instant): F[AnalyticsReportOutput] =
-    rebuildGoldFromStoredSilver(spark) *> AnalyticsGoldStage.extract(spark, paths, asOf, rawSparkExecution)
+    rebuildGoldFromStoredSilver(spark) *> AnalyticsGoldStage.extract(spark, paths, asOf, this)
 
   private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
-    blocking(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
+    apply(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
       case true =>
-        blocking(spark.read.format("delta").load(paths.silver)).flatMap(
-          AnalyticsGoldStage.rebuild(paths, _, rawSparkExecution)
+        apply(spark.read.format("delta").load(paths.silver)).flatMap(
+          AnalyticsGoldStage.rebuild(paths, _, this)
         )
-      case false => AnalyticsGoldStage.clear(spark, paths, rawSparkExecution)
+      case false => AnalyticsGoldStage.clear(spark, paths, this)
     }
 }

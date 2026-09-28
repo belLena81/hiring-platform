@@ -1,17 +1,9 @@
 package com.example.hiring.analytics.adapter.mongo
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
+import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.KafkaConnection
-import com.example.hiring.analytics.adapter.mongo.{BsonDecoder, BsonValueDecoder, MongoPublisherStream}
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.erasure.KafkaRetentionBarrier
 
 import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
@@ -245,6 +237,7 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
       volumeName: String
   ): F[HmacKeyRetirementKafkaLineage] =
     for {
+      clientProperties <- Async[F].fromEither(KafkaClientProperties.clientProperties(connection))
       containerBefore <- dockerBrokerContainer[F](connection, volumeName)
       volume <- dockerVolume[F](volumeName)
       broker <- Resource
@@ -255,9 +248,7 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
               properties.setProperty("bootstrap.servers", connection.bootstrapServers)
               properties.setProperty("request.timeout.ms", "10000")
               properties.setProperty("default.api.timeout.ms", "15000")
-              KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-                properties.setProperty(key, value)
-              }
+              clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
               val created = try Right(AdminClient.create(properties))
               catch {
                 case NonFatal(error) =>
@@ -387,7 +378,7 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
   def read(root: String, keyId: String): F[Option[HmacKeyRetirementPreparation]] =
     Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
       streams
-        .optional[F, Document](collection.find(new Document("_id", id(lakehouseId, keyId))).first())
+        .optional[F, Document](collection.find(new Document("_id", id(lakehouseId, keyId))).first)
         .flatMap {
           case Some(document) =>
             val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
@@ -417,19 +408,20 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
 /** Reads actual broker offsets for every partition of the persisted retirement barrier. */
 private[analytics] object HmacKeyRetirementKafkaOffsets {
   private def consumer[F[_]: Async](connection: KafkaConnection): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
-    Resource.fromAutoCloseable(Async[F].blocking {
-      val properties = new Properties()
-      properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-      properties.setProperty("group.id", "hiring-analytics-key-retirement")
-      properties.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
-      properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
-      properties.setProperty("enable.auto.commit", "false")
-      properties.setProperty("default.api.timeout.ms", "10000")
-      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-        properties.setProperty(key, value)
-      }
-      new KafkaConsumer[Array[Byte], Array[Byte]](properties)
-    })
+    for {
+      clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
+      client <- Resource.fromAutoCloseable(Async[F].blocking {
+        val properties = new Properties()
+        properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+        properties.setProperty("group.id", "hiring-analytics-key-retirement")
+        properties.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
+        properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
+        properties.setProperty("enable.auto.commit", "false")
+        properties.setProperty("default.api.timeout.ms", "10000")
+        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        new KafkaConsumer[Array[Byte], Array[Byte]](properties)
+      })
+    } yield client
 
   def earliest[F[_]: Async](connection: KafkaConnection, barrier: KafkaRetentionBarrier): F[Map[Int, Long]] =
     Async[F].fromEither(KafkaRetentionBarrier.validate(barrier)).flatMap { valid =>

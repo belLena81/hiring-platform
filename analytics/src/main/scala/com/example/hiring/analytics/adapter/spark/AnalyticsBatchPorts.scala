@@ -1,6 +1,7 @@
-package com.example.hiring.analytics.service.batch
+package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.AnalyticsRunManifest
+
 import cats.Applicative
 import org.apache.spark.sql.{DataFrame, SparkSession}
 

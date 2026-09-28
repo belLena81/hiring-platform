@@ -17,9 +17,9 @@ final class MongoPojoCodecsSpec extends FunSuite {
     val written = new BsonDocument()
     codec.encode(new BsonDocumentWriter(written), decoded, EncoderContext.builder().build())
 
-    assertEquals(decoded.getGeneration.asInt64().getValue, 4L)
-    assert(Option(decoded.getNextRevision).isEmpty)
-    assertEquals(decoded.getExtraFields.getString("operatorExtension"), "kept")
+    assertEquals(decoded.get("generation").asInt64().getValue, 4L)
+    assert(!decoded.fields.contains("nextRevision"))
+    assertEquals(decoded.get("operatorExtension").asString().getValue, "kept")
     assertEquals(written.getString("operatorExtension").getValue, "kept")
     assertEquals(written.getInt64("lastPublishedRevision").getValue, 8L)
     assert(!written.containsKey("nextRevision"))
@@ -31,7 +31,7 @@ final class MongoPojoCodecsSpec extends FunSuite {
     )
     val codec = MongoPojoCodecs.registry.get(classOf[MongoPojoCodecs.ReportRecord])
     val decoded = codec.decode(new BsonDocumentReader(source), DecoderContext.builder().build())
-    assert(decoded.getGeneration.isInt32)
+    assert(decoded.get("generation").isInt32)
     assert(MongoAnalyticsReportRecords.decodeControl(decoded).isLeft)
   }
 }

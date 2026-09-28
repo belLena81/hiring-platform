@@ -1,12 +1,15 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.spark.{
+  ActiveDeletionMarkerSource,
   AnalyticsKeyContinuityStage,
+  DataFrameDeletionMarkerSource,
   DeltaAnalyticsErasureLakehouse,
   DeltaManifestStore,
   HiringAnalyticsBatch,
   KeyContinuityStagePorts,
   KeyRetirementLookup,
+  ManifestStore,
   SparkExecution
 }
 import com.example.hiring.analytics.domain.SubjectPseudonymizer

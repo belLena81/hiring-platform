@@ -16,7 +16,7 @@ import com.example.hiring.analytics.adapter.mongo.*
 import cats.effect.{Clock, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
-import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
+import mongo4cats.client.{MongoClient as CatsMongoClient}
 import org.apache.spark.sql.SparkSession
 import org.bson.Document
 import org.testcontainers.containers.GenericContainer
@@ -43,8 +43,12 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   private given cats.effect.Clock[IO] = markerClock
   private var mongoContainer: MongoContainer = scala.compiletime.uninitialized
   private var mongoClient: MongoClient = scala.compiletime.uninitialized
-  private var reactiveMongoClient: ReactiveMongoClient = scala.compiletime.uninitialized
+  private var mongo4catsClient: CatsMongoClient[IO] = scala.compiletime.uninitialized
+  private var releaseMongo4catsClient: IO[Unit] = IO.unit
   private var spark: SparkSession = scala.compiletime.uninitialized
+
+  private def mongo4catsDatabase(name: String): mongo4cats.database.MongoDatabase[IO] =
+    mongo4catsClient.getDatabase(name).unsafeRunSync()
 
   private def manifest(runId: String): AnalyticsRunManifest =
     AnalyticsRunManifest
@@ -69,9 +73,12 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     mongoClient = MongoClients.create(
       s"mongodb://${mongoContainer.getHost}:${mongoContainer.getMappedPort(27017)}"
     )
-    reactiveMongoClient = ReactiveMongoClients.create(
-      s"mongodb://${mongoContainer.getHost}:${mongoContainer.getMappedPort(27017)}"
-    )
+    val (client, release) = CatsMongoClient
+      .fromConnectionString[IO](s"mongodb://${mongoContainer.getHost}:${mongoContainer.getMappedPort(27017)}")
+      .allocated
+      .unsafeRunSync()
+    mongo4catsClient = client
+    releaseMongo4catsClient = release
     spark = org.apache.spark.sql.classic.SparkSession
       .builder()
       .master("local[2]")
@@ -86,7 +93,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   override def afterAll(): Unit = {
     if (spark != null && !spark.sparkContext.isStopped) spark.stop()
     if (mongoClient != null) mongoClient.close()
-    if (reactiveMongoClient != null) reactiveMongoClient.close()
+    releaseMongo4catsClient.unsafeRunSync()
     if (mongoContainer != null) mongoContainer.stop()
     super.afterAll()
   }
@@ -95,9 +102,11 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val database = mongoClient.getDatabase(s"markers_${UUID.randomUUID()}")
     val requests = database.getCollection("analytics_erasure_requests")
     val source = new MongoActiveDeletionMarkerSource[IO](
-      reactiveMongoClient.getDatabase(database.getName),
+      mongo4catsDatabase(database.getName),
       pseudonymizer,
-      streams = AnalyticsTestOperationalConfig.streams
+      streams = AnalyticsTestOperationalConfig.streams,
+      sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+        .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
     )
     val retainedSubject = UUID.randomUUID().toString
     requests.insertOne(
@@ -148,9 +157,11 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
           .append("expiresAt", List(Date.from(Instant.parse("2026-09-23T12:00:00Z"))).asJava)
       )
     val source = new MongoActiveDeletionMarkerSource[IO](
-      reactiveMongoClient.getDatabase(database.getName),
+      mongo4catsDatabase(database.getName),
       pseudonymizer,
-      streams = AnalyticsTestOperationalConfig.streams
+      streams = AnalyticsTestOperationalConfig.streams,
+      sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+        .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
     )
 
     val error = intercept[AnalyticsError](source.activeSubjectTokens(spark).unsafeRunSync())
@@ -165,9 +176,11 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       missingPaths,
       pseudonymizer,
       new MongoActiveDeletionMarkerSource[IO](
-        reactiveMongoClient.getDatabase(missingCollectionDatabase.getName),
+        mongo4catsDatabase(missingCollectionDatabase.getName),
         pseudonymizer,
-        streams = AnalyticsTestOperationalConfig.streams
+        streams = AnalyticsTestOperationalConfig.streams,
+        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
       )
     )
     val missingManifest = manifest("missing-markers")
@@ -193,9 +206,11 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       malformedPaths,
       pseudonymizer,
       new MongoActiveDeletionMarkerSource[IO](
-        reactiveMongoClient.getDatabase(malformedDatabase.getName),
+        mongo4catsDatabase(malformedDatabase.getName),
         pseudonymizer,
-        streams = AnalyticsTestOperationalConfig.streams
+        streams = AnalyticsTestOperationalConfig.streams,
+        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
       )
     )
 
@@ -219,10 +234,12 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       )
     val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-overflow").toUri.toString)
     val markers = new MongoActiveDeletionMarkerSource[IO](
-      reactiveMongoClient.getDatabase(database.getName),
+      mongo4catsDatabase(database.getName),
       pseudonymizer,
       maximumPendingMarkers = 1,
-      streams = AnalyticsTestOperationalConfig.streams
+      streams = AnalyticsTestOperationalConfig.streams,
+      sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+        .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
     )
     val batch = AnalyticsBatchTestSupport.newBatch(paths, pseudonymizer, markers)
     val overflowManifest = manifest("overflow-markers")
@@ -243,9 +260,10 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val unavailableClient = MongoClients.create(
       "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1000&connectTimeoutMS=500"
     )
-    val unavailableReactiveClient = ReactiveMongoClients.create(
-      "mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1000&connectTimeoutMS=500"
-    )
+    val (unavailableCatsClient, releaseUnavailableCatsClient) = CatsMongoClient
+      .fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1000&connectTimeoutMS=500")
+      .allocated
+      .unsafeRunSync()
     try {
       val paths =
         AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-unavailable-markers").toUri.toString)
@@ -253,9 +271,11 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
         paths,
         pseudonymizer,
         new MongoActiveDeletionMarkerSource[IO](
-          unavailableReactiveClient.getDatabase(s"unavailable_${UUID.randomUUID()}"),
+          unavailableCatsClient.getDatabase(s"unavailable_${UUID.randomUUID()}").unsafeRunSync(),
           pseudonymizer,
-          streams = AnalyticsTestOperationalConfig.streams
+          streams = AnalyticsTestOperationalConfig.streams,
+          sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+            .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
         )
       )
       val unavailableManifest = manifest("unavailable-markers")
@@ -275,17 +295,26 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.silver), "assertion failed")
     } finally {
       unavailableClient.close()
-      unavailableReactiveClient.close()
+      releaseUnavailableCatsClient.unsafeRunSync()
     }
   }
 
   test("closed Mongo marker client returns a typed storage error") {
-    val closedClient = ReactiveMongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")
-    val database = closedClient.getDatabase("closed_markers")
-    closedClient.close()
+    val (closedClient, releaseClosedClient) = CatsMongoClient
+      .fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")
+      .allocated
+      .unsafeRunSync()
+    val database = closedClient.getDatabase("closed_markers").unsafeRunSync()
+    releaseClosedClient.unsafeRunSync()
 
     val source =
-      new MongoActiveDeletionMarkerSource[IO](database, pseudonymizer, streams = AnalyticsTestOperationalConfig.streams)
+      new MongoActiveDeletionMarkerSource[IO](
+        database,
+        pseudonymizer,
+        streams = AnalyticsTestOperationalConfig.streams,
+        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+      )
     val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeSubjectTokens(spark).unsafeRunSync())
     assert(failure.getCause.isInstanceOf[IllegalStateException], "assertion failed")
   }

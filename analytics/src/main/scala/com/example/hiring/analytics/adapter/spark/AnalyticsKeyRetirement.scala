@@ -1,17 +1,10 @@
 package com.example.hiring.analytics.adapter.spark
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.service.erasure.ErasureRequestState
+
 import cats.data.{Chain, NonEmptyChain, ValidatedNec}
 import cats.effect.kernel.Async
 import cats.syntax.all.*
@@ -187,7 +180,7 @@ private[analytics] object AnalyticsKeyRetirement {
       now: Instant,
       lakehouseLock: AnalyticsLakehouseLock[F],
       streams: MongoPublisherStream,
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[Either[NonEmptyChain[String], AuditSummary]] =
     lakehouseLock
       .resource(paths.root)
@@ -212,7 +205,7 @@ private[analytics] object AnalyticsKeyRetirement {
       writers: WriterInventory,
       now: Instant,
       streams: MongoPublisherStream,
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[Either[NonEmptyChain[String], AuditSummary]] = {
     val keyBlockers =
       if (!RegistryIdPattern.matches(retiringKeyId))

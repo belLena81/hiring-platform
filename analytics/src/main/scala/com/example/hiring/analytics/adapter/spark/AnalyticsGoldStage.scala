@@ -1,16 +1,11 @@
 package com.example.hiring.analytics.adapter.spark
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.*
+import com.example.hiring.analytics.domain.AnalyticsFunnelDayOutput
+import com.example.hiring.analytics.domain.AnalyticsReportOutput
+import com.example.hiring.analytics.domain.AnalyticsSkillPostingDayOutput
+import com.example.hiring.analytics.domain.AnalyticsTimeToHireOutput
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
 import cats.syntax.all.*
@@ -58,7 +53,7 @@ private[spark] object AnalyticsGoldStage {
   def rebuild[F[_]: Async](
       paths: AnalyticsLakehousePaths,
       silver: DataFrame,
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[Unit] =
     for {
       funnel <- lakehouse[F, DataFrame](HiringGoldTransforms.wideFunnelDay(silver), sparkExecution)
@@ -72,7 +67,7 @@ private[spark] object AnalyticsGoldStage {
   def clear[F[_]: Async](
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[Unit] = lakehouse[F, Unit](
     {
       Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
@@ -86,8 +81,7 @@ private[spark] object AnalyticsGoldStage {
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       asOf: Instant,
-      sparkExecution: SparkBlockingExecution[F] =
-        SparkBlockingExecution.forTests[F](scala.concurrent.ExecutionContext.parasitic)
+      sparkExecution: SparkExecution[F]
   ): F[AnalyticsReportOutput] =
     for {
       funnelRows <- rows(spark, paths.funnelGold, FunnelSchema, sparkExecution)
@@ -133,7 +127,7 @@ private[spark] object AnalyticsGoldStage {
       spark: SparkSession,
       path: String,
       expected: Vector[(String, DataType)],
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[Vector[Row]] =
     lakehouseEither[F, Vector[Row]](
       {
@@ -153,20 +147,20 @@ private[spark] object AnalyticsGoldStage {
       else Async[F].pure(result)
     }
 
-  private def write[F[_]: Async](frame: DataFrame, path: String, sparkExecution: SparkBlockingExecution[F]): F[Unit] =
+  private def write[F[_]: Async](frame: DataFrame, path: String, sparkExecution: SparkExecution[F]): F[Unit] =
     lakehouse[F, Unit](
       frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path),
       sparkExecution
     )
 
-  private def lakehouse[F[_]: Async, A](work: => A, sparkExecution: SparkBlockingExecution[F]): F[A] =
+  private def lakehouse[F[_]: Async, A](work: => A, sparkExecution: SparkExecution[F]): F[A] =
     adapt(sparkExecution(work))
 
   private def lakehouseIO[F[_]: Async, A](work: F[A]): F[A] = adapt(work)
 
   private def lakehouseEither[F[_]: Async, A](
       work: => Either[AnalyticsError, A],
-      sparkExecution: SparkBlockingExecution[F]
+      sparkExecution: SparkExecution[F]
   ): F[A] =
     lakehouse[F, Either[AnalyticsError, A]](work, sparkExecution).flatMap(Async[F].fromEither)
 

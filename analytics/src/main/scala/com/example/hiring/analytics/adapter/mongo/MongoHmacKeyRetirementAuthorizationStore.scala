@@ -1,31 +1,17 @@
 package com.example.hiring.analytics.adapter.mongo
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.mongo.{
-  BsonDecoder,
-  BsonValueDecoder,
-  MongoAnalyticsLakehouseLock,
-  MongoPublisherStream
-}
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
+import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 
 import cats.effect.kernel.Async
 import cats.syntax.all.*
 import com.mongodb.{ReadConcern, WriteConcern}
-import com.mongodb.reactivestreams.client.MongoDatabase
+import mongo4cats.codecs.CodecRegistry
+import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
-import java.time.Instant
 import java.util.Date
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 import scala.util.control.NonFatal
 
@@ -58,13 +44,13 @@ private[analytics] object HmacKeyRetirementAuthorizationBson {
 
 /** Immutable Mongo record, read with majority concern and inserted with majority+journal acknowledgement. */
 private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: Async](
-    database: MongoDatabase,
+    database: MongoDatabase[F],
     streams: MongoPublisherStream
 ) extends HmacKeyRetirementAuthorizationStore[F] {
   private val collection = database
-    .getCollection("analytics_hmac_key_retirements", classOf[Document])
     .withReadConcern(ReadConcern.MAJORITY)
-    .withWriteConcern(WriteConcern.MAJORITY.withJournal(true).withWTimeout(15000L, TimeUnit.MILLISECONDS))
+    .getCollection[Document]("analytics_hmac_key_retirements", CodecRegistry.Default)
+    .map(_.withWriteConcern(WriteConcern.MAJORITY.withJournal(true).withWTimeout(15000L, TimeUnit.MILLISECONDS)))
 
   private def id(value: HmacKeyRetirementAuthorization): String = value.lakehouseId + ":" + value.keyId
 
@@ -73,10 +59,8 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
 
   override def list(root: String): F[Vector[HmacKeyRetirementAuthorization]] =
     Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
-      streams
-        .stream[F, Document](collection.find(new Document("lakehouseId", lakehouseId)))
-        .compile
-        .toVector
+      collection
+        .flatMap(value => streams.stream(value.find(new Document("lakehouseId", lakehouseId)).boundedStream).compile.toVector)
         .flatMap(_.traverse(decode).liftTo[F])
         .adaptError {
           case error: AnalyticsError => error
@@ -92,18 +76,16 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
       _ <- Async[F].raiseUnless(checked.lakehouseId == expectedLakehouse)(
         AnalyticsError.InvalidConfiguration("HMAC key retirement authorization targets another lakehouse")
       )
-      _ <- streams
-        .drain {
-          collection.insertOne(
-            new Document("_id", id(checked))
-              .append("lakehouseId", checked.lakehouseId)
-              .append("keyId", checked.keyId)
-              .append("originalVerifier", checked.originalVerifier)
-              .append("evidenceFacts", checked.evidenceFacts)
-              .append("evidenceDigest", checked.evidenceDigest)
-              .append("authorizedAt", Date.from(checked.authorizedAt))
-          )
-        }
+      _ <- collection.flatMap(_.insertOne(
+        new Document("_id", id(checked))
+          .append("lakehouseId", checked.lakehouseId)
+          .append("keyId", checked.keyId)
+          .append("originalVerifier", checked.originalVerifier)
+          .append("evidenceFacts", checked.evidenceFacts)
+          .append("evidenceDigest", checked.evidenceDigest)
+          .append("authorizedAt", Date.from(checked.authorizedAt)),
+        new mongo4cats.models.collection.InsertOneOptions()
+      ))
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(_)           =>

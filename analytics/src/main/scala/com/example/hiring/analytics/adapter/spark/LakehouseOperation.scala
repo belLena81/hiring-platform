@@ -1,26 +1,29 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.errors.*
+import com.example.hiring.analytics.errors.AnalyticsError
+
 import cats.effect.Async
-import cats.syntax.all.*
 import scala.util.control.NonFatal
 
 /** Shared boundary for blocking Spark/Delta operations and their expected analytics failures. */
-private[analytics] trait LakehouseOperation[F[_]: Async] {
-  protected def async: Async[F]
-  protected def sparkExecution: SparkBlockingExecution[F]
+private[analytics] trait LakehouseOperation[F[_]: Async] extends SparkExecution[F] {
+  protected def sparkExecution: SparkExecution[F]
 
-  protected final def lakehouse[A](work: => A): F[A] = adaptLakehouseErrors(sparkExecution(work))
+  final override def apply[A](work: => A): F[A] = adaptLakehouseErrors(sparkExecution(work))
 
   protected final def lakehouseIO[A](work: F[A]): F[A] = adaptLakehouseErrors(work)
 
-  protected final def lakehouseEither[A](work: => Either[AnalyticsError, A]): F[A] =
-    async.flatMap(lakehouse(work))(value => async.fromEither(value))
+  final override def either[A](work: => Either[AnalyticsError, A]): F[A] =
+    adaptLakehouseErrors(sparkExecution.either(work))
+
+  protected final def lakehouse[A](work: => A): F[A] = apply(work)
+
+  protected final def lakehouseEither[A](work: => Either[AnalyticsError, A]): F[A] = either(work)
 
   private def adaptLakehouseErrors[A](work: F[A]): F[A] =
-    async.handleErrorWith(work) {
-      case error: AnalyticsError => async.raiseError(error)
-      case NonFatal(cause)       => async.raiseError(AnalyticsError.LakehouseFailure(cause))
-      case error                 => async.raiseError(error)
+    Async[F].handleErrorWith(work) {
+      case error: AnalyticsError => Async[F].raiseError(error)
+      case NonFatal(cause)       => Async[F].raiseError(AnalyticsError.LakehouseFailure(cause))
+      case error                 => Async[F].raiseError(error)
     }
 }

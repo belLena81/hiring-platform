@@ -14,7 +14,7 @@ import cats.effect.{Clock, IO}
 import cats.effect.unsafe.implicits.global
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
 import munit.FunSuite
-import com.mongodb.reactivestreams.client.MongoClients
+import mongo4cats.client.MongoClient
 
 import java.util.concurrent.atomic.AtomicInteger
 import scala.concurrent.duration.*
@@ -30,17 +30,21 @@ final class MongoAnalyticsLakehouseLockSpec extends FunSuite {
         0.seconds
       }
     }
-    val client = MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1")
-    try {
-      val lock = new MongoAnalyticsLakehouseLock(
-        client.getDatabase("analytics_lock_laziness"),
-        clock,
-        AnalyticsTestOperationalConfig.streams
-      )
-      val resource = lock.resource("file:///tmp/analytics-lock-laziness")
-      assert(resource != null)
-      assertEquals(reads.get(), 0)
-    } finally client.close()
+    MongoClient
+      .fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=1")
+      .use(_.getDatabase("analytics_lock_laziness").flatMap { database =>
+        IO {
+          val lock = new MongoAnalyticsLakehouseLock(
+            database,
+            clock,
+            AnalyticsTestOperationalConfig.streams
+          )
+          val resource = lock.resource("file:///tmp/analytics-lock-laziness")
+          assert(resource != null)
+          assertEquals(reads.get(), 0)
+        }
+      })
+      .unsafeRunSync()
   }
 
   test("lakehouse mutex keys canonicalize URI scheme, authority casing, and trailing slashes") {

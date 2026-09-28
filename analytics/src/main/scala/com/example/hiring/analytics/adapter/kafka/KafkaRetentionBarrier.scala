@@ -88,17 +88,18 @@ private[analytics] object KafkaRetentionAdapter {
   }
 
   private def consumer[F[_]: Async](connection: KafkaConnection): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
-    Resource.fromAutoCloseable(Async[F].blocking {
-      val properties = new Properties()
-      properties.setProperty("bootstrap.servers", connection.bootstrapServers)
-      properties.setProperty("group.id", "hiring-analytics-erasure")
-      properties.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
-      properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
-      properties.setProperty("enable.auto.commit", "false")
-      properties.setProperty("default.api.timeout.ms", "10000")
-      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
-        properties.setProperty(key, value)
-      }
-      new KafkaConsumer[Array[Byte], Array[Byte]](properties)
-    })
+    for {
+      clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
+      client <- Resource.fromAutoCloseable(Async[F].blocking {
+        val properties = new Properties()
+        properties.setProperty("bootstrap.servers", connection.bootstrapServers)
+        properties.setProperty("group.id", "hiring-analytics-erasure")
+        properties.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
+        properties.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
+        properties.setProperty("enable.auto.commit", "false")
+        properties.setProperty("default.api.timeout.ms", "10000")
+        clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
+        new KafkaConsumer[Array[Byte], Array[Byte]](properties)
+      })
+    } yield client
 }

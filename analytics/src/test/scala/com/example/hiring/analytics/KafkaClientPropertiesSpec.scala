@@ -4,6 +4,7 @@ import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.adapter.spark.KafkaOffsetRangeSource
 import com.example.hiring.analytics.domain.PartitionOffsetRange
+import com.example.hiring.analytics.errors.AnalyticsError
 import io.circe.parser.parse
 
 import org.apache.kafka.common.config.types.Password
@@ -14,7 +15,7 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
     val username = "reader\"\\line\nuser"
     val password = "secret\"\\tab\tvalue"
     val connection = KafkaConnection("localhost:9092", Some(username), Some(password))
-    val jaas = KafkaClientProperties.clientProperties(connection).apply("sasl.jaas.config")
+    val jaas = KafkaClientProperties.clientProperties(connection).toOption.get.apply("sasl.jaas.config")
     val parsed = JaasContext.loadClientContext(java.util.Map.of("sasl.jaas.config", new Password(jaas)))
     val options = parsed.configurationEntries().get(0).getOptions
 
@@ -23,16 +24,33 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
   }
 
   test("connector options retain the current secure protocol and mechanism") {
-    val options = KafkaClientProperties.clientProperties(
-      KafkaConnection("broker.example:9093", Some("reader"), Some("credential"))
+    val connection = KafkaConnection("broker.example:9093", Some("reader"), Some("credential"))
+    val options = KafkaClientProperties.clientProperties(connection).toOption.get
+    assertEquals(
+      options,
+      Map(
+        "security.protocol" -> "SASL_SSL",
+        "sasl.mechanism" -> "PLAIN",
+        "sasl.jaas.config" ->
+          "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"reader\" password=\"credential\";"
+      )
     )
-    assertEquals(options.get("security.protocol"), Some("SASL_SSL"))
-    assertEquals(options.get("sasl.mechanism"), Some("PLAIN"))
+    assertEquals(
+      KafkaClientProperties.sparkOptions(connection).toOption.get,
+      Map(
+        "kafka.security.protocol" -> "SASL_SSL",
+        "kafka.sasl.mechanism" -> "PLAIN",
+        "kafka.sasl.jaas.config" ->
+          "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"reader\" password=\"credential\";",
+        "kafka.group.id" -> "hiring-analytics-batch",
+        "kafka.isolation.level" -> "read_committed"
+      )
+    )
   }
 
   test("connections without SASL credentials still set the secure protocol explicitly") {
     assertEquals(
-      KafkaClientProperties.clientProperties(KafkaConnection("broker.example:9093")),
+      KafkaClientProperties.clientProperties(KafkaConnection("broker.example:9093")).toOption.get,
       Map("security.protocol" -> "SASL_SSL")
     )
   }
@@ -64,6 +82,15 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
       securityProtocol = "INVALID"
     )
     val problem = KafkaConnection.validate(connection).toEither.left.toOption.get.toNonEmptyList.toList.mkString(" ")
+
+    assertEquals(
+      KafkaClientProperties.clientProperties(connection),
+      Left(AnalyticsError.InvalidConfiguration("Kafka connection settings are invalid"))
+    )
+    assertEquals(
+      KafkaClientProperties.sparkOptions(connection),
+      Left(AnalyticsError.InvalidConfiguration("Kafka connection settings are invalid"))
+    )
 
     assert(!problem.contains(username))
     assert(!problem.contains(password))
