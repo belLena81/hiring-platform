@@ -322,7 +322,9 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         new TestUsers(Map(deletedRecruiter.id -> deletedRecruiter)),
         accounts,
         erasureRequests = TestErasureRequests,
-        idempotent = Idempotent(ReplayReceipts(MutationEntityReference("analytics-erasure-receipt", "00000000-0000-0000-0000-000000000123")))
+        idempotent = Idempotent(
+          ReplayReceipts(MutationEntityReference("analytics-erasure-receipt", "00000000-0000-0000-0000-000000000123"))
+        )
       )
       result <- service.deleteMyAccount(request, ActorContext(deletedRecruiter.id, UserRole.Admin)).value
     } yield assertEquals(result, Left(UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.Forbidden)))
@@ -352,7 +354,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       ): IO[Either[RepositoryError, String]] =
         IO.raiseError(new AssertionError("deletion must not enqueue when worker preflight fails"))
 
-      override def status(receiptId: String): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
+      override def statusForSubject(
+          userId: UserId,
+          receiptId: String
+      ): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
         IO.pure(Left(RepositoryError.Unavailable))
 
       override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
@@ -412,7 +417,10 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         context: MutationWriteContext
     ): IO[Either[RepositoryError, String]] = IO.pure(Right("00000000-0000-0000-0000-000000000123"))
 
-    override def status(receiptId: String): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
+    override def statusForSubject(
+        userId: UserId,
+        receiptId: String
+    ): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
       IO.pure(Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
 
     override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))

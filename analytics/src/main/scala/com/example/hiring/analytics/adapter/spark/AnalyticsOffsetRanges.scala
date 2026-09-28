@@ -12,7 +12,8 @@ import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.*
 
-import cats.effect.IO
+import cats.effect.Async
+import cats.syntax.all.*
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions.{col, countDistinct, max, min}
 
@@ -22,11 +23,11 @@ import scala.util.control.NonFatal
 private[analytics] object AnalyticsOffsetRanges {
   final case class Observed(count: Long, first: Long, last: Long)
 
-  def requireNonEmpty(manifest: AnalyticsRunManifest): IO[Unit] =
+  def requireNonEmpty[F[_]: Async](manifest: AnalyticsRunManifest): F[Unit] =
     manifest.offsetRanges.find(range => range.startOffset == range.endOffsetExclusive) match {
       case Some(range) =>
-        IO.raiseError(AnalyticsError.EmptyRequestedRange(range.topic, range.partition, range.startOffset))
-      case None => IO.unit
+        Async[F].raiseError(AnalyticsError.EmptyRequestedRange(range.topic, range.partition, range.startOffset))
+      case None => Async[F].unit
     }
 
   def available(
@@ -66,7 +67,7 @@ private[analytics] object AnalyticsOffsetRanges {
     }
   }
 
-  def verify(frame: DataFrame, manifest: AnalyticsRunManifest): IO[Unit] =
+  def verify[F[_]: Async](frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
     observedOffsets(frame).flatMap(found => verifyObservedOffsets(manifest, found, allowKafkaGaps = false))
 
   /** Kafka offset coordinates are not dense record counts: control records consume offsets and `read_committed` omits
@@ -74,37 +75,42 @@ private[analytics] object AnalyticsOffsetRanges {
     * we check that every returned data record lies within its assigned range without treating legitimate transactional
     * gaps as missing records.
     */
-  def verifyCommittedKafkaRange(frame: DataFrame, manifest: AnalyticsRunManifest): IO[Unit] =
+  def verifyCommittedKafkaRange[F[_]: Async](frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
     observedOffsets(frame).flatMap(found => verifyObservedOffsets(manifest, found, allowKafkaGaps = true))
 
-  private def observedOffsets(frame: DataFrame): IO[Map[(String, Int), Observed]] =
-    IO.blocking {
-      frame
-        .groupBy(col("topic"), col("partition"))
-        .agg(
-          countDistinct(col("offset")).as("observed"),
-          min(col("offset")).as("first"),
-          max(col("offset")).as("last")
-        )
-        .collect()
-        .iterator
-        .map(row => (row.getString(0), row.getInt(1)) -> Observed(row.getLong(2), row.getLong(3), row.getLong(4)))
-        .toMap
-    }.adaptError { case NonFatal(cause) => AnalyticsError.SourceReadFailure(cause) }
+  private def observedOffsets[F[_]: Async](frame: DataFrame): F[Map[(String, Int), Observed]] =
+    Async[F]
+      .blocking {
+        frame
+          .groupBy(col("topic"), col("partition"))
+          .agg(
+            countDistinct(col("offset")).as("observed"),
+            min(col("offset")).as("first"),
+            max(col("offset")).as("last")
+          )
+          .collect()
+          .iterator
+          .map(row => (row.getString(0), row.getInt(1)) -> Observed(row.getLong(2), row.getLong(3), row.getLong(4)))
+          .toMap
+      }
+      .adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+      }
 
-  private def verifyObservedOffsets(
+  private def verifyObservedOffsets[F[_]: Async](
       manifest: AnalyticsRunManifest,
       found: Map[(String, Int), Observed],
       allowKafkaGaps: Boolean
-  ): IO[Unit] = {
+  ): F[Unit] = {
     val requested: Set[(String, Int)] = manifest.offsetRanges
       .map(range => (range.topic, PartitionOffsetRange.partitionNumber(range.partition)))
       .toSet
     found.keySet.diff(requested).headOption match {
       case Some((topic, partition)) =>
-        IO.raiseError(AnalyticsError.UnexpectedOffsetPartition(topic, partition))
+        Async[F].raiseError(AnalyticsError.UnexpectedOffsetPartition(topic, partition))
       case None =>
-        IO.fromEither(manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
+        Async[F].fromEither(manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
           result.flatMap { _ =>
             val observation = found.get((range.topic, range.partition))
             if (allowKafkaGaps) verifyKafkaCoordinates(range, observation)

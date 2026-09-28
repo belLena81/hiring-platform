@@ -47,6 +47,18 @@ final class BsonDecoderSpec extends FunSuite {
     assert(MongoAnalyticsReportRecords.decodeControl(new Document(document).append("nextRevision", "bad")).isLeft)
   }
 
+  test("report run decoding rejects malformed typed reservation identities") {
+    val valid = new Document("_id", "batch-1")
+      .append("rangeFingerprint", "a" * 64)
+      .append("generation", 1L)
+      .append("revision", 2L)
+      .append("state", "Reserved")
+
+    assert(MongoAnalyticsReportRecords.decodeRun(valid).isRight)
+    assert(MongoAnalyticsReportRecords.decodeRun(new Document(valid).append("_id", " ")).isLeft)
+    assert(MongoAnalyticsReportRecords.decodeRun(new Document(valid).append("rangeFingerprint", "bad")).isLeft)
+  }
+
   test("HMAC retirement authorization decodes through its model instance and rejects wrong BSON types") {
     val facts = "operator evidence"
     val authorization = HmacKeyRetirementAuthorization(

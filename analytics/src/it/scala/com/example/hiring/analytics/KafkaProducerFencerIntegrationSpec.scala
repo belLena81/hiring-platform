@@ -93,7 +93,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
       val openTransactionAvailability = KafkaOffsetRangeSource
-        .verifyAvailable(connection, openTransactionManifest)
+        .verifyAvailable[IO](connection, openTransactionManifest)
         .attempt
         .unsafeRunSync()
       assert(
@@ -101,7 +101,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         clues(openTransactionAvailability)
       )
 
-      KafkaProducerFencer
+      KafkaProducerFencer[IO]
         .fence(KafkaConnection(kafka.getBootstrapServers), Vector(transactionalId))
         .unsafeRunSync()
 
@@ -139,7 +139,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()
-      val barrier = KafkaRetentionBarrier.capture(connection, topic).unsafeRunSync()
+      val barrier = KafkaRetentionAdapter.capture[IO](connection, topic).unsafeRunSync()
       val endOffset = barrier.partitions.head.endOffsetExclusive
       val manifest = AnalyticsRunManifest
         .validated(
@@ -149,9 +149,11 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
       val paths =
-        AnalyticsLakehousePaths(Files.createTempDirectory("analytics-read-committed").toUri.toString.stripSuffix("/"))
+        AnalyticsLakehousePaths.unsafe(
+          Files.createTempDirectory("analytics-read-committed").toUri.toString.stripSuffix("/")
+        )
       val markers = AnalyticsSubjectPrivacy.emptyMarkers(spark.range(0L).toDF())
-      val publication = new HiringAnalyticsBatch(
+      val publication = AnalyticsBatchTestSupport.newBatch(
         paths,
         AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-kafka-fencing-secret".padTo(32, 'x').getBytes("UTF-8")),
         DataFrameDeletionMarkerSource(markers)

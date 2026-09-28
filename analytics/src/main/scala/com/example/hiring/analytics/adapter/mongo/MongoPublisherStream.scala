@@ -1,18 +1,9 @@
 package com.example.hiring.analytics.adapter.mongo
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.{Clock, IO, Outcome}
-import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
+import cats.effect.{Async, Clock, Outcome}
+import cats.effect.syntax.all.*
+import cats.syntax.all.*
 import com.mongodb.MongoException
 import com.mongodb.reactivestreams.client.ClientSession
 import fs2.Stream
@@ -25,66 +16,67 @@ import scala.util.control.NonFatal
 private[analytics] object MongoPublisherStream {
   private val BufferSize = 256
 
-  def stream[A](publisher: => Publisher[A]): Stream[IO, A] =
+  def stream[F[_]: Async, A](publisher: => Publisher[A]): Stream[F, A] =
     Stream
-      .eval(IO.delay(publisher))
-      .flatMap(value => fs2.interop.reactivestreams.fromPublisher[IO, A](value, BufferSize))
+      .eval(Async[F].delay(publisher))
+      .flatMap(value => fs2.interop.reactivestreams.fromPublisher[F, A](value, BufferSize))
 
-  def optional[A](publisher: => Publisher[A]): IO[Option[A]] = stream(publisher).compile.last
+  def optional[F[_]: Async, A](publisher: => Publisher[A]): F[Option[A]] = stream[F, A](publisher).compile.last
 
-  def one[A](publisher: => Publisher[A]): IO[A] =
-    optional(publisher).flatMap(_.liftTo[IO](new IllegalStateException("Mongo publisher completed without a value")))
+  def one[F[_]: Async, A](publisher: => Publisher[A]): F[A] =
+    optional[F, A](publisher).flatMap(
+      _.liftTo[F](new IllegalStateException("Mongo publisher completed without a value"))
+    )
 
-  def drain[A](publisher: => Publisher[A]): IO[Unit] = stream(publisher).compile.drain
+  def drain[F[_]: Async, A](publisher: => Publisher[A]): F[Unit] = stream[F, A](publisher).compile.drain
 
   /** Reactive Streams sessions expose transaction primitives rather than the sync driver's withTransaction helper.
     * Preserve its retry rules: rerun the body for transient transaction failures and retry commit for an unknown commit
     * result, within Mongo's documented transaction callback retry window.
     */
-  def transaction[A](session: ClientSession)(work: IO[Either[AnalyticsError, A]]): IO[Either[AnalyticsError, A]] =
-    transaction(session)(work)(Clock[IO])
+  def transaction[F[_]: Async: Clock, A](session: ClientSession)(work: F[A]): F[A] =
+    transaction(session)(work)(Clock[F])
 
-  def transaction[A](session: ClientSession)(
-      work: IO[Either[AnalyticsError, A]]
-  )(clock: Clock[IO]): IO[Either[AnalyticsError, A]] =
+  def transaction[F[_]: Async, A](session: ClientSession)(
+      work: F[A]
+  )(clock: Clock[F]): F[A] =
     clock.monotonic.flatMap { startedAt =>
       val deadline = startedAt + 120.seconds
 
-      def beforeDeadline: IO[Boolean] = clock.monotonic.map(_ < deadline)
+      def beforeDeadline: F[Boolean] = clock.monotonic.map(_ < deadline)
 
-      def abortIfActive: IO[Unit] =
-        IO.delay(session.hasActiveTransaction).ifM(drain(session.abortTransaction()), IO.unit)
+      def abortIfActive: F[Unit] =
+        Async[F].delay(session.hasActiveTransaction).ifM(drain(session.abortTransaction()), Async[F].unit)
 
-      def retryTransaction(error: MongoException): IO[Boolean] =
+      def retryTransaction(error: MongoException): F[Boolean] =
         if (error.hasErrorLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)) beforeDeadline
-        else IO.pure(false)
+        else Async[F].pure(false)
 
-      def commit: IO[Unit] =
+      def commit: F[Unit] =
         drain(session.commitTransaction()).handleErrorWith {
           case error: MongoException if error.hasErrorLabel(MongoException.UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL) =>
-            beforeDeadline.flatMap(if _ then commit else IO.raiseError(error))
+            beforeDeadline.flatMap(if _ then commit else Async[F].raiseError(error))
           case error: MongoException =>
-            retryTransaction(error).flatMap(if _ then IO.raiseError(RetryTransaction(error)) else IO.raiseError(error))
-          case error => IO.raiseError(error)
+            retryTransaction(error).flatMap(if _ then Async[F].raiseError(RetryTransaction(error))
+            else Async[F].raiseError(error))
+          case error => Async[F].raiseError(error)
         }
 
-      def runOnce: IO[Either[AnalyticsError, A]] = {
-        val transaction = IO.delay(session.startTransaction()) *> work.flatMap {
-          case rejected @ Left(_) => drain(session.abortTransaction()).as(rejected)
-          case success @ Right(_) => commit.as(success)
-        }
+      def runOnce: F[A] = {
+        val transaction = Async[F].delay(session.startTransaction()) *> work.flatTap(_ => commit)
         transaction.guaranteeCase {
-          case Outcome.Succeeded(_) => IO.unit
+          case Outcome.Succeeded(_) => Async[F].unit
           case _                    => abortIfActive
         }
       }
 
-      def run: IO[Either[AnalyticsError, A]] = runOnce.handleErrorWith {
+      def run: F[A] = runOnce.handleErrorWith {
         case retry: RetryTransaction =>
-          beforeDeadline.flatMap(if _ then IO.defer(run) else IO.raiseError(retry.getCause))
+          beforeDeadline.flatMap(if _ then Async[F].defer(run) else Async[F].raiseError(retry.getCause))
         case error: MongoException =>
-          retryTransaction(error).flatMap(if _ then IO.defer(run) else IO.raiseError(error))
-        case NonFatal(error) => IO.raiseError(error)
+          retryTransaction(error).flatMap(if _ then Async[F].defer(run) else Async[F].raiseError(error))
+        case error: AnalyticsError => Async[F].raiseError(error)
+        case NonFatal(error)       => Async[F].raiseError(error)
       }
       run
     }

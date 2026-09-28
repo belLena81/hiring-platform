@@ -9,6 +9,7 @@ import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
+import AnalyticsBatchTestSupport.{newBatch, newKeyContinuityStage}
 
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
@@ -297,7 +298,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHireAction(silver).unsafeRunSync().count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver).unsafeRunSync().count(), 0L)
   }
 
   test("ten eligible applications from one subject do not satisfy time-to-hire suppression") {
@@ -332,7 +333,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, emptyMarkers)
 
-    assertEquals(HiringGoldTransforms.timeToHireAction(silver).unsafeRunSync().count(), 0L)
+    assertEquals(HiringGoldTransforms.timeToHireAction[IO](silver).unsafeRunSync().count(), 0L)
   }
 
   test("skill posting activity normalizes only created job skills and applies k anonymity") {
@@ -433,8 +434,8 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("Kafka range reader defaults authenticated metadata and Spark settings to SASL_SSL") {
     val authenticated = KafkaConnection("kafka:9092", Some("analytics_reader"), Some("local-secret"))
-    val client = KafkaConnection.clientProperties(authenticated)
-    val spark = KafkaConnection.sparkOptions(authenticated)
+    val client = KafkaClientProperties.clientProperties(authenticated)
+    val spark = KafkaClientProperties.sparkOptions(authenticated)
     assertEquals(client.get("security.protocol"), Some("SASL_SSL"))
     assertEquals(client.get("sasl.mechanism"), Some("PLAIN"))
     assert(client.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
@@ -447,19 +448,19 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("Kafka SASL_PLAINTEXT requires explicit opt-in and reaches both client property sets") {
     val unapproved = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "SASL_PLAINTEXT")
     assert(KafkaConnection.validate(unapproved).isInvalid)
-    assertEquals(KafkaConnection.clientProperties(unapproved).get("security.protocol"), None)
-    assertEquals(KafkaConnection.sparkOptions(unapproved).get("kafka.security.protocol"), None)
+    intercept[IllegalArgumentException](KafkaClientProperties.clientProperties(unapproved))
+    intercept[IllegalArgumentException](KafkaClientProperties.sparkOptions(unapproved))
 
     val approved = unapproved.copy(allowPlaintext = true)
     assert(KafkaConnection.validate(approved).isValid)
-    assertEquals(KafkaConnection.clientProperties(approved).get("security.protocol"), Some("SASL_PLAINTEXT"))
-    assertEquals(KafkaConnection.sparkOptions(approved).get("kafka.security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(KafkaClientProperties.clientProperties(approved).get("security.protocol"), Some("SASL_PLAINTEXT"))
+    assertEquals(KafkaClientProperties.sparkOptions(approved).get("kafka.security.protocol"), Some("SASL_PLAINTEXT"))
   }
 
   test("Kafka rejects an unsupported security protocol") {
     val invalid = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "PLAINTEXT", allowPlaintext = true)
     assert(KafkaConnection.validate(invalid).isInvalid)
-    assertEquals(KafkaConnection.clientProperties(invalid).get("security.protocol"), None)
+    intercept[IllegalArgumentException](KafkaClientProperties.clientProperties(invalid))
   }
 
   test("bounded batch persists replayable layers and quality-blocks Gold on malformed or conflicting records") {
@@ -485,13 +486,13 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val manifest =
       validatedManifest("run-1", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 13L)))
-    val publication = new HiringAnalyticsBatch(
-      AnalyticsLakehousePaths(lakehouse),
+    val publication = newBatch(
+      AnalyticsLakehousePaths.unsafe(lakehouse),
       pseudonymizer,
-      DataFrameDeletionMarkerSource(emptyMarkers),
+      DataFrameDeletionMarkerSource[IO](emptyMarkers),
       fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
     )
-      .run(spark, DataFrameBatchSource(input), manifest)
+      .run(spark, DataFrameBatchSource[IO](input), manifest)
       .unsafeRunSync()
 
     assertEquals(publication.bronzeRecords, 12L)
@@ -499,11 +500,11 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(publication.quarantinedRecords, 2L)
     assertEquals(publication.outcome, AnalyticsRunOutcome.QualityBlocked)
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, publication.funnelGoldPath))
-    assertEquals(spark.read.format("delta").load(AnalyticsLakehousePaths(lakehouse).silver).count(), 10L)
+    assertEquals(spark.read.format("delta").load(AnalyticsLakehousePaths.unsafe(lakehouse).silver).count(), 10L)
     assertEquals(
       spark.read
         .format("delta")
-        .load(AnalyticsLakehousePaths(lakehouse).manifests)
+        .load(AnalyticsLakehousePaths.unsafe(lakehouse).manifests)
         .filter(col("status") === "QUALITY_BLOCKED")
         .count(),
       1L
@@ -512,12 +513,12 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("tombstone quarantine rows deduplicate when a Kafka range is replayed") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-tombstone-replay").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(Seq(("hiring.operational-events", 3, 17L, null.asInstanceOf[String])))
-    val batch = new HiringAnalyticsBatch(
+    val batch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(emptyMarkers),
+      DataFrameDeletionMarkerSource[IO](emptyMarkers),
       fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
     )
     val firstManifest = validatedManifest(
@@ -529,8 +530,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 3, 17L, 18L))
     )
 
-    val first = batch.run(spark, DataFrameBatchSource(input), firstManifest).unsafeRunSync()
-    val replay = batch.run(spark, DataFrameBatchSource(input), replayManifest).unsafeRunSync()
+    val first = batch.run(spark, DataFrameBatchSource[IO](input), firstManifest).unsafeRunSync()
+    val replay = batch.run(spark, DataFrameBatchSource[IO](input), replayManifest).unsafeRunSync()
     val quarantine = spark.read.format("delta").load(paths.quarantine)
 
     assertEquals(first.quarantinedRecords, 1L)
@@ -542,19 +543,19 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("unavailable deletion markers fail before creating a manifest or Bronze data") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-marker-failure").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val source = records(Seq(("hiring.operational-events", 0, 1L, event("created", "APPLICATION_CREATED"))))
-    val markers = new ActiveDeletionMarkerSource {
+    val markers = new ActiveDeletionMarkerSource[IO] {
       override def activeSubjectTokens(spark: SparkSession): IO[org.apache.spark.sql.DataFrame] =
         IO.raiseError(AnalyticsError.MissingMarkerCollection)
     }
-    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, markers)
+    val batch = newBatch(paths, pseudonymizer, markers)
 
     val failure = intercept[AnalyticsError.MissingMarkerCollection.type] {
       batch
         .run(
           spark,
-          DataFrameBatchSource(source),
+          DataFrameBatchSource[IO](source),
           validatedManifest("run-fail", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 2L)))
         )
         .unsafeRunSync()
@@ -566,7 +567,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("clean bounded batch returns Published and records PUBLISHED in the manifest") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-published").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(
       (1 to 10).map(index =>
         (
@@ -584,12 +585,12 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val manifest =
       validatedManifest("run-published", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 11L)))
-    val publication = new HiringAnalyticsBatch(
+    val publication = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(emptyMarkers),
+      DataFrameDeletionMarkerSource[IO](emptyMarkers),
       fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
-    ).run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+    ).run(spark, DataFrameBatchSource[IO](input), manifest).unsafeRunSync()
 
     assertEquals(publication.outcome, AnalyticsRunOutcome.Published)
     assertEquals(publication.completedAt, Instant.parse("2026-09-22T12:00:00Z"))
@@ -602,7 +603,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("new raw Delta tables retain replay bytes without copying raw values into transaction log statistics") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-private-delta-stats").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val sensitiveMarker = "raw-log-personal-sentinel-8f17c2"
     val input = records(
       Seq(
@@ -625,8 +626,8 @@ class AnalyticsTransformsSpec extends FunSuite {
         Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L))
       )
 
-    new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
-      .run(spark, DataFrameBatchSource(input), manifest)
+    newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](emptyMarkers))
+      .run(spark, DataFrameBatchSource[IO](input), manifest)
       .unsafeRunSync()
 
     val rawBronze = spark.read.format("delta").load(paths.bronze).select("rawValue").head().getString(0)
@@ -689,7 +690,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("Mongo publication failure never marks the Delta manifest PUBLISHED") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-publication-failure").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(
       (1 to 10).map(index =>
         (
@@ -705,22 +706,33 @@ class AnalyticsTransformsSpec extends FunSuite {
         )
       )
     )
-    val reportPublisher = new AnalyticsReportPublisher {
-      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+    val reportPublisher = new AnalyticsReportPublisher[IO] {
+      override def reserve(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
         IO.pure(AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L))
 
       override def publish(
           reservation: AnalyticsReportReservation,
           report: AnalyticsReportOutput,
           expiresAt: Instant
-      ): IO[Unit] = IO.raiseError(AnalyticsError.RunIdRangeConflict(reservation.runId))
+      ): IO[Unit] = IO.raiseError(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
+      override def publishErasure(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant,
+          claim: ErasureClaim,
+          completedAt: Instant
+      ): IO[Unit] = IO.unit
     }
-    val batch = new HiringAnalyticsBatch(
+    val batch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(emptyMarkers),
+      DataFrameDeletionMarkerSource[IO](emptyMarkers),
       fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
-      Some(reportPublisher)
+      reportPublisher = reportPublisher
     )
     val manifest =
       validatedManifest(
@@ -729,7 +741,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
 
     val error = intercept[AnalyticsError.RunIdRangeConflict] {
-      batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+      batch.run(spark, DataFrameBatchSource[IO](input), manifest).unsafeRunSync()
     }
 
     assertEquals(error.runId, "run-publication-fails")
@@ -741,7 +753,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("same-range retry completes the manifest after Mongo publication succeeds") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-manifest-retry").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val input = records(
       (1 to 10).map(index =>
         (
@@ -764,8 +776,12 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     val published = new AtomicInteger(0)
     val failPublishedManifestOnce = new AtomicBoolean(true)
-    val publisher = new AnalyticsReportPublisher {
-      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+    val publisher = new AnalyticsReportPublisher[IO] {
+      override def reserve(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
         IO.pure(AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L))
 
       override def publish(
@@ -773,34 +789,37 @@ class AnalyticsTransformsSpec extends FunSuite {
           report: AnalyticsReportOutput,
           expiresAt: Instant
       ): IO[Unit] = IO.delay { published.incrementAndGet(); () }
+      override def publishErasure(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant,
+          claim: ErasureClaim,
+          completedAt: Instant
+      ): IO[Unit] = IO.unit
     }
-    val defaultManifestWriter = new HiringAnalyticsBatch(
-      paths,
-      pseudonymizer,
-      DataFrameDeletionMarkerSource(emptyMarkers),
-      fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
-    )
-    val writer: (SparkSession, AnalyticsRunManifest, String, String) => IO[Unit] =
-      (session, run, status, at) =>
+    val realManifestStore = new DeltaManifestStore[IO](paths)
+    val manifestStore = new ManifestStore[IO] {
+      override def persist(session: SparkSession, run: AnalyticsRunManifest, status: String, at: String): IO[Unit] =
         if (status == "PUBLISHED" && failPublishedManifestOnce.compareAndSet(true, false))
           IO.raiseError(AnalyticsError.LakehouseFailure(new IllegalStateException("injected manifest failure")))
-        else defaultManifestWriter.writeManifest(session, run, status, at)
-    val batch = new HiringAnalyticsBatch(
+        else realManifestStore.persist(session, run, status, at)
+    }
+    val batch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(emptyMarkers),
+      DataFrameDeletionMarkerSource[IO](emptyMarkers),
       fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
-      Some(publisher),
-      Some(writer)
+      reportPublisher = publisher,
+      manifests = Some(manifestStore)
     )
 
     intercept[AnalyticsError.LakehouseFailure] {
-      batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+      batch.run(spark, DataFrameBatchSource[IO](input), manifest).unsafeRunSync()
     }
     assertEquals(published.get(), 1)
     assertEquals(spark.read.format("delta").load(paths.manifests).filter(col("status") === "PUBLISHED").count(), 0L)
 
-    val retry = batch.run(spark, DataFrameBatchSource(input), manifest).unsafeRunSync()
+    val retry = batch.run(spark, DataFrameBatchSource[IO](input), manifest).unsafeRunSync()
 
     assertEquals(retry.outcome, AnalyticsRunOutcome.Published)
     assertEquals(published.get(), 2)
@@ -810,14 +829,18 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("batch reads deletion markers before reserving its publication generation") {
     val reserved = new AtomicBoolean(false)
-    val markers = new ActiveDeletionMarkerSource {
+    val markers = new ActiveDeletionMarkerSource[IO] {
       override def activeSubjectTokens(session: SparkSession): IO[org.apache.spark.sql.DataFrame] = IO.delay {
         assert(!reserved.get(), "the marker snapshot must be read before publication is reserved")
         emptyMarkers
       }
     }
-    val publisher = new AnalyticsReportPublisher {
-      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+    val publisher = new AnalyticsReportPublisher[IO] {
+      override def reserve(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
         IO.delay {
           reserved.set(true)
           AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L)
@@ -828,17 +851,26 @@ class AnalyticsTransformsSpec extends FunSuite {
           report: AnalyticsReportOutput,
           expiresAt: Instant
       ): IO[Unit] = IO.raiseError(new AssertionError("the test source fails before publication"))
+      override def publishErasure(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant,
+          claim: ErasureClaim,
+          completedAt: Instant
+      ): IO[Unit] = IO.unit
     }
-    val source = new BoundedOperationalEventSource {
+    val source = new BoundedOperationalEventSource[IO] {
       override def read(session: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
         IO.raiseError(AnalyticsError.SourceReadFailure(new IllegalStateException("injected source failure")))
+      override def verifyOffsets(frame: org.apache.spark.sql.DataFrame, manifest: AnalyticsRunManifest): IO[Unit] =
+        IO.unit
     }
-    val batch = new HiringAnalyticsBatch(
-      AnalyticsLakehousePaths(Files.createTempDirectory("analytics-reserve-order").toUri.toString),
+    val batch = newBatch(
+      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-reserve-order").toUri.toString),
       pseudonymizer,
       markers,
       fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
-      Some(publisher)
+      reportPublisher = publisher
     )
     val manifest =
       validatedManifest(
@@ -854,7 +886,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("active deletion markers purge stored Silver and rebuild Gold before a quality-blocked range") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-silver-erasure").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths(lakehouse)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouse)
     val initialEvents = (1 to 10).map(index =>
       (
         "hiring.operational-events",
@@ -873,7 +905,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val seedSilver = silverFrame(OperationalEventTransforms.validEvents(seedParsed), pseudonymizer, emptyMarkers)
       .withColumn("ingestedAt", lit(Timestamp.from(seedAt)))
       .withColumn("expiresAt", lit(Timestamp.from(seedAt.plusSeconds(30L * 24L * 60L * 60L))))
-    new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+    newKeyContinuityStage(paths, pseudonymizer)
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
     seedSilver.write.format("delta").save(paths.silver)
@@ -898,10 +930,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val markers = markerFrame(Seq(pseudonymizer.token("candidate-1")))
-    val deletionBatch = new HiringAnalyticsBatch(
+    val deletionBatch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(markers),
+      DataFrameDeletionMarkerSource[IO](markers),
       fixedClock(Instant.parse("2026-09-22T13:00:00Z"))
     )
     intercept[AnalyticsError.LakehouseFailure] {
@@ -912,7 +944,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 11L, 13L))
     )
 
-    val publication = deletionBatch.run(spark, DataFrameBatchSource(replayAndMalformed), deletionRun).unsafeRunSync()
+    val publication =
+      deletionBatch.run(spark, DataFrameBatchSource[IO](replayAndMalformed), deletionRun).unsafeRunSync()
     assertEquals(publication.outcome, AnalyticsRunOutcome.QualityBlocked)
     assertEquals(publication.suppressedRecords, 1L)
     assertEquals(spark.read.format("delta").load(paths.silver).count(), 9L)
@@ -930,7 +963,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val manifest =
       validatedManifest("run-1", Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 1L, 2L)))
-    assertEquals(DataFrameBatchSource(source).read(spark, manifest).unsafeRunSync().count(), 1L)
+    assertEquals(DataFrameBatchSource[IO](source).read(spark, manifest).unsafeRunSync().count(), 1L)
   }
 
   test("data frame source reports missing Kafka columns as a typed schema error") {
@@ -941,17 +974,17 @@ class AnalyticsTransformsSpec extends FunSuite {
         Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 0, 0L, 1L))
       )
     val failure = intercept[AnalyticsError.InvalidSourceSchema] {
-      DataFrameBatchSource(source).read(spark, manifest).unsafeRunSync()
+      DataFrameBatchSource[IO](source).read(spark, manifest).unsafeRunSync()
     }
     assertEquals(failure.missing, Vector("offset", "partition"))
   }
 
   test("empty requested ranges fail before reading or writing a manifest") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-empty-offset-range").toUri.toString)
-    val source = DataFrameBatchSource(records(Seq.empty))
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-empty-offset-range").toUri.toString)
+    val source = DataFrameBatchSource[IO](records(Seq.empty))
     val manifest = validatedManifest("empty-offset-range", Vector(PartitionOffsetRange.unsafe("topic", 0, 4L, 4L)))
     val failure = intercept[AnalyticsError.EmptyRequestedRange] {
-      new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
+      newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](emptyMarkers))
         .run(spark, source, manifest)
         .unsafeRunSync()
     }
@@ -971,10 +1004,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       ("missing-interior", PartitionOffsetRange.unsafe("topic", 0, 1L, 4L), 3L, 2L)
     )
     scenarios.foreach { case (runId, range, requested, observed) =>
-      val paths = AnalyticsLakehousePaths(Files.createTempDirectory(s"analytics-$runId").toUri.toString)
+      val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory(s"analytics-$runId").toUri.toString)
       val failure = intercept[AnalyticsError.MissingOffsetRange] {
-        new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(emptyMarkers))
-          .run(spark, DataFrameBatchSource(input), validatedManifest(runId, Vector(range)))
+        newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](emptyMarkers))
+          .run(spark, DataFrameBatchSource[IO](input), validatedManifest(runId, Vector(range)))
           .unsafeRunSync()
       }
       assertEquals(failure, AnalyticsError.MissingOffsetRange(range.topic, range.partition, requested, observed))
@@ -1033,7 +1066,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val failedFileSystem = failedPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
     val primaryFailure = new IllegalStateException("rewrite failed")
     val failure = DeltaPurgeRewrite
-      .temporaryPath(spark, failedPath.toString)
+      .temporaryPath[IO](spark, failedPath.toString)
       .use(_ => IO.blocking(failedFileSystem.mkdirs(failedPath)) *> IO.raiseError[Unit](primaryFailure))
       .attempt
       .unsafeRunSync()
@@ -1045,7 +1078,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val pathRemoved = (for {
       acquired <- Deferred[IO, Unit]
       fiber <- DeltaPurgeRewrite
-        .temporaryPath(spark, canceledPath.toString)
+        .temporaryPath[IO](spark, canceledPath.toString)
         .use(_ => IO.blocking(canceledFileSystem.mkdirs(canceledPath)) *> acquired.complete(()).void *> IO.never[Unit])
         .start
       _ <- acquired.get
@@ -1071,7 +1104,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("lakehouse operation boundary preserves typed errors and adapts thrown failures") {
-    class Boundary extends LakehouseOperation {
+    class Boundary extends LakehouseOperation[IO] {
+      override protected val async: cats.effect.Async[IO] = cats.effect.Async[IO]
       def run[A](work: => A): IO[A] = lakehouse(work)
       def runIO[A](work: IO[A]): IO[A] = lakehouseIO(work)
       def runEither[A](work: => Either[AnalyticsError, A]): IO[A] = lakehouseEither(work)
@@ -1323,8 +1357,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       hmacKey("new-cutover-key"),
       Vector("hmac-v1" -> oldSecret)
     )
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-cutover").toUri.toString)
-    new HiringAnalyticsBatch(paths, old, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-key-cutover").toUri.toString)
+    newKeyContinuityStage(paths, old)
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
     val schema = StructType(
@@ -1346,10 +1380,12 @@ class AnalyticsTransformsSpec extends FunSuite {
       .save(paths.silver)
     val markerSchema = StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
     val markers = spark.createDataFrame(spark.sparkContext.emptyRDD[Row], markerSchema)
-    val batch = new HiringAnalyticsBatch(paths, rotating, DataFrameDeletionMarkerSource(markers))
-    val source = new BoundedOperationalEventSource {
+    val batch = newBatch(paths, rotating, DataFrameDeletionMarkerSource[IO](markers))
+    val source = new BoundedOperationalEventSource[IO] {
       override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
         IO.raiseError(new AssertionError("Kafka must not be read after an unsafe HMAC cutover"))
+      override def verifyOffsets(frame: org.apache.spark.sql.DataFrame, manifest: AnalyticsRunManifest): IO[Unit] =
+        IO.unit
     }
     val error = intercept[AnalyticsError.InvalidConfiguration] {
       batch
@@ -1378,13 +1414,13 @@ class AnalyticsTransformsSpec extends FunSuite {
       Vector("hmac-v1" -> oldSecret)
     )
     val removed = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("new-stored-key"), Vector.empty)
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-retirement").toUri.toString)
-    new HiringAnalyticsBatch(paths, old, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-key-retirement").toUri.toString)
+    newKeyContinuityStage(paths, old)
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
-    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
-    val rotatingBatch = new HiringAnalyticsBatch(paths, rotating, markers)
-    rotatingBatch.validateKeyMaterialContinuity(spark).unsafeRunSync()
+    val markers = DataFrameDeletionMarkerSource[IO](markerFrame(Seq.empty))
+    val rotatingStage = newKeyContinuityStage(paths, rotating)
+    rotatingStage.validateKeyMaterialContinuity(spark).unsafeRunSync()
     val stored = spark.createDataFrame(
       Seq(Row(old.token("candidate-1"), Seq(rotating.token("candidate-1")))).asJava,
       StructType(
@@ -1396,35 +1432,35 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     stored.write.format("delta").save(paths.silver)
 
-    rotatingBatch.validateStoredTokenKeys(spark).unsafeRunSync()
+    rotatingStage.validateStoredTokenKeys(spark).unsafeRunSync()
     val error = intercept[AnalyticsError.InvalidConfiguration] {
-      new HiringAnalyticsBatch(paths, removed, markers).validateStoredTokenKeys(spark).unsafeRunSync()
+      newKeyContinuityStage(paths, removed).validateStoredTokenKeys(spark).unsafeRunSync()
     }
     assert(error.getMessage.contains("not configured"))
     io.delta.tables.DeltaTable.forPath(spark, paths.silver).delete()
     val retirementBlocked = intercept[AnalyticsError.InvalidConfiguration] {
-      new HiringAnalyticsBatch(paths, removed, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+      newKeyContinuityStage(paths, removed).validateKeyMaterialContinuity(spark).unsafeRunSync()
     }
     assert(retirementBlocked.getMessage.contains("durable cleanup and writer-exclusion authorization"))
   }
 
   test("HMAC key continuity rejects changed material under the same key ID") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-key-continuity").toUri.toString)
-    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-key-continuity").toUri.toString)
+    val markers = DataFrameDeletionMarkerSource[IO](markerFrame(Seq.empty))
     val original =
       AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("original-continuity-key"), Vector.empty)
     val changed =
       AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("changed-continuity-key"), Vector.empty)
-    new HiringAnalyticsBatch(paths, original, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
-    new HiringAnalyticsBatch(paths, original, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    newKeyContinuityStage(paths, original).validateKeyMaterialContinuity(spark).unsafeRunSync()
+    newKeyContinuityStage(paths, original).validateKeyMaterialContinuity(spark).unsafeRunSync()
     val error = intercept[AnalyticsError.InvalidConfiguration] {
-      new HiringAnalyticsBatch(paths, changed, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+      newKeyContinuityStage(paths, changed).validateKeyMaterialContinuity(spark).unsafeRunSync()
     }
     assert(error.getMessage.contains("changed without a new key ID"))
   }
 
   test("legacy lakehouse data without HMAC provenance is not silently anchored") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-unanchored-key").toUri.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-unanchored-key").toUri.toString)
     val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("legacy-key-material"))
     spark
       .createDataFrame(
@@ -1434,19 +1470,20 @@ class AnalyticsTransformsSpec extends FunSuite {
       .write
       .format("delta")
       .save(paths.silver)
-    val markers = DataFrameDeletionMarkerSource(markerFrame(Seq.empty))
+    val markers = DataFrameDeletionMarkerSource[IO](markerFrame(Seq.empty))
     val error = intercept[AnalyticsError.InvalidConfiguration] {
-      new HiringAnalyticsBatch(paths, pseudonymizer, markers).validateKeyMaterialContinuity(spark).unsafeRunSync()
+      newKeyContinuityStage(paths, pseudonymizer).validateKeyMaterialContinuity(spark).unsafeRunSync()
     }
     assert(error.getMessage.contains("no HMAC key continuity registry"))
     assert(error.getMessage.contains("reset or rebuild this local lakehouse explicitly"))
   }
 
   test("a configured key ID with stored rows but no registry anchor fails closed") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-partial-key-registry").toUri.toString)
+    val paths =
+      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-partial-key-registry").toUri.toString)
     val current =
       AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", hmacKey("current-registry-key"), Vector.empty)
-    new HiringAnalyticsBatch(paths, current, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+    newKeyContinuityStage(paths, current)
       .validateKeyMaterialContinuity(spark)
       .unsafeRunSync()
     val old = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("old-unanchored-key"), Vector.empty)
@@ -1464,7 +1501,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       Vector("hmac-v1" -> hmacKey("old-unanchored-key"))
     )
     val error = intercept[AnalyticsError.InvalidConfiguration] {
-      new HiringAnalyticsBatch(paths, rotating, DataFrameDeletionMarkerSource(markerFrame(Seq.empty)))
+      newKeyContinuityStage(paths, rotating)
         .validateKeyMaterialContinuity(spark)
         .unsafeRunSync()
     }
@@ -1473,14 +1510,16 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("unavailable deletion markers do not create key registry or manifests") {
     val paths =
-      AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-before-key-registry").toUri.toString)
-    val unavailableMarkers = new ActiveDeletionMarkerSource {
+      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-before-key-registry").toUri.toString)
+    val unavailableMarkers = new ActiveDeletionMarkerSource[IO] {
       override def activeSubjectTokens(spark: SparkSession): IO[org.apache.spark.sql.DataFrame] =
         IO.raiseError(AnalyticsError.MissingMarkerCollection)
     }
-    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, unavailableMarkers)
+    val batch = newBatch(paths, pseudonymizer, unavailableMarkers)
     val source =
-      DataFrameBatchSource(records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED")))))
+      DataFrameBatchSource[IO](
+        records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED"))))
+      )
     intercept[AnalyticsError.MissingMarkerCollection.type] {
       batch
         .run(
@@ -1499,13 +1538,17 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("lazy marker evaluation failure does not create key registry or reserve publication") {
     val paths =
-      AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-action-before-write").toUri.toString)
+      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-action-before-write").toUri.toString)
     val reserved = new AtomicBoolean(false)
     val failingMarkers = spark
       .range(1L)
       .select(org.apache.spark.sql.functions.expr("raise_error('marker evaluation failed')").as("subjectToken"))
-    val publisher = new AnalyticsReportPublisher {
-      override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+    val publisher = new AnalyticsReportPublisher[IO] {
+      override def reserve(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
         IO.delay {
           reserved.set(true)
           AnalyticsReportReservation(runId, rangeFingerprint, 0L, 1L)
@@ -1516,16 +1559,25 @@ class AnalyticsTransformsSpec extends FunSuite {
           report: AnalyticsReportOutput,
           expiresAt: Instant
       ): IO[Unit] = IO.unit
+      override def publishErasure(
+          reservation: AnalyticsReportReservation,
+          report: AnalyticsReportOutput,
+          expiresAt: Instant,
+          claim: ErasureClaim,
+          completedAt: Instant
+      ): IO[Unit] = IO.unit
     }
-    val batch = new HiringAnalyticsBatch(
+    val batch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(failingMarkers),
+      DataFrameDeletionMarkerSource[IO](failingMarkers),
       fixedClock(Instant.parse("2026-09-22T12:00:00Z")),
-      Some(publisher)
+      reportPublisher = publisher
     )
     val source =
-      DataFrameBatchSource(records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED")))))
+      DataFrameBatchSource[IO](
+        records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED"))))
+      )
     intercept[AnalyticsError.LakehouseFailure] {
       batch
         .run(
@@ -1544,13 +1596,14 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("batch filters marked subjects before Bronze and does not persist unattributable malformed quarantine") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-erasure-before-bronze").toUri.toString)
-    val batch = new HiringAnalyticsBatch(
+    val paths =
+      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-erasure-before-bronze").toUri.toString)
+    val batch = newBatch(
       paths,
       pseudonymizer,
-      DataFrameDeletionMarkerSource(markerFrame(Seq(pseudonymizer.token("candidate-1"))))
+      DataFrameDeletionMarkerSource[IO](markerFrame(Seq(pseudonymizer.token("candidate-1"))))
     )
-    val source = DataFrameBatchSource(
+    val source = DataFrameBatchSource[IO](
       records(
         Seq(
           ("hiring.operational-events", 0, 0L, event("deleted", "APPLICATION_CREATED")),
@@ -1606,11 +1659,13 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("cached deletion markers are released when the source fails") {
     val markers = markerFrame(Seq.empty)
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-marker-cleanup").toUri.toString)
-    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markers))
-    val source = new BoundedOperationalEventSource {
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-cleanup").toUri.toString)
+    val batch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markers))
+    val source = new BoundedOperationalEventSource[IO] {
       override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
         IO.raiseError(AnalyticsError.SourceReadFailure(new IllegalStateException("injected read failure")))
+      override def verifyOffsets(frame: org.apache.spark.sql.DataFrame, manifest: AnalyticsRunManifest): IO[Unit] =
+        IO.unit
     }
     val manifest = validatedManifest("cleanup", Vector(PartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
 
@@ -1621,7 +1676,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("physical erasure verification is tied to captured Delta file paths") {
     val root = Files.createTempDirectory("analytics-erasure-files")
-    val paths = AnalyticsLakehousePaths(root.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(root.toString)
     val schema = StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
     spark
       .createDataFrame(Vector(Row("subject-deleted"), Row("subject-retained")).asJava, schema)
@@ -1630,7 +1685,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .format("delta")
       .save(paths.silver)
     val batch =
-      new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerFrame(Seq("subject-deleted"))))
+      newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerFrame(Seq("subject-deleted"))))
 
     val affectedFiles = batch.captureMarkedFiles(spark, markerFrame(Seq("subject-deleted"))).unsafeRunSync()
     assertEquals(affectedFiles.size, 1)
@@ -1685,7 +1740,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("no-op erasure retries advance the raw-log checkpoint boundary") {
     val root = Files.createTempDirectory("analytics-no-op-log-checkpoint")
-    val paths = AnalyticsLakehousePaths(root.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(root.toString)
     val rawSchema = StructType(
       Seq(
         StructField("rawValue", StringType, nullable = true),
@@ -1704,7 +1759,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .format("delta")
       .save(paths.bronze)
     val markerRows = markerFrame(Seq("subject-not-present"))
-    val initialBatch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerRows))
+    val initialBatch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerRows))
     val firstVersion = org.apache.spark.sql.delta.DeltaLog.forTable(spark, paths.bronze).update().version
     assertEquals(initialBatch.countMarkedRows(spark, markerRows).unsafeRunSync(), 0L)
 
@@ -1724,7 +1779,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
 
     // Model worker reconstruction and exact retry after a crash following checkpointing.
-    val restartedBatch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerRows))
+    val restartedBatch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerRows))
     val retryEvidence =
       restartedBatch.captureMarkedFiles(spark, markerRows).unsafeRunSync().filter(_.contains("/_delta_log/"))
     val retryJson = retryEvidence.filter(_.endsWith(".json"))
@@ -1738,7 +1793,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("legacy raw log paths are checkpointed and removed once they age beyond log retention") {
     val root = Files.createTempDirectory("analytics-legacy-log-cleanup")
-    val paths = AnalyticsLakehousePaths(root.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(root.toString)
     val rawSchema = StructType(
       Seq(
         StructField("rawValue", StringType, nullable = true),
@@ -1757,7 +1812,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .option("delta.dataSkippingNumIndexedCols", "32")
       .save(rawPath)
     val markerRows = markerFrame(Seq("subject-deleted"))
-    val batch = new HiringAnalyticsBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource(markerRows))
+    val batch = newBatch(paths, pseudonymizer, DataFrameDeletionMarkerSource[IO](markerRows))
 
     val beforePurge = batch.captureMarkedFiles(spark, markerRows).unsafeRunSync()
     val legacyLogs = beforePurge.filter(_.contains("/_delta_log/"))

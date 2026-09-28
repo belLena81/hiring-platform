@@ -1,0 +1,177 @@
+package com.example.hiring.analytics.adapter.spark
+
+import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
+import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.domain.AnalyticsRunManifest
+import com.example.hiring.analytics.domain.{AnalyticsRunManifest, PartitionOffsetRange}
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, BoundedOperationalEventSource}
+
+import cats.effect.{Async, Resource}
+import cats.syntax.all.*
+import io.circe.Json
+import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.serialization.ByteArrayDeserializer
+import org.apache.spark.sql.{Column, DataFrame, SparkSession}
+import org.apache.spark.sql.functions.{col, lit}
+
+import java.util.Properties
+import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
+
+/** Reads exactly the offsets named by a manifest; it never starts a streaming query. */
+final class KafkaOffsetRangeSource[F[_]: Async](connection: KafkaConnection) extends BoundedOperationalEventSource[F] {
+  override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
+    AnalyticsOffsetRanges.verifyCommittedKafkaRange(frame, manifest)
+
+  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): F[DataFrame] =
+    for {
+      _ <- Async[F].fromEither(KafkaConnection.validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply))
+      _ <- AnalyticsOffsetRanges.requireNonEmpty(manifest)
+      _ <- KafkaOffsetRangeSource.verifyAvailable(connection, manifest)
+      frame <- Async[F]
+        .blocking {
+          spark.read
+            .format("kafka")
+            .option("kafka.bootstrap.servers", connection.bootstrapServers)
+            .options(KafkaClientProperties.sparkOptions(connection))
+            .option("assign", KafkaOffsetRangeSource.assignJson(manifest.offsetRanges))
+            .option("startingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.startOffset))
+            .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
+            .option("failOnDataLoss", "true")
+            .load()
+        }
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
+    } yield frame
+}
+
+object KafkaOffsetRangeSource {
+  private def consumer[F[_]: Async](connection: KafkaConnection): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
+    Resource.fromAutoCloseable(Async[F].blocking {
+      val settings = new Properties()
+      settings.setProperty("bootstrap.servers", connection.bootstrapServers)
+      settings.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
+      settings.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
+      settings.setProperty("enable.auto.commit", "false")
+      settings.setProperty("isolation.level", "read_committed")
+      settings.setProperty("default.api.timeout.ms", "10000")
+      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
+        settings.setProperty(key, value)
+      }
+      new KafkaConsumer[Array[Byte], Array[Byte]](settings)
+    })
+
+  private[analytics] def verifyAvailable[F[_]: Async](
+      connection: KafkaConnection,
+      manifest: AnalyticsRunManifest
+  ): F[Unit] =
+    consumer[F](connection).use { client =>
+      Async[F]
+        .blocking {
+          val topic = manifest.offsetRanges.head.topic
+          val partitions = Option(client.partitionsFor(topic)).toVector.flatMap(_.asScala).map(_.partition()).toSet
+          val missing = manifest.offsetRanges.find(range => !partitions.contains(range.partition))
+          missing match {
+            case Some(range) =>
+              Left(
+                AnalyticsError.MissingOffsetRange(
+                  range.topic,
+                  range.partition,
+                  range.endOffsetExclusive - range.startOffset,
+                  0L
+                )
+              )
+            case None =>
+              val requested = manifest.offsetRanges.map(range => new TopicPartition(range.topic, range.partition))
+              val earliest = client.beginningOffsets(requested.asJava)
+              val latest = client.endOffsets(requested.asJava)
+              manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
+                val partition = new TopicPartition(range.topic, range.partition)
+                result.flatMap { _ =>
+                  (Option(earliest.get(partition)), Option(latest.get(partition))) match {
+                    case (Some(first), Some(last)) =>
+                      AnalyticsOffsetRanges.available(range, first.longValue(), last.longValue())
+                    case _ =>
+                      Left(
+                        AnalyticsError.MissingOffsetRange(
+                          range.topic,
+                          range.partition,
+                          range.endOffsetExclusive - range.startOffset,
+                          0L
+                        )
+                      )
+                  }
+                }
+              }
+          }
+        }
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
+        .flatMap(Async[F].fromEither)
+    }
+
+  private[analytics] def offsetJson(
+      ranges: Vector[PartitionOffsetRange],
+      select: PartitionOffsetRange => Long
+  ): String = {
+    val byTopic = ranges
+      .groupBy(_.topic)
+      .toSeq
+      .sortBy(_._1)
+      .map { case (topic, topicRanges) =>
+        topic -> Json.fromFields(
+          topicRanges.sortBy(_.partition).map(range => range.partition.toString -> Json.fromLong(select(range)))
+        )
+      }
+    Json.fromFields(byTopic).noSpaces
+  }
+
+  private[analytics] def assignJson(ranges: Vector[PartitionOffsetRange]): String = {
+    val byTopic = ranges
+      .groupBy(_.topic)
+      .toSeq
+      .sortBy(_._1)
+      .map { case (topic, topicRanges) =>
+        topic -> Json.arr(topicRanges.map(_.partition).distinct.sorted.map(Json.fromInt)*)
+      }
+    Json.fromFields(byTopic).noSpaces
+  }
+}
+
+/** Test and backfill adapter. Its frame must have Kafka's topic, partition, offset, timestamp and value columns. */
+final case class DataFrameBatchSource[F[_]: Async](records: DataFrame) extends BoundedOperationalEventSource[F] {
+  override def verifyOffsets(frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
+    AnalyticsOffsetRanges.verify(frame, manifest)
+
+  override def read(spark: SparkSession, manifest: AnalyticsRunManifest): F[DataFrame] =
+    AnalyticsOffsetRanges.requireNonEmpty(manifest) *>
+      Async[F]
+        .blocking(records.schema)
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
+        .flatMap(KafkaRecordColumns.validate) *>
+      Async[F]
+        .blocking {
+          val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
+            condition || (
+              col("topic") === lit(range.topic) &&
+                col("partition") === lit(range.partition) &&
+                col("offset") >= lit(range.startOffset) &&
+                col("offset") < lit(range.endOffsetExclusive)
+            )
+          }
+          records.filter(inManifest)
+        }
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
+}

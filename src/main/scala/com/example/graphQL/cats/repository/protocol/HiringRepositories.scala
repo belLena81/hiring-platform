@@ -162,8 +162,11 @@ trait AnalyticsErasureRequestRepository {
     */
   def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, String]]
 
-  /** Returns only lifecycle state; the random receipt ID is a bearer capability. */
-  def status(receiptId: String): IO[Either[RepositoryError, AccountDeletionStatus]]
+  /** Returns lifecycle state only when the receipt belongs to the supplied subject. */
+  def statusForSubject(
+      userId: UserId,
+      receiptId: String
+  ): IO[Either[RepositoryError, AccountDeletionStatus]]
 
   /** Removes durable outbox rows attributed to the subject after producer drain has been proven. */
   def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]]
@@ -184,7 +187,10 @@ object AnalyticsErasureRequestRepository {
     ): IO[Either[RepositoryError, String]] =
       IO.pure(Left(RepositoryError.Unavailable))
 
-    override def status(receiptId: String): IO[Either[RepositoryError, AccountDeletionStatus]] =
+    override def statusForSubject(
+        userId: UserId,
+        receiptId: String
+    ): IO[Either[RepositoryError, AccountDeletionStatus]] =
       IO.pure(Left(RepositoryError.Unavailable))
 
     override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
@@ -236,9 +242,9 @@ object AnalyticsReportSnapshotPublisher {
       IO.pure(Left(RepositoryError.Unavailable))
 
     override def publish(
-      reservation: AnalyticsReportRunReservation,
-      snapshot: AnalyticsReportSnapshot,
-      expiresAt: Instant
+        reservation: AnalyticsReportRunReservation,
+        snapshot: AnalyticsReportSnapshot,
+        expiresAt: Instant
     ): IO[Either[RepositoryError, Unit]] =
       IO.pure(Left(RepositoryError.Unavailable))
   }

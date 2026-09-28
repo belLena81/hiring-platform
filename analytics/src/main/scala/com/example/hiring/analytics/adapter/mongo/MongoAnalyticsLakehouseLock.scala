@@ -10,7 +10,7 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.{Clock, IO, Resource}
+import cats.effect.{Async, Clock, Resource, Temporal}
 import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
@@ -29,10 +29,11 @@ import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 /** Mongo mutex with no expiry or automatic takeover. A stale row must be cleared manually after its owner stops. */
-private[analytics] final class MongoAnalyticsLakehouseLock(
+private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal](
     database: MongoDatabase,
-    clock: Clock[IO] = Clock[IO]
-) extends AnalyticsLakehouseLock {
+    clock: Clock[F]
+) extends AnalyticsLakehouseLock[F] {
+  private val F = Async[F]
   import MongoAnalyticsLakehouseLock.*
 
   private val collection = database
@@ -41,17 +42,17 @@ private[analytics] final class MongoAnalyticsLakehouseLock(
       WriteConcern.MAJORITY.withJournal(true).withWTimeout(WriteTimeout.toMillis, TimeUnit.MILLISECONDS)
     )
 
-  override def resource(root: String): Resource[IO, Unit] =
+  override def resource(root: String): Resource[F, Unit] =
     Resource.make(acquire(root))(owner => release(root, owner)).void
 
-  private def acquire(root: String): IO[String] =
-    IO.fromEither(lockId(root)).flatMap { id =>
-      IO.delay(UUID.randomUUID().toString).flatMap { owner =>
+  private def acquire(root: String): F[String] =
+    F.fromEither(lockId(root)).flatMap { id =>
+      F.delay(UUID.randomUUID().toString).flatMap { owner =>
         clock.monotonic.flatMap { startedAt =>
           val deadline = startedAt + WaitTimeout
-          def attempt(retryDelay: FiniteDuration): IO[String] = clock.realTimeInstant
+          def attempt(retryDelay: FiniteDuration): F[String] = clock.realTimeInstant
             .flatMap(acquiredAt =>
-              IO.delay(
+              F.delay(
                 collection.insertOne(
                   new Document("_id", id)
                     .append("ownerToken", owner)
@@ -63,26 +64,33 @@ private[analytics] final class MongoAnalyticsLakehouseLock(
             .handleErrorWith {
               case error: MongoException if error.getCode == 11000 =>
                 clock.monotonic.flatMap { current =>
-                  if (current >= deadline) IO.raiseError(AnalyticsError.LakehouseLockTimeout)
-                  else jitter(retryDelay).flatMap(IO.sleep) *> attempt((retryDelay * 2).min(MaximumRetryDelay))
+                  if (current >= deadline) F.raiseError(AnalyticsError.LakehouseLockTimeout)
+                  else
+                    MongoAnalyticsLakehouseLock.jitter[F](retryDelay).flatMap(Temporal[F].sleep) *> attempt(
+                      (retryDelay * 2).min(MaximumRetryDelay)
+                    )
                 }
-              case error: AnalyticsError => IO.raiseError(error)
-              case NonFatal(error)       => IO.raiseError(AnalyticsError.LakehouseFailure(error))
+              case error: AnalyticsError => F.raiseError(error)
+              case NonFatal(error)       => F.raiseError(AnalyticsError.LakehouseFailure(error))
             }
           attempt(InitialRetryDelay)
         }
       }
     }
 
-  private def release(root: String, owner: String): IO[Unit] = IO.fromEither(lockId(root)).flatMap { id =>
+  private def release(root: String, owner: String): F[Unit] = F.fromEither(lockId(root)).flatMap { id =>
     MongoPublisherStream
       .one(collection.deleteOne(new Document("_id", id).append("ownerToken", owner)))
       .flatMap(result =>
-        IO.raiseWhen(result.getDeletedCount != 1L)(
+        F.raiseWhen(result.getDeletedCount != 1L)(
           AnalyticsError.LakehouseFailure(new IllegalStateException("lakehouse mutex owner changed before release"))
         ).void
       )
-      .handleErrorWith { case NonFatal(error) => IO.raiseError(AnalyticsError.LakehouseFailure(error)) }
+      .handleErrorWith {
+        case error: AnalyticsError => F.raiseError(error)
+        case NonFatal(error)       => F.raiseError(AnalyticsError.LakehouseFailure(error))
+        case error                 => F.raiseError(error)
+      }
   }
 }
 
@@ -93,7 +101,7 @@ private[analytics] object MongoAnalyticsLakehouseLock {
   private val MaximumRetryDelay = 5.seconds
   private val WriteTimeout = 15.seconds
 
-  private def jitter(maximum: FiniteDuration): IO[FiniteDuration] = IO.delay {
+  private def jitter[F[_]: Async](maximum: FiniteDuration): F[FiniteDuration] = Async[F].delay {
     val bound = math.max(1L, maximum.toMillis)
     ThreadLocalRandom.current().nextLong(bound + 1L).millis
   }
@@ -102,7 +110,7 @@ private[analytics] object MongoAnalyticsLakehouseLock {
   def lockId(root: String): Either[AnalyticsError, String] =
     Either
       .catchNonFatal {
-        val uri = new URI(Option(root).getOrElse("")).normalize()
+        val uri = new URI(root).normalize()
         require(
           uri.getScheme != null && uri.getRawUserInfo == null && uri.getRawQuery == null && uri.getRawFragment == null
         )

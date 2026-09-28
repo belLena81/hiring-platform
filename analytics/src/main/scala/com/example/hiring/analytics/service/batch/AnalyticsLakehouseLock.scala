@@ -1,33 +1,30 @@
 package com.example.hiring.analytics.service.batch
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.{IO, Resource}
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.Semaphore
+import cats.effect.{Async, Resource}
+import cats.effect.Ref
+import cats.effect.std.Semaphore
+import cats.syntax.all.*
 
 /** Serializes every repository-managed batch, erasure, and retention operation for one lakehouse root. */
-private[analytics] trait AnalyticsLakehouseLock {
-  def resource(root: String): Resource[IO, Unit]
+private[analytics] trait AnalyticsLakehouseLock[F[_]] {
+  def resource(root: String): Resource[F, Unit]
 }
 
-/** Process-local fallback for unit tests only. Production entry points must inject the Mongo implementation. */
+/** Process-local lock for explicitly selected local/test compositions. */
 private[analytics] object AnalyticsLakehouseLock {
-  private val locks = new ConcurrentHashMap[String, Semaphore]()
-
-  val processLocal: AnalyticsLakehouseLock = (root: String) =>
-    Resource.make(IO.blocking {
-      val lock = locks.computeIfAbsent(root, _ => new Semaphore(1))
-      lock.acquire()
-    })(_ => IO.blocking(locks.get(root).release()))
-
-  def resource(root: String): Resource[IO, Unit] = processLocal.resource(root)
+  def processLocal[F[_]: Async]: Resource[F, AnalyticsLakehouseLock[F]] =
+    Resource.eval(Ref.of[F, Map[String, Semaphore[F]]](Map.empty)).map { locks => (root: String) =>
+      Resource
+        .eval(
+          Semaphore[F](1L).flatMap { candidate =>
+            locks.modify { current =>
+              current.get(root) match {
+                case Some(existing) => current -> existing
+                case None           => current.updated(root, candidate) -> candidate
+              }
+            }
+          }
+        )
+        .flatMap(_.permit)
+    }
 }

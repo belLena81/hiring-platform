@@ -17,7 +17,7 @@ import com.example.hiring.analytics.adapter.mongo.{
   MongoPublisherStream
 }
 
-import cats.effect.IO
+import cats.effect.kernel.Async
 import cats.syntax.all.*
 import com.mongodb.{ReadConcern, WriteConcern}
 import com.mongodb.reactivestreams.client.MongoDatabase
@@ -57,8 +57,8 @@ private[analytics] object HmacKeyRetirementAuthorizationBson {
 }
 
 /** Immutable Mongo record, read with majority concern and inserted with majority+journal acknowledgement. */
-private[analytics] final class MongoHmacKeyRetirementAuthorizationStore(database: MongoDatabase)
-    extends HmacKeyRetirementAuthorizationStore {
+private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: Async](database: MongoDatabase)
+    extends HmacKeyRetirementAuthorizationStore[F] {
   private val collection = database
     .getCollection("analytics_hmac_key_retirements", classOf[Document])
     .withReadConcern(ReadConcern.MAJORITY)
@@ -69,23 +69,25 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore(database
   private def decode(document: Document): Either[AnalyticsError, HmacKeyRetirementAuthorization] =
     HmacKeyRetirementAuthorizationBson.decode(document)
 
-  override def list(root: String): IO[Vector[HmacKeyRetirementAuthorization]] =
-    IO.fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
+  override def list(root: String): F[Vector[HmacKeyRetirementAuthorization]] =
+    Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
       MongoPublisherStream
-        .stream(collection.find(new Document("lakehouseId", lakehouseId)))
+        .stream[F, Document](collection.find(new Document("lakehouseId", lakehouseId)))
         .compile
         .toVector
-        .flatMap(_.traverse(decode).liftTo[IO])
-        .adaptError { case NonFatal(_) =>
-          AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is unavailable or malformed")
+        .flatMap(_.traverse(decode).liftTo[F])
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(_)           =>
+            AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is unavailable or malformed")
         }
     }
 
-  override def insert(root: String, authorization: HmacKeyRetirementAuthorization): IO[Unit] =
+  override def insert(root: String, authorization: HmacKeyRetirementAuthorization): F[Unit] =
     for {
-      expectedLakehouse <- IO.fromEither(MongoAnalyticsLakehouseLock.lockId(root))
-      checked <- IO.fromEither(HmacKeyRetirementAuthorization.validate(authorization))
-      _ <- IO.raiseUnless(checked.lakehouseId == expectedLakehouse)(
+      expectedLakehouse <- Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root))
+      checked <- Async[F].fromEither(HmacKeyRetirementAuthorization.validate(authorization))
+      _ <- Async[F].raiseUnless(checked.lakehouseId == expectedLakehouse)(
         AnalyticsError.InvalidConfiguration("HMAC key retirement authorization targets another lakehouse")
       )
       _ <- MongoPublisherStream
@@ -100,8 +102,10 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore(database
               .append("authorizedAt", Date.from(checked.authorizedAt))
           )
         }
-        .adaptError { case NonFatal(_) =>
-          AnalyticsError.InvalidConfiguration("HMAC key retirement authorization could not be persisted")
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(_)           =>
+            AnalyticsError.InvalidConfiguration("HMAC key retirement authorization could not be persisted")
         }
     } yield ()
 }

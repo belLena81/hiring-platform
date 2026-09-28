@@ -21,30 +21,45 @@ object AnalyticsRetention {
 }
 
 opaque type RunId = String :| Not[Blank]
+opaque type AccountSubjectId = java.util.UUID
+opaque type RangeFingerprint = String :| Match["[0-9a-f]{64}"]
 
 type AnalyticsPartition = Int :| Interval.Closed[0, 2147483647]
 type AnalyticsOffset = Long :| Interval.Closed[0L, 9223372036854775807L]
 
 object RunId {
   def from(value: String): ValidatedNec[String, RunId] =
-    Option(value)
-      .toRight("run id must be non-empty")
-      .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "run id must be non-empty"))
+    value
+      .refineEither[Not[Blank]]
+      .leftMap(_ => "run id must be non-empty")
       .toValidatedNec
 
   extension (value: RunId) def value: String = value
+}
+
+object AccountSubjectId {
+  def from(value: String): Either[String, AccountSubjectId] =
+    Either
+      .catchNonFatal(java.util.UUID.fromString(value))
+      .leftMap(_ => "account subject id must be a UUID")
+
+  extension (value: AccountSubjectId) def value: String = value.toString
+}
+
+object RangeFingerprint {
+  def from(value: String): Either[String, RangeFingerprint] =
+    value.refineEither[Match["[0-9a-f]{64}"]].leftMap(_ => "range fingerprint must be a SHA-256 hex digest")
+
+  extension (value: RangeFingerprint) def value: String = value
 }
 
 opaque type SubjectToken = String :| Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]
 
 object SubjectToken {
   def fromHmac(value: String): Either[String, SubjectToken] =
-    Option(value)
-      .toRight("subject token has an invalid format")
-      .flatMap(
-        _.refineEither[Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]]
-          .leftMap(_ => "subject token has an invalid format")
-      )
+    value
+      .refineEither[Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]]
+      .leftMap(_ => "subject token has an invalid format")
 
   extension (token: SubjectToken) def value: String = token
 }
@@ -90,30 +105,35 @@ object PartitionOffsetRange {
       partition: Int,
       startOffset: Long,
       endOffsetExclusive: Long
+  ): ValidatedNec[String, PartitionOffsetRange] =
+    fromValidated(topic.validNec, partition.validNec, startOffset.validNec, endOffsetExclusive.validNec)
+
+  def fromValidated(
+      topic: ValidatedNec[String, String],
+      partition: ValidatedNec[String, Int],
+      startOffset: ValidatedNec[String, Long],
+      endOffsetExclusive: ValidatedNec[String, Long]
   ): ValidatedNec[String, PartitionOffsetRange] = {
-    val validTopic = Option(topic)
-      .filter(_.trim.nonEmpty)
-      .toRight("topic must be non-empty")
-      .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty"))
-      .toValidatedNec
-    val validPartition = partition
-      .refineEither[Interval.Closed[0, 2147483647]]
-      .leftMap(_ => "partition must be non-negative")
-      .toValidatedNec
-    val validStart = startOffset
-      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
-      .leftMap(_ => "start offset must be non-negative")
-      .toValidatedNec
-    val validEnd = endOffsetExclusive
-      .refineEither[Interval.Closed[0L, 9223372036854775807L]]
-      .leftMap(_ => "end offset must be non-negative")
-      .toValidatedNec
-    (validTopic, validPartition, validStart, validEnd)
-      .mapN { (topic, partition, start, end) =>
-        if (end < start) "end offset must not precede start offset".invalidNec
-        else new PartitionOffsetRange(topic, partition, start, end).validNec
-      }
-      .andThen(identity)
+    val validTopic = topic.andThen(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").toValidatedNec)
+    val validPartition = partition.andThen(
+      _.refineEither[Interval.Closed[0, 2147483647]].leftMap(_ => "partition must be non-negative").toValidatedNec
+    )
+    val validStart = startOffset.andThen(
+      _.refineEither[Interval.Closed[0L, 9223372036854775807L]]
+        .leftMap(_ => "start offset must be non-negative")
+        .toValidatedNec
+    )
+    val validEnd = endOffsetExclusive.andThen(
+      _.refineEither[Interval.Closed[0L, 9223372036854775807L]]
+        .leftMap(_ => "end offset must be non-negative")
+        .toValidatedNec
+    )
+    val validOrdering = (validStart.toEither, validEnd.toEither) match {
+      case (Right(start), Right(end)) => Validated.condNec(end >= start, (), "end offset must not precede start offset")
+      case _                          => ().validNec[String]
+    }
+    (validTopic, validPartition, validStart, validEnd, validOrdering)
+      .mapN((topic, partition, start, end, _) => new PartitionOffsetRange(topic, partition, start, end))
   }
 
   private[analytics] def unsafe(
@@ -127,32 +147,14 @@ object PartitionOffsetRange {
       identity
     )
 
-  private[analytics] def refined(
-      topic: String,
-      partition: AnalyticsPartition,
-      startOffset: AnalyticsOffset,
-      endOffsetExclusive: AnalyticsOffset
-  ): PartitionOffsetRange =
-    new PartitionOffsetRange(topic, partition, startOffset, endOffsetExclusive)
-
-  def validate(range: PartitionOffsetRange): ValidatedNec[String, PartitionOffsetRange] = {
-    val topic = Option(range.topic)
-      .filter(_.trim.nonEmpty)
-      .toRight("topic must be non-empty")
-      .flatMap(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty"))
-      .toValidatedNec
-    topic.andThen { _ =>
-      if (range.endOffsetExclusive < range.startOffset) "end offset must not precede start offset".invalidNec
-      else range.validNec
-    }
-  }
 }
 
 final case class AnalyticsRunManifest private (runId: RunId, offsetRanges: Vector[PartitionOffsetRange])
 
 object AnalyticsRunManifest {
-  def validated(rawRunId: String, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] = {
-    val rangeErrors = ranges.traverse(PartitionOffsetRange.validate)
+  private def validateRanges(
+      ranges: Vector[PartitionOffsetRange]
+  ): ValidatedNec[String, Vector[PartitionOffsetRange]] = {
     val nonEmpty =
       if (ranges.nonEmpty) ().validNec[String]
       else "at least one offset range is required".invalidNec[Unit]
@@ -162,11 +164,18 @@ object AnalyticsRunManifest {
     val oneTopic =
       if (ranges.map(_.topic).distinct.size <= 1) ().validNec[String]
       else "a Kafka batch manifest must contain exactly one topic".invalidNec[Unit]
-    (RunId.from(rawRunId), rangeErrors, nonEmpty, unique, oneTopic).mapN { (runId, validRanges, _, _, _) =>
-      AnalyticsRunManifest(runId, validRanges)
-    }
+    (ranges.validNec[String], nonEmpty, unique, oneTopic).mapN((validRanges, _, _, _) => validRanges)
   }
 
-  def validate(manifest: AnalyticsRunManifest): ValidatedNec[String, AnalyticsRunManifest] =
-    validated(manifest.runId.value, manifest.offsetRanges)
+  def from(runId: RunId, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] =
+    fromValidated(runId.validNec, ranges.validNec)
+
+  def fromValidated(
+      runId: ValidatedNec[String, RunId],
+      ranges: ValidatedNec[String, Vector[PartitionOffsetRange]]
+  ): ValidatedNec[String, AnalyticsRunManifest] =
+    (runId, ranges.andThen(validateRanges)).mapN(AnalyticsRunManifest.apply)
+
+  def validated(rawRunId: String, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] =
+    fromValidated(RunId.from(rawRunId), ranges.validNec)
 }

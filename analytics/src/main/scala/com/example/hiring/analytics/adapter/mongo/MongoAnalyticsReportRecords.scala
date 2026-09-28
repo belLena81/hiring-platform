@@ -16,6 +16,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 import org.bson.{BsonReader, BsonWriter, Document}
 import org.bson.codecs.{Codec, DecoderContext, DocumentCodec, EncoderContext}
 import org.bson.codecs.configuration.{CodecRegistries, CodecRegistry}
+import cats.syntax.all.*
 
 import java.util.Date
 
@@ -35,7 +36,7 @@ private[analytics] object MongoAnalyticsReportRecords {
   final case class Snapshot(
       generation: Long,
       revision: Long,
-      runId: String,
+      runId: RunId,
       expiresAt: Option[Date],
       document: Document
   ) {
@@ -54,10 +55,12 @@ private[analytics] object MongoAnalyticsReportRecords {
     for {
       id <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.Id, malformed)
       fingerprint <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RangeFingerprint, malformed)
+      runId <- RunId.from(id).toEither.leftMap(_ => malformed)
+      rangeFingerprint <- RangeFingerprint.from(fingerprint).leftMap(_ => malformed)
       generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
       revision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Revision, malformed)
       state <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.State, malformed)
-    } yield Run(AnalyticsReportReservation(id, fingerprint, generation, revision), state, document)
+    } yield Run(AnalyticsReportReservation(runId, rangeFingerprint, generation, revision), state, document)
   }
 
   private given BsonDecoder[Control] = BsonDecoder.instance { document =>
@@ -76,12 +79,13 @@ private[analytics] object MongoAnalyticsReportRecords {
     for {
       generation <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Generation, malformed)
       revision <- BsonDecoder.required[Long](document, AnalyticsCollections.Fields.Revision, malformed)
-      runId <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RunId, malformed)
+      rawRunId <- BsonDecoder.required[String](document, AnalyticsCollections.Fields.RunId, malformed)
+      runId <- RunId.from(rawRunId).toEither.leftMap(_ => malformed)
       expiresAt <- BsonDecoder.optional[Date](document, AnalyticsCollections.Fields.ExpiresAt, malformed)
     } yield Snapshot(generation, revision, runId, expiresAt, document)
   }
 
-  private def run(document: Document): Either[AnalyticsError, Run] = BsonDecoder[Run].decode(document)
+  private[analytics] def decodeRun(document: Document): Either[AnalyticsError, Run] = BsonDecoder[Run].decode(document)
   private[analytics] def decodeControl(document: Document): Either[AnalyticsError, Control] =
     BsonDecoder[Control].decode(document)
 
@@ -99,7 +103,7 @@ private[analytics] object MongoAnalyticsReportRecords {
 
   def registry(parent: CodecRegistry): CodecRegistry = CodecRegistries.fromRegistries(
     CodecRegistries.fromCodecs(
-      new DocumentViewCodec(classOf[DecodedRun], document => DecodedRun(run(document), document), _.document),
+      new DocumentViewCodec(classOf[DecodedRun], document => DecodedRun(decodeRun(document), document), _.document),
       new DocumentViewCodec(
         classOf[DecodedControl],
         document => DecodedControl(control(document), document),

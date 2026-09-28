@@ -99,14 +99,28 @@ private[graphql] object HiringGraphQLAccountResolvers {
               .map(receiptId => DeletionReceipt(receiptId, AccountDeletionStatus.Pending))
           )
         }
-      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
+      case _ =>
+        IO.raiseError(
+          RequestContext.ReadFailure(
+            UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)
+          )
+        )
     }
 
   def accountDeletionStatus(context: Context[RequestContext, Unit]): IO[AccountDeletionStatus] =
     context.ctx.hiringAvailable.flatMap {
       case com.example.graphQL.cats.service.ProbeResult.Ready =>
-        raiseOnUseCaseError(context.ctx.hiring.accountService.accountDeletionStatus(context.arg(deletionReceiptIdArgument)))
-      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)))
+        context.ctx.deletionActor.flatMap { actor =>
+          raiseOnUseCaseError(
+            context.ctx.hiring.accountService.accountDeletionStatus(actor, context.arg(deletionReceiptIdArgument))
+          )
+        }
+      case _ =>
+        IO.raiseError(
+          RequestContext.ReadFailure(
+            UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)
+          )
+        )
     }
 
   def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =

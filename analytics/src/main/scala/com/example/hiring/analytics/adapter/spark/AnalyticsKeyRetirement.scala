@@ -10,10 +10,10 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.AnalyticsLakehousePaths
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import cats.data.{Chain, NonEmptyChain, ValidatedNec}
-import cats.effect.IO
+import cats.effect.kernel.Async
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.mongo.{
   AnalyticsCollections,
@@ -177,7 +177,7 @@ private[analytics] object AnalyticsKeyRetirement {
   /** Inspects current Delta snapshots, all retained physical files/logs, required Mongo collections and registry. No
     * HMAC material is accepted by this API. Writer and retention evidence remains an explicit operator input.
     */
-  def audit(
+  def audit[F[_]: Async](
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       database: MongoDatabase,
@@ -185,8 +185,8 @@ private[analytics] object AnalyticsKeyRetirement {
       retention: RetentionEvidence,
       writers: WriterInventory,
       now: Instant,
-      lakehouseLock: AnalyticsLakehouseLock
-  ): IO[Either[NonEmptyChain[String], AuditSummary]] =
+      lakehouseLock: AnalyticsLakehouseLock[F]
+  ): F[Either[NonEmptyChain[String], AuditSummary]] =
     lakehouseLock
       .resource(paths.root)
       .use { _ => auditUnderLock(spark, paths, database, retiringKeyId, retention, writers, now) }
@@ -199,7 +199,7 @@ private[analytics] object AnalyticsKeyRetirement {
       }
 
   /** Caller already owns the shared lakehouse mutex; used by the guarded authorization transaction. */
-  private[analytics] def auditUnderLock(
+  private[analytics] def auditUnderLock[F[_]: Async](
       spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       database: MongoDatabase,
@@ -207,29 +207,32 @@ private[analytics] object AnalyticsKeyRetirement {
       retention: RetentionEvidence,
       writers: WriterInventory,
       now: Instant
-  ): IO[Either[NonEmptyChain[String], AuditSummary]] = {
+  ): F[Either[NonEmptyChain[String], AuditSummary]] = {
     val keyBlockers =
-      if (Option(retiringKeyId).forall(id => !RegistryIdPattern.matches(id)))
+      if (!RegistryIdPattern.matches(retiringKeyId))
         Chain.one("retiring key ID is invalid")
       else Chain.empty[String]
     val evidenceBlockers =
       (validateRetention(retention, now), validateWriters(writers, now))
         .mapN((_, _) => ())
         .fold(_.toChain, _ => Chain.empty[String])
-    IO.blocking {
-      val delta = scanDelta(spark, paths, Option(retiringKeyId).getOrElse(""))
-      val registry = validateRegistry(spark, paths, Option(retiringKeyId).getOrElse(""))
-      (delta, registry)
-    }.adaptError { case NonFatal(_) =>
-      AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
-    }.flatMap { case (delta, registryBlockers) =>
-      scanMongo(database, Option(retiringKeyId).getOrElse(""), now).map { mongo =>
-        val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
-        val errors = blockers.toList.toVector
-        if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
-        else Right(AuditSummary(now, delta.count, mongo.count))
+    Async[F]
+      .blocking {
+        val delta = scanDelta(spark, paths, retiringKeyId)
+        val registry = validateRegistry(spark, paths, retiringKeyId)
+        (delta, registry)
       }
-    }
+      .adaptError { case NonFatal(_) =>
+        AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
+      }
+      .flatMap { case (delta, registryBlockers) =>
+        scanMongo[F](database, retiringKeyId, now).map { mongo =>
+          val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
+          val errors = blockers.toList.toVector
+          if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
+          else Right(AuditSummary(now, delta.count, mongo.count))
+        }
+      }
   }
 
   private[analytics] def validateRetention(evidence: RetentionEvidence, now: Instant): ValidatedNec[String, Unit] = {
@@ -254,13 +257,13 @@ private[analytics] object AnalyticsKeyRetirement {
     ).foldLeft(Chain.empty[String]) {
       case (reasons, (_, horizon))
           if horizon.retainedUntil.exists(deadline => !now.isBefore(deadline)) &&
-            Option(horizon.evidenceReference).exists(_.trim.nonEmpty) =>
+            horizon.evidenceReference.trim.nonEmpty =>
         reasons
       case (reasons, (name, _)) =>
         reasons.append(s"$name retention horizon or its evidence reference is missing or has not elapsed")
     }
     val evidenceReasons =
-      if (Option(evidence.kafka.evidenceReference).forall(_.trim.isEmpty))
+      if (evidence.kafka.evidenceReference.trim.isEmpty)
         Chain.one("Kafka retention barrier evidence reference is missing")
       else Chain.empty[String]
     accumulate(kafkaReasons ++ horizonReasons ++ evidenceReasons)
@@ -269,28 +272,24 @@ private[analytics] object AnalyticsKeyRetirement {
   private[analytics] def validateWriters(inventory: WriterInventory, now: Instant): ValidatedNec[String, Unit] = {
     val freshnessReasons =
       if (
-        inventory == null || inventory.observedAt == null || inventory.observedAt.isAfter(now) ||
-        inventory.observedAt.isBefore(now.minus(MaximumWriterEvidenceAge)) ||
-        Option(inventory.coverageReference).forall(_.trim.isEmpty)
+        inventory.observedAt.isAfter(now) || inventory.observedAt.isBefore(now.minus(MaximumWriterEvidenceAge)) ||
+        inventory.coverageReference.trim.isEmpty
       )
         Chain.one("managed and unmanaged Delta writer inventory lacks fresh operator-attested coverage evidence")
       else Chain.empty[String]
-    val all = Option(inventory).toVector.flatMap(i => i.managed ++ i.unmanaged)
+    val all = inventory.managed ++ inventory.unmanaged
     val identityReasons =
       if (all.isEmpty) Chain.one("writer inventory contains no individually accounted writer identities")
       else Chain.empty[String]
     val writerReasons = all.foldLeft(Chain.empty[String]) { (reasons, writer) =>
       val missing =
-        if (
-          writer == null || Option(writer.identity).forall(_.trim.isEmpty) ||
-          Option(writer.evidenceReference).forall(_.trim.isEmpty)
-        )
+        if (writer.identity.trim.isEmpty || writer.evidenceReference.trim.isEmpty)
           Chain.one("a Delta writer identity or evidence reference is missing")
         else Chain.empty[String]
-      val disposition = Option(writer).map(_.disposition) match {
-        case Some(WriterDisposition.Stopped | WriterDisposition.AccessRevoked) => Chain.empty[String]
-        case Some(WriterDisposition.Active) => Chain.one("a Delta writer remains active")
-        case _ => Chain.one("a Delta writer is not accounted for as stopped or access-revoked")
+      val disposition = writer.disposition match {
+        case WriterDisposition.Stopped | WriterDisposition.AccessRevoked => Chain.empty[String]
+        case WriterDisposition.Active                                    => Chain.one("a Delta writer remains active")
+        case WriterDisposition.Unknown => Chain.one("a Delta writer is not accounted for as stopped or access-revoked")
       }
       reasons ++ missing ++ disposition
     }
@@ -400,60 +399,62 @@ private[analytics] object AnalyticsKeyRetirement {
 
   private val MaximumWriterEvidenceAge = java.time.Duration.ofHours(1)
 
-  private def scanMongo(database: MongoDatabase, keyId: String, now: Instant): IO[ScanResult] = {
-    MongoPublisherStream.stream(database.listCollectionNames()).compile.toVector.map(_.toSet).flatMap { names =>
-      val missing = MongoCollections.toSet -- names
-      val missingBlockers =
-        if (missing.nonEmpty)
-          Chain.one("one or more required Mongo report, erasure, or replay collections are unavailable")
-        else Chain.empty[String]
-      val initial = MongoScanState(0L, Set.empty, missingBlockers)
-      MongoCollections
-        .filter(names.contains)
-        .foldM(initial) { (state, collectionName) =>
-          MongoPublisherStream
-            .stream {
-              val find = database.getCollection(collectionName, classOf[Document]).find()
-              if (collectionName == AnalyticsCollections.ErasureRequests) find.limit(MaximumAuditedErasureSubjects + 1)
-              find
-            }
-            .compile
-            .fold((state, 0)) { case ((current, collectionDocuments), document) =>
-              reduceMongoObservation(current, collectionName, document, keyId, now, collectionDocuments)
-            }
-            .map(_._1)
-        }
-        .flatMap { scanned =>
-          if (names.contains(AnalyticsCollections.HiringMigrationLedger))
+  private def scanMongo[F[_]: Async](database: MongoDatabase, keyId: String, now: Instant): F[ScanResult] = {
+    MongoPublisherStream.stream[F, String](database.listCollectionNames()).compile.toVector.map(_.toSet).flatMap {
+      names =>
+        val missing = MongoCollections.toSet -- names
+        val missingBlockers =
+          if (missing.nonEmpty)
+            Chain.one("one or more required Mongo report, erasure, or replay collections are unavailable")
+          else Chain.empty[String]
+        val initial = MongoScanState(0L, Set.empty, missingBlockers)
+        MongoCollections
+          .filter(names.contains)
+          .foldM(initial) { (state, collectionName) =>
             MongoPublisherStream
-              .optional {
-                database
-                  .getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
-                  .find(
-                    new Document(
-                      AnalyticsCollections.Fields.Id,
-                      AnalyticsCollections.MigrationIds.OutboxSubjectReferences
+              .stream {
+                val find = database.getCollection(collectionName, classOf[Document]).find()
+                if (collectionName == AnalyticsCollections.ErasureRequests)
+                  find.limit(MaximumAuditedErasureSubjects + 1)
+                find
+              }
+              .compile
+              .fold((state, 0)) { case ((current, collectionDocuments), document) =>
+                reduceMongoObservation(current, collectionName, document, keyId, now, collectionDocuments)
+              }
+              .map(_._1)
+          }
+          .flatMap { scanned =>
+            if (names.contains(AnalyticsCollections.HiringMigrationLedger))
+              MongoPublisherStream
+                .optional {
+                  database
+                    .getCollection(AnalyticsCollections.HiringMigrationLedger, classOf[Document])
+                    .find(
+                      new Document(
+                        AnalyticsCollections.Fields.Id,
+                        AnalyticsCollections.MigrationIds.OutboxSubjectReferences
+                      )
                     )
-                  )
-                  .first()
-              }
-              .map { migration =>
-                val migrationBlockers =
-                  if (
-                    migration.forall { row =>
-                      import BsonValueDecoder.given
-                      !BsonDecoder
-                        .required[String](row, AnalyticsCollections.Fields.State, AnalyticsError.MalformedMarker)
-                        .toOption
-                        .contains("Complete")
-                    }
-                  )
-                    Chain.one("outbox subject-reference migration is not complete")
-                  else Chain.empty[String]
-                ScanResult(scanned.count, scanned.blockers ++ migrationBlockers)
-              }
-          else IO.pure(ScanResult(scanned.count, scanned.blockers))
-        }
+                    .first()
+                }
+                .map { migration =>
+                  val migrationBlockers =
+                    if (
+                      migration.forall { row =>
+                        import BsonValueDecoder.given
+                        !BsonDecoder
+                          .required[String](row, AnalyticsCollections.Fields.State, AnalyticsError.MalformedMarker)
+                          .toOption
+                          .contains("Complete")
+                      }
+                    )
+                      Chain.one("outbox subject-reference migration is not complete")
+                    else Chain.empty[String]
+                  ScanResult(scanned.count, scanned.blockers ++ migrationBlockers)
+                }
+            else Async[F].pure(ScanResult(scanned.count, scanned.blockers))
+          }
     }
   }
 

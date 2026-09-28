@@ -10,8 +10,8 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.AnalyticsLakehousePaths
-import cats.effect.{Deferred, IO}
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import cats.effect.{Clock, Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.reactivestreams.client.{
@@ -78,7 +78,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
       .insertOne(
         new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
       )
-    seedRegistry(AnalyticsLakehousePaths(lakehouseRoot.toUri.toString))
+    seedRegistry(AnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString))
   }
 
   override def afterAll(): Unit = if (enabled) {
@@ -92,7 +92,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   }
 
   if (enabled) test("audit passes empty verified surfaces and blocks a live marker or old-key Delta row") {
-    val paths = AnalyticsLakehousePaths(lakehouseRoot.toUri.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString)
     val passed = audit(paths)
     assert(passed.isRight, passed.swap.toOption.toString)
 
@@ -102,7 +102,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
         new Document("_id", "subject-1").append("state", "Pending")
       )
     val activeMarker = audit(paths)
-    assert(activeMarker.swap.toOption.get.exists(_.contains("active or unexpired erasure marker")))
+    assert(activeMarker.swap.toOption.get.exists(_.contains("active or unexpired erasure marker")), "assertion failed")
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
 
     database
@@ -112,7 +112,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           .append("report", new Document("subjectToken", s"${oldKeyId}_report-reference"))
       )
     val oldReportReference = audit(paths)
-    assert(oldReportReference.swap.toOption.get.exists(_.contains("analytics_report_snapshots")))
+    assert(oldReportReference.swap.toOption.get.exists(_.contains("analytics_report_snapshots")), "assertion failed")
     database.getCollection("analytics_report_snapshots").deleteMany(new Document())
 
     val tokenSchema = StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
@@ -123,15 +123,16 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
       .mode("overwrite")
       .save(paths.silver)
     val oldToken = audit(paths)
-    assert(oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"))
+    assert(oldToken.swap.toOption.get.contains("a current or retained Delta data file references the retiring key"), "assertion failed")
   }
 
   if (enabled) test("Mongo lakehouse mutex excludes a second independent client until owner release") {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
-    val firstLock = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
+    val firstLock = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](reactiveDatabase, Clock[IO])
     val secondLock =
-      new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock(
-        reactivePeerMongo.getDatabase(database.getName)
+      new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+        reactivePeerMongo.getDatabase(database.getName),
+        Clock[IO]
       )
     val result = (for {
       firstEntered <- Deferred[IO, Unit]
@@ -158,7 +159,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           .append("subjectRefsVersion", 1)
           .append("state", "Retryable")
       )
-    val paths = AnalyticsLakehousePaths(lakehouseRoot.resolve("second").toUri.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("second").toUri.toString)
     seedRegistry(paths)
     val result = audit(paths)
     assert(result.isRight, result.swap.toOption.toString)
@@ -173,7 +174,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
         new Document("_id", "subject-unknown-state").append("state", "Unexpected")
       )
     val unknownState = audit(paths).swap.toOption.get
-    assert(unknownState.exists(_.contains("erasure request has an unknown state")))
+    assert(unknownState.exists(_.contains("erasure request has an unknown state")), "assertion failed")
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
 
     database
@@ -182,12 +183,12 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
         new Document("_id", "subject-complete-without-expiry").append("state", "Complete")
       )
     val missingExpiry = audit(paths).swap.toOption.get
-    assert(missingExpiry.exists(_.contains("missing or invalid retention expiry")))
+    assert(missingExpiry.exists(_.contains("missing or invalid retention expiry")), "assertion failed")
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
 
-    val missingRegistry = AnalyticsLakehousePaths(lakehouseRoot.resolve("third").toUri.toString)
+    val missingRegistry = AnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("third").toUri.toString)
     val registryReasons = audit(missingRegistry).swap.toOption.get
-    assert(registryReasons.exists(_.contains("continuity registry is missing")))
+    assert(registryReasons.exists(_.contains("continuity registry is missing")), "assertion failed")
     database.getCollection("event_outbox").deleteMany(new Document())
   }
 
@@ -220,7 +221,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           )
         ),
         now,
-        new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock(reactiveDatabase)
+        new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](reactiveDatabase, Clock[IO])
       )
       .unsafeRunSync()
 

@@ -41,7 +41,7 @@ object TestGraphQLSupport {
     def me(actor: ActorContext) = unsupported
     def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput) = unsupported
     def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext) = unsupported
-    def accountDeletionStatus(receiptId: String) = UseCaseIO.pure(AccountDeletionStatus.NotFound)
+    def accountDeletionStatus(actor: ActorContext, receiptId: String) = UseCaseIO.pure(AccountDeletionStatus.NotFound)
     def listUsers(actor: ActorContext, page: UserPageRequest) = unsupported
   }
 

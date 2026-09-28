@@ -17,7 +17,7 @@ import com.example.hiring.analytics.*
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsReportRecords.*
 
 import cats.data.EitherT
-import cats.effect.IO
+import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
@@ -30,8 +30,10 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Report revision allocation and publication use Mongo's reactive driver and transaction boundary. */
-final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDatabase)
-    extends AnalyticsReportPublisher {
+final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](client: MongoClient, database: MongoDatabase)
+    extends AnalyticsReportPublisher[F] {
+  private val F = Async[F]
+  private val clock = Clock[F]
   private val control = database.getCollection(AnalyticsCollections.ReportControl, classOf[Document])
   private val reservations = database.getCollection(AnalyticsCollections.ReportRuns, classOf[Document])
   private val snapshots = database.getCollection(AnalyticsCollections.ReportSnapshots, classOf[Document])
@@ -46,10 +48,10 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
     .getCollection(AnalyticsCollections.ReportSnapshots, classOf[DecodedSnapshot])
     .withCodecRegistry(reportCodecs)
 
-  private type Result[A] = EitherT[IO, AnalyticsError, A]
-  private def lift[A](io: IO[A]): Result[A] = EitherT.liftF(io)
-  private def reject[A](error: AnalyticsError): Result[A] = EitherT.leftT[IO, A](error)
-  private def result[A](value: Either[AnalyticsError, A]): Result[A] = EitherT.fromEither[IO](value)
+  private type Result[A] = EitherT[F, AnalyticsError, A]
+  private def lift[A](io: F[A]): Result[A] = EitherT.liftF(io)
+  private def reject[A](error: AnalyticsError): Result[A] = EitherT.leftT[F, A](error)
+  private def result[A](value: Either[AnalyticsError, A]): Result[A] = EitherT.fromEither[F](value)
 
   private def allocateRevision(session: ClientSession): Result[(Long, Long)] =
     for {
@@ -80,114 +82,110 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
       )
     } yield updatedValue.generation -> revision
 
-  override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
-    if (runId == null || runId.trim.isEmpty || rangeFingerprint == null || rangeFingerprint.trim.isEmpty)
-      IO.raiseError(AnalyticsError.InvalidConfiguration("report reservation identity is empty"))
-    else
-      MongoPublisherStream
-        .optional(typedReservations.find(Filters.eq(AnalyticsCollections.Fields.Id, runId)).first())
-        .flatMap {
-          case Some(previous) =>
-            IO.fromEither(previous.value).flatMap { record =>
-              val existing = record.reservation
-              if (existing.rangeFingerprint != rangeFingerprint)
-                IO.raiseError(AnalyticsError.RunIdRangeConflict(runId))
-              else if (record.state != "Reserved") IO.pure(existing)
-              else
-                MongoSession.resource(client).use { session =>
-                  val work = for {
-                    current <- lift(
-                      MongoPublisherStream.optional(
-                        typedControl
-                          .find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
-                          .first()
-                      )
+  override def reserve(runId: RunId, rangeFingerprint: RangeFingerprint, now: Instant): F[AnalyticsReportReservation] =
+    MongoPublisherStream
+      .optional(typedReservations.find(Filters.eq(AnalyticsCollections.Fields.Id, runId.value)).first())
+      .flatMap {
+        case Some(previous) =>
+          F.fromEither(previous.value).flatMap { record =>
+            val existing = record.reservation
+            if (existing.rangeFingerprint != rangeFingerprint)
+              F.raiseError(AnalyticsError.RunIdRangeConflict(runId.value))
+            else if (record.state != "Reserved") F.pure(existing)
+            else
+              MongoSession.resource(client).use { session =>
+                val work = for {
+                  current <- lift(
+                    MongoPublisherStream.optional(
+                      typedControl
+                        .find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
+                        .first()
                     )
-                    controlRecord <- result(
-                      current.toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
-                    )
-                    decoded <- result(controlRecord.value)
-                    refreshed <-
-                      if (
-                        decoded.generation <= existing.generation && decoded.lastPublishedRevision < existing.revision
-                      ) EitherT.pure[IO, AnalyticsError](existing)
-                      else
-                        for {
-                          allocated <- allocateRevision(session)
-                          value = existing.copy(generation = allocated._1, revision = allocated._2)
-                          replaced <- lift(
-                            casUpdate(
-                              session,
-                              reservations,
-                              Filters.and(
-                                Filters.eq(AnalyticsCollections.Fields.Id, runId),
-                                Filters.eq(AnalyticsCollections.Fields.State, "Reserved")
-                              ),
-                              Updates.combine(
-                                Updates.set(AnalyticsCollections.Fields.Generation, value.generation),
-                                Updates.set(AnalyticsCollections.Fields.Revision, value.revision),
-                                Updates.set(AnalyticsCollections.Fields.CreatedAt, Date.from(now)),
-                                Updates.set(
-                                  AnalyticsCollections.Fields.ExpiresAt,
-                                  Date.from(now.plusSeconds(90L * 24L * 60L * 60L))
-                                )
+                  )
+                  controlRecord <- result(
+                    current.toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
+                  )
+                  decoded <- result(controlRecord.value)
+                  refreshed <-
+                    if (decoded.generation <= existing.generation && decoded.lastPublishedRevision < existing.revision)
+                      EitherT.pure[F, AnalyticsError](existing)
+                    else
+                      for {
+                        allocated <- allocateRevision(session)
+                        value = existing.copy(generation = allocated._1, revision = allocated._2)
+                        replaced <- lift(
+                          casUpdate(
+                            session,
+                            reservations,
+                            Filters.and(
+                              Filters.eq(AnalyticsCollections.Fields.Id, runId.value),
+                              Filters.eq(AnalyticsCollections.Fields.State, "Reserved")
+                            ),
+                            Updates.combine(
+                              Updates.set(AnalyticsCollections.Fields.Generation, value.generation),
+                              Updates.set(AnalyticsCollections.Fields.Revision, value.revision),
+                              Updates.set(AnalyticsCollections.Fields.CreatedAt, Date.from(now)),
+                              Updates.set(
+                                AnalyticsCollections.Fields.ExpiresAt,
+                                Date.from(now.plusSeconds(90L * 24L * 60L * 60L))
                               )
                             )
                           )
-                          _ <- result(Either.cond(replaced, (), AnalyticsError.RunIdRangeConflict(runId)))
-                        } yield value
-                  } yield refreshed
-                  MongoPublisherStream.transaction(session)(work.value).flatMap(IO.fromEither)
-                }
-            }
-          case None =>
-            MongoSession.resource(client).use { session =>
-              val work = for {
-                current <- lift(
-                  MongoPublisherStream.optional(
-                    typedControl.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
-                  )
-                )
-                _ <- result(
-                  current.toRight(
-                    AnalyticsError.InvalidConfiguration("analytics report control is not initialized")
-                  )
-                )
-                allocated <- allocateRevision(session)
-                value = AnalyticsReportReservation(runId, rangeFingerprint, allocated._1, allocated._2)
-                _ <- lift(
-                  MongoPublisherStream.one(
-                    reservations.insertOne(
-                      session,
-                      new Document(AnalyticsCollections.Fields.Id, runId)
-                        .append(AnalyticsCollections.Fields.RangeFingerprint, rangeFingerprint)
-                        .append(AnalyticsCollections.Fields.Generation, value.generation)
-                        .append(AnalyticsCollections.Fields.Revision, value.revision)
-                        .append(AnalyticsCollections.Fields.State, "Reserved")
-                        .append(AnalyticsCollections.Fields.CreatedAt, Date.from(now))
-                        .append(
-                          AnalyticsCollections.Fields.ExpiresAt,
-                          Date.from(now.plusSeconds(90L * 24L * 60L * 60L))
                         )
-                    )
+                        _ <- result(Either.cond(replaced, (), AnalyticsError.RunIdRangeConflict(runId.value)))
+                      } yield value
+                } yield refreshed
+                MongoPublisherStream.transaction(session)(work.value.flatMap(F.fromEither))
+              }
+          }
+        case None =>
+          MongoSession.resource(client).use { session =>
+            val work = for {
+              current <- lift(
+                MongoPublisherStream.optional(
+                  typedControl.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
+                )
+              )
+              _ <- result(
+                current.toRight(
+                  AnalyticsError.InvalidConfiguration("analytics report control is not initialized")
+                )
+              )
+              allocated <- allocateRevision(session)
+              value = AnalyticsReportReservation(runId, rangeFingerprint, allocated._1, allocated._2)
+              _ <- lift(
+                MongoPublisherStream.one(
+                  reservations.insertOne(
+                    session,
+                    new Document(AnalyticsCollections.Fields.Id, runId.value)
+                      .append(AnalyticsCollections.Fields.RangeFingerprint, rangeFingerprint.value)
+                      .append(AnalyticsCollections.Fields.Generation, value.generation)
+                      .append(AnalyticsCollections.Fields.Revision, value.revision)
+                      .append(AnalyticsCollections.Fields.State, "Reserved")
+                      .append(AnalyticsCollections.Fields.CreatedAt, Date.from(now))
+                      .append(
+                        AnalyticsCollections.Fields.ExpiresAt,
+                        Date.from(now.plusSeconds(90L * 24L * 60L * 60L))
+                      )
                   )
                 )
-              } yield value
-              MongoPublisherStream.transaction(session)(work.value).flatMap(IO.fromEither)
-            }
-        }
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.MongoConnectionFailure(cause)
-        }
+              )
+            } yield value
+            MongoPublisherStream.transaction(session)(work.value.flatMap(F.fromEither))
+          }
+      }
+      .adaptError {
+        case error: AnalyticsError => error
+        case NonFatal(cause)       => AnalyticsError.MongoConnectionFailure(cause)
+      }
 
   override def publish(
       reservation: AnalyticsReportReservation,
       report: AnalyticsReportOutput,
       expiresAt: Instant
-  ): IO[Unit] =
+  ): F[Unit] =
     if (!expiresAt.isAfter(report.asOf))
-      IO.raiseError(AnalyticsError.InvalidConfiguration("report expiry must follow publication time"))
+      F.raiseError(AnalyticsError.InvalidConfiguration("report expiry must follow publication time"))
     else
       MongoSession
         .resource(client)
@@ -195,18 +193,20 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
           val work = for {
             reserved <- lift(
               MongoPublisherStream.optional(
-                typedReservations.find(session, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId)).first()
+                typedReservations
+                  .find(session, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
+                  .first()
               )
             )
             reservedRecord <- result(
-              reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId))
+              reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
             )
             decoded <- result(reservedRecord.value)
             _ <- result(
               Either.cond(
                 decoded.reservation == reservation,
                 (),
-                AnalyticsError.RunIdRangeConflict(reservation.runId)
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
               )
             )
             state <- lift(
@@ -214,17 +214,17 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 typedControl.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
               )
             )
-            stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId)))
+            stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
             decodedState <- result(stateRecord.value)
             _ <- result(
               Either.cond(
                 decodedState.generation == reservation.generation &&
                   Set("Published", "Unpublished").contains(decodedState.state),
                 (),
-                AnalyticsError.RunIdRangeConflict(reservation.runId)
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
               )
             )
-            currentTime <- lift(IO.realTimeInstant)
+            currentTime <- lift(clock.realTimeInstant)
             snapshotRecord <- lift(
               MongoPublisherStream.optional(
                 typedSnapshots.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first()
@@ -232,15 +232,15 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
             )
             snapshot <- result(snapshotRecord.traverse(_.value))
             alreadyPublished = decodedState.lastPublishedRevision == reservation.revision &&
-              decodedState.lastRunId.getOrElse("") == reservation.runId
+              decodedState.lastRunId.getOrElse("") == reservation.runId.value
             _ <-
               if (
                 alreadyPublished && snapshot
                   .exists(v => v.matches(reservation) && v.expiresAt.exists(_.after(Date.from(currentTime))))
               )
-                EitherT.pure[IO, AnalyticsError](())
+                EitherT.pure[F, AnalyticsError](())
               else if (alreadyPublished && snapshot.exists(_.expiresAt.exists(_.after(Date.from(currentTime)))))
-                reject(AnalyticsError.RunIdRangeConflict(reservation.runId))
+                reject(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
               else if (alreadyPublished)
                 lift(
                   MongoPublisherStream.one(
@@ -253,7 +253,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                   )
                 ).void
               else if (reservation.revision <= decodedState.lastPublishedRevision)
-                reject(AnalyticsError.RunIdRangeConflict(reservation.runId))
+                reject(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
               else
                 for {
                   changed <- lift(
@@ -269,12 +269,12 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                       Updates.combine(
                         Updates.set(AnalyticsCollections.Fields.State, "Published"),
                         Updates.set(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision),
-                        Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId),
+                        Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId.value),
                         Updates.unset(AnalyticsCollections.Fields.HiddenAt)
                       )
                     )
                   )
-                  _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId)))
+                  _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
                   _ <- lift(
                     MongoPublisherStream.one(
                       snapshots.replaceOne(
@@ -289,14 +289,14 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                     MongoPublisherStream.one(
                       reservations.updateOne(
                         session,
-                        Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId),
+                        Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value),
                         Updates.set(AnalyticsCollections.Fields.State, "Published")
                       )
                     )
                   )
                 } yield ()
           } yield ()
-          MongoPublisherStream.transaction(session)(work.value).flatMap(IO.fromEither)
+          MongoPublisherStream.transaction(session)(work.value.flatMap(F.fromEither))
         }
         .adaptError {
           case error: AnalyticsError => error
@@ -310,9 +310,9 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
       expiresAt: Instant,
       claim: ErasureClaim,
       completedAt: Instant
-  ): IO[Unit] =
+  ): F[Unit] =
     if (!expiresAt.isAfter(report.asOf) || !expiresAt.isAfter(completedAt))
-      IO.raiseError(AnalyticsError.InvalidConfiguration("erasure snapshot expiry must follow publication time"))
+      F.raiseError(AnalyticsError.InvalidConfiguration("erasure snapshot expiry must follow publication time"))
     else
       MongoSession
         .resource(client)
@@ -374,16 +374,18 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
             _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.ErasureNotReady))
             reserved <- lift(
               MongoPublisherStream.optional(
-                typedReservations.find(session, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId)).first()
+                typedReservations
+                  .find(session, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
+                  .first()
               )
             )
-            reservedRecord <- result(reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId)))
+            reservedRecord <- result(reserved.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
             reservedValue <- result(reservedRecord.value)
             _ <- result(
               Either.cond(
                 reservedValue.reservation == reservation && reservedValue.state == "Reserved",
                 (),
-                AnalyticsError.RunIdRangeConflict(reservation.runId)
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
               )
             )
             state <- lift(
@@ -391,21 +393,21 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 typedControl.find(session, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first()
               )
             )
-            stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId)))
+            stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
             decodedState <- result(stateRecord.value)
             _ <- result(
               Either.cond(
                 decodedState.generation == reservation.generation && Set("Hidden", "Published")
                   .contains(decodedState.state),
                 (),
-                AnalyticsError.RunIdRangeConflict(reservation.runId)
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
               )
             )
             _ <- result(
               Either.cond(
                 reservation.revision > decodedState.lastPublishedRevision,
                 (),
-                AnalyticsError.RunIdRangeConflict(reservation.runId)
+                AnalyticsError.RunIdRangeConflict(reservation.runId.value)
               )
             )
             changed <- lift(
@@ -421,12 +423,12 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 Updates.combine(
                   Updates.set(AnalyticsCollections.Fields.State, "Published"),
                   Updates.set(AnalyticsCollections.Fields.LastPublishedRevision, reservation.revision),
-                  Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId),
+                  Updates.set(AnalyticsCollections.Fields.LastRunId, reservation.runId.value),
                   Updates.unset(AnalyticsCollections.Fields.HiddenAt)
                 )
               )
             )
-            _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId)))
+            _ <- result(Either.cond(changed, (), AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
             _ <- lift(
               MongoPublisherStream.one(
                 snapshots.replaceOne(
@@ -442,7 +444,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
                 reservations.updateOne(
                   session,
                   Filters.and(
-                    Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId),
+                    Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value),
                     Filters.eq(AnalyticsCollections.Fields.State, "Reserved")
                   ),
                   Updates.set(AnalyticsCollections.Fields.State, "Published")
@@ -496,7 +498,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
               )
             )
           } yield ()
-          MongoPublisherStream.transaction(session)(work.value).flatMap(IO.fromEither)
+          MongoPublisherStream.transaction(session)(work.value.flatMap(F.fromEither))
         }
         .adaptError {
           case error: AnalyticsError => error
@@ -517,7 +519,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
       collection: MongoCollection[Document],
       filter: Bson,
       update: Bson
-  ): IO[Boolean] =
+  ): F[Boolean] =
     MongoPublisherStream.one(collection.updateOne(session, filter, update)).map(_.getMatchedCount == 1L)
 
   private def reportDocument(
@@ -529,7 +531,7 @@ final class MongoAnalyticsReportPublisher(client: MongoClient, database: MongoDa
       .append(AnalyticsCollections.Fields.State, "Published")
       .append(AnalyticsCollections.Fields.Generation, reservation.generation)
       .append(AnalyticsCollections.Fields.Revision, reservation.revision)
-      .append(AnalyticsCollections.Fields.RunId, reservation.runId)
+      .append(AnalyticsCollections.Fields.RunId, reservation.runId.value)
       .append(AnalyticsCollections.Fields.AsOf, Date.from(report.asOf))
       .append(AnalyticsCollections.Fields.ExpiresAt, Date.from(expiresAt))
       .append(

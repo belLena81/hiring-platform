@@ -12,9 +12,7 @@ import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.*
 import com.example.hiring.analytics.adapter.mongo.{AnalyticsCollections, BsonDecoder, BsonValueDecoder}
-import com.example.hiring.analytics.adapter.spark.ActiveDeletionMarkerSource
-
-import cats.effect.{Clock, IO}
+import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import com.mongodb.reactivestreams.client.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
@@ -31,16 +29,15 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Reads pending account-erasure requests before an analytics run can mutate Delta data. */
-final class MongoActiveDeletionMarkerSource(
+final class MongoActiveDeletionMarkerSource[F[_]: Async: Clock](
     database: MongoDatabase,
     pseudonymizer: SubjectPseudonymizer,
-    private[analytics] val maximumPendingMarkers: Int = MongoActiveDeletionMarkerSource.MaximumPendingMarkers,
-    clock: Clock[IO] = Clock[IO]
-) extends ActiveDeletionMarkerSource {
+    private[analytics] val maximumPendingMarkers: Int = MongoActiveDeletionMarkerSource.MaximumPendingMarkers
+) extends ActiveDeletionMarkerSource[F] {
   private val requestCollection = com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.ErasureRequests
 
-  private def activeRequests(now: Instant): Stream[IO, Document] =
-    MongoCursorStream(
+  private def activeRequests(now: Instant): Stream[F, Document] =
+    MongoCursorStream[F, Document](
       database
         .getCollection(requestCollection, classOf[Document])
         .find(
@@ -70,32 +67,37 @@ final class MongoActiveDeletionMarkerSource(
         .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
         .batchSize(256)
     ).handleErrorWith {
-      case error: AnalyticsError => Stream.raiseError[IO](error)
-      case cause                 => Stream.raiseError[IO](AnalyticsError.MarkerStorageFailure(cause))
+      case error: AnalyticsError => Stream.raiseError[F](error)
+      case cause                 => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
     }
 
-  override def activeSubjectTokens(spark: SparkSession): IO[DataFrame] =
+  override def activeSubjectTokens(spark: SparkSession): F[DataFrame] =
     for {
-      _ <- IO.raiseWhen(maximumPendingMarkers <= 0)(
+      _ <- Async[F].raiseWhen(maximumPendingMarkers <= 0)(
         AnalyticsError.InvalidConfiguration("maximum pending marker count must be positive")
       )
       collectionExists <- com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
         .optional(database.listCollections().filter(Filters.eq("name", requestCollection)).first())
         .map(_.isDefined)
-        .adaptError { case NonFatal(cause) => AnalyticsError.MarkerStorageFailure(cause) }
-      _ <- IO.raiseUnless(collectionExists)(AnalyticsError.MissingMarkerCollection)
-      now <- clock.realTimeInstant
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.MarkerStorageFailure(cause)
+        }
+      _ <- Async[F].raiseUnless(collectionExists)(AnalyticsError.MissingMarkerCollection)
+      now <- Clock[F].realTimeInstant
       tokens <- activeRequests(now)
-        .evalMap(request => IO.fromEither(MongoActiveDeletionMarkerSource.activeTokens(request, now, pseudonymizer)))
+        .evalMap(request =>
+          Async[F].fromEither(MongoActiveDeletionMarkerSource.activeTokens(request, now, pseudonymizer))
+        )
         .unNone
         .take(maximumPendingMarkers.toLong + 1L)
         .compile
         .toVector
-      _ <- IO.raiseWhen(tokens.size > maximumPendingMarkers)(
+      _ <- Async[F].raiseWhen(tokens.size > maximumPendingMarkers)(
         AnalyticsError.MarkerLimitExceeded(maximumPendingMarkers)
       )
       distinctTokens = tokens.flatten.distinct
-      frame <- IO
+      frame <- Async[F]
         .blocking(
           spark.createDataFrame(
             distinctTokens.map(token => Row(token.value)).asJava,
@@ -110,7 +112,10 @@ final class MongoActiveDeletionMarkerSource(
             )
           )
         )
-        .adaptError { case NonFatal(cause) => AnalyticsError.LakehouseFailure(cause) }
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
+        }
     } yield frame
 }
 

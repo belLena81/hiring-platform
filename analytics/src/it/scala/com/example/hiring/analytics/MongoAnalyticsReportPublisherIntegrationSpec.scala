@@ -30,6 +30,14 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
+  private def asRunId(value: String): RunId = RunId.from(value).toEither.toOption.get
+  private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
+  private def asFingerprint(value: String): RangeFingerprint =
+    RangeFingerprint
+      .from(AnalyticsDigest.sha256Hex(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+      .toOption
+      .get
+
   override val munitTimeout: FiniteDuration = 5.minutes
 
   private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
@@ -86,16 +94,17 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("lastPublishedRevision", 0L)
             .append("lastRunId", "")
         )
-      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
+      val publisher =
+        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
       val now = Instant.now()
       val expiry = now.plusSeconds(3600L)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
 
       val result = for {
-        older <- publisher.reserve("older", "range-older", now)
-        sameRange <- publisher.reserve("older", "range-older", now.plusMillis(1))
+        older <- publisher.reserve(asRunId("older"), asFingerprint("range-older"), now)
+        sameRange <- publisher.reserve(asRunId("older"), asFingerprint("range-older"), now.plusMillis(1))
         _ <- IO.raiseWhen(sameRange != older)(new AssertionError("same-range reservation was not idempotent"))
-        changedRange <- publisher.reserve("older", "range-changed", now.plusMillis(2)).attempt
+        changedRange <- publisher.reserve(asRunId("older"), asFingerprint("range-changed"), now.plusMillis(2)).attempt
         _ <- IO.raiseWhen(!changedRange.swap.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
           new AssertionError("a run ID was reused with a different range")
         )
@@ -109,13 +118,13 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         _ <- IO.raiseWhen(revisionAfterConflict != older.revision)(
           new AssertionError("idempotent/conflicting reservations leaked a revision increment")
         )
-        newer <- publisher.reserve("newer", "range-newer", now)
+        newer <- publisher.reserve(asRunId("newer"), asFingerprint("range-newer"), now)
         _ <- publisher.publish(newer, report, expiry)
         stale <- publisher.publish(older, report.copy(asOf = now.plusMillis(1)), expiry).attempt
         _ <- IO.raiseWhen(!stale.left.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
           new AssertionError("an older revision replaced a newer publication")
         )
-        retryAfterNewer <- publisher.reserve("older", "range-older", now.plusMillis(1))
+        retryAfterNewer <- publisher.reserve(asRunId("older"), asFingerprint("range-older"), now.plusMillis(1))
         _ <- IO.raiseWhen(retryAfterNewer.generation != newer.generation || retryAfterNewer.revision <= newer.revision)(
           new AssertionError("an unpublished retry did not advance past the accepted revision")
         )
@@ -127,12 +136,12 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
               Updates.combine(Updates.set("generation", 1L), Updates.set("state", "Hidden"))
             )
         }
-        hiddenRun <- publisher.reserve("hidden-run", "range-hidden", now)
+        hiddenRun <- publisher.reserve(asRunId("hidden-run"), asFingerprint("range-hidden"), now)
         hidden <- publisher.publish(hiddenRun, report.copy(asOf = now.plusMillis(2)), expiry).attempt
         _ <- IO.raiseWhen(!hidden.left.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
           new AssertionError("normal publication was accepted while report control was Hidden")
         )
-        refreshed <- publisher.reserve("older", "range-older", now.plusMillis(2))
+        refreshed <- publisher.reserve(asRunId("older"), asFingerprint("range-older"), now.plusMillis(2))
         _ <- IO.raiseWhen(refreshed.generation != 1L || refreshed.revision <= retryAfterNewer.revision)(
           new AssertionError("an unpublished retry did not reserve a new revision in the current generation")
         )
@@ -159,7 +168,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
               Updates.set("expiresAt", Date.from(now.minusSeconds(1L)))
             )
         }
-        replay <- publisher.reserve("newer", "range-newer", now)
+        replay <- publisher.reserve(asRunId("newer"), asFingerprint("range-newer"), now)
         _ <- publisher.publish(replay, report.copy(asOf = now.plusMillis(3)), expiry)
         snapshot <- IO.blocking(
           database.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first()
@@ -179,7 +188,8 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("revision", 3L)
             .append("state", "Reserved")
         )
-      val malformed = publisher.reserve("malformed", "range-malformed", now).attempt.unsafeRunSync()
+      val malformed =
+        publisher.reserve(asRunId("malformed"), asFingerprint("range-malformed"), now).attempt.unsafeRunSync()
       assert(malformed.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()
@@ -207,7 +217,8 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           .append("lastPublishedRevision", 0L)
           .append("lastRunId", "")
       )
-      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
+      val publisher =
+        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
       val admin = client.getDatabase("admin")
       def failOnce(command: String, errorCode: Int, label: String): Unit = {
         admin.runCommand(
@@ -224,10 +235,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       }
       val now = Instant.now()
       failOnce("update", 112, "TransientTransactionError")
-      val first = publisher.reserve("transient", "range-transient", now).unsafeRunSync()
+      val first = publisher.reserve(asRunId("transient"), asFingerprint("range-transient"), now).unsafeRunSync()
       assertEquals(first.revision, 1L)
       failOnce("commitTransaction", 91, "UnknownTransactionCommitResult")
-      val second = publisher.reserve("uncertain", "range-uncertain", now).unsafeRunSync()
+      val second = publisher.reserve(asRunId("uncertain"), asFingerprint("range-uncertain"), now).unsafeRunSync()
       assertEquals(second.revision, 2L)
       assertEquals(control.find(new Document("_id", "analytics-report")).first().getLong("nextRevision"), Long.box(2L))
       assertEquals(database.getCollection("analytics_report_runs").countDocuments(), 2L)
@@ -298,19 +309,24 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("progress", 0)
             .append("progressKey", key)
         )
-      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
-      val claim = ErasureClaim(subjectId, token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
+      val publisher =
+        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+      val claim = ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
-        reservation <- publisher.reserve("analytics-erasure-" + subjectId, "fingerprint-" + subjectId, now)
+        reservation <- publisher.reserve(
+          asRunId("analytics-erasure-" + subjectId),
+          asFingerprint("fingerprint-" + subjectId),
+          now
+        )
         _ <- publisher.publishErasure(reservation, report, now.plusSeconds(3600), claim, now)
         secondReservation <- publisher.reserve(
-          "analytics-erasure-" + secondSubjectId,
-          "fingerprint-" + secondSubjectId,
+          asRunId("analytics-erasure-" + secondSubjectId),
+          asFingerprint("fingerprint-" + secondSubjectId),
           now
         )
         secondClaim = ErasureClaim(
-          secondSubjectId,
+          asAccountSubjectId(secondSubjectId),
           secondToken,
           now.plusSeconds(90),
           ErasurePhase.ReadyToPublish,
@@ -394,11 +410,16 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             new Document("_id", otherId).append("state", "Pending")
           )
         )
-      val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveClient.getDatabase(database.getName))
-      val claim = ErasureClaim(subjectId, token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
+      val publisher =
+        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
+      val claim = ErasureClaim(asAccountSubjectId(subjectId), token, now.plusSeconds(90), ErasurePhase.ReadyToPublish, 0, key)
       val report = AnalyticsReportOutput(now, Vector.empty, None, Vector.empty)
       val result = for {
-        reservation <- publisher.reserve("analytics-erasure-" + subjectId, "fingerprint-" + subjectId, now)
+        reservation <- publisher.reserve(
+          asRunId("analytics-erasure-" + subjectId),
+          asFingerprint("fingerprint-" + subjectId),
+          now
+        )
         attempt <- publisher.publishErasure(reservation, report, now.plusSeconds(3600), claim, now).attempt
         state <- IO.blocking(
           database.getCollection("analytics_report_control").find(new Document("_id", "analytics-report")).first()
@@ -464,12 +485,13 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("subjectIds", java.util.List.of(subjectId))
             .append("subjectRefsVersion", 1)
         )
-      val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveClient.getDatabase(database.getName))
+      val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveClient.getDatabase(database.getName))
       val result = for {
         claim <- store.claim(now, now.plusSeconds(360), 1).map(_.head)
-        early <- store.publisherDrainReady(subjectId, now, 30.seconds)
-        drained <- store.publisherDrainReady(subjectId, now.plusSeconds(61), 30.seconds)
-        purged <- store.purgeOutbox(subjectId, now.plusSeconds(61), 30.seconds)
+        typedSubjectId = asAccountSubjectId(subjectId)
+        early <- store.publisherDrainReady(typedSubjectId, now, 30.seconds)
+        drained <- store.publisherDrainReady(typedSubjectId, now.plusSeconds(61), 30.seconds)
+        purged <- store.purgeOutbox(typedSubjectId, now.plusSeconds(61), 30.seconds)
         firstAdvance <- store.advance(claim, ErasurePhase.PublisherDrained, 0, now.plusSeconds(62))
         staleAdvance <- store.advance(claim, ErasurePhase.PublisherDrained, 0, now.plusSeconds(62))
         advanced = claim.copy(
@@ -485,7 +507,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           )
         )
         saved <- store.persistBarrier(advanced, barrier, now.plusSeconds(63))
-        loaded <- store.readBarrier(subjectId)
+        loaded <- store.readBarrier(asAccountSubjectId(subjectId))
         _ <- store.releaseForOtherRequests(advanced, now.plusSeconds(64))
         reclaimed <- store.claim(now.plusSeconds(65), now.plusSeconds(125), 1).map(_.head)
         staleRenew <- store.renew(advanced, now.plusSeconds(66), now.plusSeconds(126))
@@ -530,9 +552,9 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(early, false)
       assertEquals(drained, true)
       assertEquals(purged, true)
-      assertEquals(firstAdvance, true)
-      assertEquals(staleAdvance, false)
-      assertEquals(saved, true)
+      assertEquals(firstAdvance, ErasureUpdate.Applied)
+      assertEquals(staleAdvance, ErasureUpdate.LeaseLost)
+      assertEquals(saved, ErasureUpdate.Applied)
       assertEquals(
         loaded,
         Some(
@@ -546,11 +568,12 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         )
       )
       assertNotEquals(reclaimed.leaseToken, claim.leaseToken)
-      assertEquals(staleRenew, false)
-      assertEquals(currentRenew, true)
-      assertEquals(deferred, true)
+      assertEquals(staleRenew, ErasureUpdate.LeaseLost)
+      assertEquals(currentRenew, ErasureUpdate.Applied)
+      assertEquals(deferred, ErasureUpdate.Applied)
       assertEquals(beforeResume, Vector.empty)
-      assertEquals(resumed.requestId, subjectId)
+      val typedSubjectId = asAccountSubjectId(subjectId)
+      assertEquals(resumed.requestId, typedSubjectId)
       assertNotEquals(resumed.leaseToken, reclaimed.leaseToken)
       database
         .getCollection("event_outbox")
@@ -559,7 +582,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("subjectIds", "malformed")
             .append("subjectRefsVersion", 1)
         )
-      val malformedRefs = store.purgeOutbox(subjectId, now.plusSeconds(130), 30.seconds).attempt.unsafeRunSync()
+      val malformedRefs = store.purgeOutbox(typedSubjectId, now.plusSeconds(130), 30.seconds).attempt.unsafeRunSync()
       assert(malformedRefs.swap.toOption.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()

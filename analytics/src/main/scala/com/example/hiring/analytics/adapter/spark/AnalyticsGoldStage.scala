@@ -12,7 +12,8 @@ import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.*
 
-import cats.effect.IO
+import cats.effect.Async
+import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{DataType, DataTypes, StructType}
@@ -21,7 +22,7 @@ import java.sql.Timestamp
 import java.time.Instant
 
 /** Gold table rebuilds and bounded report extraction, kept outside the batch coordinator. */
-private[spark] object AnalyticsGoldStage extends LakehouseOperation {
+private[spark] object AnalyticsGoldStage {
   private val MaximumReportRows = 10000
   private val FunnelSchema = Vector(
     "day" -> DataTypes.TimestampType,
@@ -54,23 +55,27 @@ private[spark] object AnalyticsGoldStage extends LakehouseOperation {
     Either.cond(fields == expected, (), AnalyticsError.InvalidGoldSchema)
   }
 
-  def rebuild(paths: AnalyticsLakehousePaths, silver: DataFrame): IO[Unit] =
+  def rebuild[F[_]: Async](paths: AnalyticsLakehousePaths, silver: DataFrame): F[Unit] =
     for {
-      funnel <- lakehouse(HiringGoldTransforms.wideFunnelDay(silver))
+      funnel <- lakehouse[F, DataFrame](HiringGoldTransforms.wideFunnelDay(silver))
       _ <- write(funnel, paths.funnelGold)
-      timeToHire <- lakehouseIO(HiringGoldTransforms.timeToHireAction(silver))
+      timeToHire <- lakehouseIO[F, DataFrame](HiringGoldTransforms.timeToHireAction[F](silver))
       _ <- write(timeToHire, paths.timeToHireGold)
-      skills <- lakehouse(HiringGoldTransforms.skillPostingActivity(silver))
+      skills <- lakehouse[F, DataFrame](HiringGoldTransforms.skillPostingActivity(silver))
       _ <- write(skills, paths.skillsGold)
     } yield ()
 
-  def clear(spark: SparkSession, paths: AnalyticsLakehousePaths): IO[Unit] = lakehouse {
+  def clear[F[_]: Async](spark: SparkSession, paths: AnalyticsLakehousePaths): F[Unit] = lakehouse[F, Unit] {
     Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
       if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
     }
   }
 
-  def extract(spark: SparkSession, paths: AnalyticsLakehousePaths, asOf: Instant): IO[AnalyticsReportOutput] =
+  def extract[F[_]: Async](
+      spark: SparkSession,
+      paths: AnalyticsLakehousePaths,
+      asOf: Instant
+  ): F[AnalyticsReportOutput] =
     for {
       funnelRows <- rows(spark, paths.funnelGold, FunnelSchema)
       funnel = funnelRows.map(row =>
@@ -87,10 +92,10 @@ private[spark] object AnalyticsGoldStage extends LakehouseOperation {
       timeRows <- rows(spark, paths.timeToHireGold, TimeToHireSchema)
       _ <-
         if (timeRows.size > 1)
-          IO.raiseError[Unit](
+          Async[F].raiseError[Unit](
             AnalyticsError.LakehouseFailure(new IllegalStateException("time-to-hire report is not singular"))
           )
-        else IO.unit
+        else Async[F].unit
       timeToHire = timeRows.headOption.map(row =>
         AnalyticsTimeToHireOutput(
           row.getAs[Double]("p50Hours"),
@@ -111,8 +116,12 @@ private[spark] object AnalyticsGoldStage extends LakehouseOperation {
       )
     } yield AnalyticsReportOutput(asOf, funnel, timeToHire, skills)
 
-  private def rows(spark: SparkSession, path: String, expected: Vector[(String, DataType)]): IO[Vector[Row]] =
-    lakehouseEither {
+  private def rows[F[_]: Async](
+      spark: SparkSession,
+      path: String,
+      expected: Vector[(String, DataType)]
+  ): F[Vector[Row]] =
+    lakehouseEither[F, Vector[Row]] {
       if (!DeltaTable.isDeltaTable(spark, path)) Right(Vector.empty)
       else {
         val frame = spark.read.format("delta").load(path)
@@ -120,13 +129,27 @@ private[spark] object AnalyticsGoldStage extends LakehouseOperation {
       }
     }.flatMap { result =>
       if (result.size > MaximumReportRows)
-        IO.raiseError(
+        Async[F].raiseError(
           AnalyticsError.LakehouseFailure(new IllegalStateException(s"report output exceeds $MaximumReportRows rows"))
         )
-      else if (result.exists(_.anyNull)) IO.raiseError(AnalyticsError.InvalidGoldSchema)
-      else IO.pure(result)
+      else if (result.exists(_.anyNull)) Async[F].raiseError(AnalyticsError.InvalidGoldSchema)
+      else Async[F].pure(result)
     }
 
-  private def write(frame: DataFrame, path: String): IO[Unit] =
-    lakehouse(frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path))
+  private def write[F[_]: Async](frame: DataFrame, path: String): F[Unit] =
+    lakehouse[F, Unit](frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path))
+
+  private def lakehouse[F[_]: Async, A](work: => A): F[A] =
+    adapt(Async[F].blocking(work))
+
+  private def lakehouseIO[F[_]: Async, A](work: F[A]): F[A] = adapt(work)
+
+  private def lakehouseEither[F[_]: Async, A](work: => Either[AnalyticsError, A]): F[A] =
+    lakehouse[F, Either[AnalyticsError, A]](work).flatMap(Async[F].fromEither)
+
+  private def adapt[F[_]: Async, A](work: F[A]): F[A] = work.handleErrorWith {
+    case error: AnalyticsError              => Async[F].raiseError(error)
+    case scala.util.control.NonFatal(error) => Async[F].raiseError(AnalyticsError.LakehouseFailure(error))
+    case error                              => Async[F].raiseError(error)
+  }
 }

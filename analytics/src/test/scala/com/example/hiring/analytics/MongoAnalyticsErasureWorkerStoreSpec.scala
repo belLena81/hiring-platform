@@ -1,4 +1,5 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.cli.AnalyticsErasureRepairMain
 import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
@@ -23,6 +24,8 @@ import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
 final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
+  private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
+
   test("erasure phases have a stable forward-only order") {
     val phases = ErasurePhase.values.toVector
     assertEquals(
@@ -70,7 +73,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(document)
     assertEquals(
       claim,
-      Some(ErasureClaim(id, token, expiry, ErasurePhase.DeltaPurged, 17, key))
+      Some(ErasureClaim(asAccountSubjectId(id), token, expiry, ErasurePhase.DeltaPurged, 17, key))
     )
     assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(new Document(document).append("fencingVersion", 0)), None)
     assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(document.append("phase", "unknown")), None)
@@ -87,7 +90,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
 
     assertEquals(
       MongoAnalyticsErasureWorkerStore.decodeClaim(minimal),
-      Some(ErasureClaim(id, token, expiry, ErasurePhase.Requested, 0, 0L, 0))
+      Some(ErasureClaim(asAccountSubjectId(id), token, expiry, ErasurePhase.Requested, 0, 0L, 0))
     )
     assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(new Document(minimal).append("progress", "bad")), None)
   }
@@ -122,7 +125,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     val now = Instant.parse("2026-09-23T11:00:00Z")
     val id = UUID.randomUUID().toString
     val token = UUID.randomUUID().toString
-    val claim = ErasureClaim(id, token, now.plusSeconds(60), ErasurePhase.Requested, 0, 0L)
+    val claim = ErasureClaim(asAccountSubjectId(id), token, now.plusSeconds(60), ErasurePhase.Requested, 0, 0L)
     val rendered = render(MongoAnalyticsErasureWorkerStore.ownedClaimFilter(claim, now))
 
     val json = rendered.toJson

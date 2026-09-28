@@ -209,8 +209,10 @@ final class UserAccountService(
       UseCaseIO.liftIO(currentTime).flatMap(now => UseCaseIO.fromIO(deleteMyAccountOnce(actor, now, context)))
     }
 
-  override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
-    UseCaseIO.fromIO(erasureRequests.status(receiptId).map(_.leftMap(UseCaseError.Repository.apply)))
+  override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    UseCaseIO.fromIO(
+      erasureRequests.statusForSubject(actor.userId, receiptId).map(_.leftMap(UseCaseError.Repository.apply))
+    )
 
   private def deleteMyAccountOnce(
       actor: ActorContext,
@@ -228,10 +230,10 @@ final class UserAccountService(
           erasureRequests.enqueue(user.id, now, context).map(_.leftMap(UseCaseError.Repository.apply))
         case Right(user) =>
           erasureRequests.workerReady(now).flatMap {
-            case Left(_) => IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable)))
+            case Left(_)   => IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable)))
             case Right(()) =>
               erasureRequests.enqueue(user.id, now, context).flatMap {
-                case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
+                case Left(error)      => IO.pure(Left(UseCaseError.Repository(error)))
                 case Right(receiptId) =>
                   accounts
                     .deleteAccount(user.id, now, s"deleted-${user.id.value}", context)

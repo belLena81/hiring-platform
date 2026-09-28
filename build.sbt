@@ -29,6 +29,7 @@ lazy val testcontainersVersion = "2.0.5"
 lazy val IntegrationTest = config("it") extend Test
 
 lazy val root = (project in file("."))
+  .enablePlugins(JacocoItPlugin)
   .configs(IntegrationTest)
   .settings(inConfig(IntegrationTest)(Defaults.testSettings))
   .settings(

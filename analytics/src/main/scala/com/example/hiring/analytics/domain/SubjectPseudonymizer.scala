@@ -76,8 +76,8 @@ object SubjectPseudonymizer {
     val ids = allKeys.map(_._1)
     val idAndKeyErrors = allKeys.zipWithIndex.flatMap { case ((id, key), index) =>
       Vector(
-        Option.when(id == null || !KeyIdPattern.matches(id))(s"HMAC key ID at index $index is invalid"),
-        Option.when(key == null || key.length < MinimumKeyBytes)(
+        Option.when(!KeyIdPattern.matches(id))(s"HMAC key ID at index $index is invalid"),
+        Option.when(key.length < MinimumKeyBytes)(
           s"HMAC key material at index $index must contain at least $MinimumKeyBytes bytes"
         )
       ).flatten

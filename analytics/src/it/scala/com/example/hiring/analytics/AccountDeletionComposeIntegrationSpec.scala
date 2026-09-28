@@ -172,7 +172,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       root.isAbsolute && root.getCanonicalPath == root.getAbsolutePath,
       "proof Delta directory must be an absolute, non-symlink task path"
     )
-    val paths = AnalyticsLakehousePaths(root.toURI.toString.stripSuffix("/") + "/lakehouse")
+    val paths = AnalyticsLakehousePaths.unsafe(root.toURI.toString.stripSuffix("/") + "/lakehouse")
     val schema = StructType(
       Seq(
         StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false),
@@ -371,7 +371,8 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
             .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
             .getOrCreate()
           try {
-            val paths = AnalyticsLakehousePaths(new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse")
+            val paths =
+              AnalyticsLakehousePaths.unsafe(new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse")
             val currentBronze = spark.read.format("delta").load(paths.bronze)
             assertEquals(
               currentBronze.filter(array_contains(col("subjectTokens"), subjectToken)).count(),

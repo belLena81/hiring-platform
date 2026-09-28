@@ -1,50 +1,53 @@
 package com.example.hiring.analytics.service.erasure
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.IO
+import com.example.hiring.analytics.domain.AccountSubjectId
 
 import java.time.Instant
 import scala.concurrent.duration.FiniteDuration
 
-/** Persistence operations required by the resumable erasure lifecycle. */
-trait AnalyticsErasureStore {
-  def claim(now: Instant, leaseUntil: Instant, limit: Int): IO[Vector[ErasureClaim]]
-  def publisherDrainReady(subjectId: String, now: Instant, deliveryTimeout: FiniteDuration): IO[Boolean]
-  def transactionalIds(requestId: String): IO[Vector[String]]
-  def purgeOutbox(subjectId: String, now: Instant, deliveryTimeout: FiniteDuration): IO[Boolean]
-  def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): IO[Boolean]
-  def readBarrier(requestId: String): IO[Option[KafkaRetentionBarrier]]
-  def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): IO[Boolean]
-  def persistDeltaGeneration(claim: ErasureClaim, generation: Long, now: Instant): IO[Boolean]
-  def persistAffectedRows(claim: ErasureClaim, affectedRows: Long, now: Instant): IO[Boolean]
-  def persistDeltaFiles(claim: ErasureClaim, files: Vector[String], now: Instant): IO[Boolean]
-  def readDeltaFiles(requestId: String): IO[Vector[String]]
-  def readAffectedRows(requestId: String): IO[Long]
-  def readDeltaGeneration(requestId: String): IO[Option[Long]]
-  def readDeltaPurgedAt(requestId: String): IO[Option[Instant]]
-  def releaseForOtherRequests(claim: ErasureClaim, now: Instant): IO[Boolean]
+/** Queueing, publisher-drain, and worker-liveness operations for erasure requests. */
+trait ErasureQueue[F[_]] {
+  def claim(now: Instant, leaseUntil: Instant, limit: Int): F[Vector[ErasureClaim]]
+  def publisherDrainReady(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): F[Boolean]
+  def transactionalIds(requestId: AccountSubjectId): F[Vector[String]]
+  def purgeOutbox(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): F[Boolean]
+  def hasNonReadyOtherRequests(requestId: AccountSubjectId): F[Boolean]
+  def heartbeat(now: Instant, leaseUntil: Instant): F[Unit]
+  def preflight: F[Unit]
+}
+
+/** Durable barriers and erasure completion evidence. */
+trait ErasureBarrier[F[_]] {
+  def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): F[ErasureUpdate]
+  def readBarrier(requestId: AccountSubjectId): F[Option[KafkaRetentionBarrier]]
+}
+
+/** Lease-owned lifecycle progress. A failed match means the claim no longer owns the request. */
+trait ErasureProgress[F[_]] {
+  def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): F[ErasureUpdate]
+  def persistDeltaGeneration(claim: ErasureClaim, generation: Long, now: Instant): F[ErasureUpdate]
+  def persistAffectedRows(claim: ErasureClaim, affectedRows: Long, now: Instant): F[ErasureUpdate]
+  def persistDeltaFiles(claim: ErasureClaim, files: Vector[String], now: Instant): F[ErasureUpdate]
+  def readDeltaFiles(requestId: AccountSubjectId): F[Vector[String]]
+  def readAffectedRows(requestId: AccountSubjectId): F[Long]
+  def readDeltaGeneration(requestId: AccountSubjectId): F[Option[Long]]
+  def readDeltaPurgedAt(requestId: AccountSubjectId): F[Option[Instant]]
+  def releaseForOtherRequests(claim: ErasureClaim, now: Instant): F[ErasureUpdate]
   def recordFailure(
       claim: ErasureClaim,
       category: ErasureFailureCategory,
       attempt: Int,
       retryAt: Option[Instant],
       now: Instant
-  ): IO[Boolean]
-  def defer(claim: ErasureClaim, resumeAt: Instant, now: Instant): IO[Boolean]
-  def hasNonReadyOtherRequests(requestId: String): IO[Boolean]
-  def renew(claim: ErasureClaim, now: Instant, leaseUntil: Instant): IO[Boolean]
-  def advance(claim: ErasureClaim, phase: ErasurePhase, progress: Int, now: Instant): IO[Boolean]
-  def heartbeat(now: Instant, leaseUntil: Instant): IO[Unit]
-  def preflight: IO[Unit]
+  ): F[ErasureUpdate]
+  def defer(claim: ErasureClaim, resumeAt: Instant, now: Instant): F[ErasureUpdate]
+  def renew(claim: ErasureClaim, now: Instant, leaseUntil: Instant): F[ErasureUpdate]
+  def advance(claim: ErasureClaim, phase: ErasurePhase, progress: Int, now: Instant): F[ErasureUpdate]
+}
+
+enum ErasureUpdate {
+  case Applied
+  case LeaseLost
 }
 
 /** Persisted lifecycle state for an account-erasure request. */

@@ -95,7 +95,7 @@ final class RequestContext private (
         )
     }
 
-  /** Deletion replay is authorized by the already verified bearer claims and resolved with allowDeleted=true. */
+  /** Deletion replay and status access use verified bearer claims without requiring an active viewer. */
   private[graphql] def deletionActor: IO[ActorContext] =
     parameters.actor.fold[IO[ActorContext]](
       IO.raiseError(

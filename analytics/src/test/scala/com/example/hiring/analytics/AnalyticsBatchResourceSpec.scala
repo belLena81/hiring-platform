@@ -1,4 +1,5 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
@@ -27,26 +28,54 @@ import scala.concurrent.duration.*
 class AnalyticsBatchResourceSpec extends FunSuite {
   test("process-local test lock serializes same-process access") {
     val root = java.nio.file.Files.createTempDirectory("analytics-lock").toUri.toString
-    val result = (for {
-      firstEntered <- Deferred[IO, Unit]
-      releaseFirst <- Deferred[IO, Unit]
-      secondEntered <- Deferred[IO, Unit]
-      first <- AnalyticsLakehouseLock.resource(root).use(_ => firstEntered.complete(()) *> releaseFirst.get).start
-      _ <- firstEntered.get
-      second <- AnalyticsLakehouseLock.resource(root).use(_ => secondEntered.complete(())).start
-      beforeRelease <- secondEntered.tryGet
-      _ <- releaseFirst.complete(())
-      _ <- secondEntered.get.timeout(5.seconds)
-      _ <- first.joinWithNever
-      _ <- second.joinWithNever
-    } yield beforeRelease).unsafeRunSync()
+    val result = AnalyticsLakehouseLock
+      .processLocal[IO]
+      .use { lock =>
+        for {
+          firstEntered <- Deferred[IO, Unit]
+          releaseFirst <- Deferred[IO, Unit]
+          secondEntered <- Deferred[IO, Unit]
+          first <- lock.resource(root).use(_ => firstEntered.complete(()) *> releaseFirst.get).start
+          _ <- firstEntered.get
+          second <- lock.resource(root).use(_ => secondEntered.complete(())).start
+          beforeRelease <- secondEntered.tryGet
+          _ <- releaseFirst.complete(())
+          _ <- secondEntered.get.timeout(5.seconds)
+          _ <- first.joinWithNever
+          _ <- second.joinWithNever
+        } yield beforeRelease
+      }
+      .unsafeRunSync()
 
     assertEquals(result, None)
   }
 
-  test("batch entry point closes Spark and Mongo after a failed run") {
+  test("waiting for the process-local test lock is cancellable") {
+    val root = java.nio.file.Files.createTempDirectory("analytics-lock-cancel").toUri.toString
+    val cancelledWaiterDidNotEnter = AnalyticsLakehouseLock
+      .processLocal[IO]
+      .use { lock =>
+        for {
+          releaseHolder <- Deferred[IO, Unit]
+          holderEntered <- Deferred[IO, Unit]
+          waiterEntered <- Deferred[IO, Unit]
+          holder <- lock.resource(root).use(_ => holderEntered.complete(()) *> releaseHolder.get).start
+          _ <- holderEntered.get
+          waiter <- lock.resource(root).use(_ => waiterEntered.complete(())).start
+          _ <- waiter.cancel
+          _ <- releaseHolder.complete(())
+          _ <- holder.joinWithNever
+          entered <- waiterEntered.tryGet
+        } yield entered.isEmpty
+      }
+      .unsafeRunSync()
+
+    assert(cancelledWaiterDidNotEnter)
+  }
+
+  test("application resources close Spark and Mongo after a failed run") {
     val acquired = new AtomicReference[Option[(SparkSession, MongoClient)]](None)
-    val resources = HiringAnalyticsBatchMain.managedResources(
+    val resources = AppModule.managedSparkMongo[IO](
       IO.blocking(
         org.apache.spark.sql.classic.SparkSession
           .builder()
@@ -69,7 +98,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     val (spark, mongo) = acquired.get().getOrElse(fail("resources were not acquired"))
     assert(spark.sparkContext.isStopped)
     assert(
-      MongoPublisherStream.stream(mongo.listDatabaseNames()).compile.drain.attempt.unsafeRunSync().isLeft
+      MongoPublisherStream.stream[IO, String](mongo.listDatabaseNames()).compile.drain.attempt.unsafeRunSync().isLeft
     )
   }
 }

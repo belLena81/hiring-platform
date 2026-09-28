@@ -14,6 +14,7 @@ import com.example.hiring.analytics.domain.{AnalyticsEventType, AnalyticsApplica
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import munit.FunSuite
+import cats.effect.IO
 import org.apache.spark.sql.{Row, SparkSession}
 import org.apache.spark.sql.types.{DataTypes, StructType}
 import cats.effect.unsafe.implicits.global
@@ -21,9 +22,12 @@ import cats.effect.unsafe.implicits.global
 import java.sql.Timestamp
 import java.nio.file.Files
 import java.time.Instant
+import scala.concurrent.duration.*
 import scala.reflect.runtime.universe.TypeTag
 
 class HiringAnalyticsTypedTransformsSpec extends FunSuite {
+  override val munitTimeout: FiniteDuration = 5.minutes
+
   private given TypeTag[SilverHiringEvent] = SparkProductTypeTag[SilverHiringEvent]
   private lazy val spark: SparkSession = org.apache.spark.sql.classic.SparkSession
     .builder()
@@ -158,7 +162,7 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
       Seq("scala" -> 10L)
     )
 
-    val timeToHire = HiringGoldTransforms.timeToHireAction(silver).unsafeRunSync()
+    val timeToHire = HiringGoldTransforms.timeToHireAction[IO](silver).unsafeRunSync()
     assertEquals(
       timeToHire.schema.fieldNames.toSeq,
       Seq("p50Hours", "p75Hours", "p90Hours", "p95Hours", "eligibleCount", "excludedCount")
@@ -190,19 +194,19 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
   }
 
   test("report extraction rejects a persisted Gold table with a drifted schema") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-gold-schema-drift").toUri.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-gold-schema-drift").toUri.toString)
     val frame = spark.createDataFrame(
       spark.sparkContext.parallelize(Seq(Row("not-a-timestamp", Long.box(1L)))),
       StructType.fromDDL("day STRING, created BIGINT")
     )
     frame.write.format("delta").save(paths.funnelGold)
 
-    val result = AnalyticsGoldStage.extract(spark, paths, Instant.EPOCH).attempt.unsafeRunSync()
+    val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH).attempt.unsafeRunSync()
     assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
   }
 
   test("report extraction rejects null values in a persisted Gold row") {
-    val paths = AnalyticsLakehousePaths(Files.createTempDirectory("analytics-gold-null-output").toUri.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-gold-null-output").toUri.toString)
     val schema = StructType.fromDDL(
       "p50Hours DOUBLE, p75Hours DOUBLE, p90Hours DOUBLE, p95Hours DOUBLE, eligibleCount BIGINT, excludedCount BIGINT"
     )
@@ -214,7 +218,7 @@ class HiringAnalyticsTypedTransformsSpec extends FunSuite {
     )
     frame.write.format("delta").save(paths.timeToHireGold)
 
-    val result = AnalyticsGoldStage.extract(spark, paths, Instant.EPOCH).attempt.unsafeRunSync()
+    val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH).attempt.unsafeRunSync()
     assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
   }
 

@@ -9,12 +9,11 @@ import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
+import com.example.hiring.analytics.app.AppModule
 
-import com.example.hiring.analytics.adapter.spark.{AnalyticsLakehousePaths, HiringAnalyticsBatchMain, KafkaConnection}
-
-import cats.effect.{ExitCode, IO, IOApp}
+import cats.effect.{Clock, ExitCode, IO, IOApp}
+import cats.effect.Clock
 import cats.syntax.all.*
-import com.mongodb.reactivestreams.client.MongoClients
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.{ConfigReader, ConfigSource}
 
@@ -101,6 +100,10 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       database <- required("retirement.mongo.database", raw.mongo.database)
       master <- required("retirement.spark.master", raw.spark.master)
       root <- required("retirement.lakehouse.root", raw.lakehouse.root)
+      paths <- AnalyticsLakehousePaths
+        .from(root)
+        .toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
       bootstrap <- required("retirement.kafka.bootstrap-servers", raw.kafka.bootstrapServers)
       topic <- required("retirement.kafka.topic", raw.kafka.topic)
       keyId <- required("retirement.retiring-key-id", raw.retiringKeyId)
@@ -127,7 +130,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       mongoUri,
       database,
       master,
-      AnalyticsLakehousePaths(root),
+      paths,
       connection,
       topic,
       keyId,
@@ -144,28 +147,25 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
           )
       }
       .flatMap { settings =>
-        HiringAnalyticsBatchMain
-          .managedResources(
-            IO.blocking(
-              org.apache.spark.sql.classic.SparkSession
-                .builder()
-                .appName("hiring-hmac-key-retirement")
-                .master(settings.sparkMaster)
-                .config("spark.ui.enabled", "false")
-                .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-                .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-                .getOrCreate()
-            ),
-            IO.delay(MongoClients.create(settings.mongoUri))
+        AppModule
+          .sparkMongo[IO](
+            settings.mongoUri,
+            settings.sparkMaster,
+            appName = "hiring-hmac-key-retirement",
+            sparkUiEnabled = Some(false)
           )
           .use { case (spark, mongo) =>
-            val coordinator = new HmacKeyRetirementCoordinator(
+            val database = mongo.getDatabase(settings.database)
+            val clock = Clock[IO]
+            val coordinator = new HmacKeyRetirementCoordinator[IO](
               spark,
               settings.paths,
-              mongo.getDatabase(settings.database),
+              database,
               settings.kafka,
               settings.topic,
-              settings.docker
+              settings.docker,
+              clock,
+              new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, clock)
             )
             action match {
               case "prepare"   => coordinator.prepare(settings.keyId).void

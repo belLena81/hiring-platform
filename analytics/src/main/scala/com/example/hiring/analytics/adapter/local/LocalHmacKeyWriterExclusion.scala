@@ -10,7 +10,7 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.IO
+import cats.effect.Async
 import cats.syntax.all.*
 
 import java.util.UUID
@@ -215,18 +215,13 @@ private[analytics] object LocalHmacKeyWriterExclusion {
       }
     } yield ()
 
-  private def verifyBlocking(settings: Settings, lakehouseRoot: String): Either[AnalyticsError, Unit] =
+  private def verifyBlocking(settings: Settings, lakehouseRoot: String): Either[AnalyticsError, Unit] = {
+    val validSettings = settings.volumeName.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}") &&
+      settings.oldImage.nonEmpty && settings.newImage.nonEmpty &&
+      settings.oldImageId.matches("sha256:[0-9a-f]{64}") &&
+      settings.newImageId.matches("sha256:[0-9a-f]{64}") &&
+      settings.oldUid > 0 && settings.newUid > 0 && settings.oldUid != settings.newUid
     for {
-      _ <- Either.cond(
-        settings != null,
-        (),
-        AnalyticsError.InvalidConfiguration("Docker writer-exclusion settings are invalid")
-      )
-      validSettings = settings != null && settings.volumeName.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,127}") &&
-        settings.oldImage.nonEmpty && settings.newImage.nonEmpty &&
-        settings.oldImageId.matches("sha256:[0-9a-f]{64}") &&
-        settings.newImageId.matches("sha256:[0-9a-f]{64}") &&
-        settings.oldUid > 0 && settings.newUid > 0 && settings.oldUid != settings.newUid
       _ <- Either.cond(
         validSettings,
         (),
@@ -321,10 +316,11 @@ private[analytics] object LocalHmacKeyWriterExclusion {
         AnalyticsError.InvalidConfiguration("new writer image cannot write the retirement volume")
       )
     } yield ()
+  }
 
-  def verify(settings: Settings, lakehouseRoot: String): IO[Unit] = IO
+  def verify[F[_]: Async](settings: Settings, lakehouseRoot: String): F[Unit] = Async[F]
     .blocking(verifyBlocking(settings, lakehouseRoot))
-    .flatMap(IO.fromEither)
+    .flatMap(Async[F].fromEither)
     .adaptError {
       case error: AnalyticsError => error
       case NonFatal(_)           => AnalyticsError.InvalidConfiguration("Docker writer-exclusion proof is unavailable")

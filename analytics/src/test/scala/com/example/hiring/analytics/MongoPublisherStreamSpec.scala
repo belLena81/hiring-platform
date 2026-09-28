@@ -24,6 +24,15 @@ import java.lang.reflect.{InvocationHandler, Proxy}
 import scala.concurrent.duration.*
 
 final class MongoPublisherStreamSpec extends FunSuite {
+  private def completedPublisher: Publisher[Void] = new Publisher[Void] {
+    override def subscribe(subscriber: Subscriber[? >: Void]): Unit = {
+      subscriber.onSubscribe(new Subscription {
+        override def request(count: Long): Unit = subscriber.onComplete()
+        override def cancel(): Unit = ()
+      })
+    }
+  }
+
   private def failedPublisher(error: Throwable): Publisher[Void] = new Publisher[Void] {
     override def subscribe(subscriber: Subscriber[? >: Void]): Unit = {
       subscriber.onSubscribe(new Subscription {
@@ -77,7 +86,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
         }
       )
       .asInstanceOf[ClientSession]
-    val transaction = MongoPublisherStream.transaction(session)(IO.pure(Right(1)))(clock)
+    val transaction = MongoPublisherStream.transaction(session)(IO.pure(1))(clock)
     assertEquals(reads.get(), 0)
     transaction.attempt.unsafeRunSync()
     assertEquals(reads.get(), 1)
@@ -99,7 +108,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
     }
 
     val result =
-      MongoPublisherStream.transaction(session)(IO.pure(Right(1)))(cutoffClock(reads)).attempt.unsafeRunSync()
+      MongoPublisherStream.transaction(session)(IO.pure(1))(cutoffClock(reads)).attempt.unsafeRunSync()
 
     assert(result.isLeft)
     assertEquals(starts.get(), 1)
@@ -123,11 +132,31 @@ final class MongoPublisherStreamSpec extends FunSuite {
     }
 
     val result =
-      MongoPublisherStream.transaction(session)(IO.pure(Right(1)))(cutoffClock(reads)).attempt.unsafeRunSync()
+      MongoPublisherStream.transaction(session)(IO.pure(1))(cutoffClock(reads)).attempt.unsafeRunSync()
 
     assert(result.isLeft)
     assertEquals(commits.get(), 1)
     assertEquals(reads.get(), 2)
+  }
+
+  test("typed analytics errors abort and propagate without adapter rewrapping") {
+    val aborts = new AtomicInteger(0)
+    val session = sessionProxy { (method, _) =>
+      method match {
+        case "startTransaction"     => null
+        case "hasActiveTransaction" => java.lang.Boolean.TRUE
+        case "abortTransaction"     =>
+          aborts.incrementAndGet()
+          completedPublisher
+        case _ => null
+      }
+    }
+    val expected = AnalyticsError.InvalidConfiguration("expected analytics failure")
+
+    val result = MongoPublisherStream.transaction(session)(IO.raiseError[Int](expected)).attempt.unsafeRunSync()
+
+    assertEquals(result.swap.toOption, Some(expected))
+    assertEquals(aborts.get(), 1)
   }
 
   test("publisher creation is lazy, demand is bounded, and take cancellation reaches the subscription") {
@@ -168,7 +197,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
       }
     }
 
-    val stream = MongoPublisherStream.stream {
+    val stream = MongoPublisherStream.stream[IO, Int] {
       publisherEvaluations.incrementAndGet()
       publisher
     }

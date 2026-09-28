@@ -14,6 +14,7 @@ import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import cats.effect.unsafe.implicits.global
+import cats.effect.{Clock, IO}
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.reactivestreams.client.{
@@ -185,13 +186,13 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   }
 
   private def prepare(db: MongoDatabase, reactiveDb: ReactiveMongoDatabase): Unit = {
-    assert(enabled)
+    assert(enabled, "assertion failed")
     assertEquals(mode, "prepare")
-    assert(nonce.matches("[a-f0-9]{16}"))
-    assert(UUID.fromString(subjectId).toString == subjectId)
-    assert(databaseName.matches("hiring_retention_[a-f0-9]{16}"))
-    assert(topic.matches("hiring\\.retention\\.[a-f0-9]{16}"))
-    assert(lakehouseRoot.startsWith("file:///var/lib/hiring-analytics/lakehouse"))
+    assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
+    assert(UUID.fromString(subjectId).toString == subjectId, "assertion failed")
+    assert(databaseName.matches("hiring_retention_[a-f0-9]{16}"), "assertion failed")
+    assert(topic.matches("hiring\\.retention\\.[a-f0-9]{16}"), "assertion failed")
+    assert(lakehouseRoot.startsWith("file:///var/lib/hiring-analytics/lakehouse"), "assertion failed")
     initializeDatabase(db)
     val fixture = db.getCollection(proofCollection).find(Filters.eq("_id", nonce)).first()
     if (fixture.getString("stage") == "Prepared") {
@@ -221,9 +222,12 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     val spark = sparkSession()
     try {
       val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
-      val paths = AnalyticsLakehousePaths(lakehouseRoot)
-      val batch =
-        new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(reactiveDb, pseudonymizer))
+      val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
+      val batch = AnalyticsBatchTestSupport.newBatch(
+        paths,
+        pseudonymizer,
+        new MongoActiveDeletionMarkerSource[IO](reactiveDb, pseudonymizer)
+      )
       val manifest = AnalyticsRunManifest
         .validated(
           runId(rangeEnd),
@@ -239,8 +243,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         )
         .unsafeRunSync()
       assertEquals(result.outcome, AnalyticsRunOutcome.QualityBlocked)
-      assert(result.validRecords >= 24L)
-      assert(result.quarantinedRecords >= 1L)
+      assert(result.validRecords >= 24L, "assertion failed")
+      assert(result.quarantinedRecords >= 1L, "assertion failed")
 
       val tick = 96.toChar.toString
       spark.sql(
@@ -263,9 +267,9 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           .get("delta.dataSkippingNumIndexedCols"),
         Some("0")
       )
-      assert(DeltaTable.isDeltaTable(spark, paths.quarantine))
-      assert(spark.read.format("delta").load(paths.bronze).count() > 0L)
-      assert(spark.read.format("delta").load(paths.quarantine).count() > 0L)
+      assert(DeltaTable.isDeltaTable(spark, paths.quarantine), "assertion failed")
+      assert(spark.read.format("delta").load(paths.bronze).count() > 0L, "assertion failed")
+      assert(spark.read.format("delta").load(paths.quarantine).count() > 0L, "assertion failed")
     } finally spark.stop()
 
     val now = Instant.now()
@@ -360,10 +364,10 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       return
     }
     val request = db.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first()
-    assert(request != null)
+    assert(request != null, "assertion failed")
     assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
-    val barrier = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDb)
-      .readBarrier(subjectId)
+    val barrier = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDb)
+      .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("worker must persist its Kafka barrier"))
     assertEquals(barrier.topic, topic)
@@ -380,7 +384,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     val sent = try {
       producer.initTransactions()
       val payloads = Vector.fill(2)(event(UUID.randomUUID().toString, unrelated, "t" * (segmentBytes / 2)))
-      assert(payloads.forall(_.getBytes(StandardCharsets.UTF_8).length < segmentBytes - 1024))
+      assert(payloads.forall(_.getBytes(StandardCharsets.UTF_8).length < segmentBytes - 1024), "assertion failed")
       payloads.map { payload =>
         producer.beginTransaction()
         val result = producer
@@ -394,7 +398,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       sent.head.offset() >= barrierOffset,
       "post-barrier tail must begin at or after the exclusive barrier, allowing aborted-offset gaps"
     )
-    assert(sent.last.offset() > sent.head.offset())
+    assert(sent.last.offset() > sent.head.offset(), "assertion failed")
     db.getCollection(proofCollection)
       .updateOne(
         Filters.eq("_id", nonce),
@@ -420,14 +424,15 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       finalCheck: Boolean
   ): Unit = {
     val request = db.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first()
-    assert(request != null)
+    assert(request != null, "assertion failed")
     val purgedAt =
       Option(request.getDate("deltaPurgedAt")).map(_.toInstant).getOrElse(fail("DeltaPurged timestamp is missing"))
-    val barrier = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDb)
-      .readBarrier(subjectId)
+    val barrier = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDb)
+      .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("Kafka barrier is missing"))
-    val kafkaPassed = KafkaRetentionBarrier.liveRetention
+    val kafkaPassed = KafkaRetentionAdapter
+      .liveRetention[IO]
       .retentionPassed(
         connection("analytics_reader", required("KAFKA_READER_PASSWORD")),
         barrier
@@ -453,7 +458,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     )
     if (requireKafka) assert(kafkaPassed, "Kafka earliest offsets have not passed the persisted barrier")
     if (requireAll) {
-      assert(kafkaPassed)
+      assert(kafkaPassed, "assertion failed")
       assert(deltaPassed, "the full 30-day Delta log horizon has not elapsed")
       if (request.getString("state") == "Processing")
         assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
@@ -463,18 +468,21 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       }
     }
     if (finalCheck) {
-      assert(kafkaPassed && deltaPassed)
+      assert(kafkaPassed && deltaPassed, "assertion failed")
       assertEquals(request.getString("state"), "Complete")
       assertEquals(request.getString("phase"), ErasurePhase.ReportPublished.toString)
       val spark = sparkSession()
       try {
-        val paths = AnalyticsLakehousePaths(lakehouseRoot)
+        val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
         val pseudonymizer =
           AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
-        val batch =
-          new HiringAnalyticsBatch(paths, pseudonymizer, new MongoActiveDeletionMarkerSource(reactiveDb, pseudonymizer))
+        val batch = AnalyticsBatchTestSupport.newBatch(
+          paths,
+          pseudonymizer,
+          new MongoActiveDeletionMarkerSource[IO](reactiveDb, pseudonymizer)
+        )
         val markers =
-          new MongoActiveDeletionMarkerSource(reactiveDb, pseudonymizer).activeSubjectTokens(spark).unsafeRunSync()
+          new MongoActiveDeletionMarkerSource[IO](reactiveDb, pseudonymizer).activeSubjectTokens(spark).unsafeRunSync()
         batch.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
         batch.verifyFilesAbsent(spark, evidence).unsafeRunSync()
       } finally spark.stop()
@@ -487,7 +495,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           .getString("state"),
         "Published"
       )
-      assert(db.getCollection("analytics_report_snapshots").find(Filters.eq("_id", "current")).first() != null)
+      assert(db.getCollection("analytics_report_snapshots").find(Filters.eq("_id", "current")).first() != null, "assertion failed")
       println(
         "RETENTION_PROOF_VERIFIED request=" + subjectId + " exactCapturedPathsAbsent=" + evidence.size +
           " completionCount=1 report=Published"
@@ -507,7 +515,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
 
   test("actual local retention proof stages, checks, and verifies durable erasure") {
     if (enabled) {
-      assert(nonce.matches("[a-f0-9]{16}"))
+      assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
       val client = MongoClients.create(required("MONGODB_URI"))
       val reactiveClient = ReactiveMongoClients.create(required("MONGODB_URI"))
       try {

@@ -12,7 +12,7 @@ import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.*
 
-import cats.effect.IO
+import cats.effect.Async
 import org.apache.spark.sql.{Column, DataFrame, Dataset}
 import org.apache.spark.sql.functions.{
   col,
@@ -285,7 +285,7 @@ object HiringGoldTransforms {
   }
 
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
-  def timeToHireAction(silver: DataFrame): IO[DataFrame] = IO.blocking {
+  def timeToHireAction[F[_]: Async](silver: DataFrame): F[DataFrame] = Async[F].blocking {
     val lifecycle = applicationLifecycle(typedSilver(silver).toDF())
       .groupBy("applicationId", "subjectToken")
       .agg(

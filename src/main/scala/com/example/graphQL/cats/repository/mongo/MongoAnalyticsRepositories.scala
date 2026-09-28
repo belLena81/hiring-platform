@@ -50,90 +50,138 @@ final class MongoAnalyticsErasureRequestRepository(
       .map(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.Unavailable))(_ => Right(())))
       .handleError(_ => Left(RepositoryError.Unavailable))
 
-  override def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, String]] =
+  override def enqueue(
+      userId: UserId,
+      now: Instant,
+      context: MutationWriteContext
+  ): IO[Either[RepositoryError, String]] =
     IO.delay(UUID.randomUUID().toString).flatMap { freshReceiptId =>
-    MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
-      val requestId = userId.value.toString
-      val completion = session.fold(
-        PublisherBridge.first(completions.find(Filters.eq("_id", requestId)))
-      )(active => PublisherBridge.first(completions.find(active, Filters.eq("_id", requestId))))
-      completion.flatMap {
-        case Some(document) =>
-          Option(document.getString("receiptId")) match {
-            case Some(value) => IO.pure(Right(value))
-            case None =>
-              val update = Updates.set("receiptId", freshReceiptId)
-              val result = session.fold(
-                PublisherBridge.first(completions.updateOne(Filters.eq("_id", requestId), update))
-              )(active => PublisherBridge.first(completions.updateOne(active, Filters.eq("_id", requestId), update)))
-              result.map(_.fold[Either[RepositoryError, String]](Left(RepositoryError.Unavailable))(_ => Right(freshReceiptId)))
-          }
-        case None =>
-          val existing = session.fold(
-            PublisherBridge.first(collection.find(Filters.eq("_id", requestId)))
-          )(active => PublisherBridge.first(collection.find(active, Filters.eq("_id", requestId))))
-          existing.flatMap {
+      MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
+        val requestId = userId.value.toString
+        val completion = session.fold(
+          PublisherBridge.first(completions.find(Filters.eq("_id", requestId)))
+        )(active => PublisherBridge.first(completions.find(active, Filters.eq("_id", requestId))))
+        completion
+          .flatMap {
             case Some(document) =>
               Option(document.getString("receiptId")) match {
                 case Some(value) => IO.pure(Right(value))
-                case None =>
+                case None        =>
                   val update = Updates.set("receiptId", freshReceiptId)
                   val result = session.fold(
-                    PublisherBridge.first(collection.updateOne(Filters.eq("_id", requestId), update))
-                  )(active => PublisherBridge.first(collection.updateOne(active, Filters.eq("_id", requestId), update)))
-                  result.map(_.fold[Either[RepositoryError, String]](Left(RepositoryError.Unavailable))(_ => Right(freshReceiptId)))
+                    PublisherBridge.first(completions.updateOne(Filters.eq("_id", requestId), update))
+                  )(active =>
+                    PublisherBridge.first(completions.updateOne(active, Filters.eq("_id", requestId), update))
+                  )
+                  result.map(
+                    _.fold[Either[RepositoryError, String]](Left(RepositoryError.Unavailable))(_ =>
+                      Right(freshReceiptId)
+                    )
+                  )
               }
             case None =>
-              val fence = session.fold(
-                PublisherBridge.first(subjectFences.find(Filters.eq("_id", requestId)))
-              )(active => PublisherBridge.first(subjectFences.find(active, Filters.eq("_id", requestId))))
-              fence.flatMap { currentFence =>
-              val transactionalIds = currentFence
-                .flatMap(value => Option(value.getList("transactionalIds", classOf[String])))
-                .fold(List.empty[String])(_.asScala.toList.distinct.sorted)
-              val request = new Document("_id", requestId).append("requestedAt", Date.from(now))
-                .append("receiptId", freshReceiptId).append("state", "Pending")
-                .append("fencingVersion", 1)
-                .append("transactionalIds", transactionalIds.asJava)
-              val insert = session.fold(
-                PublisherBridge.first(collection.insertOne(request))
-              )(active => PublisherBridge.first(collection.insertOne(active, request)))
-              insert.flatMap {
-                case Some(_) =>
-                  val reportControl = database.getCollection("analytics_report_control")
-                  val hide = Updates.combine(
-                    Updates.inc("generation", 1L),
-                    Updates.set("state", AnalyticsReportSnapshotDocument.Hidden),
-                    Updates.set("hiddenAt", Date.from(now))
-                  )
-                  val hideResult = session.fold(
-                    PublisherBridge.first(reportControl.updateOne(Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId), hide))
-                  )(active => PublisherBridge.first(reportControl.updateOne(active, Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId), hide)))
-                  hideResult.map {
-                    case Some(result) if result.getMatchedCount == 1L => Right(freshReceiptId)
-                    case Some(_)                                      => Left(RepositoryError.Unavailable)
-                    case None                                         => Left(RepositoryError.Unavailable)
+              val existing = session.fold(
+                PublisherBridge.first(collection.find(Filters.eq("_id", requestId)))
+              )(active => PublisherBridge.first(collection.find(active, Filters.eq("_id", requestId))))
+              existing.flatMap {
+                case Some(document) =>
+                  Option(document.getString("receiptId")) match {
+                    case Some(value) => IO.pure(Right(value))
+                    case None        =>
+                      val update = Updates.set("receiptId", freshReceiptId)
+                      val result = session.fold(
+                        PublisherBridge.first(collection.updateOne(Filters.eq("_id", requestId), update))
+                      )(active =>
+                        PublisherBridge.first(collection.updateOne(active, Filters.eq("_id", requestId), update))
+                      )
+                      result.map(
+                        _.fold[Either[RepositoryError, String]](Left(RepositoryError.Unavailable))(_ =>
+                          Right(freshReceiptId)
+                        )
+                      )
                   }
-                case None => IO.pure(Left(RepositoryError.Unavailable))
-              }
+                case None =>
+                  val fence = session.fold(
+                    PublisherBridge.first(subjectFences.find(Filters.eq("_id", requestId)))
+                  )(active => PublisherBridge.first(subjectFences.find(active, Filters.eq("_id", requestId))))
+                  fence.flatMap { currentFence =>
+                    val transactionalIds = currentFence
+                      .flatMap(value => Option(value.getList("transactionalIds", classOf[String])))
+                      .fold(List.empty[String])(_.asScala.toList.distinct.sorted)
+                    val request = new Document("_id", requestId)
+                      .append("requestedAt", Date.from(now))
+                      .append("receiptId", freshReceiptId)
+                      .append("state", "Pending")
+                      .append("fencingVersion", 1)
+                      .append("transactionalIds", transactionalIds.asJava)
+                    val insert = session.fold(
+                      PublisherBridge.first(collection.insertOne(request))
+                    )(active => PublisherBridge.first(collection.insertOne(active, request)))
+                    insert.flatMap {
+                      case Some(_) =>
+                        val reportControl = database.getCollection("analytics_report_control")
+                        val hide = Updates.combine(
+                          Updates.inc("generation", 1L),
+                          Updates.set("state", AnalyticsReportSnapshotDocument.Hidden),
+                          Updates.set("hiddenAt", Date.from(now))
+                        )
+                        val hideResult = session.fold(
+                          PublisherBridge.first(
+                            reportControl.updateOne(Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId), hide)
+                          )
+                        )(active =>
+                          PublisherBridge.first(
+                            reportControl
+                              .updateOne(active, Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId), hide)
+                          )
+                        )
+                        hideResult.map {
+                          case Some(result) if result.getMatchedCount == 1L => Right(freshReceiptId)
+                          case Some(_)                                      => Left(RepositoryError.Unavailable)
+                          case None                                         => Left(RepositoryError.Unavailable)
+                        }
+                      case None => IO.pure(Left(RepositoryError.Unavailable))
+                    }
+                  }
               }
           }
+          .handleError(_ => Left(RepositoryError.Unavailable))
       }
-        .handleError(_ => Left(RepositoryError.Unavailable))
-    }
     }
 
-  override def status(receiptId: String): IO[Either[RepositoryError, AccountDeletionStatus]] =
+  override def statusForSubject(
+      userId: UserId,
+      receiptId: String
+  ): IO[Either[RepositoryError, AccountDeletionStatus]] =
     if (scala.util.Try(UUID.fromString(receiptId)).isFailure) IO.pure(Right(AccountDeletionStatus.NotFound))
-    else PublisherBridge.first(collection.find(Filters.eq("receiptId", receiptId))).flatMap {
-      case Some(document) if document.getString("state") == "Complete" => IO.pure(Right(AccountDeletionStatus.Complete))
-      case Some(document) if Set("Pending", "Processing").contains(document.getString("state")) =>
-        IO.pure(Right(AccountDeletionStatus.Pending))
-      case Some(_) => IO.pure(Left(RepositoryError.Unavailable))
-      case None =>
-        PublisherBridge.first(completions.find(Filters.eq("receiptId", receiptId)))
-          .map(_.fold[Either[RepositoryError, AccountDeletionStatus]](Right(AccountDeletionStatus.NotFound))(_ => Right(AccountDeletionStatus.Complete)))
-    }.handleError(_ => Left(RepositoryError.Unavailable))
+    else {
+      val requestFilter = Filters.and(
+        Filters.eq("_id", userId.value.toString),
+        Filters.eq("receiptId", receiptId)
+      )
+      val completionFilter = Filters.and(
+        Filters.eq("_id", userId.value.toString),
+        Filters.eq("receiptId", receiptId)
+      )
+      PublisherBridge
+        .first(collection.find(requestFilter))
+        .flatMap {
+          case Some(document) if document.getString("state") == "Complete" =>
+            IO.pure(Right(AccountDeletionStatus.Complete))
+          case Some(document) if Set("Pending", "Processing").contains(document.getString("state")) =>
+            IO.pure(Right(AccountDeletionStatus.Pending))
+          case Some(_) => IO.pure(Left(RepositoryError.Unavailable))
+          case None    =>
+            PublisherBridge
+              .first(completions.find(completionFilter))
+              .map(
+                _.fold[Either[RepositoryError, AccountDeletionStatus]](Right(AccountDeletionStatus.NotFound))(_ =>
+                  Right(AccountDeletionStatus.Complete)
+                )
+              )
+        }
+        .handleError(_ => Left(RepositoryError.Unavailable))
+    }
 
   override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
     PublisherBridge
@@ -147,28 +195,38 @@ final class MongoAnalyticsErasureRequestRepository(
       val user = session.fold(
         PublisherBridge.first(users.find(Filters.eq("_id", requestId)))
       )(active => PublisherBridge.first(users.find(active, Filters.eq("_id", requestId))))
-      user.flatMap {
-        case Some(document) if document.getString("accountStatus") == "Deleted" =>
-          val filter = Filters.and(Filters.eq("_id", requestId), Filters.in("state", "Pending", "Processing"))
-          val update = Updates.combine(
-            Updates.set("state", "Complete"),
-            Updates.set("completedAt", Date.from(now)),
-            Updates.set("expiresAt", Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
-          )
-          val requests = session.fold(
-            PublisherBridge.first(collection.updateOne(filter, update))
-          )(active => PublisherBridge.first(collection.updateOne(active, filter, update)))
-          requests.flatMap {
-            case Some(result) if result.getMatchedCount == 1L => persistCompletion(session, requestId, now)
-            case Some(_) =>
-              val completed = session.fold(
-                PublisherBridge.first(collection.find(Filters.and(Filters.eq("_id", requestId), Filters.eq("state", "Complete"))))
-              )(active => PublisherBridge.first(collection.find(active, Filters.and(Filters.eq("_id", requestId), Filters.eq("state", "Complete")))))
-              completed.flatMap(_.fold(IO.pure(Left(RepositoryError.Conflict)))(_ => persistCompletion(session, requestId, now)))
-            case None => IO.pure(Left(RepositoryError.Unavailable))
-          }
-        case _ => IO.pure(Left(RepositoryError.Conflict))
-      }.handleError(_ => Left(RepositoryError.Unavailable))
+      user
+        .flatMap {
+          case Some(document) if document.getString("accountStatus") == "Deleted" =>
+            val filter = Filters.and(Filters.eq("_id", requestId), Filters.in("state", "Pending", "Processing"))
+            val update = Updates.combine(
+              Updates.set("state", "Complete"),
+              Updates.set("completedAt", Date.from(now)),
+              Updates.set("expiresAt", Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
+            )
+            val requests = session.fold(
+              PublisherBridge.first(collection.updateOne(filter, update))
+            )(active => PublisherBridge.first(collection.updateOne(active, filter, update)))
+            requests.flatMap {
+              case Some(result) if result.getMatchedCount == 1L => persistCompletion(session, requestId, now)
+              case Some(_)                                      =>
+                val completed = session.fold(
+                  PublisherBridge.first(
+                    collection.find(Filters.and(Filters.eq("_id", requestId), Filters.eq("state", "Complete")))
+                  )
+                )(active =>
+                  PublisherBridge.first(
+                    collection.find(active, Filters.and(Filters.eq("_id", requestId), Filters.eq("state", "Complete")))
+                  )
+                )
+                completed.flatMap(
+                  _.fold(IO.pure(Left(RepositoryError.Conflict)))(_ => persistCompletion(session, requestId, now))
+                )
+              case None => IO.pure(Left(RepositoryError.Unavailable))
+            }
+          case _ => IO.pure(Left(RepositoryError.Conflict))
+        }
+        .handleError(_ => Left(RepositoryError.Unavailable))
     }
 
   private def persistCompletion(
@@ -179,22 +237,28 @@ final class MongoAnalyticsErasureRequestRepository(
     val request = session.fold(
       PublisherBridge.first(collection.find(Filters.eq("_id", userId)))
     )(active => PublisherBridge.first(collection.find(active, Filters.eq("_id", userId))))
-    request.flatMap { stored =>
-      val updates = List(
-        Some(Updates.setOnInsert("_id", userId)),
-        Some(Updates.setOnInsert("completedAt", Date.from(now))),
-        stored.flatMap(value => Option(value.getString("receiptId"))).map(Updates.setOnInsert("receiptId", _))
-      ).flatten
-      val filter = Filters.eq("_id", userId)
-      val update = Updates.combine(updates.asJava)
-      val result = session.fold(
-        PublisherBridge.first(completions.updateOne(filter, update, new UpdateOptions().upsert(true)))
-      )(active => PublisherBridge.first(completions.updateOne(active, filter, update, new UpdateOptions().upsert(true))))
-      result.map {
-        case Some(_) => Right(())
-        case _       => Left(RepositoryError.Unavailable)
-      }.handleError(_ => Left(RepositoryError.Unavailable))
-    }.handleError(_ => Left(RepositoryError.Unavailable))
+    request
+      .flatMap { stored =>
+        val updates = List(
+          Some(Updates.setOnInsert("_id", userId)),
+          Some(Updates.setOnInsert("completedAt", Date.from(now))),
+          stored.flatMap(value => Option(value.getString("receiptId"))).map(Updates.setOnInsert("receiptId", _))
+        ).flatten
+        val filter = Filters.eq("_id", userId)
+        val update = Updates.combine(updates.asJava)
+        val result = session.fold(
+          PublisherBridge.first(completions.updateOne(filter, update, new UpdateOptions().upsert(true)))
+        )(active =>
+          PublisherBridge.first(completions.updateOne(active, filter, update, new UpdateOptions().upsert(true)))
+        )
+        result
+          .map {
+            case Some(_) => Right(())
+            case _       => Left(RepositoryError.Unavailable)
+          }
+          .handleError(_ => Left(RepositoryError.Unavailable))
+      }
+      .handleError(_ => Left(RepositoryError.Unavailable))
   }
 }
 
@@ -260,9 +324,9 @@ final class MongoAnalyticsReportRepository(
                   case Some(state)
                       if existing.getString("state") == "Reserved" &&
                         (Option(state.get("generation", classOf[java.lang.Long]))
-                           .exists(_.longValue() > reservation.generation) ||
-                         Option(state.get("lastPublishedRevision", classOf[java.lang.Long]))
-                           .exists(_.longValue() >= reservation.revision)) =>
+                          .exists(_.longValue() > reservation.generation) ||
+                          Option(state.get("lastPublishedRevision", classOf[java.lang.Long]))
+                            .exists(_.longValue() >= reservation.revision)) =>
                     updateOne(
                       session,
                       control,
@@ -270,32 +334,33 @@ final class MongoAnalyticsReportRepository(
                       Updates.inc("nextRevision", 1L)
                     ).flatMap {
                       case Some(incremented) if incremented.getMatchedCount == 1L =>
-                        findOne(session, control, Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId)).flatMap {
-                          case Some(updatedState) =>
-                            val generation = Option(updatedState.get("generation", classOf[java.lang.Long]))
-                              .fold(-1L)(_.longValue())
-                            val revision = Option(updatedState.get("nextRevision", classOf[java.lang.Long]))
-                              .fold(-1L)(_.longValue())
-                            val refreshed = reservation.copy(generation = generation, revision = revision)
-                            if (generation < reservation.generation || revision <= reservation.revision)
-                              IO.pure(Left(RepositoryError.Unavailable))
-                            else
-                              updateOne(
-                                session,
-                                reservations,
-                                Filters.and(Filters.eq("_id", runId), Filters.eq("state", "Reserved")),
-                                Updates.combine(
-                                  Updates.set("generation", generation),
-                                  Updates.set("revision", revision),
-                                  Updates.set("createdAt", Date.from(now)),
-                                  Updates.set("expiresAt", Date.from(reservationExpiresAt))
-                                )
-                              ).map {
-                                case Some(result) if result.getMatchedCount == 1L => Right(refreshed)
-                                case _                                            => Left(RepositoryError.Conflict)
-                              }
-                          case None => IO.pure(Left(RepositoryError.Unavailable))
-                        }
+                        findOne(session, control, Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId))
+                          .flatMap {
+                            case Some(updatedState) =>
+                              val generation = Option(updatedState.get("generation", classOf[java.lang.Long]))
+                                .fold(-1L)(_.longValue())
+                              val revision = Option(updatedState.get("nextRevision", classOf[java.lang.Long]))
+                                .fold(-1L)(_.longValue())
+                              val refreshed = reservation.copy(generation = generation, revision = revision)
+                              if (generation < reservation.generation || revision <= reservation.revision)
+                                IO.pure(Left(RepositoryError.Unavailable))
+                              else
+                                updateOne(
+                                  session,
+                                  reservations,
+                                  Filters.and(Filters.eq("_id", runId), Filters.eq("state", "Reserved")),
+                                  Updates.combine(
+                                    Updates.set("generation", generation),
+                                    Updates.set("revision", revision),
+                                    Updates.set("createdAt", Date.from(now)),
+                                    Updates.set("expiresAt", Date.from(reservationExpiresAt))
+                                  )
+                                ).map {
+                                  case Some(result) if result.getMatchedCount == 1L => Right(refreshed)
+                                  case _                                            => Left(RepositoryError.Conflict)
+                                }
+                            case None => IO.pure(Left(RepositoryError.Unavailable))
+                          }
                       case _ => IO.pure(Left(RepositoryError.Unavailable))
                     }
                   case Some(_) => IO.pure(Right(reservation))
@@ -383,12 +448,14 @@ final class MongoAnalyticsReportRepository(
                     Filters.eq("_id", AnalyticsReportSnapshotDocument.CurrentId)
                   ).flatMap {
                     case Some(existing)
-                        if Option(existing.get("generation", classOf[java.lang.Long])).exists(_.longValue() == reservation.generation) &&
-                          Option(existing.get("revision", classOf[java.lang.Long])).exists(_.longValue() == reservation.revision) &&
+                        if Option(existing.get("generation", classOf[java.lang.Long]))
+                          .exists(_.longValue() == reservation.generation) &&
+                          Option(existing.get("revision", classOf[java.lang.Long]))
+                            .exists(_.longValue() == reservation.revision) &&
                           existing.getString("runId") == reservation.runId &&
-                          Option(existing.getDate("expiresAt")).exists(_.after(new Date())) => IO.pure(Right(()))
-                    case Some(existing)
-                        if Option(existing.getDate("expiresAt")).exists(_.after(new Date())) =>
+                          Option(existing.getDate("expiresAt")).exists(_.after(new Date())) =>
+                      IO.pure(Right(()))
+                    case Some(existing) if Option(existing.getDate("expiresAt")).exists(_.after(new Date())) =>
                       IO.pure(Left(RepositoryError.Conflict))
                     case _ =>
                       val restored = AnalyticsReportSnapshotDocument
@@ -415,7 +482,8 @@ final class MongoAnalyticsReportRepository(
                   Filters.eq("_id", AnalyticsReportSnapshotDocument.ControlId),
                   Filters.eq("generation", reservation.generation),
                   Filters.lt("lastPublishedRevision", reservation.revision),
-                  Filters.in("state", AnalyticsReportSnapshotDocument.Published, AnalyticsReportSnapshotDocument.Unpublished)
+                  Filters
+                    .in("state", AnalyticsReportSnapshotDocument.Published, AnalyticsReportSnapshotDocument.Unpublished)
                 )
                 updateOne(session, control, controlFilter, updateControl).flatMap {
                   case Some(updateResult) if updateResult.getMatchedCount == 1L =>

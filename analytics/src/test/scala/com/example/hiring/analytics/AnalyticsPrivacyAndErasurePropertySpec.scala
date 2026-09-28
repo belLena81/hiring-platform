@@ -16,6 +16,7 @@ import org.scalacheck.Gen
 import org.scalacheck.Prop.forAll
 
 final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
+  private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
   property("erasure claims accept only the immediate successor and reset phase progress") {
     forAll(
       Gen.choose(0, ErasurePhase.values.length - 1),
@@ -24,7 +25,14 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
     ) { (phaseIndex, nextIndex, progress) =>
       val phase = ErasurePhase.values(phaseIndex)
       val requested = ErasurePhase.values(nextIndex)
-      val claim = ErasureClaim("request", "lease", java.time.Instant.EPOCH, phase, progress, progress.toLong)
+      val claim = ErasureClaim(
+        asAccountSubjectId("00000000-0000-0000-0000-000000000001"),
+        "lease",
+        java.time.Instant.EPOCH,
+        phase,
+        progress,
+        progress.toLong
+      )
       claim.advanceTo(requested) match {
         case Right(advanced) =>
           phase.next.contains(requested) && advanced.phase == requested && advanced.progress == 0 &&

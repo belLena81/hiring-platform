@@ -10,7 +10,7 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.{AnalyticsLakehousePaths, KafkaConnection}
+import com.example.hiring.analytics.config.KafkaConnection
 
 import cats.effect.{Clock, ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
@@ -303,7 +303,9 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       properties.setProperty("enable.idempotence", "true")
       properties.setProperty("acks", "all")
       properties.setProperty("delivery.timeout.ms", "30000")
-      KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
+      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
+        properties.setProperty(key, value)
+      }
       val eventId = UUID.randomUUID().toString
       val jobId = UUID.randomUUID().toString
       val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
@@ -406,7 +408,9 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       properties.setProperty("enable.idempotence", "true")
       properties.setProperty("acks", "all")
       properties.setProperty("delivery.timeout.ms", "30000")
-      KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
+      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
+        properties.setProperty(key, value)
+      }
       val eventId = UUID.randomUUID().toString
       val jobId = UUID.randomUUID().toString
       val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
@@ -433,7 +437,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           uri <- IO.fromEither(required("analytics.mongo.uri", raw.uri))
           database <- IO.fromEither(required("analytics.mongo.database", raw.database))
           _ <- Resource.fromAutoCloseable(IO.delay(MongoClients.create(uri))).use { client =>
-            new MongoHmacKeyRetirementAuthorizationStore(client.getDatabase(database)).list(root).flatMap { rows =>
+            new MongoHmacKeyRetirementAuthorizationStore[IO](client.getDatabase(database)).list(root).flatMap { rows =>
               IO.raiseUnless(rows.exists(_.keyId == oldKeyId))(
                 AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")
               )
@@ -551,6 +555,12 @@ object HmacKeyRetirementFixtureMain extends IOApp {
             raw.lakehouseRoot.orElse(standardRoot.toOption)
           )
         )
+        paths <- IO.fromEither(
+          AnalyticsLakehousePaths
+            .from(root)
+            .toEither
+            .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
+        )
         master <- IO.fromEither(required("fixture.spark-master", raw.sparkMaster))
         pseudonymizer <- IO.fromEither(keyRing(raw, action == "stage-old"))
         _ <-
@@ -573,7 +583,6 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           )(spark => IO.blocking(spark.stop()))
           .use { spark =>
             IO.blocking {
-              val paths = AnalyticsLakehousePaths(root)
               if (action == "stage-old") stageOld(spark, paths, pseudonymizer, at)
               else if (action == "publish-old-event") publishOldEvent(spark, paths, raw, at)
               else if (action == "seed-new-control") seedNewControl(spark, paths, pseudonymizer, at)

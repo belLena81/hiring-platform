@@ -140,23 +140,28 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .insertOne(
           new Document("_id", requestId).append("deleted", true)
         )
-      val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDatabase)
-      val worker = new AnalyticsErasureWorker(
+      val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDatabase)
+      val worker = AnalyticsErasureWorkerTestSupport.worker(
         null,
         reactiveDatabase,
         store,
         KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
         KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
         topic,
-        AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
+        AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-        new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase)
+        new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase)
       )
       val result = (for {
         claim <- store.claim(requestedAt, requestedAt.plusSeconds(60L), 1).map(_.head)
-        reservation = AnalyticsReportReservation("worker-auth-" + requestId, "worker-auth-range", 1L, 1L)
+        reservation = AnalyticsReportReservation(
+          AnalyticsErasureWorkerTestSupport.runId("worker-auth-" + requestId),
+          AnalyticsErasureWorkerTestSupport.fingerprint("worker-auth-range"),
+          1L,
+          1L
+        )
         failure <- worker.process(claim, reservation).attempt
-        barrier <- store.readBarrier(requestId)
+        barrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
         request <- IO.blocking(
           database
             .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
@@ -175,24 +180,24 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         reclaimAt <- IO.realTimeInstant.map(_.plusSeconds(1L))
         reclaimed <- store.claim(reclaimAt, reclaimAt.plusSeconds(60L), 1).map(_.head)
         uncertainFencingCompleted = new AtomicBoolean(false)
-        uncertainFencer = new TransactionalProducerFencer {
+        uncertainFencer = new TransactionalProducerFencer[IO] {
           override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
-            KafkaProducerFencer.fence(connection, transactionalIds).flatMap { _ =>
+            KafkaProducerFencer[IO].fence(connection, transactionalIds).flatMap { _ =>
               IO.delay(uncertainFencingCompleted.set(true)) *> IO.raiseError(
                 new java.util.concurrent.TimeoutException("simulated client timeout after broker accepted fencing")
               )
             }
         }
-        uncertainWorker = new AnalyticsErasureWorker(
+        uncertainWorker = AnalyticsErasureWorkerTestSupport.worker(
           null,
           reactiveDatabase,
           store,
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
-          AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString),
+          AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-          new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase),
+          new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase),
           producerFencer = uncertainFencer
         )
         uncertainFailure <- uncertainWorker.process(reclaimed, reservation).attempt
@@ -202,7 +207,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             .find(new Document("_id", requestId))
             .first()
         )
-        uncertainBarrier <- store.readBarrier(requestId)
+        uncertainBarrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
         uncertainOutboxCount <- IO.blocking(database.getCollection("event_outbox").countDocuments())
         _ <- IO.blocking(
           database
@@ -215,20 +220,20 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         retryAt <- IO.realTimeInstant.map(_.plusSeconds(1L))
         retryClaim <- store.claim(retryAt, retryAt.plusSeconds(60L), 1).map(_.head)
         retryFenced = new AtomicBoolean(false)
-        correctFencer = new TransactionalProducerFencer {
+        correctFencer = new TransactionalProducerFencer[IO] {
           override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
-            KafkaProducerFencer.fence(connection, transactionalIds).flatTap(_ => IO.delay(retryFenced.set(true)))
+            KafkaProducerFencer[IO].fence(connection, transactionalIds).flatTap(_ => IO.delay(retryFenced.set(true)))
         }
-        retryWorker = new AnalyticsErasureWorker(
+        retryWorker = AnalyticsErasureWorkerTestSupport.worker(
           null,
           reactiveDatabase,
           store,
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
-          AnalyticsLakehousePaths("file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString),
+          AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
-          new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase),
+          new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase),
           producerFencer = correctFencer
         )
         retryFailure <- retryWorker.process(retryClaim, reservation).attempt
@@ -238,7 +243,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             .find(new Document("_id", requestId))
             .first()
         )
-        barrierAfterRetry <- store.readBarrier(requestId)
+        barrierAfterRetry <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
         outboxAfterRetry <- IO.blocking(database.getCollection("event_outbox").countDocuments())
       } yield (
         failure,
@@ -328,7 +333,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .getCollection("event_outbox")
         .insertOne(new Document("_id", UUID.randomUUID().toString).append("subjectIds", java.util.List.of(requestId)))
 
-      val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDatabase)
+      val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDatabase)
       val attempts = new AtomicInteger(0)
       val firstFailure = new AtomicReference[Throwable](null)
       val pendingWasObservedDuringOutage = new AtomicBoolean(false)
@@ -337,13 +342,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         try socket.getLocalPort
         finally socket.close()
       }
-      val recoveringFencer = new TransactionalProducerFencer {
+      val recoveringFencer = new TransactionalProducerFencer[IO] {
         override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
           if (attempts.incrementAndGet() == 1) {
             val firstAttempt =
               interruptedBroker match {
                 case Some(broker) =>
-                  KafkaProducerFencer.fenceAfterSubmission(connection, transactionalIds) { future =>
+                  KafkaProducerFencer.fenceAfterSubmission[IO](connection, transactionalIds) { future =>
                     IO.raiseWhen(future.isDone)(
                       new AssertionError("AdminClient fencing completed before broker outage")
                     ) *>
@@ -374,7 +379,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
                     finally socket.close()
                   }
                 case None =>
-                  KafkaProducerFencer.fence(
+                  KafkaProducerFencer[IO].fence(
                     connection.copy(saslPassword = Some(fencerPassword + "-invalid")),
                     transactionalIds
                   )
@@ -384,14 +389,23 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
                 IO(firstFailure.set(error)) *> IO.raiseError(error)
             }
           } else
-            interruptedBroker.fold(KafkaProducerFencer.fence(connection, transactionalIds))(broker =>
-              KafkaProducerFencer
+            interruptedBroker.fold(KafkaProducerFencer[IO].fence(connection, transactionalIds))(broker =>
+              KafkaProducerFencer[IO]
                 .fence(connection.copy(bootstrapServers = broker.getBootstrapServers), transactionalIds)
             )
       }
-      val reservation = AnalyticsReportReservation("poll-recovery-" + requestId, "poll-recovery-range", 0L, 1L)
-      val publisher = new AnalyticsReportPublisher {
-        override def reserve(runId: String, rangeFingerprint: String, now: Instant): IO[AnalyticsReportReservation] =
+      val reservation = AnalyticsReportReservation(
+        AnalyticsErasureWorkerTestSupport.runId("poll-recovery-" + requestId),
+        AnalyticsErasureWorkerTestSupport.fingerprint("poll-recovery-range"),
+        0L,
+        1L
+      )
+      val publisher = new AnalyticsReportPublisher[IO] {
+        override def reserve(
+            runId: RunId,
+            rangeFingerprint: RangeFingerprint,
+            now: Instant
+        ): IO[AnalyticsReportReservation] =
           IO.pure(reservation)
 
         override def publish(
@@ -399,8 +413,16 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             report: AnalyticsReportOutput,
             expiresAt: Instant
         ): IO[Unit] = IO.raiseError(new AssertionError("the poll-recovery test must stop before report publication"))
+
+        override def publishErasure(
+            value: AnalyticsReportReservation,
+            report: AnalyticsReportOutput,
+            expiresAt: Instant,
+            claim: ErasureClaim,
+            completedAt: Instant
+        ): IO[Unit] = IO.raiseError(new AssertionError("the poll-recovery test must stop before report publication"))
       }
-      val worker = new AnalyticsErasureWorker(
+      val worker = AnalyticsErasureWorkerTestSupport.worker(
         null,
         reactiveDatabase,
         store,
@@ -408,7 +430,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         if (fencerPassword.isEmpty) KafkaConnection(workerBootstrapServers, None, None)
         else KafkaConnection(workerBootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
         topic,
-        AnalyticsLakehousePaths("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
+        AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
         publisher,
         leaseDuration = 250.millis,
@@ -439,7 +461,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           assert(pendingWasObservedDuringOutage.get(), "the request was not observed pending during the broker outage")
         assertEquals(request.getString("state"), "Processing")
         assertEquals(request.getString("receiptId"), receiptId)
-        assertEquals(store.readBarrier(requestId).unsafeRunSync(), None)
+        assertEquals(store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)).unsafeRunSync(), None)
         assertEquals(database.getCollection("event_outbox").countDocuments(), 1L)
       } finally polling.cancel.unsafeRunSync()
     } finally {
@@ -478,7 +500,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         stalePublisher
           .send(new ProducerRecord(topic, "acl-evidence", "pending-publisher-write"))
           .get(30, TimeUnit.SECONDS)
-        KafkaProducerFencer
+        KafkaProducerFencer[IO]
           .fence(
             KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
             Vector(transactionalId)
@@ -493,7 +515,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         assert(staleCommit.exists(hasProducerFencingFailure), clues(staleCommit))
       } finally stalePublisher.close(Duration.ofSeconds(5))
 
-      val unauthorizedFence = KafkaProducerFencer
+      val unauthorizedFence = KafkaProducerFencer[IO]
         .fence(
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(readerPassword)),
           Vector(transactionalId)
@@ -502,7 +524,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .unsafeRunSync()
       assert(unauthorizedFence.swap.toOption.exists(hasKafkaAuthorizationFailure), clues(unauthorizedFence))
 
-      val badFencerCredential = KafkaProducerFencer
+      val badFencerCredential = KafkaProducerFencer[IO]
         .fence(
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
           Vector(transactionalId)

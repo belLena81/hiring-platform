@@ -15,6 +15,6 @@ trait AccountUseCases {
   def me(actor: ActorContext): UseCaseIO[User]
   def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput): UseCaseIO[User]
   def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String]
-  def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus]
+  def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus]
   def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]]
 }

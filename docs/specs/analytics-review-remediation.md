@@ -3,12 +3,12 @@
 ## Identity and scope
 
 - Task / use case / roadmap phase: Analytics correctness, effect boundaries, and internal architecture cleanup.
-- Status: implementation complete; final QA evidence recorded below.
+- Status: in progress.
 - Coordinator / implementation owner: Product Manager / Codex.
-- User outcome: Analytics helper signatures expose expected failures, effectful timing is suspended and testable, repeated logic is consolidated, and source responsibilities are visible in package boundaries.
-- Authorized scope: review points 1–9 in the user's request, including package/file moves, caller/test updates, and canonical documentation. Keep one analytics SBT project.
-- Non-goals: mongo4cats adoption (point 10 explicitly deferred), SBT subproject split, persisted schema/wire changes, behavior changes to analytics workflows, root application changes.
-- Dependencies: no new runtime dependency planned.
+- User outcome: analytics collaborators are mandatory and narrowly scoped, service/workflow effects are generic, and identifiers, validation, JSON, and credential encoding have explicit safe boundaries.
+- Authorized scope: address the user's review points 5–11 across the dedicated `analytics/` build, including production wiring, adapters, tests, dependency declaration, and canonical analytics documentation. Keep one SBT project.
+- Non-goals: persisted schema or wire-contract changes, analytics workflow behavior changes, root application changes, new SBT subprojects, and local/live infrastructure proof unrelated to these findings.
+- Dependencies: add Circe for Kafka connector JSON encoding; use the existing Typesafe Config and Kafka APIs for JAAS value rendering/validation.
 
 ## Source context and decisions
 
@@ -47,11 +47,69 @@
 - Current risks: package moves touch entrypoint class names and package-scoped test helpers; the single-build layout cannot enforce a complete import DAG. Several moved files retain broad sibling-package wildcard imports; domain files themselves do not import adapters. Preserve runtime order, error categories, CAS predicates, resource ownership, and retry bounds.
 - Review status: Architect, Data Engineer, and Big Data Engineer spec reviews READY; implementation review PASS; Security Engineer PASS; independent final QA PASS with documented maintainability and coverage notes.
 
-## Checkpoint and review
+## Review points 5–11 amendment
 
-- Completed criteria and changed files: AR-01 through AR-09 implemented across analytics source/tests, CLI references, Dockerfiles/scripts, architecture documentation, and this spec. Public runnable `IOApp`s are all under `cli`; adapter Spark command programs expose `run` only.
+- Source facts: `HiringAnalyticsBatch` has optional publisher/manifest writer and a process-local lock default; `AnalyticsBatchStageRuntime` exposes twelve capabilities to every stage. All analytics use cases and adapters currently use `IO`, including worker polling and lease renewal. `AnalyticsErasureStore` has a single 20-method port and boolean matched-update results. `PartitionOffsetRange` and runtime config repeat raw range checks; paths expose a public case-class constructor; Kafka JSON and JAAS values are concatenated. The analytics build does not declare Circe.
+- Decisions: genericize every production analytics port, use-case/workflow, and Spark/Mongo/Kafka/local adapter in `F[_]`; only CLI `IOApp` composition chooses `IO`. Use `Async[F]` for blocking effect boundaries, `Temporal[F]` for time/sleep, Cats Effect `Clock[F]` for wall/monotonic time, and injected `Logger[F]`. Use required explicit collaborators and stage-specific ports. Ingestion gets `ManifestStore[F]`, `DeltaWriter[F]`, `Clock[F]`, and Spark execution; Silver gets `DeltaReader[F]`, `DeltaWriter[F]`, quarantine ID generation, and Spark execution; KeyContinuity gets authorization lookup, clock, Spark execution, and Delta access; Erasure gets the Delta access/privacy configuration and evidence-file bound. Split erasure persistence into queue, progress, and barrier capabilities. Map only lease-guarded matched-update Booleans (`persistBarrier`, Delta progress writes, release/failure/defer, renew, and advance) to `ErasureUpdate.Applied | LeaseLost`; retain Booleans for actual predicates such as publisher drain/readiness. Use `RunId` and a new opaque `RangeFingerprint` at reservation boundaries. Construct validated ranges/paths only through accumulating smart constructors; preserve null guards at Java/Spark interop only. Add Circe for connector JSON and use Typesafe Config's concise quoted-value renderer, validated by Kafka `JaasConfig`, for JAAS option values.
+- Compatibility: retain Kafka JSON member ordering and values, JAAS credentials semantics, erasure lease/CAS predicates, report publication ordering, retry/cancellation behavior, persisted data shape, and all external wire contracts.
+
+| ID | Given / When / Then | Evidence |
+|---|---|---|
+| AR-10 | Given batch production wiring or a test batch, when `HiringAnalyticsBatch` is constructed, then clock, report publisher, manifest store, lakehouse lock, and retirement store are mandatory and no unavailable/default publication path exists. Ingestion receives manifest/delta-writer/clock/Spark capabilities; Silver receives delta-reader/writer, quarantine IDs, and Spark; KeyContinuity receives authorization lookup, clock, Spark, and Delta; Erasure receives only Delta/privacy configuration and its evidence bound. | Constructor/type-level wiring checks; explicit test fakes; focused stage behavior tests; analytics compile/test. |
+| AR-11 | Given any production analytics port, use case/workflow, or adapter, when effects are composed, then its signatures and resource ownership are generic in `F[_]`; no production analytics service/port/adapter hardcodes `IO`. Only CLI `IOApp` composition chooses `IO`. `Async`, `Temporal`, Cats Effect `Clock`, and `Logger` are supplied at the owning boundary. Polling and lease renewal are controllable without real sleeps and remain cancellable. | Compile/source checks across all production analytics packages; TestControl/TestContext polling, renewal, and cancellation tests. |
+| AR-12 | Given an erasure store operation, when a lease-guarded matched update succeeds or loses ownership, then persistBarrier, Delta progress writes, release/failure/defer, renew, and advance return `ErasureUpdate.Applied` or `LeaseLost`; drain/readiness predicates remain Boolean. Queue, progress, and barrier callers depend on their narrow capability interfaces. Reservation uses typed run/fingerprint values. | Mongo adapter tests for matched/unmatched updates in each mutation family, predicate tests, and existing lifecycle/recovery integration coverage. |
+| AR-13 | Given raw ranges, configuration, or a lakehouse root, when validation occurs at construction boundaries, then invalid values accumulate once and already-refined values are trusted thereafter. Scala-owned values are not guarded against null; Java/Spark interop remains checked. | Negative and positive smart-constructor/config/path tests; source review for duplicate validation and null guards. |
+| AR-14 | Given Kafka topic names or SASL credentials containing quotes, backslashes, and control characters, when connector options are generated, then JSON parses with unchanged ordering/values and JAAS parses with equivalent credentials through the Kafka connector property path without leaking them in diagnostics. | Circe decode/round-trip tests; `JaasConfig` parse plus connector-property tests for valid and malformed inputs and secret-safe diagnostics. |
+| AR-15 | Given final source and adapters, when the analytics build is compiled, tested, and reviewed, then workflow ordering, persisted/wire shapes, lease semantics, and retry behavior remain unchanged. | Java 17 analytics compile/test, IntegrationTest compile/test, formatter checks, diff check, independent Code Reviewer, Security Engineer, and QA verdicts. |
+| AR-20 | Given analytics batch, erasure worker, and repair binaries, when composition is created, then their only `IOApp`s are in `cli`, resources and service construction are owned by generic `AppModule[F]` resources, repair acquires Mongo without Spark, and adapter packages contain no command entrypoints. Existing CLI binary names and behavior remain stable. | Entrypoint architecture test; Spark/Mongo finalization test; source review of repair resource; analytics compile/test and all in-repository `runMain` references. |
+
+## Amendment checkpoint
+
+- Completed: source inspection and design decisions for review points 5–11; user selected all-analytics generic effects.
+- In progress: architecture review, implementation, focused tests, and contract-preserving verification.
+- Next: finish AR-10–AR-15 and AR-20, record actual evidence, and obtain independent code/security/QA verdicts.
+
+## Historical checkpoint (superseded by the 2026-09-28 checkpoints below)
+
+- At the preceding checkpoint, AR-01 through AR-09 were implemented across analytics source/tests, CLI references, Dockerfiles/scripts, architecture documentation, and this spec. At that time, public runnable `IOApp`s were under `cli` and adapter Spark command programs exposed `run`; the later CLI composition follow-up removes those command objects.
 - Latest commands/results: Java 17 `Test / compile` passed; focused `MongoPublisherStreamSpec` passed (4/4); `test` passed (120 passed, 0 failed, 1 ignored); `IntegrationTest / compile` passed; `IntegrationTest / test` passed (24 passed, 0 failed, 1 ignored); `scalafmtCheckAll` and `scalafmtSbtCheck` passed. One asynchronous `ShutdownChannelGroupException` was logged by retention-proof test cleanup and did not fail the suite.
 - Blockers and next action: commit and post-commit status verification. No external infrastructure blocker.
 - Code Reviewer verdict: PASS; confirmed retry cutoff tests and CLI ownership on final source.
 - Security Engineer verdict: PASS; no regression in key retirement, deletion markers, or erasure safeguards.
 - Final independent QA verdict: PASS; notes broad sibling-package wildcard imports and no dedicated worker-loop cancellation test, neither blocking remediation acceptance.
+
+## CLI composition follow-up (2026-09-28)
+
+- Completed AR-20 implementation: batch, worker, and repair composition now enters through `AppModule` resources; the three public `IOApp`s and repair command handling are in `cli`; audit and authorization use the shared Spark/Mongo resource; repair acquires only Mongo. Docker names are unchanged, and README repair commands now use the CLI FQCN.
+- Evidence: Java 17 `Compile / compile` passed; analytics `scalafmtCheckAll` passed; the focused `AnalyticsBatchResourceSpec` and `AnalyticsLayeringSpec` passed 5/5; final `git diff --check` passed.
+- Suite limitation: full `Test / compile` is blocked by existing unrelated test-source errors in `AnalyticsBatchTestSupport`, `KafkaClientPropertiesSpec`, `AnalyticsErasureWorkerSpec`, `AnalyticsTransformsSpec`, and `HiringAnalyticsTypedTransformsSpec`. A subsequent `sbt test` reported failures in the worker lease-renewal and Kafka JAAS tests, then remained silent during a Spark-heavy test and was canceled. `IntegrationTest / compile` also stops in test compilation on the unresolved `JaasConfig` in `KafkaClientPropertiesSpec`.
+- Independent reviews for this follow-up: Code Reviewer PASS after the README FQCN fix; Security Engineer PASS for composition boundaries, with deployment credentials and operator access policy outside source-review scope; final QA PASS scoped to AR-20.
+- Status: AR-20 is complete with focused acceptance and independent review gates passed. The broader analytics remediation remains in progress, with unrelated test failures and blocked integration compilation recorded above.
+
+## Critical review points 1–4 amendment
+
+- Added scope: address the four critical analytics findings in the same dedicated `analytics/` build, while preserving the unrelated in-progress AR-10–AR-15 work in this shared checkout.
+- Contract choice: expected failures use the `F[A]` error channel with `AnalyticsError` values raised as effect errors. Pure validation boundaries may return `Either`; adapter workflows lift once. Error recovery must match `AnalyticsError` before generic throwable handling.
+- Package choice: validated Kafka connection settings live in `config`; lakehouse paths, batch outcomes/publication, and source ports live in `service.batch`; Kafka retention barrier contracts live in `service.erasure`. Spark and Kafka SDK implementations remain in adapters. Inward packages may not depend on `adapter` or `cli`.
+
+| ID | Given / When / Then | Evidence |
+|---|---|---|
+| AR-16 | Given domain, service, or config production code, when dependencies are compiled and architecture tests run, then these packages contain no wildcard imports and cannot reference adapter or CLI packages. | Source import scan and ArchUnit `AnalyticsLayeringSpec`. |
+| AR-17 | Given the batch orchestration and source code, when production code is inspected, then ports, validated connection/path types, source adapters, publication values, and stages are split by concern, and tests call stage collaborators directly instead of `HiringAnalyticsBatch` pass-throughs. | Source ownership review; analytics compile and batch behavior tests. |
+| AR-18 | Given a Mongo publisher transaction or analytics adapter failure, when the operation runs, then there is one effect error channel, transaction work returns `F[A]`, retries/abort behavior is preserved, and `AnalyticsError` is preserved before generic throwable mapping. | `MongoPublisherStreamSpec`, source checks for nested `F[Either]`, analytics compile/test. |
+| AR-19 | Given process-local serialization of a lakehouse root, when fibers contend or a waiting fiber is cancelled, then Cats Effect semaphore permits serialize entry and cancellation releases no unacquired permit and does not block a worker thread. | Same-root serialization and waiter-cancellation cases in `AnalyticsBatchResourceSpec`. |
+
+## Amendment checkpoint
+
+- Completed: ports and value types moved to inward packages; wildcard imports removed from domain/service/config; ArchUnit layer rule added; batch source extracted from the original god file; Mongo transaction uses `F[A]`; keyed process-local lock uses `cats.effect.std.Semaphore` with `Resource` permits.
+- Completed scoped gates: Java 17 `sbt compile 'Test / compile'` passed; `sbt scalafmtCheckAll scalafmtSbtCheck compile 'Test / compile' 'testOnly *AnalyticsBatchResourceSpec *AnalyticsLayeringSpec *MongoPublisherStreamSpec *KafkaClientPropertiesSpec'` passed (15/15 focused tests); `git diff --check` is pending final handoff check. Independent Code Reviewer, Security Engineer, and scoped QA verdicts are PASS for AR-16–AR-19.
+- Unverified/blocked: full `sbt test` was cancelled after Spark tests stopped emitting output and no Java test process remained; do not count it as a pass. `IntegrationTest / compile` did not pass: after correcting the first surfaced `KafkaRetention[IO]` fixture inference error, the rerun still reported 46 in-flight type errors across sibling specs. Integration execution and Mongo transaction integration behavior are therefore unverified. The shared checkout also contains unrelated in-progress AR-10–AR-15 and GraphQL changes; those were preserved.
+- Remaining architecture risk: service batch ports expose Spark `DataFrame` and `SparkSession`, as noted by the independent Code Reviewer and QA; this does not fail the scoped AR-16–AR-19 criteria but leaves the service boundary coupled to Spark types.
+- Status: AR-16–AR-19 are implemented and scoped review gates passed. Broader analytics remediation and its full unit/integration evidence remain in progress.
+
+## Review points 5–11 implementation checkpoint (2026-09-28)
+
+- Production implementation: required batch collaborators and stage-specific ports; generic `F[_]` ports/workflows/adapters with `IO` selected in CLI composition; split erasure queue/progress/barrier ports and typed lease updates; typed run/fingerprint boundaries and accumulating range/config validation; smart-constructed lakehouse paths; Circe Kafka JSON and parsed/rendered JAAS configuration.
+- Current evidence: Java 17 `compile` passed after the config smart-constructor edits. Formatter tasks passed before the last small security/type-boundary edits and will be rerun. Unit suites before the Spark transforms passed; the complete unit run failed with class-loading errors when test runtime class files disappeared from `analytics/target`, and the isolated transform suite failed similarly after 152 seconds. Integration test compilation currently fails with 46 errors across migrated integration callers; integration tests have not run. These are the active results and supersede earlier historical PASS rows above.
+- Review: independent Security Engineer static review PASS, with deployment-only concern that an explicit SASL_PLAINTEXT opt-in could accept `kafka:9092` outside Compose. Independent Code Reviewer initially FAIL identified raw subject identifier arguments, credential-bearing `KafkaConnection.toString`, and stale evidence checkpoints. `KafkaConnection.toString` now redacts values; the old status rows are labeled historical; and erasure request identity plus queue boundaries now use a UUID-backed `AccountSubjectId` (not batch `RunId` or analytics HMAC `SubjectToken`). A fresh Code Reviewer verdict is pending.
+- Next: finish integration test compilation and run available unit/integration evidence; rerun formatter and diff checks; then request a fresh independent Code Reviewer verdict followed by separate final QA. The analytics remediation remains in progress.

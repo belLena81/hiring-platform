@@ -5,12 +5,16 @@ lazy val deltaVersion = "4.0.0"
 lazy val munitVersion = "1.3.6"
 lazy val munitCatsEffectVersion = "2.2.1"
 lazy val pureConfigVersion = "0.17.10"
+lazy val circeVersion = "0.14.16"
+lazy val typesafeConfigVersion = "1.4.9"
 lazy val ironVersion = "3.3.2"
-lazy val catsRetryVersion = "3.1.0"
-lazy val munitScalaCheckVersion = "1.3.0"
+lazy val catsRetryVersion = "4.0.0"
+lazy val munitScalaCheckVersion = "1.3.1"
+lazy val archUnitVersion = "1.5.1"
 lazy val IntegrationTest = config("it") extend Test
 
 lazy val analytics = (project in file("."))
+  .enablePlugins(JacocoItPlugin)
   .configs(IntegrationTest)
   .settings(inConfig(IntegrationTest)(Defaults.testSettings))
   .settings(
@@ -33,16 +37,21 @@ lazy val analytics = (project in file("."))
       "org.typelevel" %% "cats-effect" % "3.7.1",
       "com.github.cb372" %% "cats-retry" % catsRetryVersion,
       "com.github.pureconfig" %% "pureconfig-core" % pureConfigVersion,
+      "io.circe" %% "circe-core" % circeVersion,
+      "io.circe" %% "circe-parser" % circeVersion % Test,
+      "com.typesafe" % "config" % typesafeConfigVersion,
       "io.github.iltotore" %% "iron" % ironVersion,
       "co.fs2" %% "fs2-core" % "3.14.0",
       "org.typelevel" %% "log4cats-slf4j" % "2.8.0",
-      "org.mongodb" % "mongodb-driver-reactivestreams" % "5.12.0",
-      "org.mongodb" % "mongodb-driver-sync" % "5.12.0" % Test,
+      "org.mongodb" % "mongodb-driver-reactivestreams" % "5.13.0",
+      "org.mongodb" % "mongodb-driver-sync" % "5.13.0" % Test,
       "co.fs2" %% "fs2-reactive-streams" % "3.14.0",
       "org.testcontainers" % "testcontainers" % "2.0.5" % Test,
       "org.testcontainers" % "testcontainers-kafka" % "2.0.5" % Test,
       "org.scalameta" %% "munit" % munitVersion % Test,
       "org.typelevel" %% "munit-cats-effect" % munitCatsEffectVersion % Test,
-      "org.scalameta" %% "munit-scalacheck" % munitScalaCheckVersion % Test
+      "org.typelevel" %% "cats-effect-testkit" % "3.7.1" % Test,
+      "org.scalameta" %% "munit-scalacheck" % munitScalaCheckVersion % Test,
+      "com.tngtech.archunit" % "archunit" % archUnitVersion % Test
     )
   )

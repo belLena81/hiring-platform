@@ -10,41 +10,48 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.KafkaConnection
+import com.example.hiring.analytics.config.KafkaConnection
 
-import cats.effect.{IO, Resource}
+import cats.effect.{Async, Resource}
+import cats.syntax.all.*
 import org.apache.kafka.clients.admin.Admin
 
 import java.time.Duration
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
-private[analytics] trait TransactionalProducerFencer {
-  def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit]
+private[analytics] trait TransactionalProducerFencer[F[_]] {
+  def fence(connection: KafkaConnection, transactionalIds: Vector[String]): F[Unit]
 }
 
 /** Confirms broker-side producer fencing before deletion passes its Kafka replay barrier. */
-object KafkaProducerFencer extends TransactionalProducerFencer {
-  override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
-    fenceAfterSubmission(connection, transactionalIds)(_ => IO.unit)
+object KafkaProducerFencer {
+  def apply[F[_]: Async]: TransactionalProducerFencer[F] = new TransactionalProducerFencer[F] {
+    override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): F[Unit] =
+      fenceAfterSubmission[F](connection, transactionalIds)(_ => Async[F].unit)
+  }
 
   /** Test seam signals after the AdminClient has submitted the request and before awaiting its result. */
-  private[analytics] def fenceAfterSubmission(
+  private[analytics] def fenceAfterSubmission[F[_]: Async](
       connection: KafkaConnection,
       transactionalIds: Vector[String]
-  )(afterSubmission: org.apache.kafka.common.KafkaFuture[Void] => IO[Unit]): IO[Unit] =
-    if (transactionalIds.isEmpty) IO.unit
+  )(afterSubmission: org.apache.kafka.common.KafkaFuture[Void] => F[Unit]): F[Unit] =
+    if (transactionalIds.isEmpty) Async[F].unit
     else {
       val properties = new Properties()
       properties.put("bootstrap.servers", connection.bootstrapServers)
-      KafkaConnection.clientProperties(connection).foreach { case (key, value) => properties.setProperty(key, value) }
+      KafkaClientProperties.clientProperties(connection).foreach { case (key, value) =>
+        properties.setProperty(key, value)
+      }
       Resource
-        .make(IO.blocking(Admin.create(properties)))(admin => IO.blocking(admin.close(Duration.ofSeconds(5))).void)
+        .make(Async[F].blocking(Admin.create(properties)))(admin =>
+          Async[F].blocking(admin.close(Duration.ofSeconds(5))).void
+        )
         .use { admin =>
           for {
-            result <- IO.blocking(admin.fenceProducers(transactionalIds.distinct.asJava).all())
+            result <- Async[F].blocking(admin.fenceProducers(transactionalIds.distinct.asJava).all())
             _ <- afterSubmission(result)
-            _ <- IO.blocking(result.get()).void
+            _ <- Async[F].blocking(result.get()).void
           } yield ()
         }
     }

@@ -155,7 +155,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
       .validated("hal07-fixed-seed-424242", Vector(PartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
-    val paths = AnalyticsLakehousePaths(root.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(root.toString)
     for {
       generated <- IO.blocking {
         val generationStart = System.nanoTime()
@@ -176,8 +176,9 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
       (silverPlan, goldPlan) = plans
       heapBefore <- IO(java.lang.management.ManagementFactory.getMemoryMXBean.getHeapMemoryUsage.getUsed)
       started <- IO.monotonic
-      publication <- new HiringAnalyticsBatch(paths, Pseudonymizer, DataFrameDeletionMarkerSource(markers), FixedClock)
-        .run(spark, DataFrameBatchSource(raw), manifest)
+      publication <- AnalyticsBatchTestSupport
+        .newBatch(paths, Pseudonymizer, DataFrameDeletionMarkerSource[IO](markers), FixedClock)
+        .run(spark, DataFrameBatchSource[IO](raw), manifest)
       elapsedMs <- IO.monotonic.map(now => (now - started).toMillis)
       heapAfter <- IO(java.lang.management.ManagementFactory.getMemoryMXBean.getHeapMemoryUsage.getUsed)
       _ <- IO.blocking {

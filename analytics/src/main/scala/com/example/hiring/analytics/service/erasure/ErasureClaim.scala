@@ -1,19 +1,9 @@
 package com.example.hiring.analytics.service.erasure
-import com.example.hiring.analytics.service.keyretirement.*
-import com.example.hiring.analytics.service.batch.*
-import com.example.hiring.analytics.errors.*
-import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.config.*
-import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.adapter.mongo.*
-import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
-import com.example.hiring.analytics.service.erasure.*
-
+import com.example.hiring.analytics.domain.AccountSubjectId
 import java.time.Instant
 
 final case class ErasureClaim(
-    requestId: String,
+    requestId: AccountSubjectId,
     leaseToken: String,
     leaseUntil: Instant,
     phase: ErasurePhase,

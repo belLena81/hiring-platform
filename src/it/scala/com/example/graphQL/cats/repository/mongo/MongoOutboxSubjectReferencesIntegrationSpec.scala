@@ -340,8 +340,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
           _ <- MongoHiringSetup.initialize(database)
           receiptIdResult <- erasures.enqueue(deletedUser, now.plusSeconds(3L), MutationWriteContext.noop)
           receiptId <- receiptIdResult.fold(error => IO.raiseError[String](new AssertionError(error.toString)), IO.pure)
-          pendingStatus <- erasures.status(receiptId)
+          pendingStatus <- erasures.statusForSubject(deletedUser, receiptId)
           _ = assertEquals(pendingStatus, Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
+          foreignPendingStatus <- erasures.statusForSubject(UserId(UUID.randomUUID()), receiptId)
+          _ = assertEquals(
+            foreignPendingStatus,
+            Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.NotFound)
+          )
           hiddenBeforeCompletion <- reports.latest
           _ = assertEquals(hiddenBeforeCompletion, Right(None))
           generationAfterDelete <- PublisherBridge.first(
@@ -373,8 +378,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             case Right(())   => IO.unit
             case Left(error) => IO.raiseError(new AssertionError(s"Could not complete erasure request: $error"))
           }
-          completed <- erasures.status(receiptId)
+          completed <- erasures.statusForSubject(deletedUser, receiptId)
           _ = assertEquals(completed, Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Complete))
+          foreignCompletedStatus <- erasures.statusForSubject(UserId(UUID.randomUUID()), receiptId)
+          _ = assertEquals(
+            foreignCompletedStatus,
+            Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.NotFound)
+          )
           completedRequest <- PublisherBridge.first(
             database.getCollection("analytics_erasure_requests").find(new Document("_id", deletedUser.value.toString))
           )
@@ -395,7 +405,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
               .getCollection("analytics_erasure_requests")
               .deleteOne(new Document("_id", deletedUser.value.toString))
           )
-          completionSurvivesMarkerTtl <- erasures.status(receiptId)
+          completionSurvivesMarkerTtl <- erasures.statusForSubject(deletedUser, receiptId)
           _ = assertEquals(
             completionSurvivesMarkerTtl,
             Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Complete)
@@ -465,8 +475,12 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             error => IO.raiseError[String](new AssertionError(s"Account deletion failed: $error")),
             IO.pure
           )
-          pending <- service.accountDeletionStatus(receiptId).value
+          pending <- service.accountDeletionStatus(actor, receiptId).value
           _ = assertEquals(pending, Right(AccountDeletionStatus.Pending))
+          foreignPending <- service
+            .accountDeletionStatus(ActorContext(UserId(UUID.randomUUID()), UserRole.Candidate), receiptId)
+            .value
+          _ = assertEquals(foreignPending, Right(AccountDeletionStatus.NotFound))
           deleted <- users.find(userId)
           _ = assertEquals(deleted.map(_.map(_.accountStatus)), Right(Some(AccountStatus.Deleted)))
           mutationReceipt <- PublisherBridge.first(
@@ -474,7 +488,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
               .getCollection("mutation_receipts")
               .find(new Document("operation", "deleteMyAccount"))
           )
-          _ = assert(mutationReceipt.nonEmpty, "the bearer receipt must be committed with the account tombstone")
+          _ = assert(mutationReceipt.nonEmpty, "the deletion receipt must be committed with the account tombstone")
           _ = assertEquals(mutationReceipt.map(_.getString("state")), Some("Completed"))
           storedEntity = mutationReceipt.flatMap(value => Option(value.get("entity", classOf[Document])))
           _ = assertEquals(storedEntity.map(_.getString("type")), Some("analytics-erasure-receipt"))
@@ -487,12 +501,16 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
           _ = assertEquals(erasureRequest.map(_.getString("receiptId")), Some(receiptId))
           replay <- service.deleteMyAccount(request, actor).value
           _ = assertEquals(replay, Right(receiptId))
-          pendingAfterReplay <- service.accountDeletionStatus(receiptId).value
+          pendingAfterReplay <- service.accountDeletionStatus(actor, receiptId).value
           _ = assertEquals(pendingAfterReplay, Right(AccountDeletionStatus.Pending))
           completion <- erasures.markComplete(userId, serviceNow.plusSeconds(1L))
           _ = assertEquals(completion, Right(()))
-          complete <- service.accountDeletionStatus(receiptId).value
+          complete <- service.accountDeletionStatus(actor, receiptId).value
           _ = assertEquals(complete, Right(AccountDeletionStatus.Complete))
+          foreignComplete <- service
+            .accountDeletionStatus(ActorContext(UserId(UUID.randomUUID()), UserRole.Candidate), receiptId)
+            .value
+          _ = assertEquals(foreignComplete, Right(AccountDeletionStatus.NotFound))
         } yield ()
       }
     }
@@ -726,7 +744,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             database.getCollection("event_outbox").find(new Document("_id", eventValue.eventId.toString))
           )
           _ = assertEquals(outboxAfterLateClaim.map(_.getString("state")), Some("Failed"))
-          status <- erasures.status(receiptId)
+          status <- erasures.statusForSubject(userId, receiptId)
           _ = assertEquals(status, Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
         } yield ()
       }

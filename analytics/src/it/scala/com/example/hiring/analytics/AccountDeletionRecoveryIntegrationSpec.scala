@@ -284,8 +284,8 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       val test = resources.use { case (client, reactiveClient, spark, root) =>
         val database = client.getDatabase(databaseName)
         val reactiveDatabase = reactiveClient.getDatabase(databaseName)
-        val store = new MongoAnalyticsErasureWorkerStore(reactiveClient, reactiveDatabase)
-        val publisher = new MongoAnalyticsReportPublisher(reactiveClient, reactiveDatabase)
+        val store = new MongoAnalyticsErasureWorkerStore[IO](reactiveClient, reactiveDatabase)
+        val publisher = new MongoAnalyticsReportPublisher[IO](reactiveClient, reactiveDatabase)
         for {
           claimedFixture <- IO.blocking(
             database
@@ -316,21 +316,21 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                   override def realTime: IO[FiniteDuration] =
                     (IO.realTime, clockOffset.get).mapN(_ + _)
                 }
-                retention = new KafkaRetention {
+                retention = new KafkaRetention[IO] {
                   override def capture(connection: KafkaConnection, name: String): IO[KafkaRetentionBarrier] =
-                    KafkaRetentionBarrier.capture(connection, name)
+                    KafkaRetentionAdapter.capture(connection, name)
                   override def retentionPassed(
                       connection: KafkaConnection,
                       barrier: KafkaRetentionBarrier
                   ): IO[Boolean] =
                     retentionReady.get
                 }
-                producerFencer = new TransactionalProducerFencer {
+                producerFencer = new TransactionalProducerFencer[IO] {
                   override def fence(connection: KafkaConnection, ids: Vector[String]): IO[Unit] =
                     attempt.updateAndGet(_ + 1).flatMap {
                       case 1 =>
                         val invalid = connection.copy(saslPassword = connection.saslPassword.map(_ + "-invalid"))
-                        KafkaProducerFencer.fence(invalid, ids).attempt.flatMap {
+                        KafkaProducerFencer[IO].fence(invalid, ids).attempt.flatMap {
                           case Left(error)
                               if Iterator
                                 .iterate(error)(_.getCause)
@@ -340,18 +340,19 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                           case _ => IO.raiseError(new AssertionError("bad fencer credentials were not rejected"))
                         }
                       case 2 =>
-                        secondStarted.complete(()) *> continueSecond.get *> KafkaProducerFencer.fence(connection, ids)
+                        secondStarted
+                          .complete(()) *> continueSecond.get *> KafkaProducerFencer[IO].fence(connection, ids)
                       case _ => IO.raiseError(new AssertionError("unexpected additional fence attempt"))
                     }
                 }
-                worker = new AnalyticsErasureWorker(
+                worker = AnalyticsErasureWorkerTestSupport.worker(
                   spark,
                   reactiveDatabase,
                   store,
                   reader,
                   fencer,
                   topic,
-                  AnalyticsLakehousePaths(root.toUri.toString.stripSuffix("/")),
+                  AnalyticsLakehousePaths.unsafe(root.toUri.toString.stripSuffix("/")),
                   pseudonymizer,
                   publisher,
                   clock = clock,
@@ -403,7 +404,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                     _ <- secondStarted.get.timeout(60.seconds)
                     pending <- status(apiBase, receiptId)
                     _ = assertEquals(pending, "PENDING")
-                    barrier <- store.readBarrier(requestId)
+                    barrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
                     _ = assertEquals(barrier, None)
                     outboxBefore <- IO.blocking(database.getCollection("event_outbox").countDocuments())
                     _ = assertEquals(outboxBefore, 1L)
@@ -420,7 +421,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                         "resumeAfter"
                       ) != null
                     ).timeout(4.minutes)
-                    savedBarrier <- store.readBarrier(requestId)
+                    savedBarrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
                     _ = assert(savedBarrier.exists(value => value.topic == topic && value.partitions.nonEmpty))
                     _ <- assertPublisherTransactionFenced(inFlightProducer)
                     _ <- retentionReady.set(true)

@@ -112,7 +112,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       allowPlaintext = true
     )
     assert(KafkaConnection.validate(externalEndpoint).isInvalid)
-    assertEquals(KafkaConnection.clientProperties(externalEndpoint), Map.empty[String, String])
+    intercept[IllegalArgumentException](KafkaClientProperties.clientProperties(externalEndpoint))
   }
 
   test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {
@@ -133,6 +133,14 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       )
     )
     assert(malformedFlag.isLeft)
+  }
+
+  test("typed batch readers reject malformed numeric substitutions without echoing their values") {
+    val malformed = AnalyticsRuntimeConfig.batchFromHocon(
+      hocon,
+      settings + ("ANALYTICS_PARTITION" -> "not-a-number")
+    )
+    assert(malformed.swap.toOption.exists(error => !error.getMessage.contains("not-a-number")))
   }
 
   test("packaged application.conf supports the same substitutions and defaults") {
@@ -178,7 +186,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "ANALYTICS_KAFKA_USERNAME"
     ) ++ Map(
       "HIRING_ANALYTICS_HMAC_SECRET_BASE64" -> "this-value-must-not-appear-in-errors",
-      "ANALYTICS_PARTITION" -> "not-a-number",
+      "ANALYTICS_PARTITION" -> "2",
       "ANALYTICS_START_OFFSET" -> "10",
       "ANALYTICS_END_OFFSET_EXCLUSIVE" -> "4"
     )
@@ -188,7 +196,6 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(message.contains("analytics.mongo.uri is required"))
     assert(message.contains("analytics.kafka.bootstrap-servers is required"))
     assert(message.contains("analytics.kafka.username is required"))
-    assert(message.contains("analytics.batch.partition must be an integer"))
     assert(message.contains("end offset must not precede start offset"))
     assert(!message.contains("this-value-must-not-appear-in-errors"))
   }

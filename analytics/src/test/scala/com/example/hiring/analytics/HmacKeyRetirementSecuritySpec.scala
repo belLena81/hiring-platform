@@ -11,10 +11,23 @@ import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import munit.FunSuite
+import cats.Id
 
 import java.nio.file.Path
 
 final class HmacKeyRetirementSecuritySpec extends FunSuite {
+  test("authorization store is parameterized by its effect") {
+    val store = new HmacKeyRetirementAuthorizationStore[Id] {
+      override def list(root: String): Id[Vector[HmacKeyRetirementAuthorization]] = Vector.empty
+      override def insert(root: String, authorization: HmacKeyRetirementAuthorization): Id[Unit] = ()
+    }
+
+    assertEquals(store.list("lakehouse"), Vector.empty)
+    val authorization =
+      HmacKeyRetirementAuthorization("0" * 64, "key-a", "v" * 43, "facts", "digest", java.time.Instant.EPOCH)
+    assertEquals(store.insert("lakehouse", authorization), ())
+  }
+
   test("running bind mounts of the protected source or its ancestors and descendants are detected") {
     val source = Path.of("/proof/data/rotation")
     assert(LocalHmacKeyWriterExclusion.mountIntersectsProtectedSource(source, source))

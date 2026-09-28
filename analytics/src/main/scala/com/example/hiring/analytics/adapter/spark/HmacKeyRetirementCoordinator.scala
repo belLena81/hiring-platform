@@ -10,10 +10,10 @@ import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
-import com.example.hiring.analytics.adapter.spark.{AnalyticsLakehousePaths, KafkaConnection}
+import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
 
-import cats.effect.{Clock, IO}
+import cats.effect.kernel.{Async, Clock}
 import cats.syntax.all.*
 import com.mongodb.reactivestreams.client.MongoDatabase
 import io.delta.tables.DeltaTable
@@ -25,27 +25,28 @@ import java.time.Instant
 import scala.util.control.NonFatal
 
 /** Local operator workflow. Both steps hold the shared mutex and independently verify Docker writer exclusion. */
-private[analytics] final class HmacKeyRetirementCoordinator(
+private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     spark: SparkSession,
     paths: AnalyticsLakehousePaths,
     database: MongoDatabase,
     kafka: KafkaConnection,
     topic: String,
     writerSettings: LocalHmacKeyWriterExclusion.Settings,
-    clock: Clock[IO] = Clock[IO]
-) extends LakehouseOperation {
-  private val mutex = new MongoAnalyticsLakehouseLock(database)
-  private val preparations = new MongoHmacKeyRetirementPreparationStore(database)
-  private val authorizations = new MongoHmacKeyRetirementAuthorizationStore(database)
+    clock: Clock[F],
+    mutex: AnalyticsLakehouseLock[F]
+) extends LakehouseOperation[F] {
+  override protected val async: Async[F] = Async[F]
+  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database)
+  private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database)
   private val kafkaVolumeName = writerSettings.volumeName.stripSuffix("_hmac-rotation-analytics") +
     "_hmac-rotation-kafka"
 
-  private def observeKafkaLineage: IO[HmacKeyRetirementKafkaLineage] =
-    IO.raiseUnless(writerSettings.volumeName.endsWith("_hmac-rotation-analytics"))(
+  private def observeKafkaLineage: F[HmacKeyRetirementKafkaLineage] =
+    Async[F].raiseUnless(writerSettings.volumeName.endsWith("_hmac-rotation-analytics"))(
       AnalyticsError.InvalidConfiguration("retirement analytics volume does not identify its isolated Kafka volume")
-    ) *> HmacKeyRetirementKafkaLineage.observe(kafka, topic, kafkaVolumeName)
+    ) *> HmacKeyRetirementKafkaLineage.observe[F](kafka, topic, kafkaVolumeName)
 
-  private def registryVerifier(keyId: String): IO[String] = lakehouseEither {
+  private def registryVerifier(keyId: String): F[String] = lakehouseEither {
     if (!DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry))
       Left(
         AnalyticsError.InvalidConfiguration("permanent HMAC continuity registry is missing")
@@ -74,7 +75,7 @@ private[analytics] final class HmacKeyRetirementCoordinator(
     }
   }
 
-  private def verifyPreparedFixture(keyId: String, barrier: KafkaRetentionBarrier): IO[Unit] = lakehouseEither {
+  private def verifyPreparedFixture(keyId: String, barrier: KafkaRetentionBarrier): F[Unit] = lakehouseEither {
     val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
     if (!DeltaTable.isDeltaTable(spark, paths.silver) || !DeltaTable.isDeltaTable(spark, fixturePath))
       Left(AnalyticsError.InvalidConfiguration("old-key retirement fixture is missing"))
@@ -118,7 +119,7 @@ private[analytics] final class HmacKeyRetirementCoordinator(
   }
 
   /** The fixture captures exact old-primary Silver data and log paths before the retention wait. */
-  private def verifyCapturedPhysicalPaths(expectedPresent: Boolean): IO[Unit] = lakehouseEither {
+  private def verifyCapturedPhysicalPaths(expectedPresent: Boolean): F[Unit] = lakehouseEither {
     val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
     if (!DeltaTable.isDeltaTable(spark, fixturePath))
       Left(AnalyticsError.InvalidConfiguration("old-key physical path evidence is missing"))
@@ -182,13 +183,13 @@ private[analytics] final class HmacKeyRetirementCoordinator(
     }
   }
 
-  def prepare(keyId: String): IO[HmacKeyRetirementPreparation] = mutex.resource(paths.root).use { _ =>
+  def prepare(keyId: String): F[HmacKeyRetirementPreparation] = mutex.resource(paths.root).use { _ =>
     for {
-      _ <- LocalHmacKeyWriterExclusion.verify(writerSettings, paths.root)
-      lakehouseId <- IO.fromEither(MongoAnalyticsLakehouseLock.lockId(paths.root))
+      _ <- LocalHmacKeyWriterExclusion.verify[F](writerSettings, paths.root)
+      lakehouseId <- Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(paths.root))
       verifier <- registryVerifier(keyId)
       lineageBefore <- observeKafkaLineage
-      barrier <- KafkaRetentionBarrier.capture(kafka, topic).adaptError {
+      barrier <- KafkaRetentionAdapter.capture[F](kafka, topic).adaptError {
         case error: AnalyticsError => error
         case NonFatal(error)       =>
           AnalyticsError.InvalidConfiguration(
@@ -196,7 +197,7 @@ private[analytics] final class HmacKeyRetirementCoordinator(
           )
       }
       lineageAfter <- observeKafkaLineage
-      _ <- IO.raiseUnless(HmacKeyRetirementKafkaLineage.matches(lineageBefore, lineageAfter))(
+      _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(lineageBefore, lineageAfter))(
         AnalyticsError.InvalidConfiguration("Kafka lineage changed during retirement preparation")
       )
       _ <- verifyPreparedFixture(keyId, barrier)
@@ -208,37 +209,37 @@ private[analytics] final class HmacKeyRetirementCoordinator(
   }
 
   /** Returns the persisted authorization only after actual broker, Delta, Mongo, and Docker observations pass. */
-  def authorize(keyId: String): IO[HmacKeyRetirementAuthorization] = mutex.resource(paths.root).use { _ =>
+  def authorize(keyId: String): F[HmacKeyRetirementAuthorization] = mutex.resource(paths.root).use { _ =>
     for {
-      _ <- LocalHmacKeyWriterExclusion.verify(writerSettings, paths.root)
+      _ <- LocalHmacKeyWriterExclusion.verify[F](writerSettings, paths.root)
       preparation <- preparations
         .read(paths.root, keyId)
         .flatMap(
-          _.liftTo[IO](
+          _.liftTo[F](
             AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is missing")
           )
         )
       verifier <- registryVerifier(keyId)
-      _ <- IO.raiseUnless(preparation.originalVerifier == verifier)(
+      _ <- Async[F].raiseUnless(preparation.originalVerifier == verifier)(
         AnalyticsError.InvalidConfiguration("HMAC key continuity verifier changed after retirement preparation")
       )
       lineageBefore <- observeKafkaLineage
-      _ <- IO.raiseUnless(HmacKeyRetirementKafkaLineage.matches(preparation.lineage, lineageBefore))(
+      _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(preparation.lineage, lineageBefore))(
         AnalyticsError.InvalidConfiguration("Kafka broker, topic, or volume lineage changed since preparation")
       )
-      earliest <- HmacKeyRetirementKafkaOffsets.earliest(kafka, preparation.barrier)
+      earliest <- HmacKeyRetirementKafkaOffsets.earliest[F](kafka, preparation.barrier)
       lineageAfter <- observeKafkaLineage
-      _ <- IO.raiseUnless(HmacKeyRetirementKafkaLineage.matches(preparation.lineage, lineageAfter))(
+      _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(preparation.lineage, lineageAfter))(
         AnalyticsError.InvalidConfiguration("Kafka lineage changed during retirement authorization")
       )
-      passed <- IO.fromEither(KafkaRetentionBarrier.hasExpired(preparation.barrier, earliest))
-      _ <- IO.raiseUnless(passed)(
+      passed <- Async[F].fromEither(KafkaRetentionBarrier.hasExpired(preparation.barrier, earliest))
+      _ <- Async[F].raiseUnless(passed)(
         AnalyticsError.InvalidConfiguration("Kafka retention has not passed the captured retirement barrier")
       )
       now <- clock.realTimeInstant
       dataDeadline = preparation.capturedAt.plusSeconds(7L * 86400L)
       finalDeadline = preparation.capturedAt.plusSeconds(30L * 86400L)
-      _ <- IO.raiseWhen(now.isBefore(finalDeadline))(
+      _ <- Async[F].raiseWhen(now.isBefore(finalDeadline))(
         AnalyticsError.InvalidConfiguration("HMAC key retirement physical-retention horizon has not elapsed")
       )
       writers = AnalyticsKeyRetirement.WriterInventory(
@@ -275,9 +276,9 @@ private[analytics] final class HmacKeyRetirementCoordinator(
         AnalyticsKeyRetirement.RetentionHorizon(Some(finalDeadline), "persisted-retirement-preparation"),
         AnalyticsKeyRetirement.RetentionHorizon(Some(finalDeadline), "persisted-retirement-preparation")
       )
-      audited <- AnalyticsKeyRetirement.auditUnderLock(spark, paths, database, keyId, retention, writers, now)
+      audited <- AnalyticsKeyRetirement.auditUnderLock[F](spark, paths, database, keyId, retention, writers, now)
       _ <- verifyCapturedPhysicalPaths(expectedPresent = false)
-      summary <- IO.fromEither(
+      summary <- Async[F].fromEither(
         audited.leftMap(blockers =>
           AnalyticsError.InvalidConfiguration(
             "HMAC key retirement audit blocked: " + blockers.toNonEmptyList.toList.mkString("; ")
@@ -296,9 +297,9 @@ private[analytics] final class HmacKeyRetirementCoordinator(
       existing <- authorizations.list(paths.root).map(_.find(_.keyId == keyId))
       result <- existing match {
         case Some(value) if value.lakehouseId == record.lakehouseId && value.originalVerifier == verifier =>
-          IO.pure(value)
+          Async[F].pure(value)
         case Some(_) =>
-          IO.raiseError[HmacKeyRetirementAuthorization](
+          Async[F].raiseError[HmacKeyRetirementAuthorization](
             AnalyticsError.InvalidConfiguration("existing HMAC key retirement authorization conflicts with registry")
           )
         case None =>
@@ -308,7 +309,7 @@ private[analytics] final class HmacKeyRetirementCoordinator(
               .flatMap(
                 _.find(_.keyId == keyId)
                   .filter(_ == record)
-                  .liftTo[IO](
+                  .liftTo[F](
                     AnalyticsError.InvalidConfiguration("HMAC key retirement authorization readback failed")
                   )
               )

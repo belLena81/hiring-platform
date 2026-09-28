@@ -124,12 +124,17 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("deletion receipt status is queryable without an active login") {
-    execute(
-      """query { accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") }""",
-      None
-    ).map { json =>
-      assertEquals(json.hcursor.downField("data").get[String]("accountDeletionStatus"), Right("NOT_FOUND"))
+  test("deletion receipt status requires an authenticated actor") {
+    val query =
+      """query { accountDeletionStatus(receiptId: "00000000-0000-0000-0000-000000000001") }"""
+
+    (execute(query, None), execute(query, Some(ActorContext(candidateId, UserRole.Candidate)))).mapN {
+      (anonymous, authenticated) =>
+        assertEquals(errorCode(anonymous), Right("UNAUTHORIZED"))
+        assertEquals(
+          authenticated.hcursor.downField("data").get[String]("accountDeletionStatus"),
+          Right("NOT_FOUND")
+        )
     }
   }
 
@@ -1229,7 +1234,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
       UseCaseIO.left(unsupported)
 
-    override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
       UseCaseIO.pure(AccountDeletionStatus.NotFound)
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
@@ -1259,7 +1264,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         input: AccountProfileInput
     ): UseCaseIO[User] = unavailable
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] = unavailable
-    override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
       UseCaseIO.pure(AccountDeletionStatus.NotFound)
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] = unavailable
   }
@@ -1293,7 +1298,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
       UseCaseIO.left(unsupported)
 
-    override def accountDeletionStatus(receiptId: String): UseCaseIO[AccountDeletionStatus] =
+    override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
       UseCaseIO.pure(AccountDeletionStatus.NotFound)
 
     override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
