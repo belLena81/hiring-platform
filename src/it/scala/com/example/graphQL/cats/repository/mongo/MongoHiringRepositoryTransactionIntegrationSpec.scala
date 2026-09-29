@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
@@ -409,7 +410,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
           storedRecruiter <- users.find(recruiterId).flatMap(requireResult)
           eventsAfterFailure <- PublisherBridge.first(database.getCollection("event_outbox").countDocuments())
         } yield {
-          assertEquals(deletion, Left(RepositoryError.Unavailable))
+          assertEquals(deletion, Left(RepositoryError.InvalidStoredData))
           assertEquals(storedRecruiter, Some(recruiter))
           assertEquals(eventsAfterFailure.map(_.longValue), Some(0L))
         }
@@ -450,7 +451,7 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
   private def recruiterUser(id: UserId): User =
     User(
       id,
-      Some(s"$id@example.com"),
+      Some(email(s"$id@example.com")),
       "Recruiter",
       UserRole.Recruiter,
       Some(UserProfile.Recruiter(RecruiterProfile("Hiring Co", Some("Lead Recruiter")))),

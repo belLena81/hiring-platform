@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents}
+import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{Filters, Sorts, UpdateOptions, Updates}
 import com.mongodb.client.result.UpdateResult
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
@@ -14,12 +15,14 @@ import org.bson.Document
 import org.bson.conversions.Bson
 
 import java.time.Instant
+import scala.util.chaining.*
 import java.util.Date
 
 final class MongoUserRepository(
     database: MongoDatabase,
     transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
-    embeddingWork: Option[MongoEmbeddingWorkRepository] = None
+    embeddingWork: Option[MongoEmbeddingWorkRepository] = None,
+    diagnostics: Diagnostics = Diagnostics.noop
 ) extends UserRepository
     with UserAccountRepository
     with MongoConflictWriteMapping
@@ -32,27 +35,43 @@ final class MongoUserRepository(
 
   def insert(user: User): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid) IO.pure(Left(RepositoryError.Conflict))
-    else PublisherBridge.first(collection.insertOne(MongoHiringCodecs.user(user))).as(Right(())).handleError(mapWrite)
+    else
+      MongoRepositorySupport
+        .repositoryGuard(diagnostics, "MongoUserRepository.insert")(
+          PublisherBridge.first(collection.insertOne(MongoHiringCodecs.user(user))).as(Right(()))
+        )(mapWrite)
+        .value
 
   override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
-    PublisherBridge
-      .first(collection.find(Filters.eq("_id", id.value.toString)))
-      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "MongoUserRepository.find")(
+        PublisherBridge
+          .first(collection.find(Filters.eq("_id", id.value.toString)))
+          .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
+      )(_ => Left(RepositoryError.Unavailable))
+      .value
 
   override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
-    PublisherBridge
-      .first(collection.find(Filters.eq("_id", id.value.toString)))
-      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser)))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "MongoUserRepository.findVersioned")(
+        PublisherBridge
+          .first(collection.find(Filters.eq("_id", id.value.toString)))
+          .map(document =>
+            MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser))
+          )
+      )(_ => Left(RepositoryError.Unavailable))
+      .value
 
   private def findWithSession(id: UserId, session: Option[ClientSession]): IO[Either[RepositoryError, Option[User]]] =
-    findOne(session, collection, Filters.eq("_id", id.value.toString))
-      .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "MongoUserRepository.findWithSession")(
+        findOne(session, collection, Filters.eq("_id", id.value.toString))
+          .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
+      )(_ => Left(RepositoryError.Unavailable))
+      .value
 
   override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-    MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)
+    MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)(diagnostics)
 
   override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
     findVersioned(id).flatMap {
@@ -80,20 +99,27 @@ final class MongoUserRepository(
       .map {
         case Some(result) if result.getMatchedCount == 1L => Right(())
         case Some(_)                                      => Left(RepositoryError.Conflict)
-        case None                                         => Left(RepositoryError.Unavailable)
+        case None                                         => Left(RepositoryError.MissingWriteResult)
       }
-      .handleError(mapWrite)
+      .pipe(effect =>
+        MongoRepositorySupport
+          .repositoryGuard(diagnostics, "MongoUserRepository.updateEmbedding")(effect)(mapWrite)
+          .value
+      )
   }
 
   override def initialized: IO[Either[RepositoryError, Boolean]] =
-    PublisherBridge
-      .first(registry.find(Filters.eq("_id", "user-account-registry")))
-      .map(document => Right(document.exists(_.getString("state", "") == "Initialized")))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "MongoUserRepository.initialized")(
+        PublisherBridge
+          .first(registry.find(Filters.eq("_id", "user-account-registry")))
+          .map(document => Right(document.exists(_.getString("state", "") == "Initialized")))
+      )(_ => Left(RepositoryError.Unavailable))
+      .value
 
   override def bootstrap(
       user: User,
-      passwordHash: String,
+      passwordHash: PasswordHash,
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton)
@@ -103,11 +129,13 @@ final class MongoUserRepository(
         .run(context, transactionRunner, transactionRequired = true) { session =>
           bootstrapWithSession(user, passwordHash, session)
         }
-        .handleError(mapWrite)
+        .pipe(effect =>
+          MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+        )
 
   private def bootstrapWithSession(
       user: User,
-      passwordHash: String,
+      passwordHash: PasswordHash,
       session: Option[ClientSession]
   ): IO[Either[RepositoryError, Unit]] =
     val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Uninitialized"))
@@ -119,19 +147,25 @@ final class MongoUserRepository(
         findAnyUser.flatMap {
           case Some(_) => IO.pure(Left(RepositoryError.Conflict))
           case None    =>
-            insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)) *>
-              updateOne(
-                session,
-                registry,
-                stateFilter,
-                Updates.combine(Updates.set("state", "Initialized"), Updates.set("adminId", user.id.value.toString))
-              ).void.as(Right(()))
+            insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)).flatMap {
+              case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+              case Some(_) =>
+                updateOne(
+                  session,
+                  registry,
+                  stateFilter,
+                  Updates.combine(Updates.set("state", "Initialized"), Updates.set("adminId", user.id.value.toString))
+                ).map {
+                  case Some(_) => Right(())
+                  case None    => Left(RepositoryError.MissingWriteResult)
+                }
+            }
         }
     }
 
   private def writeAccountSession(
       user: User,
-      passwordHash: String,
+      passwordHash: PasswordHash,
       now: Instant,
       session: Option[ClientSession]
   ): IO[Either[RepositoryError, Unit]] =
@@ -143,7 +177,7 @@ final class MongoUserRepository(
           case None    => IO.pure(Left(RepositoryError.Conflict))
           case Some(_) =>
             insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)).flatMap {
-              case None    => IO.pure(Left(RepositoryError.Unavailable))
+              case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
               case Some(_) =>
                 embeddingWork
                   .filter(_ => user.role == UserRole.Candidate)
@@ -158,11 +192,13 @@ final class MongoUserRepository(
                   )
             }
         }
-      }.handleError(mapWrite)
+      }.pipe(effect =>
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+      )
 
   override def createAccount(
       user: User,
-      passwordHash: String,
+      passwordHash: PasswordHash,
       now: Instant,
       context: MutationWriteContext
   ): IO[Either[RepositoryError, Unit]] =
@@ -172,7 +208,9 @@ final class MongoUserRepository(
         transactionRunner,
         transactionRequired = embeddingWork.nonEmpty && user.role == UserRole.Candidate
       )(session => writeAccountSession(user, passwordHash, now, session))
-      .handleError(mapWrite)
+      .pipe(effect =>
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+      )
 
   override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] =
     PublisherBridge
@@ -180,7 +218,11 @@ final class MongoUserRepository(
       .map { document =>
         MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readCredentials)).map(_.flatten)
       }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+      .pipe(effect =>
+        MongoRepositorySupport
+          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
+          .value
+      )
 
   override def updateProfile(
       userId: UserId,
@@ -197,13 +239,17 @@ final class MongoUserRepository(
               case Left(error) => IO.pure(Left(error))
             }
           }
-          .handleError(mapWrite)
+          .pipe(effect =>
+            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+          )
       case _ =>
         MongoMutationWriteContext
           .run(context, transactionRunner, transactionRequired = false) { session =>
             updateProfileDirect(userId, profile, now, session)
           }
-          .handleError(mapWrite)
+          .pipe(effect =>
+            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+          )
     }
 
   private def updateProfileDirect(
@@ -229,8 +275,10 @@ final class MongoUserRepository(
       case Some(result) if result.getMatchedCount == 1L =>
         findWithSession(userId, session).map(_.flatMap(_.toRight(RepositoryError.Unavailable)))
       case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None    => IO.pure(Left(RepositoryError.Unavailable))
-    }.handleError(mapWrite)
+      case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+    }.pipe(effect =>
+      MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+    )
 
   private def updateCandidateProfileWithEmbeddingWork(
       userId: UserId,
@@ -255,9 +303,11 @@ final class MongoUserRepository(
           case Some(result) if result.getMatchedCount == 1L =>
             work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, userId.value.toString), now)
           case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-          case None    => IO.pure(Left(RepositoryError.Unavailable))
+          case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
         }
-      }.handleError(mapWrite)
+      }.pipe(effect =>
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+      )
     }
 
   override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = {
@@ -276,7 +326,11 @@ final class MongoUserRepository(
         page.pageSize.value
       )
       .map(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readUser)))
-      .handleError(_ => Left(RepositoryError.Unavailable))
+      .pipe(effect =>
+        MongoRepositorySupport
+          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
+          .value
+      )
   }
 
   override def deleteAccount(
@@ -289,7 +343,9 @@ final class MongoUserRepository(
       .run(context, transactionRunner, transactionRequired = true) { session =>
         deleteAccountWithSession(userId, now, tombstone, session)
       }
-      .handleError(mapWrite)
+      .pipe(effect =>
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+      )
 
   private def deleteAccountWithSession(
       userId: UserId,
@@ -323,7 +379,7 @@ final class MongoUserRepository(
           case Right(())   => closeRecruiterJobs(userId, now, session)
         }
       case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None    => IO.pure(Left(RepositoryError.Unavailable))
+      case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
     }
   }
 
@@ -346,9 +402,13 @@ final class MongoUserRepository(
     operation
       .map {
         case Some(_) => Right(())
-        case None    => Left(RepositoryError.Unavailable)
+        case None    => Left(RepositoryError.MissingWriteResult)
       }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+      .pipe(effect =>
+        MongoRepositorySupport
+          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
+          .value
+      )
   }
 
   private def closeRecruiterJobs(
@@ -403,7 +463,7 @@ final class MongoUserRepository(
             }
             (for {
               _ <- closeWrites
-              _ <- EitherT(insertOperationalEvents(outbox, session, closeEvents, now))
+              _ <- EitherT(insertOperationalEvents(outbox, session, closeEvents, now, diagnostics))
               _ <- EitherT(closeJobs(Some(openJobs.last.id.value.toString)))
             } yield ()).value
         }
@@ -468,16 +528,22 @@ object MongoUserRepository {
     result match {
       case Some(value) if value.getMatchedCount == 1L => Right(())
       case Some(_)                                    => Left(RepositoryError.Conflict)
-      case None                                       => Left(RepositoryError.Unavailable)
+      case None                                       => Left(RepositoryError.MissingWriteResult)
     }
 
-  def standalone(database: MongoDatabase): MongoUserRepository =
-    new MongoUserRepository(database)
+  def standalone(database: MongoDatabase, diagnostics: Diagnostics = Diagnostics.noop): MongoUserRepository =
+    new MongoUserRepository(database, diagnostics = diagnostics)
 
   def transactional(
       database: MongoDatabase,
       client: MongoClient,
-      embeddingWork: Option[MongoEmbeddingWorkRepository] = None
+      embeddingWork: Option[MongoEmbeddingWorkRepository] = None,
+      diagnostics: Diagnostics = Diagnostics.noop
   ): MongoUserRepository =
-    new MongoUserRepository(database, MongoTransactionRunner.sessions(client, RepositoryError.Conflict), embeddingWork)
+    new MongoUserRepository(
+      database,
+      MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
+      embeddingWork,
+      diagnostics
+    )
 }

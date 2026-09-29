@@ -72,40 +72,38 @@ object AppModule {
     }
 
   def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
-    shared[F](settings.common, appName = "hiring-analytics-erasure-worker").map { shared =>
+    shared[F](settings.common, appName = "hiring-analytics-erasure-worker").flatMap { shared =>
       val common = settings.common
-      val store = new MongoAnalyticsErasureWorkerStore[F](shared.client, shared.database, shared.streams)
-      val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
-      val job = new AnalyticsErasureWorker[F](
-        store,
-        store,
-        store,
-        common.kafka,
-        settings.fencerKafka,
-        settings.topic,
-        shared.paths,
-        publisher,
-        shared.markers,
-        shared.maintenance,
-        shared.lock,
-        Clock[F],
-        Slf4jLogger.getLogger[F],
-        KafkaProducerFencer[F](shared.sparkExecution),
-        KafkaRetentionAdapter.liveRetention[F](shared.sparkExecution),
-        common.operational.retention
-      )
-      WorkerProgram(job.run)
+      MongoAnalyticsErasureStores.resource(shared.client, shared.database, shared.streams).map { stores =>
+        val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
+        val job = new AnalyticsErasureWorker[F](
+          stores.queue,
+          stores.progress,
+          stores.barrier,
+          common.kafka,
+          settings.fencerKafka,
+          settings.topic,
+          shared.paths,
+          publisher,
+          shared.markers,
+          shared.maintenance,
+          shared.lock,
+          Clock[F],
+          Slf4jLogger.getLogger[F],
+          KafkaProducerFencer[F](shared.sparkExecution),
+          KafkaRetentionAdapter.liveRetention[F](shared.sparkExecution),
+          common.operational.retention
+        )
+        WorkerProgram(job.run)
+      }
     }
 
-  def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureWorkerStore[F]] =
+  def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureQueue[F]] =
     for {
       client <- mongoClient[F](settings.common.mongoUri)
       database <- Resource.eval(mongoDatabase[F](client, settings.common.mongoDatabase))
-    } yield new MongoAnalyticsErasureWorkerStore[F](
-      client,
-      database,
-      new MongoPublisherStream(settings.common.operational)
-    )
+      queue <- MongoAnalyticsErasureQueue.resource(database, new MongoPublisherStream(settings.common.operational))
+    } yield queue
 
   private def shared[F[_]: Async](
       common: AnalyticsCommonSettings,

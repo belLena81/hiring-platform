@@ -92,6 +92,24 @@ final class AnalyticsLayeringSpec extends FunSuite {
     }
   }
 
+  test("local HMAC retirement operator tooling stays in test scope") {
+    val productionRoot = Paths.get("src/main/scala/com/example/hiring/analytics")
+    val testRoot = Paths.get("src/test/scala/com/example/hiring/analytics")
+    val files = List(
+      "adapter/local/LocalHmacKeyWriterExclusion.scala",
+      "adapter/local/LocalProcess.scala",
+      "adapter/mongo/HmacKeyRetirementPreparation.scala",
+      "adapter/spark/HmacKeyRetirementCoordinator.scala",
+      "cli/HmacKeyRetirementAuthorizationMain.scala",
+      "cli/HmacKeyRetirementFixtureMain.scala"
+    )
+
+    files.foreach { file =>
+      assert(!Files.exists(productionRoot.resolve(file)), s"operator tooling leaked into Compile: $file")
+      assert(Files.exists(testRoot.resolve(file)), s"test-scoped operator tooling is missing: $file")
+    }
+  }
+
   test("batch and erasure orchestration live in service, not the Spark adapter") {
     assertEquals(
       Class.forName("com.example.hiring.analytics.service.batch.HiringAnalyticsBatch").getName,

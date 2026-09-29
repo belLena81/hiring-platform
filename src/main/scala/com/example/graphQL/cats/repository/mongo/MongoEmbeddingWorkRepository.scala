@@ -3,6 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import com.example.graphQL.cats.repository.protocol.*
 import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Updates}
 import com.mongodb.reactivestreams.client.{ClientSession, MongoDatabase}
 import org.bson.Document
@@ -10,7 +11,8 @@ import java.time.Instant
 import java.util.Date
 
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
-final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends EmbeddingWorkRepository {
+final class MongoEmbeddingWorkRepository(database: MongoDatabase, diagnostics: Diagnostics = Diagnostics.noop)
+    extends EmbeddingWorkRepository {
   private enum StoredWorkError {
     case InvalidDocument
   }
@@ -50,23 +52,29 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
       Updates.set("attempts", java.lang.Integer.valueOf(0)),
       Updates.set("updatedAt", Date.from(now))
     )
-    updateOne(
-      session,
-      Filters.and(Filters.eq("_id", key.value), Filters.ne("state", "Processing")),
-      readyUpdate,
-      new UpdateOptions().upsert(true)
-    ).flatMap {
-      case Some(result) if result.getMatchedCount == 1L || result.getUpsertedId != null => IO.pure(Right(()))
-      case _                                                                            =>
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "embeddingWork.enqueue") {
         updateOne(
           session,
-          Filters.and(Filters.eq("_id", key.value), Filters.eq("state", "Processing")),
-          refreshActiveLease
-        ).map {
-          case Some(result) if result.getMatchedCount == 1L => Right(())
-          case _                                            => Left(RepositoryError.Conflict)
+          Filters.and(Filters.eq("_id", key.value), Filters.ne("state", "Processing")),
+          readyUpdate,
+          new UpdateOptions().upsert(true)
+        ).flatMap {
+          case Some(result) if result.getMatchedCount == 1L || result.getUpsertedId != null => IO.pure(Right(()))
+          case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+          case Some(_) =>
+            updateOne(
+              session,
+              Filters.and(Filters.eq("_id", key.value), Filters.eq("state", "Processing")),
+              refreshActiveLease
+            ).map {
+              case Some(result) if result.getMatchedCount == 1L => Right(())
+              case Some(_)                                      => Left(RepositoryError.Conflict)
+              case None                                         => Left(RepositoryError.MissingWriteResult)
+            }
         }
-    }.handleError(_ => Left(RepositoryError.Unavailable))
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private def updateOne(
@@ -97,28 +105,35 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
       val options = new FindOneAndUpdateOptions()
         .returnDocument(ReturnDocument.AFTER)
         .sort(Sorts.ascending("availableAt", "_id"))
-      PublisherBridge
-        .first(collection.findOneAndUpdate(Filters.or(available, expiredLease), update, options))
-        .map {
-          case Some(document) =>
-            readClaim(document) match {
-              case Right(claim) => Right(Some(claim))
-              case Left(_)      => Left(RepositoryError.Unavailable)
+      MongoRepositorySupport
+        .repositoryGuard(diagnostics, "embeddingWork.claim") {
+          PublisherBridge
+            .first(collection.findOneAndUpdate(Filters.or(available, expiredLease), update, options))
+            .map {
+              case Some(document) =>
+                readClaim(document) match {
+                  case Right(claim) => Right(Some(claim))
+                  case Left(_)      => Left(RepositoryError.InvalidStoredData)
+                }
+              case None => Right(None)
             }
-          case None => Right(None)
-        }
-        .handleError(_ => Left(RepositoryError.Unavailable))
+        }(_ => Left(RepositoryError.Unavailable))
+        .value
     }
   }
 
   override def complete(claim: ClaimedEmbeddingWork): IO[Either[RepositoryError, Unit]] =
-    PublisherBridge
-      .first(collection.deleteOne(leaseFilter(claim)))
-      .map {
-        case Some(result) if result.getDeletedCount == 1L => Right(())
-        case _                                            => Left(RepositoryError.Conflict)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "embeddingWork.complete") {
+        PublisherBridge
+          .first(collection.deleteOne(leaseFilter(claim)))
+          .map {
+            case Some(result) if result.getDeletedCount == 1L => Right(())
+            case Some(_)                                      => Left(RepositoryError.Conflict)
+            case None                                         => Left(RepositoryError.MissingWriteResult)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
 
   override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): IO[Either[RepositoryError, Unit]] =
     transition(
@@ -154,13 +169,17 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase) extends Embedd
       claim: ClaimedEmbeddingWork,
       update: org.bson.conversions.Bson
   ): IO[Either[RepositoryError, Unit]] =
-    PublisherBridge
-      .first(collection.updateOne(leaseFilter(claim), update))
-      .map {
-        case Some(result) if result.getMatchedCount == 1L => Right(())
-        case _                                            => Left(RepositoryError.Conflict)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "embeddingWork.transition") {
+        PublisherBridge
+          .first(collection.updateOne(leaseFilter(claim), update))
+          .map {
+            case Some(result) if result.getMatchedCount == 1L => Right(())
+            case Some(_)                                      => Left(RepositoryError.Conflict)
+            case None                                         => Left(RepositoryError.MissingWriteResult)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
 
   private def leaseFilter(claim: ClaimedEmbeddingWork) =
     Filters.and(

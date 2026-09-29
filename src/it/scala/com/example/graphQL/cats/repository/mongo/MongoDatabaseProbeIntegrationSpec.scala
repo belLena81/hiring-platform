@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{IO, Ref, Resource}
 import com.example.graphQL.cats.api.graphql.TestGraphQLSupport
 import com.example.graphQL.cats.api.http.HiringApiRoutes
@@ -99,7 +100,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   private def fixtureCandidate(id: UserId): User =
     User(
       id,
-      Some(s"$id@example.com"),
+      Some(email(s"$id@example.com")),
       "Candidate",
       UserRole.Candidate,
       Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Backend engineer"), None))),

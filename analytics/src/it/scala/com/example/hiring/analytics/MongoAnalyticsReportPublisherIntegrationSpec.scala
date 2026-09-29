@@ -515,19 +515,18 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("subjectIds", java.util.List.of(subjectId))
             .append("subjectRefsVersion", 1)
         )
-      val store = new MongoAnalyticsErasureWorkerStore[IO](
+      val store = AnalyticsErasureWorkerTestSupport.stores(
         reactiveClient,
-        AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
-        streams = AnalyticsTestOperationalConfig.streams
+        AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName)
       )
       val result = for {
-        claim <- store.claim(now, now.plusSeconds(360), 1).map(_.head)
+        claim <- store.queue.claim(now, now.plusSeconds(360), 1).map(_.head)
         typedSubjectId = asAccountSubjectId(subjectId)
-        early <- store.publisherDrainReady(typedSubjectId, now, 30.seconds)
-        drained <- store.publisherDrainReady(typedSubjectId, now.plusSeconds(61), 30.seconds)
-        purged <- store.purgeOutbox(typedSubjectId, now.plusSeconds(61), 30.seconds)
-        firstAdvance <- store.advance(claim, ErasurePhase.PublisherDrained, 0, now.plusSeconds(62))
-        staleAdvance <- store.advance(claim, ErasurePhase.PublisherDrained, 0, now.plusSeconds(62))
+        early <- store.queue.publisherDrainReady(typedSubjectId, now, 30.seconds)
+        drained <- store.queue.publisherDrainReady(typedSubjectId, now.plusSeconds(61), 30.seconds)
+        purged <- store.queue.purgeOutbox(typedSubjectId, now.plusSeconds(61), 30.seconds)
+        firstAdvance <- store.progress.advance(claim, ErasurePhase.PublisherDrained, 0, now.plusSeconds(62))
+        staleAdvance <- store.progress.advance(claim, ErasurePhase.PublisherDrained, 0, now.plusSeconds(62))
         advanced = claim.copy(
           phase = ErasurePhase.PublisherDrained,
           progress = 0,
@@ -540,15 +539,15 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             KafkaRetentionBarrier.Partition(1, 14L)
           )
         )
-        saved <- store.persistBarrier(advanced, barrier, now.plusSeconds(63))
-        loaded <- store.readBarrier(asAccountSubjectId(subjectId))
-        _ <- store.releaseForOtherRequests(advanced, now.plusSeconds(64))
-        reclaimed <- store.claim(now.plusSeconds(65), now.plusSeconds(125), 1).map(_.head)
-        staleRenew <- store.renew(advanced, now.plusSeconds(66), now.plusSeconds(126))
-        currentRenew <- store.renew(reclaimed, now.plusSeconds(66), now.plusSeconds(126))
-        deferred <- store.defer(reclaimed, now.plusSeconds(120), now.plusSeconds(66))
-        beforeResume <- store.claim(now.plusSeconds(100), now.plusSeconds(160), 1)
-        resumed <- store.claim(now.plusSeconds(121), now.plusSeconds(181), 1).map(_.head)
+        saved <- store.barrier.persistBarrier(advanced, barrier, now.plusSeconds(63))
+        loaded <- store.barrier.readBarrier(asAccountSubjectId(subjectId))
+        _ <- store.progress.releaseForOtherRequests(advanced, now.plusSeconds(64))
+        reclaimed <- store.queue.claim(now.plusSeconds(65), now.plusSeconds(125), 1).map(_.head)
+        staleRenew <- store.progress.renew(advanced, now.plusSeconds(66), now.plusSeconds(126))
+        currentRenew <- store.progress.renew(reclaimed, now.plusSeconds(66), now.plusSeconds(126))
+        deferred <- store.progress.defer(reclaimed, now.plusSeconds(120), now.plusSeconds(66))
+        beforeResume <- store.queue.claim(now.plusSeconds(100), now.plusSeconds(160), 1)
+        resumed <- store.queue.claim(now.plusSeconds(121), now.plusSeconds(181), 1).map(_.head)
       } yield (
         claim,
         early,
@@ -616,7 +615,8 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .append("subjectIds", "malformed")
             .append("subjectRefsVersion", 1)
         )
-      val malformedRefs = store.purgeOutbox(typedSubjectId, now.plusSeconds(130), 30.seconds).attempt.unsafeRunSync()
+      val malformedRefs =
+        store.queue.purgeOutbox(typedSubjectId, now.plusSeconds(130), 30.seconds).attempt.unsafeRunSync()
       assert(malformedRefs.swap.toOption.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()

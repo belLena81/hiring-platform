@@ -43,6 +43,7 @@ lazy val analytics = (project in file("."))
       "com.typesafe" % "config" % typesafeConfigVersion,
       "io.github.iltotore" %% "iron" % ironVersion,
       "co.fs2" %% "fs2-core" % "3.14.0",
+      "co.fs2" %% "fs2-io" % "3.14.0" % Test,
       "org.typelevel" %% "log4cats-slf4j" % "2.8.0",
       "io.github.kirill5k" %% "mongo4cats-core" % mongo4catsVersion,
       "io.github.kirill5k" %% "mongo4cats-circe" % mongo4catsVersion,

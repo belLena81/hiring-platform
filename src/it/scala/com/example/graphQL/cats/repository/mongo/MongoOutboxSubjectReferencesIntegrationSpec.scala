@@ -1,10 +1,12 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{Deferred, IO, Resource}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{
   AccountDeletionStatus,
   AccountStatus,
+  PasswordHash,
   RecruiterProfile,
   User,
   UserProfile,
@@ -517,8 +519,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
   }
 
   private object NoopPasswordHasher extends PasswordHasher {
-    override def hash(password: String): IO[String] = IO.pure(password)
-    override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(encoded == password)
+    override def hash(password: String): IO[PasswordHash] = IO.pure(PasswordHash.fromEncoded(password))
+    override def verify(encoded: PasswordHash, password: String): IO[Boolean] = IO.pure(encoded.encoded == password)
     override def verifyUnknown(password: String): IO[Unit] = IO.unit
   }
 
@@ -754,7 +756,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
   private def recruiterUser(id: UserId): User =
     User(
       id,
-      Some(s"$id@example.com"),
+      Some(email(s"$id@example.com")),
       "Recruiter",
       UserRole.Recruiter,
       Some(UserProfile.Recruiter(RecruiterProfile("Hiring Co", Some("Lead Recruiter")))),

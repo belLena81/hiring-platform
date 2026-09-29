@@ -2,7 +2,7 @@ package com.example.hiring.analytics.cli
 
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.config.AnalyticsRuntimeConfig
-import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureWorkerStore
+import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsErasureQueue
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.service.erasure.ErasureUpdate
 
@@ -57,6 +57,6 @@ object AnalyticsErasureRepairMain extends IOApp {
         .as(ExitCode.Error)
   }
 
-  private def program(operation: MongoAnalyticsErasureWorkerStore[IO] => IO[ExitCode]): IO[ExitCode] =
+  private def program(operation: MongoAnalyticsErasureQueue[IO] => IO[ExitCode]): IO[ExitCode] =
     AnalyticsRuntimeConfig.loadWorker[IO].flatMap(settings => AppModule.repair[IO](settings).use(operation))
 }

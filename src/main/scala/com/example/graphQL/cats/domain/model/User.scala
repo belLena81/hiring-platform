@@ -102,7 +102,7 @@ object UserProfile {
 
 final case class User(
     id: UserId,
-    email: Option[String],
+    email: Option[EmailAddress],
     name: String,
     role: UserRole,
     profile: Option[UserProfile],
@@ -136,7 +136,7 @@ object User {
       createdAt: Instant
   ): ValidatedNel[DomainValidationError, User] =
     (
-      email.traverse(value => validateText("email", value)),
+      email.traverse(value => EmailAddress.from(value).toValidatedNel),
       validateText("name", name)
     ).mapN((validEmail, validName) => User(id, validEmail, validName, role, profile, createdAt))
 }

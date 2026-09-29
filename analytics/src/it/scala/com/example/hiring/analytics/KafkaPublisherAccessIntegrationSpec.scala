@@ -121,7 +121,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val requestedAt = Instant.now()
     try {
       database
-        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .getCollection(AnalyticsCollections.ErasureRequests)
         .insertOne(
           new Document("_id", requestId)
             .append("state", "Pending")
@@ -142,11 +142,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .insertOne(
           new Document("_id", requestId).append("deleted", true)
         )
-      val store = new MongoAnalyticsErasureWorkerStore[IO](
-        reactiveClient,
-        reactiveDatabase,
-        streams = AnalyticsTestOperationalConfig.streams
-      )
+      val store = AnalyticsErasureWorkerTestSupport.stores(reactiveClient, reactiveDatabase)
       val worker = AnalyticsErasureWorkerTestSupport.worker(
         null,
         reactiveDatabase,
@@ -163,7 +159,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         )
       )
       val result = (for {
-        claim <- store.claim(requestedAt, requestedAt.plusSeconds(60L), 1).map(_.head)
+        claim <- store.queue.claim(requestedAt, requestedAt.plusSeconds(60L), 1).map(_.head)
         reservation = AnalyticsReportReservation(
           AnalyticsErasureWorkerTestSupport.runId("worker-auth-" + requestId),
           AnalyticsErasureWorkerTestSupport.fingerprint("worker-auth-range"),
@@ -171,24 +167,24 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           1L
         )
         failure <- worker.process(claim, reservation).attempt
-        barrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
+        barrier <- store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
         request <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
         outboxCount <- IO.blocking(database.getCollection("event_outbox").countDocuments())
         _ <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .updateOne(
               new Document("_id", requestId),
               new Document("$set", new Document("leaseUntil", java.util.Date.from(requestedAt.minusSeconds(1L))))
             )
         )
         reclaimAt <- IO.realTimeInstant.map(_.plusSeconds(1L))
-        reclaimed <- store.claim(reclaimAt, reclaimAt.plusSeconds(60L), 1).map(_.head)
+        reclaimed <- store.queue.claim(reclaimAt, reclaimAt.plusSeconds(60L), 1).map(_.head)
         uncertainFencingCompleted = new AtomicBoolean(false)
         uncertainFencer = new TransactionalProducerFencer[IO] {
           override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
@@ -219,22 +215,22 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         uncertainFailure <- uncertainWorker.process(reclaimed, reservation).attempt
         uncertainRequest <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
-        uncertainBarrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
+        uncertainBarrier <- store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
         uncertainOutboxCount <- IO.blocking(database.getCollection("event_outbox").countDocuments())
         _ <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .updateOne(
               new Document("_id", requestId),
               new Document("$set", new Document("leaseUntil", java.util.Date.from(requestedAt.minusSeconds(1L))))
             )
         )
         retryAt <- IO.realTimeInstant.map(_.plusSeconds(1L))
-        retryClaim <- store.claim(retryAt, retryAt.plusSeconds(60L), 1).map(_.head)
+        retryClaim <- store.queue.claim(retryAt, retryAt.plusSeconds(60L), 1).map(_.head)
         retryFenced = new AtomicBoolean(false)
         correctFencer = new TransactionalProducerFencer[IO] {
           override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
@@ -261,11 +257,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         retryFailure <- retryWorker.process(retryClaim, reservation).attempt
         requestAfterRetry <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
-        barrierAfterRetry <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
+        barrierAfterRetry <- store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
         outboxAfterRetry <- IO.blocking(database.getCollection("event_outbox").countDocuments())
       } yield (
         failure,
@@ -339,7 +335,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val requestedAt = Instant.now()
     try {
       database
-        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .getCollection(AnalyticsCollections.ErasureRequests)
         .insertOne(
           new Document("_id", requestId)
             .append("receiptId", receiptId)
@@ -355,11 +351,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .getCollection("event_outbox")
         .insertOne(new Document("_id", UUID.randomUUID().toString).append("subjectIds", java.util.List.of(requestId)))
 
-      val store = new MongoAnalyticsErasureWorkerStore[IO](
-        reactiveClient,
-        reactiveDatabase,
-        streams = AnalyticsTestOperationalConfig.streams
-      )
+      val store = AnalyticsErasureWorkerTestSupport.stores(reactiveClient, reactiveDatabase)
       val attempts = new AtomicInteger(0)
       val firstFailure = new AtomicReference[Throwable](null)
       val pendingWasObservedDuringOutage = new AtomicBoolean(false)
@@ -384,7 +376,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
                     ) *>
                       IO.blocking(broker.stop()) *> IO.blocking {
                         val request = database
-                          .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+                          .getCollection(AnalyticsCollections.ErasureRequests)
                           .find(new Document("_id", requestId))
                           .first()
                         val phase = Option(request).flatMap(value => Option(value.getString("phase")))
@@ -474,7 +466,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         def awaitDurableAdvance: IO[Document] = IO.defer {
           IO.blocking(
             database
-              .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+              .getCollection(AnalyticsCollections.ErasureRequests)
               .find(new Document("_id", requestId))
               .first()
           ).flatMap { document =>
@@ -494,7 +486,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         assertEquals(request.getString("state"), "Processing")
         assertEquals(request.getString("receiptId"), receiptId)
         assertEquals(
-          store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)).unsafeRunSync(),
+          store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)).unsafeRunSync(),
           None
         )
         assertEquals(database.getCollection("event_outbox").countDocuments(), 1L)

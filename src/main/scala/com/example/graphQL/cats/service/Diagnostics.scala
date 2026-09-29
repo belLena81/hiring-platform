@@ -22,6 +22,8 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case Shutdown extends LogEvent("SHUTDOWN", "RUNTIME", "Application resources released", LogLevel.Info)
   case GraphQLCompleted extends LogEvent("GRAPHQL_COMPLETED", "GRAPHQL", "GraphQL operation finished", LogLevel.Info)
   case MongoProbeFailed extends LogEvent("MONGO_PROBE_FAILED", "MONGO", "MongoDB ping failed", LogLevel.Warn)
+  case MongoRepositoryFailed
+      extends LogEvent("MONGO_REPOSITORY_FAILED", "MONGO", "Mongo repository operation failed", LogLevel.Error)
   case MongoSetupFailed extends LogEvent("MONGO_SETUP_FAILED", "MONGO", "MongoDB setup failed", LogLevel.Error)
   case LocalUnmasked
       extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
@@ -79,7 +81,10 @@ object LogFields {
     "com.mongodb.MongoSocketOpenException",
     "com.mongodb.MongoSocketReadException",
     "com.mongodb.MongoSocketReadTimeoutException",
-    "com.mongodb.MongoCommandException"
+    "com.mongodb.MongoCommandException",
+    "com.mongodb.MongoWriteException",
+    "com.mongodb.MongoBulkWriteException",
+    "com.mongodb.MongoException"
   )
   private val Root = "com.example.graphQL.cats."
 

@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
 import com.mongodb.reactivestreams.client.{ClientSession, MongoClient}
 import retry.*
@@ -59,7 +60,8 @@ private[mongo] object MongoTransactionRunner {
   def sessions(
       client: MongoClient,
       duplicateKeyError: RepositoryError,
-      retryPolicy: RetryPolicy = RetryPolicy()
+      retryPolicy: RetryPolicy = RetryPolicy(),
+      diagnostics: Diagnostics = Diagnostics.noop
   ): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
@@ -74,7 +76,9 @@ private[mongo] object MongoTransactionRunner {
             .use(use)
 
         def abort(session: ClientSession): IO[Unit] =
-          PublisherBridge.first(session.abortTransaction()).attempt.void
+          MongoRepositorySupport.guard(diagnostics, "transaction.abort")(
+            PublisherBridge.first(session.abortTransaction()).map(_ => ())
+          )(_ => ())
 
         val transactionBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxTransactionAttempts)
         val commitBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxCommitAttempts)
@@ -84,15 +88,23 @@ private[mongo] object MongoTransactionRunner {
 
         def commit(session: ClientSession, result: A): IO[CommitOutcome[A]] = {
           val commitAttempt =
-            PublisherBridge.first(session.commitTransaction()).as(CommitOutcome.Completed(Right(result))).handleError {
-              case error: MongoException =>
-                RetryDecision.decide(RetryStage.Commit, labels(error)) match {
-                  case RetryDecision.RetryCommit      => CommitOutcome.RetryCommit(error)
-                  case RetryDecision.RetryTransaction => CommitOutcome.RetryTransaction(error)
-                  case RetryDecision.Fail             => CommitOutcome.Completed(mapWrite(error, duplicateKeyError))
-                }
-              case error => CommitOutcome.Completed(mapWrite(error, duplicateKeyError))
-            }
+            PublisherBridge
+              .first(session.commitTransaction())
+              .as(CommitOutcome.Completed(Right(result)))
+              .handleErrorWith {
+                case error: MongoException =>
+                  MongoRepositorySupport.reportFailure(diagnostics, "transaction.commit", error).as {
+                    RetryDecision.decide(RetryStage.Commit, labels(error)) match {
+                      case RetryDecision.RetryCommit      => CommitOutcome.RetryCommit(error)
+                      case RetryDecision.RetryTransaction => CommitOutcome.RetryTransaction(error)
+                      case RetryDecision.Fail             => CommitOutcome.Completed(mapWrite(error, duplicateKeyError))
+                    }
+                  }
+                case error =>
+                  MongoRepositorySupport
+                    .reportFailure(diagnostics, "transaction.commit", error)
+                    .as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+              }
 
           retryingOnFailures(commitAttempt)(
             policy = commitBackoff,
@@ -110,8 +122,11 @@ private[mongo] object MongoTransactionRunner {
               error match {
                 case mongo: MongoException
                     if RetryDecision.decide(RetryStage.Operation, labels(mongo)) == RetryDecision.RetryTransaction =>
-                  abort(session).as(CommitOutcome.RetryTransaction(mongo))
-                case _ => abort(session).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+                  (abort(session) *> MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error))
+                    .as(CommitOutcome.RetryTransaction(mongo))
+                case _ =>
+                  (abort(session) *> MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error))
+                    .as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
               }
             case Right(Left(error)) =>
               abort(session).as(CommitOutcome.Completed(Left(error)))

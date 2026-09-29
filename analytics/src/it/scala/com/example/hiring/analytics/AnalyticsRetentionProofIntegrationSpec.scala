@@ -383,11 +383,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     val request = db.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first()
     assert(request != null, "assertion failed")
     assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
-    val barrier = new MongoAnalyticsErasureWorkerStore[IO](
-      reactiveClient,
-      reactiveDb,
-      streams = AnalyticsTestOperationalConfig.streams
-    )
+    val barrier = AnalyticsErasureWorkerTestSupport
+      .barrier(reactiveDb)
       .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("worker must persist its Kafka barrier"))
@@ -448,11 +445,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     assert(request != null, "assertion failed")
     val purgedAt =
       Option(request.getDate("deltaPurgedAt")).map(_.toInstant).getOrElse(fail("DeltaPurged timestamp is missing"))
-    val barrier = new MongoAnalyticsErasureWorkerStore[IO](
-      reactiveClient,
-      reactiveDb,
-      streams = AnalyticsTestOperationalConfig.streams
-    )
+    val barrier = AnalyticsErasureWorkerTestSupport
+      .barrier(reactiveDb)
       .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("Kafka barrier is missing"))

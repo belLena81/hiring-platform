@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.service
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
 import cats.effect.Ref
 import com.example.graphQL.cats.repository.protocol.{
@@ -43,7 +44,7 @@ private[cats] object ServiceFixtures {
 
   val candidate: User = User(
     candidateId,
-    Some("candidate@example.com"),
+    Some(email("candidate@example.com")),
     "Candidate",
     UserRole.Candidate,
     Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
@@ -51,13 +52,14 @@ private[cats] object ServiceFixtures {
   )
   val recruiter: User = User(
     recruiterId,
-    Some("recruiter@example.com"),
+    Some(email("recruiter@example.com")),
     "Recruiter",
     UserRole.Recruiter,
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
     now
   )
-  val admin: User = User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
+  val admin: User =
+    User(adminId, Some(email("admin@example.com")), "Admin", UserRole.Admin, None, now, adminSingleton = true)
   val openJob: Job = Job(
     jobId,
     recruiterId,

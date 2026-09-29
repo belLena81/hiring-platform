@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.domain
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
@@ -26,7 +27,7 @@ class ApplicationSubmissionSpec extends FunSuite {
 
   private val candidate = User(
     candidateId,
-    Some("candidate@example.com"),
+    Some(email("candidate@example.com")),
     "Candidate",
     UserRole.Candidate,
     Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
@@ -34,7 +35,7 @@ class ApplicationSubmissionSpec extends FunSuite {
   )
   private val recruiter = User(
     recruiterId,
-    Some("recruiter@example.com"),
+    Some(email("recruiter@example.com")),
     "Recruiter",
     UserRole.Recruiter,
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),

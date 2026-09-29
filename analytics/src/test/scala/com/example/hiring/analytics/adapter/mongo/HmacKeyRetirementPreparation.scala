@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
+import com.example.hiring.analytics.adapter.local.LocalProcess
 import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -116,22 +117,22 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
         destination == "/var/lib/kafka/data" && (kind != "volume" || name != volumeName)
       }
 
-  private def docker[F[_]: Async](args: Vector[String]): F[String] = Async[F]
-    .blocking {
-      val process = new ProcessBuilder(args*).redirectErrorStream(true).start()
-      if (!process.waitFor(30L, TimeUnit.SECONDS)) {
-        process.destroyForcibly()
-        Left(AnalyticsError.InvalidConfiguration("Kafka Docker inspection timed out"))
-      } else {
-        val output = new String(process.getInputStream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).trim
-        Either.cond(
-          process.exitValue() == 0,
-          output,
-          AnalyticsError.InvalidConfiguration("Kafka Docker inspection failed")
+  private def docker[F[_]: Async](args: Vector[String]): F[String] =
+    LocalProcess
+      .run[F](
+        args,
+        "Kafka Docker inspection timed out",
+        "Kafka Docker inspection could not start"
+      )
+      .flatMap(result =>
+        Async[F].fromEither(
+          Either.cond(
+            result.exitCode == 0,
+            result.output,
+            AnalyticsError.InvalidConfiguration("Kafka Docker inspection failed")
+          )
         )
-      }
-    }
-    .flatMap(Async[F].fromEither)
+      )
 
   private def dockerBrokerContainer[F[_]: Async](connection: KafkaConnection, volumeName: String): F[String] =
     for {

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
 import cats.effect.Ref
 import cats.syntax.all.*
@@ -58,7 +59,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   private val candidate = User(
     candidateId,
-    Some("candidate@example.com"),
+    Some(email("candidate@example.com")),
     "Candidate",
     UserRole.Candidate,
     Some(
@@ -77,14 +78,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   )
   private val recruiter = User(
     recruiterId,
-    Some("recruiter@example.com"),
+    Some(email("recruiter@example.com")),
     "Recruiter",
     UserRole.Recruiter,
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
     now
   )
   private val admin =
-    User(adminId, Some("admin@example.com"), "Admin", UserRole.Admin, None, now, adminSingleton = true)
+    User(adminId, Some(email("admin@example.com")), "Admin", UserRole.Admin, None, now, adminSingleton = true)
   private val openJob = job(jobId, JobStatus.Open)
   private val closedJob = job(closedJobId, JobStatus.Closed)
   private val application = Application.create(applicationId, candidateId, jobId, now)
@@ -611,7 +612,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     val secondApplicationId = ApplicationId(UUID.fromString("10000000-0000-0000-0000-000000000009"))
     val secondRecruiter = User(
       secondRecruiterId,
-      Some("recruiter2@example.com"),
+      Some(email("recruiter2@example.com")),
       "Recruiter 2",
       UserRole.Recruiter,
       Some(UserProfile.Recruiter(RecruiterProfile("Acme 2", None))),

@@ -147,7 +147,7 @@ private[graphql] object HiringGraphQLTypes {
           emailVisibilityFetcher
             .deferOpt(context.value.id)
             // Sangria's deferred Future projection requires an EC; parasitic avoids a thread hop.
-            .map(_.flatMap(_ => context.value.email))(using ExecutionContext.parasitic)
+            .map(_.flatMap(_ => context.value.email.map(_.value)))(using ExecutionContext.parasitic)
       ),
       simple("name", StringType)(_.name),
       simple("role", userRole)(_.role),

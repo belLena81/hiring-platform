@@ -113,15 +113,15 @@ object MongoHiringRuntime {
       )
       capability <- embeddingCapability(database, client, config, setup.await)
       users = capability.users
-      applications = MongoApplicationRepository.transactional(database, client)
-      searchSessions = MongoSearchSessionRepository.transactional(database, client)
-      searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client)
-      outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
-      receipts = new MongoConsumerReceiptRepository(database)
-      mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
-      erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-      analyticsReports = MongoAnalyticsReportRepository.transactional(database, client)
-      quarantine = new MongoEventQuarantineRepository(database)
+      applications = MongoApplicationRepository.transactional(database, client, config.diagnostics)
+      searchSessions = MongoSearchSessionRepository.transactional(database, client, config.diagnostics)
+      searchSessionWork = MongoSearchSessionWorkRepository.transactional(database, client, config.diagnostics)
+      outbox = MongoOperationalEventOutboxRepository.transactional(database, client, config.diagnostics)
+      receipts = new MongoConsumerReceiptRepository(database, config.diagnostics)
+      mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, config.diagnostics)
+      erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client, config.diagnostics)
+      analyticsReports = MongoAnalyticsReportRepository.transactional(database, client, config.diagnostics)
+      quarantine = new MongoEventQuarantineRepository(database, config.diagnostics)
       services <- hiringServices(
         capability,
         applications,
@@ -160,9 +160,9 @@ object MongoHiringRuntime {
   ): Resource[IO, RuntimeEmbeddingCapability] =
     EmbeddingCapability.resource(
       config.vectorSearch,
-      IO(new MongoEmbeddingWorkRepository(database)),
-      embeddingWork => IO(MongoUserRepository.transactional(database, client, embeddingWork)),
-      embeddingWork => IO(MongoJobRepository.transactional(database, client, embeddingWork)),
+      IO(new MongoEmbeddingWorkRepository(database, config.diagnostics)),
+      embeddingWork => IO(MongoUserRepository.transactional(database, client, embeddingWork, config.diagnostics)),
+      embeddingWork => IO(MongoJobRepository.transactional(database, client, embeddingWork, config.diagnostics)),
       IO(
         new MongoSemanticSearchRepository(
           database,
@@ -173,7 +173,8 @@ object MongoHiringRuntime {
           config.vectorSearch.numCandidates,
           config.vectorSearch.fusionStrategy,
           config.vectorSearch.rerankEnabled,
-          config.vectorSearch.rerankModel
+          config.vectorSearch.rerankModel,
+          config.diagnostics
         )
       ),
       config.embeddingService,
@@ -214,12 +215,6 @@ object MongoHiringRuntime {
   ): Resource[IO, HiringGraphQLServices] =
     val users = capability.users
     val jobs = capability.jobs
-    val hasher = new Argon2PasswordHasher(
-      passwordHash.iterations,
-      passwordHash.memoryKilobytes,
-      passwordHash.parallelism,
-      passwordHashPermits
-    )
     val tokenIssuer = new JwtAccessTokenIssuer(jwtAuth)
     val idempotent = Idempotent(mutationReceipts)
     val readModel = HiringReadService(users, jobs, applications)
@@ -247,28 +242,37 @@ object MongoHiringRuntime {
         AnalyticsReportingService(users, analyticsReports)
       )
 
-    SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).map {
-      searchSessionHandoff =>
-        capability match {
-          case EmbeddingCapability.Disabled(_, _) =>
-            val account =
-              UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, idempotent = idempotent)
-            val jobService = JobService.live(users, jobs, EmbeddingWorkPublisher.noop, idempotent)
-            assemble(jobService, account, searchSessionHandoff = searchSessionHandoff)
-          case EmbeddingCapability.Enabled(_, _, _, search, embeddings, publisher, model) =>
-            val jobService = JobService.live(users, jobs, publisher, idempotent)
-            val accountService =
-              UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, publisher, idempotent)
-            val semanticSearch = SemanticSearchService(
-              users,
-              jobs,
-              embeddings,
-              search,
-              model
-            )
-            assemble(jobService, accountService, Some(semanticSearch), searchSessionHandoff)
+    Argon2PasswordHasher
+      .resource(
+        passwordHash.iterations,
+        passwordHash.memoryKilobytes,
+        passwordHash.parallelism,
+        passwordHashPermits
+      )
+      .flatMap { hasher =>
+        SearchSessionHandoff.resource(searchSessionWork, SearchSessionHandoffConfig(), diagnostics).map {
+          searchSessionHandoff =>
+            capability match {
+              case EmbeddingCapability.Disabled(_, _) =>
+                val account =
+                  UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, idempotent = idempotent)
+                val jobService = JobService.live(users, jobs, EmbeddingWorkPublisher.noop, idempotent)
+                assemble(jobService, account, searchSessionHandoff = searchSessionHandoff)
+              case EmbeddingCapability.Enabled(_, _, _, search, embeddings, publisher, model) =>
+                val jobService = JobService.live(users, jobs, publisher, idempotent)
+                val accountService =
+                  UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, publisher, idempotent)
+                val semanticSearch = SemanticSearchService(
+                  users,
+                  jobs,
+                  embeddings,
+                  search,
+                  model
+                )
+                assemble(jobService, accountService, Some(semanticSearch), searchSessionHandoff)
+            }
         }
-    }
+      }
 
   private def voyageEmbeddingService(config: VectorSearchConfig, apiKey: String): Resource[IO, EmbeddingService] =
     VoyageEmbeddingService.resource(

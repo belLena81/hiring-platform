@@ -27,8 +27,8 @@ private[mongo] object MongoHiringCodecs {
 
   import StoredDocumentError.*
 
-  def userWithPassword(value: User, passwordHash: String, version: Long = 0L): Document =
-    MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash), version))
+  def userWithPassword(value: User, passwordHash: PasswordHash, version: Long = 0L): Document =
+    MongoHiringPersistenceCodecs.user(storedUser(value, Some(passwordHash.encoded), version))
 
   def user(value: User, version: Long = 0L): Document =
     MongoHiringPersistenceCodecs.user(storedUser(value, None, version))
@@ -42,7 +42,7 @@ private[mongo] object MongoHiringCodecs {
   private def readVersionedUser(value: StoredUser): ValidatedNel[StoredDocumentError, Versioned[User]] =
     (
       uuid("_id", value._id).toValidatedNel.map(UserId.apply),
-      value.email.validNel,
+      value.email.traverse(email => EmailAddress.from(email).leftMap(_ => InvalidField("email")).toValidatedNel),
       value.name.validNel,
       enumValue("role", value.role, UserRole.values).toValidatedNel,
       readUserProfile(value.profile),
@@ -64,7 +64,7 @@ private[mongo] object MongoHiringCodecs {
   def readCredentials(document: Document): ValidatedNel[StoredDocumentError, Option[AccountCredentials]] =
     decode(document, UserFields)(MongoHiringPersistenceCodecs.decodeUser).andThen { value =>
       value.passwordHash.fold(None.validNel)(hash =>
-        readVersionedUser(value).map(v => AccountCredentials(v.value, hash).some)
+        readVersionedUser(value).map(v => AccountCredentials(v.value, PasswordHash.fromEncoded(hash)).some)
       )
     }
 
@@ -474,7 +474,7 @@ private[mongo] object MongoHiringCodecs {
     catch { case NonFatal(_) => Left(InvalidField(field)) }
 
   private def storedUser(value: User, passwordHash: Option[String], version: Long): StoredUser = {
-    val emailCanonical = value.email.map(AccountName.canonical)
+    val emailCanonical = value.email.map(email => AccountName.canonical(email.value))
     val embedding = value.embedding.map(_.values.map(_.toDouble))
     val embeddingMeta = value.embedding.map(embedding =>
       StoredEmbeddingMeta(
@@ -486,7 +486,7 @@ private[mongo] object MongoHiringCodecs {
     StoredUser(
       value.id.value.toString,
       version,
-      value.email,
+      value.email.map(_.value),
       emailCanonical,
       value.name,
       AccountName.canonical(value.name),

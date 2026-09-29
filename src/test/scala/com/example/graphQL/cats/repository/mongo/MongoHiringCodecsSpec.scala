@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import com.example.graphQL.cats.AccountValueFixtures.email
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId}
 import com.example.graphQL.cats.domain.model.{
@@ -14,6 +15,7 @@ import com.example.graphQL.cats.domain.model.{
   Job,
   JobStatus,
   Location,
+  PasswordHash,
   RecruiterProfile,
   User,
   UserProfile,
@@ -50,7 +52,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     )
     val user = User(
       candidateId,
-      Some("candidate@example.com"),
+      Some(email("candidate@example.com")),
       "Candidate",
       UserRole.Candidate,
       Some(UserProfile.Candidate(profile)),
@@ -62,6 +64,37 @@ class MongoHiringCodecsSpec extends FunSuite {
     assertEquals(result.toEither, Right(user))
     assertEquals(MongoHiringCodecs.user(user).get("profile", classOf[Document]).getString("kind"), "Candidate")
     assert(!MongoHiringCodecs.user(user).containsKey("recruiterProfile"))
+  }
+
+  test("email and password hash domain values round-trip through their string storage fields") {
+    val user = User(
+      candidateId,
+      Some(email("candidate@example.com")),
+      "Candidate",
+      UserRole.Candidate,
+      Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+      now
+    )
+    val encodedHash = PasswordHash.fromEncoded("encoded-hash")
+    val document = MongoHiringCodecs.userWithPassword(user, encodedHash)
+
+    assertEquals(document.getString("email"), "candidate@example.com")
+    assertEquals(document.getString("passwordHash"), "encoded-hash")
+    assertEquals(
+      MongoHiringCodecs.readCredentials(document).toOption.flatten,
+      Some(com.example.graphQL.cats.domain.model.AccountCredentials(user, encodedHash))
+    )
+  }
+
+  test("user codec rejects email values that fail the existing domain validation") {
+    val document = MongoHiringCodecs
+      .user(User(candidateId, Some(email("candidate@example.com")), "Candidate", UserRole.Candidate, None, now))
+    document.put("email", " ")
+
+    assertEquals(
+      MongoHiringCodecs.readUser(document).toEither,
+      Left(NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InvalidField("email")))
+    )
   }
 
   test("user codec preserves recruiter profile as the single tagged profile") {
@@ -103,7 +136,7 @@ class MongoHiringCodecsSpec extends FunSuite {
   test("user codec keeps legacy untagged profiles as candidate profiles") {
     val user = User(
       candidateId,
-      Some("candidate@example.com"),
+      Some(email("candidate@example.com")),
       "Candidate",
       UserRole.Candidate,
       Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
@@ -120,7 +153,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       .user(
         User(
           candidateId,
-          Some("candidate@example.com"),
+          Some(email("candidate@example.com")),
           "Candidate",
           UserRole.Candidate,
           Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
@@ -201,11 +234,11 @@ class MongoHiringCodecsSpec extends FunSuite {
 
   test("malformed stored documents decode to non-sensitive typed errors") {
     val missingName = MongoHiringCodecs.user(
-      User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+      User(candidateId, Some(email("candidate@example.com")), "Candidate", UserRole.Candidate, None, now)
     )
     missingName.remove("name")
     val invalidRole = MongoHiringCodecs
-      .user(User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now))
+      .user(User(candidateId, Some(email("candidate@example.com")), "Candidate", UserRole.Candidate, None, now))
       .append("role", "NotARole")
     val invalidEmbedding = MongoHiringCodecs
       .job(
@@ -239,13 +272,13 @@ class MongoHiringCodecsSpec extends FunSuite {
     )
     assertEquals(
       MongoStoredDocumentDecoding.repository(MongoHiringCodecs.readUser(missingName)),
-      Left(RepositoryError.Unavailable)
+      Left(RepositoryError.InvalidStoredData)
     )
   }
 
   test("codec accumulates independent semantic user errors") {
     val malformed = MongoHiringCodecs.user(
-      User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+      User(candidateId, Some(email("candidate@example.com")), "Candidate", UserRole.Candidate, None, now)
     )
     malformed.put("role", "NotARole")
     malformed.put("accountStatus", "NotAnAccountStatus")
@@ -266,7 +299,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       .user(
         User(
           candidateId,
-          Some("candidate@example.com"),
+          Some(email("candidate@example.com")),
           "Candidate",
           UserRole.Candidate,
           Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
@@ -277,7 +310,7 @@ class MongoHiringCodecsSpec extends FunSuite {
     val adminWithoutSingleton = MongoHiringCodecs.user(
       User(
         candidateId,
-        Some("admin@example.com"),
+        Some(email("admin@example.com")),
         "Admin",
         UserRole.Admin,
         None,
@@ -298,7 +331,7 @@ class MongoHiringCodecsSpec extends FunSuite {
   }
 
   test("codec builders do not share mutable document state") {
-    val user = User(candidateId, Some("candidate@example.com"), "Candidate", UserRole.Candidate, None, now)
+    val user = User(candidateId, Some(email("candidate@example.com")), "Candidate", UserRole.Candidate, None, now)
     val first = MongoHiringCodecs.user(user)
     val second = MongoHiringCodecs.user(user)
 

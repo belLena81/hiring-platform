@@ -43,12 +43,12 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     assertEquals(ranked.map(_.map(_.meta.sourceHash)), Right(Some(SourceHash.sha256(SearchableText.job(job)))))
   }
 
-  test("malformed native-fusion job results map to sanitized search unavailability") {
+  test("malformed native-fusion job results are classified as invalid stored data") {
     val malformed = new Document("_id", "unexpected").append("unsupported", true).append("score", "invalid")
 
     assertEquals(
       MongoSemanticSearchResult.rankedJobs(List(malformed), query),
-      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)
+      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.InvalidStoredData)
     )
   }
 
@@ -92,10 +92,10 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     assertEquals(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(stale)), query), Right(None))
   }
 
-  test("malformed native-fusion candidate results map to sanitized search unavailability") {
+  test("malformed native-fusion candidate results are classified as invalid stored data") {
     assertEquals(
       MongoSemanticSearchResult.rankedCandidates(List(new Document("_id", "invalid")), query),
-      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable)
+      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.InvalidStoredData)
     )
   }
 

@@ -30,6 +30,7 @@ import com.example.graphQL.cats.service.protocol.{
 import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.service.events.SearchSessionHandoff
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
+import scala.util.Try
 import scala.util.control.NoStackTrace
 
 final case class HiringGraphQLServices(
@@ -126,11 +127,11 @@ final class RequestContext private (
     }
 
   private[graphql] def reportExecutionFailure(error: Throwable): Unit =
-    try
+    Try(
       dispatcher.unsafeRunAndForget(
         parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error))
       )
-    catch case _: Throwable => ()
+    ).toEither.fold(_ => (), identity)
 
   def users(ids: List[UserId]): IO[List[User]] =
     read(parameters.hiring.readModel.users(ids.distinct))

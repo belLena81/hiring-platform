@@ -29,9 +29,10 @@ import java.time.Instant
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
-final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
+final class MongoAnalyticsErasureAdaptersSpec extends CatsEffectSuite {
   private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
-  private def asJson(document: Document) = MongoAnalyticsErasureWorkerStore.jsonFromBson(document)
+  private def asJson(document: Document) = MongoAnalyticsErasureStoreSupport.jsonFromBson(document)
+  private val jsonCodec = MongoAnalyticsErasureStoreSupport.jsonRegistry.get(classOf[Json])
 
   test("Mongo JSON codec preserves application keys that resemble BSON metadata") {
     val value = Json.obj(
@@ -43,16 +44,28 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       )
     )
     val bson = new BsonDocument()
-    MongoAnalyticsErasureWorkerStore.jsonCodec.encode(
+    jsonCodec.encode(
       new BsonDocumentWriter(bson),
       value,
       EncoderContext.builder().isEncodingCollectibleDocument(false).build()
     )
-    val decoded = MongoAnalyticsErasureWorkerStore.jsonCodec.decode(
+    val decoded = jsonCodec.decode(
       new BsonDocumentReader(bson),
       DecoderContext.builder().build()
     )
     assertEquals(decoded, value)
+  }
+
+  test("Mongo JSON codec rejects BSON values that cannot be represented as JSON") {
+    val bson = new BsonDocument()
+    bson.put("unsupported", new org.bson.BsonJavaScript("return 1"))
+
+    intercept[IllegalArgumentException] {
+      jsonCodec.decode(
+        new BsonDocumentReader(bson),
+        DecoderContext.builder().build()
+      )
+    }
   }
 
   test("erasure phases have a stable forward-only order") {
@@ -99,20 +112,20 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       .append("progress", 17)
       .append("progressKey", key)
 
-    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(document))
+    val claim = MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(document))
     assertEquals(
       claim,
       Some(ErasureClaim(asAccountSubjectId(id), token, expiry, ErasurePhase.DeltaPurged, 17, key))
     )
     assertEquals(
-      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(new Document(document).append("fencingVersion", 0))),
+      MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(new Document(document).append("fencingVersion", 0))),
       None
     )
     assertEquals(
-      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(new Document(document).append("fencingVersion", 1.5d))),
+      MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(new Document(document).append("fencingVersion", 1.5d))),
       None
     )
-    assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(document.append("phase", "unknown"))), None)
+    assertEquals(MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(document.append("phase", "unknown"))), None)
   }
 
   test("missing optional claim fields keep defaults while malformed BSON fails closed") {
@@ -125,11 +138,11 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       .append("leaseUntil", java.util.Date.from(expiry))
 
     assertEquals(
-      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(minimal)),
+      MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(minimal)),
       Some(ErasureClaim(asAccountSubjectId(id), token, expiry, ErasurePhase.Requested, 0, 0L, 0))
     )
     assertEquals(
-      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(new Document(minimal).append("progress", "bad"))),
+      MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(new Document(minimal).append("progress", "bad"))),
       None
     )
   }
@@ -149,7 +162,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       .append("attemptCount", 7)
       .append("failureCategory", "TRANSIENT_STORAGE")
       .append("repairRequired", true)
-    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(request))
+    val claim = MongoAnalyticsErasureStoreSupport.decodeClaim(asJson(request))
     assertEquals(claim.map(_.phase), Some(ErasurePhase.DeltaPurged))
     assertEquals(claim.map(_.progress), Some(17))
     assertEquals(claim.map(_.attemptCount), Some(7))
@@ -171,7 +184,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
     val id = UUID.randomUUID().toString
     val token = UUID.randomUUID().toString
     val claim = ErasureClaim(asAccountSubjectId(id), token, now.plusSeconds(60), ErasurePhase.Requested, 0, 0L)
-    val rendered = render(MongoAnalyticsErasureWorkerStore.ownedClaimFilter(claim, now))
+    val rendered = render(MongoAnalyticsErasureStoreSupport.ownedClaimFilter(claim, now))
 
     val json = rendered.toJson
     assert(json.contains(id))

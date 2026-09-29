@@ -11,7 +11,7 @@ object AccountName {
     Normalizer.normalize(value.trim, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT)
 }
 
-final case class AccountCredentials(user: User, passwordHash: String)
+final case class AccountCredentials(user: User, passwordHash: PasswordHash)
 
 final case class UserCursor(createdAt: Instant, id: UserId)
 

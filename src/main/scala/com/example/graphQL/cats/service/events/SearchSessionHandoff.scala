@@ -85,7 +85,8 @@ object SearchSessionHandoff {
 
   private def errorType(error: RepositoryError): String =
     error match {
-      case RepositoryError.Unavailable => "java.lang.RuntimeException"
-      case _                           => "java.lang.IllegalStateException"
+      case RepositoryError.Unavailable | RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult =>
+        "java.lang.RuntimeException"
+      case _ => "java.lang.IllegalStateException"
     }
 }

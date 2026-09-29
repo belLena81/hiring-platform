@@ -8,6 +8,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.repository.protocol.{RepositoryError, SemanticSearchRepository}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.shared.search.*
+import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.Filters
 import com.mongodb.reactivestreams.client.MongoDatabase
 import org.bson.Document
@@ -24,7 +25,8 @@ final class MongoSemanticSearchRepository(
     numCandidates: Int,
     fusionStrategy: SearchFusionStrategy = SearchFusionStrategy.ApplicationRrf,
     rerankEnabled: Boolean = false,
-    rerankModel: String = "rerank-2.5-lite"
+    rerankModel: String = "rerank-2.5-lite",
+    diagnostics: Diagnostics = Diagnostics.noop
 ) extends SemanticSearchRepository {
   private lazy val jobs = database.getCollection("jobs")
   private lazy val users = database.getCollection("users")
@@ -61,12 +63,15 @@ final class MongoSemanticSearchRepository(
       filter: Bson
   ): IO[Either[RepositoryError, List[RankedCandidate]]] = {
     val pipeline = candidateVectorPipeline(vector, filter)
-    PublisherBridge
-      .collectWithin(users.aggregate(pipeline), numCandidates)
-      .map { documents =>
-        MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "semanticSearch.candidateVector") {
+        PublisherBridge
+          .collectWithin(users.aggregate(pipeline), numCandidates)
+          .map { documents =>
+            MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private def candidateLexicalSearch(
@@ -74,12 +79,15 @@ final class MongoSemanticSearchRepository(
       filter: Bson
   ): IO[Either[RepositoryError, List[RankedCandidate]]] = {
     val pipeline = candidateLexicalPipeline(query, filter)
-    PublisherBridge
-      .collectWithin(users.aggregate(pipeline), numCandidates)
-      .map { documents =>
-        MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "semanticSearch.candidateLexical") {
+        PublisherBridge
+          .collectWithin(users.aggregate(pipeline), numCandidates)
+          .map { documents =>
+            MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private[mongo] def candidateFilter(query: VectorSearchQuery, includeEmbeddingModel: Boolean): Bson = {
@@ -156,12 +164,15 @@ final class MongoSemanticSearchRepository(
       filter: Bson
   ): IO[Either[RepositoryError, List[RankedJob]]] = {
     val stages = nativeJobFusionStages(query, text, filter)
-    PublisherBridge
-      .collectWithin(jobs.aggregate(stages.asJava), query.first.value)
-      .map { documents =>
-        MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "semanticSearch.nativeJobs") {
+        PublisherBridge
+          .collectWithin(jobs.aggregate(stages.asJava), query.first.value)
+          .map { documents =>
+            MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private[mongo] def nativeJobFusionStages(
@@ -207,12 +218,15 @@ final class MongoSemanticSearchRepository(
       filter: Bson
   ): IO[Either[RepositoryError, List[RankedCandidate]]] = {
     val pipeline = nativeCandidateFusionStages(query, queryVector, filter)
-    PublisherBridge
-      .collectWithin(users.aggregate(pipeline.asJava), query.first.value)
-      .map { documents =>
-        MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "semanticSearch.nativeCandidates") {
+        PublisherBridge
+          .collectWithin(users.aggregate(pipeline.asJava), query.first.value)
+          .map { documents =>
+            MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private[mongo] def nativeCandidateFusionStages(
@@ -275,12 +289,15 @@ final class MongoSemanticSearchRepository(
       limit: Int
   ): IO[Either[RepositoryError, List[RankedJob]]] = {
     val pipeline = jobVectorPipeline(query.vector, filter, limit)
-    PublisherBridge
-      .collectWithin(jobs.aggregate(pipeline), limit)
-      .map { documents =>
-        MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "semanticSearch.vectorJobs") {
+        PublisherBridge
+          .collectWithin(jobs.aggregate(pipeline), limit)
+          .map { documents =>
+            MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private[mongo] def jobVectorPipeline(vector: List[Float], filter: Bson, limit: Int): java.util.List[Document] =
@@ -326,12 +343,15 @@ final class MongoSemanticSearchRepository(
       new Document("$limit", java.lang.Integer.valueOf(numCandidates)),
       new Document("$set", new Document("score", new Document("$meta", "searchScore")))
     ).asJava
-    PublisherBridge
-      .collectWithin(jobs.aggregate(pipeline), numCandidates)
-      .map { documents =>
-        MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
-      }
-      .handleError(_ => Left(RepositoryError.Unavailable))
+    MongoRepositorySupport
+      .repositoryGuard(diagnostics, "semanticSearch.lexicalJobs") {
+        PublisherBridge
+          .collectWithin(jobs.aggregate(pipeline), numCandidates)
+          .map { documents =>
+            MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+      .value
   }
 
   private[mongo] def jobFilter(query: VectorSearchQuery, filter: JobSearchFilter): Bson =
@@ -428,7 +448,7 @@ private[mongo] object MongoSemanticSearchResult {
       documents: List[Document],
       query: VectorSearchQuery
   ): Either[RepositoryError, List[Option[RankedJob]]] =
-    documents.traverse(rankedJob(_, query)).leftMap(_ => RepositoryError.Unavailable)
+    documents.traverse(rankedJob(_, query)).leftMap(_ => RepositoryError.InvalidStoredData)
 
   def rankedCandidates(
       documents: List[Document],
@@ -487,5 +507,5 @@ private[mongo] object MongoSemanticSearchResult {
         )
       }
     }
-    .leftMap(_ => RepositoryError.Unavailable)
+    .leftMap(_ => RepositoryError.InvalidStoredData)
 }

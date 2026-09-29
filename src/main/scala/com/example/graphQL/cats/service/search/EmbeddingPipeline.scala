@@ -180,8 +180,10 @@ final class EmbeddingPipeline(
     embedding.meta.sourceHash == hash && embedding.meta.model == model
 
   private def writeOutcome(result: Either[RepositoryError, Unit]): ProcessingOutcome = result match {
-    case Right(_) | Left(RepositoryError.Conflict)                                      => ProcessingOutcome.Completed
-    case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) => ProcessingOutcome.Retry
+    case Right(_) | Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
+    case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) |
+        Left(RepositoryError.InvalidStoredData) | Left(RepositoryError.MissingWriteResult) =>
+      ProcessingOutcome.Retry
   }
 
   private def embedDocument(text: String): IO[EmbeddingOutcome] =

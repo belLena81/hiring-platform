@@ -3,7 +3,10 @@ package com.example.hiring.analytics
 import com.example.hiring.analytics.adapter.kafka.KafkaProducerFencer
 import com.example.hiring.analytics.adapter.mongo.{
   MongoActiveDeletionMarkerSource,
-  MongoAnalyticsErasureWorkerStore,
+  MongoAnalyticsErasureBarrier,
+  MongoAnalyticsErasureProgress,
+  MongoAnalyticsErasureQueue,
+  MongoAnalyticsErasureStores,
   MongoAnalyticsLakehouseLock,
   MongoAnalyticsReportPublisher,
   MongoHmacKeyRetirementAuthorizationStore
@@ -21,6 +24,8 @@ import com.example.hiring.analytics.service.erasure.{
 import com.example.hiring.analytics.domain.{AccountSubjectId, RangeFingerprint, RunId}
 import com.example.hiring.analytics.domain.AnalyticsDigest
 import cats.effect.{Clock, IO}
+import cats.effect.unsafe.implicits.global
+import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.slf4j.Slf4jLogger
@@ -29,6 +34,20 @@ import scala.concurrent.duration.*
 
 /** Builds the production-shaped required collaborator graph for erasure integration cases. */
 private[analytics] object AnalyticsErasureWorkerTestSupport {
+  def stores(client: MongoClient[IO], database: MongoDatabase[IO]): MongoAnalyticsErasureStores[IO] =
+    MongoAnalyticsErasureStores
+      .resource(client, database, AnalyticsTestOperationalConfig.streams)
+      .allocated
+      .map(_._1)
+      .unsafeRunSync()
+
+  def barrier(database: MongoDatabase[IO]): MongoAnalyticsErasureBarrier[IO] =
+    MongoAnalyticsErasureBarrier
+      .resource(database, AnalyticsTestOperationalConfig.streams)
+      .allocated
+      .map(_._1)
+      .unsafeRunSync()
+
   def runId(raw: String): RunId = RunId.from(raw).toEither.toOption.get
   def accountSubjectId(raw: String): AccountSubjectId = AccountSubjectId.from(raw).toOption.get
 
@@ -38,7 +57,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
   def worker(
       spark: SparkSession,
       database: MongoDatabase[IO],
-      store: MongoAnalyticsErasureWorkerStore[IO],
+      stores: MongoAnalyticsErasureStores[IO],
       kafka: KafkaConnection,
       fencerKafka: KafkaConnection,
       topic: String,
@@ -76,9 +95,9 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       Slf4jLogger.getLogger[IO]
     )
     new AnalyticsErasureWorker[IO](
-      store,
-      store,
-      store,
+      stores.queue,
+      stores.progress,
+      stores.barrier,
       kafka,
       fencerKafka,
       topic,

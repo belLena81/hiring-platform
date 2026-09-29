@@ -125,8 +125,8 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
     assertEquals(MongoUserRepository.classifyJobClose(Some(zeroMatch)), Left(RepositoryError.Conflict))
   }
 
-  test("account deletion classifies a missing job replacement result as unavailable") {
-    assertEquals(MongoUserRepository.classifyJobClose(None), Left(RepositoryError.Unavailable))
+  test("account deletion classifies a missing job replacement result precisely") {
+    assertEquals(MongoUserRepository.classifyJobClose(None), Left(RepositoryError.MissingWriteResult))
   }
 
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =

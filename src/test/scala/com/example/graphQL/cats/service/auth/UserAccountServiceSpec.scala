@@ -21,6 +21,7 @@ import com.example.graphQL.cats.service.{AccountError, ActorContext, AnalyticsEr
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.*
 import munit.CatsEffectSuite
+import com.example.graphQL.cats.AccountValueFixtures.passwordHash
 
 import java.time.Instant
 import java.util.UUID
@@ -279,8 +280,8 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       unknownVerifications <- Ref.of[IO, Int](0)
       accounts <- TestAccounts.create(initialized = true)
       hasher = new PasswordHasher {
-        override def hash(password: String): IO[String] = IO.pure(s"hash:$password")
-        override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(false)
+        override def hash(password: String): IO[PasswordHash] = IO.pure(passwordHash(s"hash:$password"))
+        override def verify(encoded: PasswordHash, password: String): IO[Boolean] = IO.pure(false)
         override def verifyUnknown(password: String): IO[Unit] = unknownVerifications.update(_ + 1)
       }
       service = accountService(new TestUsers(Map.empty), accounts, hasher = hasher)
@@ -294,11 +295,12 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
 
   test("Argon2 unknown-user verification accepts arbitrary credentials without retaining their hash") {
     Semaphore[IO](1).flatMap { permits =>
-      val hasher = new Argon2PasswordHasher(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits)
-      hasher
-        .verifyUnknown("first-password")
-        .flatMap(_ => hasher.verifyUnknown("second-password"))
-        .map(assertEquals(_, ()))
+      Argon2PasswordHasher.resource(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits).use { hasher =>
+        hasher
+          .verifyUnknown("first-password")
+          .flatMap(_ => hasher.verifyUnknown("second-password"))
+          .map(assertEquals(_, ()))
+      }
     }
   }
 
@@ -398,8 +400,9 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     )
 
   private object TestHasher extends PasswordHasher {
-    override def hash(password: String): IO[String] = IO.pure(s"hash:$password")
-    override def verify(encoded: String, password: String): IO[Boolean] = IO.pure(encoded == s"hash:$password")
+    override def hash(password: String): IO[PasswordHash] = IO.pure(passwordHash(s"hash:$password"))
+    override def verify(encoded: PasswordHash, password: String): IO[Boolean] =
+      IO.pure(encoded.encoded == s"hash:$password")
     override def verifyUnknown(password: String): IO[Unit] = IO.unit
   }
 
@@ -478,13 +481,13 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   ) extends UserAccountRepository {
     override def bootstrap(
         user: User,
-        passwordHash: String,
+        passwordHash: PasswordHash,
         context: MutationWriteContext
     ): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
     override def initialized: IO[Either[RepositoryError, Boolean]] = IO.pure(Right(initializedState))
     override def createAccount(
         user: User,
-        passwordHash: String,
+        passwordHash: PasswordHash,
         now: Instant,
         context: MutationWriteContext
     ): IO[Either[RepositoryError, Unit]] =

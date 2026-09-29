@@ -33,7 +33,7 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
 
-class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
+class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
   private def assert(condition: Boolean, clue: => Any): Unit =
     if (!condition) throw new AssertionError(clue.toString)
 
@@ -145,7 +145,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       val requestId = UUID.randomUUID().toString
       val requestedAt = Instant.parse("2026-01-01T00:00:00Z")
       database
-        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .getCollection(AnalyticsCollections.ErasureRequests)
         .insertOne(
           new Document("_id", requestId)
             .append("state", "Pending")
@@ -153,11 +153,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("transactionalIds", java.util.List.of("hiring-publisher-test"))
             .append("requestedAt", Date.from(requestedAt))
         )
-      val store = new MongoAnalyticsErasureWorkerStore[IO](
-        mongo4catsClient(client),
-        mongo4catsDatabase(client, databaseName),
-        streams = AnalyticsTestOperationalConfig.streams
-      )
+      val store =
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, databaseName))
       val barrier = KafkaRetentionBarrier(
         "hiring.operational-events",
         Vector(
@@ -170,18 +167,23 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       val staleWorkerNow = requestedAt.plusSeconds(9)
 
       val result = for {
-        initial <- store.claim(requestedAt, requestedAt.plusSeconds(10), 1).map(_.head)
-        transactionalIds <- store.transactionalIds(asAccountSubjectId(requestId))
+        initial <- store.queue.claim(requestedAt, requestedAt.plusSeconds(10), 1).map(_.head)
+        transactionalIds <- store.queue.transactionalIds(asAccountSubjectId(requestId))
         _ = assertEquals(transactionalIds, Vector("hiring-publisher-test"))
-        _ <- store.advance(initial, ErasurePhase.PublisherDrained, 0, requestedAt.plusSeconds(1))
+        _ <- store.progress.advance(initial, ErasurePhase.PublisherDrained, 0, requestedAt.plusSeconds(1))
         publisherDrained = initial.copy(
           phase = ErasurePhase.PublisherDrained,
           progress = 0,
           progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * ErasurePhase.ProgressPerPhase
         )
-        _ <- store.persistBarrier(publisherDrained, barrier, requestedAt.plusSeconds(2))
-        _ <- store.persistDeltaFiles(publisherDrained, fileEvidence, requestedAt.plusSeconds(2))
-        advanced <- store.advance(publisherDrained, ErasurePhase.PublisherDrained, 17, requestedAt.plusSeconds(3))
+        _ <- store.barrier.persistBarrier(publisherDrained, barrier, requestedAt.plusSeconds(2))
+        _ <- store.progress.persistDeltaFiles(publisherDrained, fileEvidence, requestedAt.plusSeconds(2))
+        advanced <- store.progress.advance(
+          publisherDrained,
+          ErasurePhase.PublisherDrained,
+          17,
+          requestedAt.plusSeconds(3)
+        )
         _ <- IO.raiseWhen(advanced != ErasureUpdate.Applied)(
           new AssertionError("initial worker could not persist its checkpoint")
         )
@@ -191,20 +193,21 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * ErasurePhase.ProgressPerPhase + 17L
         )
         _ <- IO.delay(pauseEvidenceWrite.set(true))
-        inFlightWrite <- store.persistDeltaFiles(checkpoint, Vector(inFlightFileEvidence), staleWorkerNow).start
+        inFlightWrite <- store.progress
+          .persistDeltaFiles(checkpoint, Vector(inFlightFileEvidence), staleWorkerNow)
+          .start
         _ <- IO.blocking {
           if (!evidenceWriteStarted.await(90, TimeUnit.SECONDS))
             throw new AssertionError("old worker did not reach the file evidence write")
         }
         _ <- IO.blocking { restartedClient = syncClient(settings, connectionString) }
         restartedDatabase = restartedClient.getDatabase(databaseName)
-        restartedStore = new MongoAnalyticsErasureWorkerStore[IO](
+        restartedStore = AnalyticsErasureWorkerTestSupport.stores(
           mongo4catsClient(restartedClient),
-          mongo4catsDatabase(restartedClient, databaseName),
-          streams = AnalyticsTestOperationalConfig.streams
+          mongo4catsDatabase(restartedClient, databaseName)
         )
         claimResult <- Deferred[IO, Either[Throwable, Vector[ErasureClaim]]]
-        claimFiber <- restartedStore
+        claimFiber <- restartedStore.queue
           .claim(requestedAt.plusSeconds(11), requestedAt.plusSeconds(61), 1)
           .attempt
           .flatTap(claimResult.complete)
@@ -227,20 +230,25 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         recoveryAttempt <- claimFiber.joinWithNever
         recovered <- recoveryAttempt match {
           case Right(claims) => IO.pure(claims.head)
-          case Left(_) => restartedStore.claim(requestedAt.plusSeconds(11), requestedAt.plusSeconds(61), 1).map(_.head)
+          case Left(_)       =>
+            restartedStore.queue.claim(requestedAt.plusSeconds(11), requestedAt.plusSeconds(61), 1).map(_.head)
         }
         _ = assert(!evidencePauseTimedOut.get(), "test synchronization expired before releasing the file write")
-        staleBarrier <- store.persistBarrier(checkpoint, barrier.copy(topic = "wrong-topic"), staleWorkerNow)
-        staleFiles <- store.persistDeltaFiles(checkpoint, Vector("file:/analytics/forged.parquet"), staleWorkerNow)
-        staleDeferred <- store.defer(checkpoint, requestedAt.plusSeconds(40), staleWorkerNow)
-        staleAdvanced <- store.advance(checkpoint, ErasurePhase.PublisherDrained, 18, staleWorkerNow)
-        barrierReplay <- restartedStore.persistBarrier(recovered, barrier, requestedAt.plusSeconds(13))
-        fileReplay <- restartedStore.persistDeltaFiles(recovered, fileEvidence, requestedAt.plusSeconds(13))
-        loadedBarrier <- restartedStore.readBarrier(asAccountSubjectId(requestId))
-        loadedFiles <- restartedStore.readDeltaFiles(asAccountSubjectId(requestId))
+        staleBarrier <- store.barrier.persistBarrier(checkpoint, barrier.copy(topic = "wrong-topic"), staleWorkerNow)
+        staleFiles <- store.progress.persistDeltaFiles(
+          checkpoint,
+          Vector("file:/analytics/forged.parquet"),
+          staleWorkerNow
+        )
+        staleDeferred <- store.progress.defer(checkpoint, requestedAt.plusSeconds(40), staleWorkerNow)
+        staleAdvanced <- store.progress.advance(checkpoint, ErasurePhase.PublisherDrained, 18, staleWorkerNow)
+        barrierReplay <- restartedStore.barrier.persistBarrier(recovered, barrier, requestedAt.plusSeconds(13))
+        fileReplay <- restartedStore.progress.persistDeltaFiles(recovered, fileEvidence, requestedAt.plusSeconds(13))
+        loadedBarrier <- restartedStore.barrier.readBarrier(asAccountSubjectId(requestId))
+        loadedFiles <- restartedStore.progress.readDeltaFiles(asAccountSubjectId(requestId))
         request <- IO.blocking(
           restartedDatabase
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
@@ -297,7 +305,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       assertEquals(request.getString("leaseToken"), recovered.leaseToken)
       restartedClient
         .getDatabase(databaseName)
-        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .getCollection(AnalyticsCollections.ErasureRequests)
         .updateOne(
           new Document("_id", requestId),
           new Document(
@@ -313,11 +321,9 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           )
         )
       assertEquals(
-        new MongoAnalyticsErasureWorkerStore[IO](
-          mongo4catsClient(restartedClient),
-          mongo4catsDatabase(restartedClient, databaseName),
-          streams = AnalyticsTestOperationalConfig.streams
-        )
+        AnalyticsErasureWorkerTestSupport
+          .stores(mongo4catsClient(restartedClient), mongo4catsDatabase(restartedClient, databaseName))
+          .barrier
           .readBarrier(asAccountSubjectId(requestId))
           .attempt
           .unsafeRunSync(),
@@ -363,7 +369,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       client = syncClient(connectionString)
       val database = client.getDatabase(databaseName)
       database
-        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .getCollection(AnalyticsCollections.ErasureRequests)
         .insertOne(
           new Document("_id", requestId)
             .append("state", "Pending")
@@ -407,11 +413,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         .getOrCreate()
 
       val firstStore =
-        new MongoAnalyticsErasureWorkerStore[IO](
-          mongo4catsClient(client),
-          mongo4catsDatabase(client, databaseName),
-          streams = AnalyticsTestOperationalConfig.streams
-        )
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, databaseName))
       val firstPublisher =
         new MongoAnalyticsReportPublisher[IO](
           mongo4catsClient(client),
@@ -437,12 +439,12 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       val rangeFingerprint = AnalyticsErasureWorkerTestSupport.fingerprint("erasure:" + requestId)
 
       val result = for {
-        initialClaim <- firstStore.claim(startedAt, startedAt.plusSeconds(60L * 86400L), 1).map(_.head)
+        initialClaim <- firstStore.queue.claim(startedAt, startedAt.plusSeconds(60L * 86400L), 1).map(_.head)
         reservation <- firstPublisher.reserve(runId, rangeFingerprint, startedAt)
         firstAttempt <- firstWorker.process(initialClaim, reservation)
         checkpoint <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
@@ -455,10 +457,9 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           restartedClient = syncClient(connectionString)
         }
         restartedDatabase = restartedClient.getDatabase(databaseName)
-        restartedStore = new MongoAnalyticsErasureWorkerStore[IO](
+        restartedStore = AnalyticsErasureWorkerTestSupport.stores(
           mongo4catsClient(restartedClient),
-          mongo4catsDatabase(restartedClient, databaseName),
-          streams = AnalyticsTestOperationalConfig.streams
+          mongo4catsDatabase(restartedClient, databaseName)
         )
         restartedPublisher = new MongoAnalyticsReportPublisher[IO](
           mongo4catsClient(restartedClient),
@@ -466,7 +467,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           operational = AnalyticsTestOperationalConfig.operational
         )
         _ <- IO.delay(retentionHasPassed.set(true))
-        resumedClaim <- restartedStore.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
+        resumedClaim <- restartedStore.queue.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
         _ = assertEquals(resumedClaim.phase, ErasurePhase.DeltaPurged)
         resumedReservation <- restartedPublisher.reserve(runId, rangeFingerprint, afterRetention)
         restartedWorker = AnalyticsErasureWorkerTestSupport.worker(
@@ -488,20 +489,20 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         _ = assertEquals(resumedOutcome, ErasureClaimOutcome.Completed)
         readyToPublish <- IO.blocking(
           restartedDatabase
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
         _ = assertEquals(readyToPublish.getString("phase"), ErasurePhase.ReadyToPublish.toString)
         _ <- IO.blocking(
           restartedDatabase
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .updateOne(
               new Document("_id", requestId),
               new Document("$set", new Document("leaseUntil", Date.from(afterRetention.minusSeconds(1L))))
             )
         )
-        finalizerClaim <- restartedStore.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
+        finalizerClaim <- restartedStore.queue.claim(afterRetention, afterRetention.plusSeconds(86400L), 1).map(_.head)
         _ = assertEquals(finalizerClaim.phase, ErasurePhase.ReadyToPublish)
         finalizerReservation <- restartedPublisher.reserve(runId, rangeFingerprint, afterRetention)
         finalizerWorker = AnalyticsErasureWorkerTestSupport.worker(
@@ -523,7 +524,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         _ = assertEquals(finalizerOutcome, ErasureClaimOutcome.Completed)
         request <- IO.blocking(
           restartedDatabase
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
@@ -574,7 +575,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       val transactionalId = "hiring-publisher-" + UUID.randomUUID().toString
       val now = Instant.now()
       database
-        .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+        .getCollection(AnalyticsCollections.ErasureRequests)
         .insertOne(
           new Document("_id", requestId)
             .append("state", "Pending")
@@ -591,11 +592,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("subjectRefsVersion", 1)
         )
       val store =
-        new MongoAnalyticsErasureWorkerStore[IO](
-          mongo4catsClient(client),
-          mongo4catsDatabase(client, database.getName),
-          streams = AnalyticsTestOperationalConfig.streams
-        )
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, database.getName))
       val failedFencer = new TransactionalProducerFencer[IO] {
         override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
           IO.raiseError(new IllegalStateException("simulated broker fencing failure"))
@@ -632,12 +629,12 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         producerFencer = failedFencer
       )
       val result = for {
-        claim <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
+        claim <- store.queue.claim(now, now.plusSeconds(60L), 1).map(_.head)
         outcome <- worker.runClaim(claim)
-        barrier <- store.readBarrier(asAccountSubjectId(requestId))
+        barrier <- store.barrier.readBarrier(asAccountSubjectId(requestId))
         request <- IO.blocking(
           database
-            .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+            .getCollection(AnalyticsCollections.ErasureRequests)
             .find(new Document("_id", requestId))
             .first()
         )
@@ -671,7 +668,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
     )
     try {
       val database = client.getDatabase(s"analytics_erasure_repair_${UUID.randomUUID()}")
-      val collection = database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+      val collection = database.getCollection(AnalyticsCollections.ErasureRequests)
       val requestId = UUID.randomUUID().toString
       val now = Instant.now()
       collection.insertOne(
@@ -682,31 +679,27 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("requestedAt", Date.from(now))
       )
       val store =
-        new MongoAnalyticsErasureWorkerStore[IO](
-          mongo4catsClient(client),
-          mongo4catsDatabase(client, database.getName),
-          streams = AnalyticsTestOperationalConfig.streams
-        )
-      val claim = store.claim(now, now.plusSeconds(60L), 1).unsafeRunSync().head
-      val saved = store
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, database.getName))
+      val claim = store.queue.claim(now, now.plusSeconds(60L), 1).unsafeRunSync().head
+      val saved = store.progress
         .recordFailure(claim, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
         .unsafeRunSync()
       assertEquals(saved, ErasureUpdate.Applied)
-      val repair = store.inspectRepairRequests(10).unsafeRunSync().head
+      val repair = store.queue.inspectRepairRequests(10).unsafeRunSync().head
       assertEquals(repair.requestId, asAccountSubjectId(requestId))
       assertEquals(repair.phase, ErasurePhase.Requested.persistedName)
       assertEquals(repair.attemptCount, 1)
       assertEquals(repair.failureCategory, ErasureFailureCategory.InvalidState.persistedName)
-      assertEquals(store.claim(now.plusSeconds(2L), now.plusSeconds(62L), 1).unsafeRunSync(), Vector.empty)
+      assertEquals(store.queue.claim(now.plusSeconds(2L), now.plusSeconds(62L), 1).unsafeRunSync(), Vector.empty)
       assertEquals(
-        store.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(3L)).unsafeRunSync(),
+        store.queue.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(3L)).unsafeRunSync(),
         ErasureUpdate.LeaseLost
       )
       assertEquals(
-        store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L)).unsafeRunSync(),
+        store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L)).unsafeRunSync(),
         ErasureUpdate.Applied
       )
-      val resumed = store.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).unsafeRunSync().head
+      val resumed = store.queue.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).unsafeRunSync().head
       assertEquals(resumed.phase, ErasurePhase.Requested)
       assertEquals(resumed.progress, 0)
       assertEquals(resumed.attemptCount, 1)
@@ -755,7 +748,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       val database = currentClient.getDatabase(databaseName)
       val requestId = UUID.randomUUID().toString
       val now = Instant.now()
-      val requests = database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+      val requests = database.getCollection(AnalyticsCollections.ErasureRequests)
       requests.insertOne(
         new Document("_id", requestId)
           .append("state", "Pending")
@@ -764,20 +757,18 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("requestedAt", Date.from(now))
       )
       val staleStore =
-        new MongoAnalyticsErasureWorkerStore[IO](
+        AnalyticsErasureWorkerTestSupport.stores(
           mongo4catsClient(staleClient),
-          mongo4catsDatabase(staleClient, databaseName),
-          streams = AnalyticsTestOperationalConfig.streams
+          mongo4catsDatabase(staleClient, databaseName)
         )
       val currentStore =
-        new MongoAnalyticsErasureWorkerStore[IO](
+        AnalyticsErasureWorkerTestSupport.stores(
           mongo4catsClient(currentClient),
-          mongo4catsDatabase(currentClient, databaseName),
-          streams = AnalyticsTestOperationalConfig.streams
+          mongo4catsDatabase(currentClient, databaseName)
         )
-      val staleClaim = currentStore.claim(now, now.plusSeconds(1), 1).unsafeRunSync().head
+      val staleClaim = currentStore.queue.claim(now, now.plusSeconds(1), 1).unsafeRunSync().head
       val result = for {
-        delayed <- staleStore
+        delayed <- staleStore.progress
           .recordFailure(
             staleClaim,
             ErasureFailureCategory.Unknown,
@@ -787,11 +778,11 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           )
           .start
         _ <- IO.blocking(assert(staleWriteStarted.await(30, TimeUnit.SECONDS), "assertion failed"))
-        currentClaim <- currentStore.claim(now.plusSeconds(2), now.plusSeconds(62), 1).map(_.head)
-        staleRequeue <- staleStore.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3))
+        currentClaim <- currentStore.queue.claim(now.plusSeconds(2), now.plusSeconds(62), 1).map(_.head)
+        staleRequeue <- staleStore.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3))
         _ <- IO.blocking(releaseStaleWrite.countDown())
         staleSaved <- delayed.joinWithNever
-        currentSaved <- currentStore.recordFailure(
+        currentSaved <- currentStore.progress.recordFailure(
           currentClaim,
           ErasureFailureCategory.InvalidState,
           1,
@@ -824,7 +815,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
     )
     try {
       val database = client.getDatabase(s"erasure_repair_race_${UUID.randomUUID()}")
-      val collection = database.getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
+      val collection = database.getCollection(AnalyticsCollections.ErasureRequests)
       val users = database.getCollection("users")
       val reportControl = database.getCollection("analytics_report_control")
       val requestId = UUID.randomUUID().toString
@@ -851,14 +842,10 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           .append("lastPublishedRevision", 3L)
       )
       val store =
-        new MongoAnalyticsErasureWorkerStore[IO](
-          mongo4catsClient(client),
-          mongo4catsDatabase(client, database.getName),
-          streams = AnalyticsTestOperationalConfig.streams
-        )
+        AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, database.getName))
       val result = for {
-        initial <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
-        saved <- store.recordFailure(initial, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
+        initial <- store.queue.claim(now, now.plusSeconds(60L), 1).map(_.head)
+        saved <- store.progress.recordFailure(initial, ErasureFailureCategory.InvalidState, 1, None, now.plusMillis(1L))
         _ <- IO.raiseWhen(saved != ErasureUpdate.Applied)(new AssertionError("repair failure was not recorded"))
         _ <- IO.blocking {
           collection.updateOne(
@@ -869,7 +856,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             )
           )
         }
-        liveLeaseRequeue <- store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(2L))
+        liveLeaseRequeue <- store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(2L))
         _ = assertEquals(liveLeaseRequeue, ErasureUpdate.LeaseLost)
         _ <- IO.blocking {
           collection.updateOne(
@@ -881,15 +868,15 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         firstReady <- Deferred[IO, Unit]
         secondReady <- Deferred[IO, Unit]
         first <- (firstReady.complete(()) *> gate.get *>
-          store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L))).start
+          store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L))).start
         second <- (secondReady.complete(()) *> gate.get *>
-          store.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L))).start
+          store.queue.requeueRepair(asAccountSubjectId(requestId), 1, now.plusSeconds(3L))).start
         _ <- firstReady.get *> secondReady.get *> gate.complete(())
         firstResult <- first.joinWithNever
         secondResult <- second.joinWithNever
         _ = assertEquals(Vector(firstResult, secondResult).count(_ == ErasureUpdate.Applied), 1)
-        retryClaim <- store.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).map(_.head)
-        secondFailure <- store.recordFailure(
+        retryClaim <- store.queue.claim(now.plusSeconds(4L), now.plusSeconds(64L), 1).map(_.head)
+        secondFailure <- store.progress.recordFailure(
           retryClaim,
           ErasureFailureCategory.InvalidState,
           2,
@@ -903,13 +890,13 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         claimReady <- Deferred[IO, Unit]
         requeueReady <- Deferred[IO, Unit]
         claimFiber <- (claimReady.complete(()) *> claimGate.get *>
-          store.claim(now.plusSeconds(6L), now.plusSeconds(66L), 1)).start
+          store.queue.claim(now.plusSeconds(6L), now.plusSeconds(66L), 1)).start
         requeueFiber <- (requeueReady.complete(()) *> claimGate.get *>
-          store.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(6L))).start
+          store.queue.requeueRepair(asAccountSubjectId(requestId), 2, now.plusSeconds(6L))).start
         _ <- claimReady.get *> requeueReady.get *> claimGate.complete(())
         racingClaims <- claimFiber.joinWithNever
         racingRequeue <- requeueFiber.joinWithNever
-        laterClaims <- store.claim(now.plusSeconds(7L), now.plusSeconds(67L), 1)
+        laterClaims <- store.queue.claim(now.plusSeconds(7L), now.plusSeconds(67L), 1)
         persisted <- IO.blocking(collection.find(new Document("_id", requestId)).first())
         tombstone <- IO.blocking(users.find(new Document("_id", requestId)).first())
         reportState <- IO.blocking(reportControl.find(new Document("_id", "analytics-report")).first())

@@ -285,11 +285,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       val test = resources.use { case (client, reactiveClient, spark, root) =>
         val database = client.getDatabase(databaseName)
         val reactiveDatabase: CatsMongoDatabase[IO] = reactiveClient.getDatabase(databaseName).unsafeRunSync()
-        val store = new MongoAnalyticsErasureWorkerStore[IO](
-          reactiveClient,
-          reactiveDatabase,
-          streams = AnalyticsTestOperationalConfig.streams
-        )
+        val store = AnalyticsErasureWorkerTestSupport.stores(reactiveClient, reactiveDatabase)
         val publisher = new MongoAnalyticsReportPublisher[IO](
           reactiveClient,
           reactiveDatabase,
@@ -418,7 +414,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                     _ <- secondStarted.get.timeout(60.seconds)
                     pending <- status(apiBase, receiptId)
                     _ = assertEquals(pending, "PENDING")
-                    barrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
+                    barrier <- store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
                     _ = assertEquals(barrier, None)
                     outboxBefore <- IO.blocking(database.getCollection("event_outbox").countDocuments())
                     _ = assertEquals(outboxBefore, 1L)
@@ -435,7 +431,9 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                         "resumeAfter"
                       ) != null
                     ).timeout(4.minutes)
-                    savedBarrier <- store.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
+                    savedBarrier <- store.barrier.readBarrier(
+                      AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)
+                    )
                     _ = assert(savedBarrier.exists(value => value.topic == topic && value.partitions.nonEmpty))
                     _ <- assertPublisherTransactionFenced(inFlightProducer)
                     _ <- retentionReady.set(true)

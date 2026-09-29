@@ -7,7 +7,6 @@ import com.example.hiring.analytics.config.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
-import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.app.AppModule
 

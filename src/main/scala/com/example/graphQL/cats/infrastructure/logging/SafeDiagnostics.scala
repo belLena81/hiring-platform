@@ -23,12 +23,12 @@ object SafeDiagnostics {
       if (!maskSensitive) {
         restrictToCurrentUser(DefaultLogDirectory)
         activeLogFiles.foreach(restrictToCurrentUser)
-        requireSafeUnmaskedDestination()
+        requireSafeUnmaskedDestination().map(_ => diagnostics)
+      } else Right(diagnostics)
+    }.flatMap(IO.fromEither)
+      .flatTap { diagnostics =>
+        if (maskSensitive) IO.unit else diagnostics.emit(LogEvent.LocalUnmasked)
       }
-      diagnostics
-    }.flatTap { diagnostics =>
-      if (maskSensitive) IO.unit else diagnostics.emit(LogEvent.LocalUnmasked)
-    }
 
   def apply(maskSensitive: Boolean = true): Diagnostics = {
     val structuredLogger = Slf4jLogger.getLoggerFromName[IO](loggerName)
@@ -60,7 +60,7 @@ object SafeDiagnostics {
       case LogLevel.Error => logger.isErrorEnabled
     }
 
-  private def requireSafeUnmaskedDestination(): Unit = {
+  private def requireSafeUnmaskedDestination(): Either[IllegalStateException, Unit] = {
     val files = activeLogFiles
     val unsafe = files.isEmpty || files.exists { file =>
       val directory = file.getParent
@@ -68,7 +68,11 @@ object SafeDiagnostics {
         directory
       ) || !privatePath(file)
     }
-    if (unsafe) throw new IllegalStateException("Unmasked diagnostics require a private pre-provisioned file directory")
+    Either.cond(
+      !unsafe,
+      (),
+      new IllegalStateException("Unmasked diagnostics require a private pre-provisioned file directory")
+    )
   }
 
   private def activeLogFiles: List[Path] = {

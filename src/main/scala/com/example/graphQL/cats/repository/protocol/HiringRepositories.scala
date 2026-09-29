@@ -10,6 +10,7 @@ import com.example.graphQL.cats.domain.model.{
   EntityEmbedding,
   Job,
   User,
+  PasswordHash,
   UserPageRequest,
   UserProfile
 }
@@ -123,13 +124,13 @@ trait UserRepository {
 trait UserAccountRepository {
   def bootstrap(
       user: User,
-      passwordHash: String,
+      passwordHash: PasswordHash,
       context: MutationWriteContext = MutationWriteContext.noop
   ): IO[Either[RepositoryError, Unit]]
   def initialized: IO[Either[RepositoryError, Boolean]]
   def createAccount(
       user: User,
-      passwordHash: String,
+      passwordHash: PasswordHash,
       now: Instant,
       context: MutationWriteContext = MutationWriteContext.noop
   ): IO[Either[RepositoryError, Unit]]
