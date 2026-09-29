@@ -15,8 +15,14 @@ import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import munit.CatsEffectSuite
+import io.circe.Json
 import org.bson.Document
+import org.bson.BsonDocument
+import org.bson.BsonDocumentReader
+import org.bson.BsonDocumentWriter
 import org.bson.conversions.Bson
+import org.bson.codecs.DecoderContext
+import org.bson.codecs.EncoderContext
 import com.mongodb.MongoClientSettings
 
 import java.time.Instant
@@ -25,6 +31,29 @@ import scala.jdk.CollectionConverters.*
 
 final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
   private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
+  private def asJson(document: Document) = MongoAnalyticsErasureWorkerStore.jsonFromBson(document)
+
+  test("Mongo JSON codec preserves application keys that resemble BSON metadata") {
+    val value = Json.obj(
+      "_id" -> Json.fromString("outbox-record"),
+      "$__analyticsBsonInt32Fields" -> Json.arr(Json.fromString("applicationField")),
+      "payload" -> Json.obj(
+        "$__analyticsBsonInt64Fields" -> Json.obj("nested" -> Json.fromInt(7)),
+        "applicationField" -> Json.fromString("kept")
+      )
+    )
+    val bson = new BsonDocument()
+    MongoAnalyticsErasureWorkerStore.jsonCodec.encode(
+      new BsonDocumentWriter(bson),
+      value,
+      EncoderContext.builder().isEncodingCollectibleDocument(false).build()
+    )
+    val decoded = MongoAnalyticsErasureWorkerStore.jsonCodec.decode(
+      new BsonDocumentReader(bson),
+      DecoderContext.builder().build()
+    )
+    assertEquals(decoded, value)
+  }
 
   test("erasure phases have a stable forward-only order") {
     val phases = ErasurePhase.values.toVector
@@ -70,13 +99,20 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       .append("progress", 17)
       .append("progressKey", key)
 
-    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(document)
+    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(document))
     assertEquals(
       claim,
       Some(ErasureClaim(asAccountSubjectId(id), token, expiry, ErasurePhase.DeltaPurged, 17, key))
     )
-    assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(new Document(document).append("fencingVersion", 0)), None)
-    assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(document.append("phase", "unknown")), None)
+    assertEquals(
+      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(new Document(document).append("fencingVersion", 0))),
+      None
+    )
+    assertEquals(
+      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(new Document(document).append("fencingVersion", 1.5d))),
+      None
+    )
+    assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(document.append("phase", "unknown"))), None)
   }
 
   test("missing optional claim fields keep defaults while malformed BSON fails closed") {
@@ -89,10 +125,13 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       .append("leaseUntil", java.util.Date.from(expiry))
 
     assertEquals(
-      MongoAnalyticsErasureWorkerStore.decodeClaim(minimal),
+      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(minimal)),
       Some(ErasureClaim(asAccountSubjectId(id), token, expiry, ErasurePhase.Requested, 0, 0L, 0))
     )
-    assertEquals(MongoAnalyticsErasureWorkerStore.decodeClaim(new Document(minimal).append("progress", "bad")), None)
+    assertEquals(
+      MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(new Document(minimal).append("progress", "bad"))),
+      None
+    )
   }
 
   test("failure labels are fixed sanitized values and repaired claims preserve phase checkpoints") {
@@ -110,7 +149,7 @@ final class MongoAnalyticsErasureWorkerStoreSpec extends CatsEffectSuite {
       .append("attemptCount", 7)
       .append("failureCategory", "TRANSIENT_STORAGE")
       .append("repairRequired", true)
-    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(request)
+    val claim = MongoAnalyticsErasureWorkerStore.decodeClaim(asJson(request))
     assertEquals(claim.map(_.phase), Some(ErasurePhase.DeltaPurged))
     assertEquals(claim.map(_.progress), Some(17))
     assertEquals(claim.map(_.attemptCount), Some(7))

@@ -27,7 +27,13 @@ private[analytics] object MongoPojoCodecs {
 
     override def decode(reader: org.bson.BsonReader, context: DecoderContext): ReportRecord =
       ReportRecord(
-        documentCodec.decode(reader, context).entrySet().asScala.iterator.map(entry => entry.getKey -> entry.getValue).toMap
+        documentCodec
+          .decode(reader, context)
+          .entrySet()
+          .asScala
+          .iterator
+          .map(entry => entry.getKey -> entry.getValue)
+          .toMap
       )
   }
 

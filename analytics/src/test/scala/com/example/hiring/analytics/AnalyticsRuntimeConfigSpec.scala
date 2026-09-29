@@ -10,12 +10,16 @@ import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+import io.github.iltotore.iron.*
+import scala.concurrent.duration.*
 
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
 import java.util.Base64
 import java.nio.charset.StandardCharsets
+import java.net.InetAddress
 
 class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   private val key = Base64.getEncoder.encodeToString(Array.fill[Byte](32)(7))
@@ -118,12 +122,12 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       Vector(PartitionOffsetRange.unsafe("hiring.operational-events", 2, 10L, 20L))
     )
     assertEquals(loaded.common.kafka.bootstrapServers, "localhost:9092")
-    assertEquals(loaded.common.kafka.securityProtocol, "SASL_SSL")
+    assertEquals(loaded.common.kafka.securityProtocol, KafkaSecurityProtocol.SaslSsl)
     assertEquals(loaded.common.kafka.allowPlaintext, false)
     assertEquals(loaded.common.lakehouseRoot, "file:///tmp/hiring-analytics")
     assertEquals(loaded.common.mongoDatabase, "hiring")
-    assertEquals(loaded.common.operational.reportReservationTtlDays, 90)
-    assertEquals(loaded.common.operational.mongoTransactionWindowSeconds, 120)
+    assertEquals(loaded.common.operational.reportReservationTtl, 90.days)
+    assertEquals(loaded.common.operational.mongoTransactionWindow, 120.seconds)
     assertEquals(loaded.common.operational.maximumErasureEvidenceFiles, 100000)
     assertEquals(loaded.common.operational.mongoPublisherBufferSize, 256)
     assert(!loaded.toString.contains(key))
@@ -165,16 +169,16 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       )
       .toOption
       .getOrElse(fail("expected valid operational config"))
-    assertEquals(configured.retention.bronzeDays, 14)
-    assertEquals(configured.retention.quarantineDays, 12)
-    assertEquals(configured.retention.silverDays, 60)
-    assertEquals(configured.retention.publishedSnapshotDays, 15)
-    assertEquals(configured.retention.deletionMarkerDays, 20)
-    assertEquals(configured.retention.deltaVacuumSafetyDays, 3)
+    assertEquals(configured.retention.bronzeDays.value, 14)
+    assertEquals(configured.retention.quarantineDays.value, 12)
+    assertEquals(configured.retention.silverDays.value, 60)
+    assertEquals(configured.retention.publishedSnapshotDays.value, 15)
+    assertEquals(configured.retention.deletionMarkerDays.value, 20)
+    assertEquals(configured.retention.deltaVacuumSafetyDays.value, 3)
     assertEquals(configured.retention.deltaVacuumSafetyCheckEnabled, false)
-    assertEquals(configured.retention.deltaLogRetentionDays, 10)
-    assertEquals(configured.reportReservationTtlDays, 45)
-    assertEquals(configured.mongoTransactionWindowSeconds, 30)
+    assertEquals(configured.retention.deltaLogRetentionDays.value, 10)
+    assertEquals(configured.reportReservationTtl, 45.days)
+    assertEquals(configured.mongoTransactionWindow, 30.seconds)
     assertEquals(configured.maximumErasureEvidenceFiles, 8000)
     assertEquals(configured.mongoPublisherBufferSize, 64)
 
@@ -185,6 +189,16 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val message = invalid.swap.toOption.getOrElse(fail("expected rejected operational settings")).getMessage
     assert(message.contains("retention.bronze-days must be greater than zero"))
     assert(message.contains("mongo-publisher-buffer-size must be between one and"))
+
+    val invalidTimeWindows = AnalyticsRuntimeConfig.operationalFromHocon(
+      hocon,
+      Map("ANALYTICS_REPORT_RESERVATION_TTL_DAYS" -> "0", "ANALYTICS_MONGO_TRANSACTION_WINDOW_SECONDS" -> "0")
+    )
+    val timeWindowMessage = invalidTimeWindows.swap.toOption
+      .getOrElse(fail("expected rejected time windows"))
+      .getMessage
+    assert(timeWindowMessage.contains("report-reservation-ttl-days must be greater than zero"))
+    assert(timeWindowMessage.contains("mongo-transaction-window-seconds must be greater than zero"))
 
     val evidenceOverflow = AnalyticsRuntimeConfig.operationalFromHocon(
       hocon,
@@ -208,7 +222,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "true"
     )
     val loaded = AnalyticsRuntimeConfig.batchFromHocon(hocon, local).toOption.getOrElse(fail("expected local config"))
-    assertEquals(loaded.common.kafka.securityProtocol, "SASL_PLAINTEXT")
+    assertEquals(loaded.common.kafka.securityProtocol, KafkaSecurityProtocol.SaslPlaintext)
     assertEquals(loaded.common.kafka.allowPlaintext, true)
 
     val missingOptIn = AnalyticsRuntimeConfig
@@ -222,14 +236,20 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(missingOptIn.getMessage.contains("allow-plaintext=true"))
 
     val composeEndpoint = KafkaConnection.validate(
-      KafkaConnection("kafka:9092", Some("reader"), Some("password"), "SASL_PLAINTEXT", allowPlaintext = true)
+      KafkaConnection(
+        "kafka:9092",
+        Some("reader"),
+        Some("password"),
+        KafkaSecurityProtocol.SaslPlaintext,
+        allowPlaintext = true
+      )
     )
     assert(composeEndpoint.isValid)
     val externalEndpoint = KafkaConnection(
       "broker.example.com:9092",
       Some("reader"),
       Some("password"),
-      "SASL_PLAINTEXT",
+      KafkaSecurityProtocol.SaslPlaintext,
       allowPlaintext = true
     )
     assert(KafkaConnection.validate(externalEndpoint).isInvalid)
@@ -241,6 +261,24 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     )
   }
 
+  test("plaintext bootstrap parser accepts only valid local broker endpoints") {
+    Vector("localhost:9092", "kafka:9092", "127.0.0.1:9092", "[::1]:9092").foreach { endpoint =>
+      assert(KafkaConnection.localPlaintextBootstrap(endpoint), s"expected local endpoint: $endpoint")
+    }
+    Vector("kafka:9093", "broker.example:9092", "localhost", "localhost:0", "[::1]9092", "localhost:70000")
+      .foreach { endpoint =>
+        assert(!KafkaConnection.localPlaintextBootstrap(endpoint), s"expected rejected endpoint: $endpoint")
+      }
+    assert(!KafkaConnection.localPlaintextBootstrap("localhost:9092,broker.example:9092"))
+
+    val externalAddress = InetAddress.getByAddress(Array[Byte](203.toByte, 0.toByte, 113.toByte, 10.toByte))
+    assert(
+      !KafkaConnection.localPlaintextBootstrapUsing("localhost:9092", _ => Some(Vector(externalAddress)))
+    )
+    val loopbackAddress = InetAddress.getByAddress(Array[Byte](127, 0, 0, 1).map(_.toByte))
+    assert(KafkaConnection.localPlaintextBootstrapUsing("localhost:9092", _ => Some(Vector(loopbackAddress))))
+  }
+
   test("Kafka configuration rejects unsupported protocols and malformed opt-in values") {
     val unsupported = AnalyticsRuntimeConfig.batchFromHocon(
       hocon,
@@ -249,7 +287,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
         "ANALYTICS_KAFKA_ALLOW_PLAINTEXT" -> "true"
       )
     )
-    assert(unsupported.swap.toOption.exists(_.getMessage.contains("security protocol")))
+    assert(unsupported.swap.toOption.exists(_.getMessage.contains("configuration is missing or malformed")))
 
     val malformedFlag = AnalyticsRuntimeConfig.batchFromHocon(
       hocon,

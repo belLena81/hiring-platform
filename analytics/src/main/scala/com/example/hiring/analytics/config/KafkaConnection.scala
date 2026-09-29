@@ -17,7 +17,7 @@ object KafkaSecurityProtocol {
   given ConfigReader[KafkaSecurityProtocol] = ConfigReader[String].emap {
     case "SASL_SSL"       => Right(SaslSsl)
     case "SASL_PLAINTEXT" => Right(SaslPlaintext)
-    case _                 => Left(UserValidationFailed("must be SASL_SSL or SASL_PLAINTEXT"))
+    case _                => Left(UserValidationFailed("must be SASL_SSL or SASL_PLAINTEXT"))
   }
 }
 
@@ -55,16 +55,25 @@ object KafkaConnection {
     ).mapN((_, _, _) => connection)
 
   private[analytics] def localPlaintextBootstrap(bootstrapServers: String): Boolean =
+    localPlaintextBootstrapUsing(
+      bootstrapServers,
+      host => Try(InetAddress.getAllByName(host).toVector).toOption.filter(_.nonEmpty)
+    )
+
+  private[analytics] def localPlaintextBootstrapUsing(
+      bootstrapServers: String,
+      resolveAddresses: String => Option[Vector[InetAddress]]
+  ): Boolean =
     bootstrapServers.trim.nonEmpty && bootstrapServers.split(",", -1).forall { endpoint =>
-      BootstrapEndpoint.parse(endpoint).exists(_.isLocal)
+      BootstrapEndpoint.parse(endpoint).exists(_.isLocal(resolveAddresses))
     }
 
   private final case class BootstrapEndpoint(host: String, port: Int) {
-    def isLocal: Boolean =
-      host.equalsIgnoreCase("localhost") ||
-        (host.equalsIgnoreCase("kafka") && port == 9092) ||
-        ((host.forall(char => char.isDigit || char == '.' || char == ':') && host.nonEmpty) &&
-          Try(InetAddress.getByName(host).isLoopbackAddress).getOrElse(false))
+    def isLocal(resolveAddresses: String => Option[Vector[InetAddress]]): Boolean =
+      (host.equalsIgnoreCase("kafka") && port == 9092) ||
+        ((host.equalsIgnoreCase("localhost") || (host.nonEmpty && host.forall(char =>
+          char.isDigit || char == '.' || char == ':'
+        ))) && resolveAddresses(host).exists(addresses => addresses.nonEmpty && addresses.forall(_.isLoopbackAddress)))
   }
 
   private object BootstrapEndpoint {

@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+
 import com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter
 import com.example.hiring.analytics.adapter.local.LocalHmacKeyWriterExclusion
 import com.example.hiring.analytics.adapter.mongo.HmacKeyRetirementKafkaLineage

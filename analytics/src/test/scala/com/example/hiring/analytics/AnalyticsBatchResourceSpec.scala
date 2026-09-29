@@ -18,7 +18,7 @@ import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
-import com.mongodb.reactivestreams.client.{MongoClient, MongoClients}
+import mongo4cats.client.MongoClient
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
 
@@ -98,7 +98,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
 
   test("application resources close Spark and Mongo after a failed run") {
     val acquired = new AtomicReference[
-      Option[(SparkSession, MongoClient, com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO])]
+      Option[(SparkSession, MongoClient[IO], com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO])]
     ](None)
     val resources = AppModule.managedSparkMongo[IO](
       execution =>
@@ -110,7 +110,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
             .config("spark.ui.enabled", "false")
             .getOrCreate()
         },
-      IO.delay(MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200"))
+      MongoClient.fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")
     )
 
     val result = resources
@@ -126,9 +126,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     assert(sparkExecution.isShutdown)
     assert(
       AnalyticsTestOperationalConfig.streams
-        .stream[IO, String](mongo.listDatabaseNames())
-        .compile
-        .drain
+        .drain[IO, String](mongo.underlying.listDatabaseNames())
         .attempt
         .unsafeRunSync()
         .isLeft
@@ -141,7 +139,7 @@ class AnalyticsBatchResourceSpec extends FunSuite {
     val resources = AppModule.managedSparkMongo[IO](
       execution =>
         IO.delay(acquired.set(Some(execution))) *> IO.raiseError(new IllegalStateException("startup failed")),
-      IO.delay(MongoClients.create("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200"))
+      MongoClient.fromConnectionString[IO]("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=200")
     )
 
     val result = resources.use(_ => IO.unit).attempt.unsafeRunSync()

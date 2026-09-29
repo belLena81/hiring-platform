@@ -31,9 +31,11 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
 
   private val collection = database
     .getCollection[Document](CollectionName, CodecRegistry.Default)
-    .map(_.withWriteConcern(
-      WriteConcern.MAJORITY.withJournal(true).withWTimeout(WriteTimeout.toMillis, TimeUnit.MILLISECONDS)
-    ))
+    .map(
+      _.withWriteConcern(
+        WriteConcern.MAJORITY.withJournal(true).withWTimeout(WriteTimeout.toMillis, TimeUnit.MILLISECONDS)
+      )
+    )
 
   override def resource(root: String): Resource[F, Unit] =
     Resource.make(acquire(root))(owner => release(root, owner)).void
@@ -44,12 +46,16 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
         clock.monotonic.flatMap { startedAt =>
           val deadline = startedAt + WaitTimeout
           def attempt(retryDelay: FiniteDuration): F[String] = clock.realTimeInstant
-            .flatMap(acquiredAt => collection.flatMap(_.insertOne(
-              new Document("_id", id)
-                .append("ownerToken", owner)
-                .append("acquiredAt", java.util.Date.from(acquiredAt)),
-              mongo4cats.models.collection.InsertOneOptions()
-            )))
+            .flatMap(acquiredAt =>
+              collection.flatMap(
+                _.insertOne(
+                  new Document("_id", id)
+                    .append("ownerToken", owner)
+                    .append("acquiredAt", java.util.Date.from(acquiredAt)),
+                  mongo4cats.models.collection.InsertOneOptions()
+                )
+              )
+            )
             .as(owner)
             .handleErrorWith {
               case error: MongoException if error.getCode == 11000 =>
@@ -70,10 +76,12 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal
 
   private def release(root: String, owner: String): F[Unit] = F.fromEither(lockId(root)).flatMap { id =>
     collection
-      .flatMap(_.deleteOne(
-        new Document("_id", id).append("ownerToken", owner),
-        mongo4cats.models.collection.DeleteOptions()
-      ))
+      .flatMap(
+        _.deleteOne(
+          new Document("_id", id).append("ownerToken", owner),
+          mongo4cats.models.collection.DeleteOptions()
+        )
+      )
       .flatMap(result =>
         F.raiseWhen(result.getDeletedCount != 1L)(
           AnalyticsError.LakehouseFailure(new IllegalStateException("lakehouse mutex owner changed before release"))

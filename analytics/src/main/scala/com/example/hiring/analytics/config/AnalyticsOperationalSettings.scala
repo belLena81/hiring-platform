@@ -1,10 +1,16 @@
 package com.example.hiring.analytics.config
 
+import AnalyticsPositiveInt.*
+
 import scala.concurrent.duration.*
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.numeric.Positive
 
 type AnalyticsPositiveInt = Int :| Positive
+
+object AnalyticsPositiveInt {
+  extension (value: AnalyticsPositiveInt) def value: Int = value.asInstanceOf[Int]
+}
 
 final case class AnalyticsRetentionSettings(
     bronzeDays: AnalyticsPositiveInt,

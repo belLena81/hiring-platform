@@ -211,7 +211,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     } finally spark.stop()
   }
 
-  private def deletionStatus(apiBase: String, receiptId: String): String = {
+  private def deletionStatus(apiBase: String, receiptId: String, token: String): String = {
     val body = new Document("query", "query($receiptId: ID!) { accountDeletionStatus(receiptId: $receiptId) }")
       .append("variables", new Document("receiptId", receiptId))
       .toJson
@@ -219,14 +219,15 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       .newBuilder(URI.create(apiBase.stripSuffix("/") + "/graphql"))
       .header("Content-Type", "application/json")
       .header("Accept", "application/json")
+      .header("Authorization", "Bearer " + token)
       .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
       .build()
     val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
     assertEquals(response.statusCode(), 200)
-    "\\\"accountDeletionStatus\\\"\\s*:\\s*\\\"(PENDING|COMPLETE)\\\"".r
+    "\\\"accountDeletionStatus\\\"\\s*:\\s*\\\"(PENDING|COMPLETE|NOT_FOUND)\\\"".r
       .findFirstMatchIn(response.body())
       .map(_.group(1))
-      .getOrElse(fail("missing deletion status"))
+      .getOrElse(fail("missing deletion status in authenticated GraphQL response"))
   }
 
   test("production publisher claim is captured and fenced by the long-lived Compose erasure worker") {
@@ -336,7 +337,11 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
           val purgedRequest = eventually(
             Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
           )(doc => doc.exists(_.getString("phase") == ErasurePhase.DeltaPurged.toString)).get
-          assertEquals(deletionStatus(api, receiptId), "PENDING", "real Delta retention horizon must remain pending")
+          assertEquals(
+            deletionStatus(api, receiptId, token),
+            "PENDING",
+            "real Delta retention horizon must remain pending"
+          )
           val deletedFence = database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first()
           assert(
             java.lang.Boolean.TRUE == deletedFence.getBoolean("deleted"),

@@ -19,6 +19,7 @@ import com.mongodb.reactivestreams.client.{
   MongoClients as ReactiveMongoClients,
   MongoDatabase as ReactiveMongoDatabase
 }
+import mongo4cats.client.MongoClient as CatsMongoClient
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.sql.Row
@@ -37,7 +38,10 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   private var mongo: MongoClient = uninitialized
   private var peerMongo: MongoClient = uninitialized
   private var reactiveMongo: ReactiveMongoClient = uninitialized
-  private var reactivePeerMongo: ReactiveMongoClient = uninitialized
+  private var catsMongo: CatsMongoClient[IO] = uninitialized
+  private var catsPeerMongo: CatsMongoClient[IO] = uninitialized
+  private var releaseCatsMongo: IO[Unit] = IO.unit
+  private var releaseCatsPeerMongo: IO[Unit] = IO.unit
   private var database: MongoDatabase = uninitialized
   private var reactiveDatabase: ReactiveMongoDatabase = uninitialized
   private var spark: SparkSession = uninitialized
@@ -49,7 +53,18 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     mongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
     peerMongo = MongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
     reactiveMongo = ReactiveMongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
-    reactivePeerMongo = ReactiveMongoClients.create(sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+    val (catsClient, releaseCatsClient) = CatsMongoClient
+      .fromConnectionString[IO](sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+      .allocated
+      .unsafeRunSync()
+    catsMongo = catsClient
+    releaseCatsMongo = releaseCatsClient
+    val (catsPeerClient, releaseCatsPeerClient) = CatsMongoClient
+      .fromConnectionString[IO](sys.env("ANALYTICS_KEY_RETIREMENT_MONGO_URI"))
+      .allocated
+      .unsafeRunSync()
+    catsPeerMongo = catsPeerClient
+    releaseCatsPeerMongo = releaseCatsPeerClient
     database = mongo.getDatabase(s"analytics_key_retirement_${java.util.UUID.randomUUID().toString.replace('-', '_')}")
     reactiveDatabase = reactiveMongo.getDatabase(database.getName)
     spark = SparkSession
@@ -86,7 +101,8 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     Try(mongo.close())
     Try(peerMongo.close())
     Try(reactiveMongo.close())
-    Try(reactivePeerMongo.close())
+    Try(releaseCatsMongo.unsafeRunSync())
+    Try(releaseCatsPeerMongo.unsafeRunSync())
     Try(spark.stop())
     if (lakehouseRoot != null) deleteTree(lakehouseRoot)
   }
@@ -133,13 +149,13 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     val root = s"s3a://analytics-test/${java.util.UUID.randomUUID()}"
     val firstLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
-        reactiveDatabase,
+        catsMongo.getDatabase(database.getName).unsafeRunSync(),
         Clock[IO],
         AnalyticsTestOperationalConfig.streams
       )
     val secondLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
-        reactivePeerMongo.getDatabase(database.getName),
+        catsPeerMongo.getDatabase(database.getName).unsafeRunSync(),
         Clock[IO],
         AnalyticsTestOperationalConfig.streams
       )
@@ -231,7 +247,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
         ),
         now,
         new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
-          reactiveDatabase,
+          catsMongo.getDatabase(database.getName).unsafeRunSync(),
           Clock[IO],
           AnalyticsTestOperationalConfig.streams
         ),

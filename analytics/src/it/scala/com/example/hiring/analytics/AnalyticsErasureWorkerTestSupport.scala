@@ -16,7 +16,7 @@ import com.example.hiring.analytics.service.erasure.{KafkaRetention, KafkaRetent
 import com.example.hiring.analytics.domain.{AccountSubjectId, RangeFingerprint, RunId}
 import com.example.hiring.analytics.domain.AnalyticsDigest
 import cats.effect.{Clock, IO}
-import com.mongodb.reactivestreams.client.MongoDatabase
+import mongo4cats.database.MongoDatabase
 import org.apache.spark.sql.SparkSession
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
@@ -32,7 +32,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
 
   def worker(
       spark: SparkSession,
-      database: MongoDatabase,
+      database: MongoDatabase[IO],
       store: MongoAnalyticsErasureWorkerStore[IO],
       kafka: KafkaConnection,
       fencerKafka: KafkaConnection,

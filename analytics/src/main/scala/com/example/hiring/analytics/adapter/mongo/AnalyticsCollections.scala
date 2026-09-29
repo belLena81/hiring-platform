@@ -1,6 +1,5 @@
 package com.example.hiring.analytics.adapter.mongo
 
-
 /** Stable Mongo namespaces and BSON field names shared by analytics adapters. */
 private[analytics] object AnalyticsCollections {
   val ReportSnapshots = "analytics_report_snapshots"

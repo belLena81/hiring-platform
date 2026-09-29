@@ -4,6 +4,7 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
@@ -378,8 +379,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("offset manifests reject impossible or duplicated partition ranges") {
-    assertEquals(AnalyticsTestOperationalConfig.operational.retention.bronzeDays, 7)
-    assertEquals(AnalyticsTestOperationalConfig.operational.retention.silverDays, 30)
+    assertEquals(AnalyticsTestOperationalConfig.operational.retention.bronzeDays.value, 7)
+    assertEquals(AnalyticsTestOperationalConfig.operational.retention.silverDays.value, 30)
     assert(PartitionOffsetRange.from("topic", 0, 5L, 4L).isInvalid)
     assert(
       AnalyticsRunManifest
@@ -447,7 +448,12 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("Kafka SASL_PLAINTEXT requires explicit opt-in and reaches both client property sets") {
-    val unapproved = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "SASL_PLAINTEXT")
+    val unapproved = KafkaConnection(
+      "kafka:9092",
+      Some("reader"),
+      Some("secret"),
+      KafkaSecurityProtocol.SaslPlaintext
+    )
     assert(KafkaConnection.validate(unapproved).isInvalid)
     assert(KafkaClientProperties.clientProperties(unapproved).isLeft)
     assert(KafkaClientProperties.sparkOptions(unapproved).isLeft)
@@ -465,7 +471,13 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("Kafka rejects an unsupported security protocol") {
-    val invalid = KafkaConnection("kafka:9092", Some("reader"), Some("secret"), "PLAINTEXT", allowPlaintext = true)
+    val invalid = KafkaConnection(
+      "broker.example.com:9092",
+      Some("reader"),
+      Some("secret"),
+      KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = true
+    )
     assert(KafkaConnection.validate(invalid).isInvalid)
     assert(KafkaClientProperties.clientProperties(invalid).isLeft)
   }
@@ -1170,7 +1182,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         .matchingTokens(subjectId)
         .left
         .map(AnalyticsError.InvalidConfiguration.apply)
-        .map(_.toSet)
+        .map(_.map(_.value).toSet)
     )
   }
 

@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
@@ -220,7 +222,11 @@ final class HiringAnalyticsBatch[F[_]: Async](
         .whenNotMatched()
         .insertAll()
         .execute()
-    else source.write.format("delta").mode("errorifexists").save(path)
+    else {
+      val writer = source.write.format("delta").mode("errorifexists")
+      val rawPath = path == paths.bronze || path == paths.quarantine
+      (if (rawPath) writer.option("delta.dataSkippingNumIndexedCols", "0") else writer).save(path)
+    }
   }
 
   private def readDeltaOrEmpty(spark: SparkSession, path: String, schema: StructType): F[DataFrame] =

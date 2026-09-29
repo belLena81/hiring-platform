@@ -38,32 +38,33 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Cloc
       .eval(database.getCollection[Document](requestCollection, CodecRegistry.Default))
       .flatMap(collection =>
         streams.stream(
-          collection.underlying.find(
-            Filters.or(
-              Filters.in(
-                AnalyticsCollections.Fields.State,
-                ErasureRequestState.Pending.persistedName,
-                ErasureRequestState.Processing.persistedName
-              ),
-              Filters.and(
-                Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
-                Filters.or(
-                  Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
-                  Filters.expr(
-                    new Document(
-                      "$ne",
-                      List(
-                        new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
-                        "date"
-                      ).asJava
+          collection.underlying
+            .find(
+              Filters.or(
+                Filters.in(
+                  AnalyticsCollections.Fields.State,
+                  ErasureRequestState.Pending.persistedName,
+                  ErasureRequestState.Processing.persistedName
+                ),
+                Filters.and(
+                  Filters.eq(AnalyticsCollections.Fields.State, ErasureRequestState.Complete.persistedName),
+                  Filters.or(
+                    Filters.gt(AnalyticsCollections.Fields.ExpiresAt, Date.from(now)),
+                    Filters.expr(
+                      new Document(
+                        "$ne",
+                        List(
+                          new Document("$type", s"$$${AnalyticsCollections.Fields.ExpiresAt}"),
+                          "date"
+                        ).asJava
+                      )
                     )
                   )
                 )
               )
             )
-          )
-          .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
-          .batchSize(256)
+            .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
+            .batchSize(256)
         )
       )
       .handleErrorWith {

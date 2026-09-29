@@ -18,7 +18,6 @@ import cats.effect.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
-import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import org.apache.kafka.clients.admin.{Admin, NewTopic}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.errors.{
@@ -49,6 +48,9 @@ import scala.util.control.NonFatal
 
 /** Opt-in authorization proof against the authenticated local Compose Kafka broker. */
 class KafkaPublisherAccessIntegrationSpec extends FunSuite {
+  private def assert(condition: Boolean, clue: => Any): Unit =
+    if (!condition) throw new AssertionError(clue.toString)
+
   override val munitTimeout = scala.concurrent.duration.FiniteDuration(3, scala.concurrent.duration.MINUTES)
 
   private val enabled = sys.props.get("hiring.analytics.compose.acl-evidence").contains("true") ||
@@ -112,8 +114,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val client: MongoClient = MongoClients.create(mongoUri)
     val databaseName = "analytics_fencer_auth_" + UUID.randomUUID().toString.replace('-', '_')
     val database = client.getDatabase(databaseName)
-    val reactiveClient: ReactiveMongoClient = ReactiveMongoClients.create(mongoUri)
-    val reactiveDatabase = reactiveClient.getDatabase(databaseName)
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(mongoUri)
+    val reactiveDatabase = AnalyticsMongo4catsTestSupport.database(reactiveClient, databaseName)
     val requestId = UUID.randomUUID().toString
     val transactionalId = "hiring-publisher-invalid-fencer-" + UUID.randomUUID().toString
     val requestedAt = Instant.now()
@@ -304,7 +306,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     } finally {
       try database.drop()
       finally {
-        reactiveClient.close()
+        AnalyticsMongo4catsTestSupport.close(reactiveClient)
         client.close()
       }
     }
@@ -324,8 +326,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     val client = MongoClients.create(mongoUri)
     val databaseName = "analytics_poll_recovery_" + UUID.randomUUID().toString.replace('-', '_')
     val database = client.getDatabase(databaseName)
-    val reactiveClient: ReactiveMongoClient = ReactiveMongoClients.create(mongoUri)
-    val reactiveDatabase = reactiveClient.getDatabase(databaseName)
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(mongoUri)
+    val reactiveDatabase = AnalyticsMongo4catsTestSupport.database(reactiveClient, databaseName)
     val requestId = UUID.randomUUID().toString
     val receiptId = UUID.randomUUID().toString
     val transactionalId =
@@ -490,7 +492,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     } finally {
       try database.drop()
       finally {
-        reactiveClient.close()
+        AnalyticsMongo4catsTestSupport.close(reactiveClient)
         client.close()
       }
     }

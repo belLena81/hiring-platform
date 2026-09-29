@@ -63,7 +63,11 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
     s"""{"eventId":"$eventId","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-24T12:00:00Z","aggregateType":"Application","aggregateId":"application-$eventId","actorId":"candidate-$eventId","payload":{"applicationId":"application-$eventId","candidateId":"candidate-$eventId","jobId":"job-$eventId","newStatus":"Accepted"}}"""
 
   private def localKafkaConnection(bootstrapServers: String): KafkaConnection =
-    KafkaConnection(bootstrapServers, securityProtocol = "SASL_PLAINTEXT", allowPlaintext = true)
+    KafkaConnection(
+      bootstrapServers,
+      securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = true
+    )
 
   test("the production fencer fences an open transaction and read_committed hides its record") {
     val kafka = new KafkaContainer(image)

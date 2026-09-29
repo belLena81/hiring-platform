@@ -174,7 +174,11 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
                 settings.operational,
                 streams,
                 clock,
-                new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](database, clock, streams),
+                new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+                  database,
+                  clock,
+                  streams
+                ),
                 sparkExecution
               )
               action match {

@@ -18,7 +18,6 @@ import cats.effect.{Clock, Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.{ConnectionString, MongoClientSettings}
 import com.mongodb.client.{MongoClient, MongoClients}
-import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import com.mongodb.event.{CommandFailedEvent, CommandListener, CommandStartedEvent, CommandSucceededEvent}
 import org.bson.Document
 import org.apache.spark.sql.SparkSession
@@ -32,32 +31,36 @@ import java.util.Date
 import java.util.UUID
 import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.IdentityHashMap
 import scala.concurrent.duration.*
 
 class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
+  private def assert(condition: Boolean, clue: => Any): Unit =
+    if (!condition) throw new AssertionError(clue.toString)
+
   private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
   override val munitTimeout: FiniteDuration = 5.minutes
 
   private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
   private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
 
-  private val reactiveBySync = new IdentityHashMap[MongoClient, ReactiveMongoClient]()
+  private val mongo4catsBySync = new java.util.IdentityHashMap[MongoClient, mongo4cats.client.MongoClient[IO]]()
   private def syncClient(uri: String): MongoClient = {
     val sync = MongoClients.create(uri)
-    reactiveBySync.put(sync, ReactiveMongoClients.create(uri))
+    mongo4catsBySync.put(sync, AnalyticsMongo4catsTestSupport.client(uri))
     sync
   }
-  private def syncClient(settings: MongoClientSettings): MongoClient = {
+  private def syncClient(settings: MongoClientSettings, uri: String): MongoClient = {
     val sync = MongoClients.create(settings)
-    reactiveBySync.put(sync, ReactiveMongoClients.create(settings))
+    mongo4catsBySync.put(sync, AnalyticsMongo4catsTestSupport.client(settings))
     sync
   }
-  private def reactive(sync: MongoClient): ReactiveMongoClient = reactiveBySync.get(sync)
+  private def mongo4catsClient(sync: MongoClient): mongo4cats.client.MongoClient[IO] = mongo4catsBySync.get(sync)
+  private def mongo4catsDatabase(sync: MongoClient, name: String): mongo4cats.database.MongoDatabase[IO] =
+    AnalyticsMongo4catsTestSupport.database(mongo4catsClient(sync), name)
   override def afterEach(context: AfterEach): Unit = {
-    val clients = reactiveBySync.values().iterator()
-    while (clients.hasNext) clients.next().close()
-    reactiveBySync.clear()
+    val clients = mongo4catsBySync.values().iterator()
+    while (clients.hasNext) AnalyticsMongo4catsTestSupport.close(clients.next())
+    mongo4catsBySync.clear()
     super.afterEach(context)
   }
 
@@ -137,7 +140,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
     var client: MongoClient = null
     var restartedClient: MongoClient = null
     try {
-      client = syncClient(settings)
+      client = syncClient(settings, connectionString)
       val database = client.getDatabase(databaseName)
       val requestId = UUID.randomUUID().toString
       val requestedAt = Instant.parse("2026-01-01T00:00:00Z")
@@ -151,8 +154,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .append("requestedAt", Date.from(requestedAt))
         )
       val store = new MongoAnalyticsErasureWorkerStore[IO](
-        reactive(client),
-        reactive(client).getDatabase(databaseName),
+        mongo4catsClient(client),
+        mongo4catsDatabase(client, databaseName),
         streams = AnalyticsTestOperationalConfig.streams
       )
       val barrier = KafkaRetentionBarrier(
@@ -193,11 +196,11 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           if (!evidenceWriteStarted.await(90, TimeUnit.SECONDS))
             throw new AssertionError("old worker did not reach the file evidence write")
         }
-        _ <- IO.blocking { restartedClient = syncClient(settings) }
+        _ <- IO.blocking { restartedClient = syncClient(settings, connectionString) }
         restartedDatabase = restartedClient.getDatabase(databaseName)
         restartedStore = new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName),
+          mongo4catsClient(restartedClient),
+          mongo4catsDatabase(restartedClient, databaseName),
           streams = AnalyticsTestOperationalConfig.streams
         )
         claimResult <- Deferred[IO, Either[Throwable, Vector[ErasureClaim]]]
@@ -311,8 +314,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         )
       assertEquals(
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName),
+          mongo4catsClient(restartedClient),
+          mongo4catsDatabase(restartedClient, databaseName),
           streams = AnalyticsTestOperationalConfig.streams
         )
           .readBarrier(asAccountSubjectId(requestId))
@@ -405,19 +408,19 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
 
       val firstStore =
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(client),
-          reactive(client).getDatabase(databaseName),
+          mongo4catsClient(client),
+          mongo4catsDatabase(client, databaseName),
           streams = AnalyticsTestOperationalConfig.streams
         )
       val firstPublisher =
         new MongoAnalyticsReportPublisher[IO](
-          reactive(client),
-          reactive(client).getDatabase(databaseName),
+          mongo4catsClient(client),
+          mongo4catsDatabase(client, databaseName),
           operational = AnalyticsTestOperationalConfig.operational
         )
       val firstWorker = AnalyticsErasureWorkerTestSupport.worker(
         spark,
-        reactive(client).getDatabase(databaseName),
+        mongo4catsDatabase(client, databaseName),
         firstStore,
         KafkaConnection("unused:9092"),
         KafkaConnection("unused:9092"),
@@ -453,13 +456,13 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         }
         restartedDatabase = restartedClient.getDatabase(databaseName)
         restartedStore = new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName),
+          mongo4catsClient(restartedClient),
+          mongo4catsDatabase(restartedClient, databaseName),
           streams = AnalyticsTestOperationalConfig.streams
         )
         restartedPublisher = new MongoAnalyticsReportPublisher[IO](
-          reactive(restartedClient),
-          reactive(restartedClient).getDatabase(databaseName),
+          mongo4catsClient(restartedClient),
+          mongo4catsDatabase(restartedClient, databaseName),
           operational = AnalyticsTestOperationalConfig.operational
         )
         _ <- IO.delay(retentionHasPassed.set(true))
@@ -468,7 +471,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         resumedReservation <- restartedPublisher.reserve(runId, rangeFingerprint, afterRetention)
         restartedWorker = AnalyticsErasureWorkerTestSupport.worker(
           spark,
-          reactive(restartedClient).getDatabase(databaseName),
+          mongo4catsDatabase(restartedClient, databaseName),
           restartedStore,
           KafkaConnection("unused:9092"),
           KafkaConnection("unused:9092"),
@@ -502,7 +505,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         finalizerReservation <- restartedPublisher.reserve(runId, rangeFingerprint, afterRetention)
         finalizerWorker = AnalyticsErasureWorkerTestSupport.worker(
           spark,
-          reactive(restartedClient).getDatabase(databaseName),
+          mongo4catsDatabase(restartedClient, databaseName),
           restartedStore,
           KafkaConnection("unused:9092"),
           KafkaConnection("unused:9092"),
@@ -587,8 +590,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         )
       val store =
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(client),
-          reactive(client).getDatabase(database.getName),
+          mongo4catsClient(client),
+          mongo4catsDatabase(client, database.getName),
           streams = AnalyticsTestOperationalConfig.streams
         )
       val failedFencer = new TransactionalProducerFencer[IO] {
@@ -597,7 +600,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       }
       val worker = AnalyticsErasureWorkerTestSupport.worker(
         null,
-        reactive(client).getDatabase(database.getName),
+        mongo4catsDatabase(client, database.getName),
         store,
         KafkaConnection("unused:9092"),
         KafkaConnection("unused:9092"),
@@ -674,8 +677,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       )
       val store =
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(client),
-          reactive(client).getDatabase(database.getName),
+          mongo4catsClient(client),
+          mongo4catsDatabase(client, database.getName),
           streams = AnalyticsTestOperationalConfig.streams
         )
       val claim = store.claim(now, now.plusSeconds(60L), 1).unsafeRunSync().head
@@ -740,7 +743,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       .applyConnectionString(new ConnectionString(connectionString))
       .addCommandListener(listener)
       .build()
-    val staleClient = syncClient(settings)
+    val staleClient = syncClient(settings, connectionString)
     val currentClient = syncClient(connectionString)
     try {
       val database = currentClient.getDatabase(databaseName)
@@ -756,14 +759,14 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       )
       val staleStore =
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(staleClient),
-          reactive(staleClient).getDatabase(databaseName),
+          mongo4catsClient(staleClient),
+          mongo4catsDatabase(staleClient, databaseName),
           streams = AnalyticsTestOperationalConfig.streams
         )
       val currentStore =
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(currentClient),
-          reactive(currentClient).getDatabase(databaseName),
+          mongo4catsClient(currentClient),
+          mongo4catsDatabase(currentClient, databaseName),
           streams = AnalyticsTestOperationalConfig.streams
         )
       val staleClaim = currentStore.claim(now, now.plusSeconds(1), 1).unsafeRunSync().head
@@ -843,8 +846,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       )
       val store =
         new MongoAnalyticsErasureWorkerStore[IO](
-          reactive(client),
-          reactive(client).getDatabase(database.getName),
+          mongo4catsClient(client),
+          mongo4catsDatabase(client, database.getName),
           streams = AnalyticsTestOperationalConfig.streams
         )
       val result = for {

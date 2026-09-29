@@ -16,7 +16,6 @@ import com.example.hiring.analytics.adapter.mongo.*
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
-import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
 import com.mongodb.client.model.Updates
 import munit.FunSuite
 import org.bson.Document
@@ -79,7 +78,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     val client: MongoClient = MongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
-    val reactiveClient: ReactiveMongoClient = ReactiveMongoClients.create(
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -97,7 +96,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val publisher =
         new MongoAnalyticsReportPublisher[IO](
           reactiveClient,
-          reactiveClient.getDatabase(database.getName),
+          AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
           operational = AnalyticsTestOperationalConfig.operational
         )
       val now = Instant.now()
@@ -206,7 +205,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assert(invalidState.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()
-      reactiveClient.close()
+      AnalyticsMongo4catsTestSupport.close(reactiveClient)
       container.stop()
     }
   }
@@ -216,7 +215,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     val client = MongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
-    val reactiveClient = ReactiveMongoClients.create(
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -233,7 +232,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val publisher =
         new MongoAnalyticsReportPublisher[IO](
           reactiveClient,
-          reactiveClient.getDatabase(database.getName),
+          AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
           operational = AnalyticsTestOperationalConfig.operational
         )
       val admin = client.getDatabase("admin")
@@ -261,7 +260,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(database.getCollection("analytics_report_runs").countDocuments(), 2L)
     } finally {
       client.close()
-      reactiveClient.close()
+      AnalyticsMongo4catsTestSupport.close(reactiveClient)
       container.stop()
     }
   }
@@ -271,7 +270,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     val client = MongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
-    val reactiveClient = ReactiveMongoClients.create(
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -329,7 +328,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val publisher =
         new MongoAnalyticsReportPublisher[IO](
           reactiveClient,
-          reactiveClient.getDatabase(database.getName),
+          AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
           operational = AnalyticsTestOperationalConfig.operational
         )
       val claim =
@@ -382,7 +381,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(snapshot.getLong("generation"), Long.box(2L))
     } finally {
       client.close()
-      reactiveClient.close()
+      AnalyticsMongo4catsTestSupport.close(reactiveClient)
       container.stop()
     }
   }
@@ -392,7 +391,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     val client = MongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
-    val reactiveClient = ReactiveMongoClients.create(
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -435,7 +434,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       val publisher =
         new MongoAnalyticsReportPublisher[IO](
           reactiveClient,
-          reactiveClient.getDatabase(database.getName),
+          AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
           operational = AnalyticsTestOperationalConfig.operational
         )
       val claim =
@@ -465,7 +464,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(snapshot, null)
     } finally {
       client.close()
-      reactiveClient.close()
+      AnalyticsMongo4catsTestSupport.close(reactiveClient)
       container.stop()
     }
   }
@@ -475,7 +474,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     val client = MongoClients.create(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
-    val reactiveClient = ReactiveMongoClients.create(
+    val reactiveClient = AnalyticsMongo4catsTestSupport.client(
       s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
     )
     try {
@@ -514,7 +513,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         )
       val store = new MongoAnalyticsErasureWorkerStore[IO](
         reactiveClient,
-        reactiveClient.getDatabase(database.getName),
+        AnalyticsMongo4catsTestSupport.database(reactiveClient, database.getName),
         streams = AnalyticsTestOperationalConfig.streams
       )
       val result = for {
@@ -617,7 +616,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assert(malformedRefs.swap.toOption.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
     } finally {
       client.close()
-      reactiveClient.close()
+      AnalyticsMongo4catsTestSupport.close(reactiveClient)
       container.stop()
     }
   }

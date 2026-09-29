@@ -4,6 +4,7 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.config.*
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
@@ -18,11 +19,8 @@ import cats.effect.{Clock, IO}
 import io.github.iltotore.iron.*
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
-import com.mongodb.reactivestreams.client.{
-  MongoClient as ReactiveMongoClient,
-  MongoClients as ReactiveMongoClients,
-  MongoDatabase as ReactiveMongoDatabase
-}
+import mongo4cats.client.MongoClient as CatsMongoClient
+import mongo4cats.database.MongoDatabase as CatsMongoDatabase
 import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import io.delta.tables.DeltaTable
 import munit.FunSuite
@@ -186,7 +184,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       )
   }
 
-  private def prepare(db: MongoDatabase, reactiveDb: ReactiveMongoDatabase): Unit = {
+  private def prepare(db: MongoDatabase, reactiveDb: CatsMongoDatabase[IO]): Unit = {
     assert(enabled, "assertion failed")
     assertEquals(mode, "prepare")
     assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
@@ -230,7 +228,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         new MongoActiveDeletionMarkerSource[IO](
           reactiveDb,
           pseudonymizer,
-          streams = AnalyticsTestOperationalConfig.streams
+          streams = AnalyticsTestOperationalConfig.streams,
+          sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
         )
       )
       val manifest = AnalyticsRunManifest
@@ -358,8 +357,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   }
 
   private def appendRetentionTail(
-      reactiveClient: ReactiveMongoClient,
-      reactiveDb: ReactiveMongoDatabase,
+      reactiveClient: CatsMongoClient[IO],
+      reactiveDb: CatsMongoDatabase[IO],
       db: MongoDatabase
   ): Unit = {
     assertEquals(mode, "append-retention-tail")
@@ -429,8 +428,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   }
 
   private def inspect(
-      reactiveClient: ReactiveMongoClient,
-      reactiveDb: ReactiveMongoDatabase,
+      reactiveClient: CatsMongoClient[IO],
+      reactiveDb: CatsMongoDatabase[IO],
       db: MongoDatabase,
       requireKafka: Boolean,
       requireAll: Boolean,
@@ -501,7 +500,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           new MongoActiveDeletionMarkerSource[IO](
             reactiveDb,
             pseudonymizer,
-            streams = AnalyticsTestOperationalConfig.streams
+            streams = AnalyticsTestOperationalConfig.streams,
+            sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
           ).activeSubjectTokens(spark).unsafeRunSync()
         maintenance.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
         maintenance.verifyFilesAbsent(spark, evidence).unsafeRunSync()
@@ -540,10 +540,13 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     if (enabled) {
       assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
       val client = MongoClients.create(required("MONGODB_URI"))
-      val reactiveClient = ReactiveMongoClients.create(required("MONGODB_URI"))
+      val (reactiveClient, releaseReactiveClient) = CatsMongoClient
+        .fromConnectionString[IO](required("MONGODB_URI"))
+        .allocated
+        .unsafeRunSync()
       try {
         val db = client.getDatabase(databaseName)
-        val reactiveDb = reactiveClient.getDatabase(databaseName)
+        val reactiveDb = reactiveClient.getDatabase(databaseName).unsafeRunSync()
         mode match {
           case "prepare"               => prepare(db, reactiveDb)
           case "append-retention-tail" => appendRetentionTail(reactiveClient, reactiveDb, db)
@@ -558,7 +561,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           case other => fail("unsupported retention proof mode: " + other)
         }
       } finally {
-        reactiveClient.close()
+        releaseReactiveClient.unsafeRunSync()
         client.close()
       }
     }

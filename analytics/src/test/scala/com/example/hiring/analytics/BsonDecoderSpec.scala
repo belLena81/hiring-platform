@@ -57,7 +57,10 @@ final class BsonDecoderSpec extends FunSuite {
 
     val decoded = MongoAnalyticsReportRecords.decodeControl(reportRecord(document))
     assertEquals(decoded.map(_.nextRevision), Right(None))
-    assertEquals(decoded.map(_.extraFields.getString("operatorExtension")), Right("preserved"))
+    assertEquals(
+      decoded.map(_.extraFields.get("operatorExtension").map(_.asString().getValue)),
+      Right(Some("preserved"))
+    )
     assertEquals(
       MongoAnalyticsReportRecords
         .decodeControl(

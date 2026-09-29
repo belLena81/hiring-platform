@@ -3,7 +3,7 @@ package com.example.hiring.analytics.app
 import com.example.hiring.analytics.adapter.kafka.{KafkaProducerFencer, KafkaRetentionAdapter}
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.spark.*
-import com.example.hiring.analytics.config.{AnalyticsBatchSettings, AnalyticsWorkerSettings}
+import com.example.hiring.analytics.config.{AnalyticsBatchSettings, AnalyticsCommonSettings, AnalyticsWorkerSettings}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.adapter.spark.AnalyticsErasureWorker
 import com.example.hiring.analytics.service.batch.*
@@ -23,91 +23,66 @@ object AppModule {
   final case class BatchProgram[F[_]] private[app] (run: F[AnalyticsPublication])
   final case class WorkerProgram[F[_]] private[app] (run: F[Unit])
 
+  private final case class Shared[F[_]](
+      paths: AnalyticsLakehousePaths,
+      spark: SparkSession,
+      client: MongoClient[F],
+      database: MongoDatabase[F],
+      sparkExecution: SparkBlockingExecution[F],
+      streams: MongoPublisherStream,
+      markers: MongoActiveDeletionMarkerSource[F],
+      lock: MongoAnalyticsLakehouseLock[F],
+      maintenance: DeltaAnalyticsErasureLakehouse[F]
+  )
+
   private[analytics] def resolveLakehousePaths(root: String): Either[AnalyticsError, AnalyticsLakehousePaths] =
     AnalyticsLakehousePaths
       .from(root)
       .toEither
       .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
 
-  def batch[F[_]: Async: Clock](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] = {
-    val common = settings.common
-    for {
-      paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
-      (spark, client, sparkExecution) <- sparkMongo[F](
-        common.mongoUri,
-        common.sparkMaster,
-        appName = "hiring-analytics-batch"
-      )
-      database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
-    } yield {
-      val streams = new MongoPublisherStream(common.operational)
-      val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution)
-      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
-      val maintenance = new DeltaAnalyticsErasureLakehouse[F](
-        paths,
-        common.pseudonymizer,
-        Clock[F],
-        lock,
-        new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
-        common.operational,
-        sparkExecution,
-        Slf4jLogger.getLogger[F]
-      )
+  def batch[F[_]: Async: Clock](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
+    shared[F](settings.common, appName = "hiring-analytics-batch").map { shared =>
+      val common = settings.common
       val job = new HiringAnalyticsBatch[F](
-        paths,
+        shared.paths,
         common.pseudonymizer,
-        markers,
+        shared.markers,
         Clock[F],
-        new MongoAnalyticsReportPublisher[F](client, database, common.operational),
-        new DeltaManifestStore[F](paths),
-        lock,
+        new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational),
+        new DeltaManifestStore[F](shared.paths),
+        shared.lock,
         common.operational,
-        sparkExecution,
-        maintenance
+        shared.sparkExecution,
+        shared.maintenance
       )
-      BatchProgram(job.run(spark, new KafkaOffsetRangeSource[F](common.kafka, sparkExecution), settings.manifest))
+      BatchProgram(
+        job.run(
+          shared.spark,
+          new KafkaOffsetRangeSource[F](common.kafka, shared.sparkExecution),
+          settings.manifest
+        )
+      )
     }
-  }
 
-  def worker[F[_]: Async: Clock: Temporal](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] = {
-    val common = settings.common
-    for {
-      paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
-      (spark, client, sparkExecution) <- sparkMongo[F](
-        common.mongoUri,
-        common.sparkMaster,
-        appName = "hiring-analytics-erasure-worker"
-      )
-      database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
-    } yield {
-      val streams = new MongoPublisherStream(common.operational)
-      val store = new MongoAnalyticsErasureWorkerStore[F](client, database, streams)
-      val publisher = new MongoAnalyticsReportPublisher[F](client, database, common.operational)
-      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
-      val markers = new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution)
-      val maintenance = new DeltaAnalyticsErasureLakehouse[F](
-        paths,
-        common.pseudonymizer,
-        Clock[F],
-        lock,
-        new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
-        common.operational,
-        sparkExecution,
-        Slf4jLogger.getLogger[F]
-      )
+  def worker[F[_]: Async: Clock: Temporal](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
+    shared[F](settings.common, appName = "hiring-analytics-erasure-worker").map { shared =>
+      val common = settings.common
+      val store = new MongoAnalyticsErasureWorkerStore[F](shared.client, shared.database, shared.streams)
+      val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
       val job = new AnalyticsErasureWorker[F](
-        spark,
+        shared.spark,
         store,
         store,
         store,
         common.kafka,
         settings.fencerKafka,
         settings.topic,
-        paths,
+        shared.paths,
         publisher,
-        markers,
-        maintenance,
-        lock,
+        shared.markers,
+        shared.maintenance,
+        shared.lock,
         Clock[F],
         Slf4jLogger.getLogger[F],
         KafkaProducerFencer[F],
@@ -116,7 +91,6 @@ object AppModule {
       )
       WorkerProgram(job.run)
     }
-  }
 
   def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureWorkerStore[F]] =
     for {
@@ -127,6 +101,39 @@ object AppModule {
       database,
       new MongoPublisherStream(settings.common.operational)
     )
+
+  private def shared[F[_]: Async: Clock](
+      common: AnalyticsCommonSettings,
+      appName: String
+  ): Resource[F, Shared[F]] =
+    for {
+      paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
+      (spark, client, sparkExecution) <- sparkMongo[F](common.mongoUri, common.sparkMaster, appName)
+      database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
+    } yield {
+      val streams = new MongoPublisherStream(common.operational)
+      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
+      Shared(
+        paths,
+        spark,
+        client,
+        database,
+        sparkExecution,
+        streams,
+        new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution),
+        lock,
+        new DeltaAnalyticsErasureLakehouse[F](
+          paths,
+          common.pseudonymizer,
+          Clock[F],
+          lock,
+          new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
+          common.operational,
+          sparkExecution,
+          Slf4jLogger.getLogger[F]
+        )
+      )
+    }
 
   /** Shared resource boundary for operator diagnostics that need Spark and Mongo without batch services. */
   def sparkMongo[F[_]: Async](
@@ -159,7 +166,9 @@ object AppModule {
   private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient[F]] =
     MongoClient.fromConnectionString[F](uri).handleErrorWith {
       case _: IllegalArgumentException =>
-        Resource.eval(Async[F].raiseError[MongoClient[F]](AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")))
+        Resource.eval(
+          Async[F].raiseError[MongoClient[F]](AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid"))
+        )
       case NonFatal(cause) =>
         Resource.eval(Async[F].raiseError[MongoClient[F]](AnalyticsError.MongoConnectionFailure(cause)))
     }

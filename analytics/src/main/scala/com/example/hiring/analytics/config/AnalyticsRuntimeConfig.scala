@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.config
 
+import AnalyticsPositiveInt.*
+
 import com.example.hiring.analytics.domain.{AnalyticsRunManifest, PartitionOffsetRange, RunId, SubjectPseudonymizer}
 import com.example.hiring.analytics.errors.AnalyticsError
 
@@ -303,11 +305,11 @@ object AnalyticsRuntimeConfig {
       .leftMap(_ => "analytics.batch.run-id must be non-empty")
       .toValidatedNec
     val ranges = (
-        present(raw.kafka.topic, "analytics.kafka.topic"),
-        integer(raw.batch.partition, "analytics.batch.partition"),
-        long(raw.batch.startOffset, "analytics.batch.start-offset"),
-        long(raw.batch.endOffsetExclusive, "analytics.batch.end-offset-exclusive")
-      )
+      present(raw.kafka.topic, "analytics.kafka.topic"),
+      integer(raw.batch.partition, "analytics.batch.partition"),
+      long(raw.batch.startOffset, "analytics.batch.start-offset"),
+      long(raw.batch.endOffsetExclusive, "analytics.batch.end-offset-exclusive")
+    )
       .mapN((topic, partition, startOffset, endOffset) => (topic, partition, startOffset, endOffset))
       .andThen { case (topic, partition, startOffset, endOffset) =>
         PartitionOffsetRange.from(topic, partition, startOffset, endOffset).map(Vector(_))
@@ -445,8 +447,9 @@ object AnalyticsRuntimeConfig {
       positive(raw.retention.deltaVacuumSafetyDays, "analytics.operational.retention.delta-vacuum-safety-days"),
       positive(raw.retention.deltaLogRetentionDays, "analytics.operational.retention.delta-log-retention-days")
     ).mapN(AnalyticsRetentionSettings.apply)
-    val reportReservationTtl = positive(raw.reportReservationTtlDays, "analytics.operational.report-reservation-ttl-days")
-      .map(value => value.value.toLong.days)
+    val reportReservationTtl =
+      positive(raw.reportReservationTtlDays, "analytics.operational.report-reservation-ttl-days")
+        .map(value => value.value.toLong.days)
     val mongoTransactionWindow = positive(
       raw.mongoTransactionWindowSeconds,
       "analytics.operational.mongo-transaction-window-seconds"

@@ -56,6 +56,16 @@ final class KeyMaterialContinuityDecisionSpec extends ScalaCheckSuite {
         .evaluate(true, true, Vector("old-key" -> ("c" * 43)), Vector(oldKey), Set.empty)
         .isLeft
     )
+    assert(
+      KeyMaterialContinuityDecision
+        .evaluate(true, true, Vector((null: String) -> ("a" * 43)), Vector(oldKey), Set.empty)
+        .isLeft
+    )
+    assert(
+      KeyMaterialContinuityDecision
+        .evaluate(true, true, Vector("old-key" -> (null: String)), Vector(oldKey), Set.empty)
+        .isLeft
+    )
   }
 
   test("omission needs an immutable authorization bound to the lakehouse and original verifier") {

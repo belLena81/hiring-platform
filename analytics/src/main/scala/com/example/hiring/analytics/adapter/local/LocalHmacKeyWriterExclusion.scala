@@ -28,6 +28,14 @@ private[analytics] object LocalHmacKeyWriterExclusion {
 
   private final case class Result(exitCode: Int, output: String)
 
+  private[analytics] def unixAttributeInt(value: Any): Either[AnalyticsError, Int] = value match {
+    case number: java.lang.Integer => Right(number.intValue())
+    case _ => Left(AnalyticsError.InvalidConfiguration("retirement volume permission metadata is unavailable"))
+  }
+
+  private def readUnixIntAttribute(path: Path, name: String): Either[AnalyticsError, Int] =
+    unixAttributeInt(Files.getAttribute(path, name))
+
   private def run(args: Vector[String]): Either[AnalyticsError, Result] = {
     val process = new ProcessBuilder(args*).redirectErrorStream(true).start()
     val completed = process.waitFor(30L, TimeUnit.SECONDS)
@@ -161,47 +169,52 @@ private[analytics] object LocalHmacKeyWriterExclusion {
             entries.traverse_ { path =>
               if (Files.isSymbolicLink(path))
                 Left(AnalyticsError.InvalidConfiguration("retirement volume contains a symlink"))
-              else {
-                val owner = Files.getAttribute(path, "unix:uid").asInstanceOf[Int]
-                val group = Files.getAttribute(path, "unix:gid").asInstanceOf[Int]
-                val mode = Files.getAttribute(path, "unix:mode").asInstanceOf[Int]
-                val writable =
-                  if (owner == uid) (mode & 0x80) != 0
-                  else if (groups.contains(group)) (mode & 0x10) != 0
-                  else (mode & 0x2) != 0
-                val permissionCheck =
-                  if (writable)
-                    Left(AnalyticsError.InvalidConfiguration("host user can write a retirement volume path"))
-                  else if (Files.isWritable(path))
-                    Left(
-                      AnalyticsError.InvalidConfiguration("host user has effective write access to a retirement path")
-                    )
-                  else if (Files.isDirectory(path)) {
-                    val challenge = path.resolve(".hmac-host-create-" + UUID.randomUUID().toString)
-                    val created = try {
-                      Files.createFile(challenge)
-                      true
-                    } catch { case _: java.nio.file.AccessDeniedException => false }
-                    if (created) Files.deleteIfExists(challenge)
-                    Either.cond(
-                      !created,
-                      (),
-                      AnalyticsError.InvalidConfiguration("host user can create a retirement file")
-                    )
-                  } else if (Files.isRegularFile(path)) {
-                    val opened = try {
-                      val channel = Files.newByteChannel(path, StandardOpenOption.WRITE)
-                      channel.close()
-                      true
-                    } catch { case _: java.nio.file.AccessDeniedException => false }
-                    Either.cond(
-                      !opened,
-                      (),
-                      AnalyticsError.InvalidConfiguration("host user can modify a retirement file")
-                    )
-                  } else Right(())
-                permissionCheck
-              }
+              else
+                for {
+                  owner <- readUnixIntAttribute(path, "unix:uid")
+                  group <- readUnixIntAttribute(path, "unix:gid")
+                  mode <- readUnixIntAttribute(path, "unix:mode")
+                  result <- {
+                    val writable =
+                      if (owner == uid) (mode & 0x80) != 0
+                      else if (groups.contains(group)) (mode & 0x10) != 0
+                      else (mode & 0x2) != 0
+                    val permissionCheck =
+                      if (writable)
+                        Left(AnalyticsError.InvalidConfiguration("host user can write a retirement volume path"))
+                      else if (Files.isWritable(path))
+                        Left(
+                          AnalyticsError.InvalidConfiguration(
+                            "host user has effective write access to a retirement path"
+                          )
+                        )
+                      else if (Files.isDirectory(path)) {
+                        val challenge = path.resolve(".hmac-host-create-" + UUID.randomUUID().toString)
+                        val created = try {
+                          Files.createFile(challenge)
+                          true
+                        } catch { case _: java.nio.file.AccessDeniedException => false }
+                        if (created) Files.deleteIfExists(challenge)
+                        Either.cond(
+                          !created,
+                          (),
+                          AnalyticsError.InvalidConfiguration("host user can create a retirement file")
+                        )
+                      } else if (Files.isRegularFile(path)) {
+                        val opened = try {
+                          val channel = Files.newByteChannel(path, StandardOpenOption.WRITE)
+                          channel.close()
+                          true
+                        } catch { case _: java.nio.file.AccessDeniedException => false }
+                        Either.cond(
+                          !opened,
+                          (),
+                          AnalyticsError.InvalidConfiguration("host user can modify a retirement file")
+                        )
+                      } else Right(())
+                    permissionCheck
+                  }
+                } yield result
             }
         } finally stream.close()
       }

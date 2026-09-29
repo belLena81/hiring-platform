@@ -16,6 +16,12 @@ import cats.Id
 import java.nio.file.Path
 
 final class HmacKeyRetirementSecuritySpec extends FunSuite {
+  test("Unix permission attributes accept integer values and reject unexpected types") {
+    assertEquals(LocalHmacKeyWriterExclusion.unixAttributeInt(Integer.valueOf(42)), Right(42))
+    assert(LocalHmacKeyWriterExclusion.unixAttributeInt(java.lang.Long.valueOf(42L)).isLeft)
+    assert(LocalHmacKeyWriterExclusion.unixAttributeInt(null).isLeft)
+  }
+
   test("authorization store is parameterized by its effect") {
     val store = new HmacKeyRetirementAuthorizationStore[Id] {
       override def list(root: String): Id[Vector[HmacKeyRetirementAuthorization]] = Vector.empty

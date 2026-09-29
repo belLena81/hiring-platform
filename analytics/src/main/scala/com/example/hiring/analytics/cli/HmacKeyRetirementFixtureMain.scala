@@ -1,4 +1,5 @@
 package com.example.hiring.analytics.cli
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import com.example.hiring.analytics.service.keyretirement.*
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.errors.*
@@ -460,7 +461,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                       AnalyticsError.InvalidConfiguration("old-key retirement authorization is not persisted")
                     )
                   }
-                }
+              }
             }
           } yield ()
         case Left(_) => IO.raiseError(AnalyticsError.InvalidConfiguration("analytics.mongo settings are missing"))

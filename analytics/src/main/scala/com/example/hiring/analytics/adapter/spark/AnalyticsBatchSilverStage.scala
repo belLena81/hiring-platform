@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+
 import cats.effect.Async
 import cats.syntax.all.*
 import io.github.iltotore.iron.*

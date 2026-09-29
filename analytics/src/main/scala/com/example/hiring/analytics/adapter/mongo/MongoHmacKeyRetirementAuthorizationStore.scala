@@ -81,16 +81,19 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
       _ <- Async[F].raiseUnless(checked.lakehouseId == expectedLakehouse)(
         AnalyticsError.InvalidConfiguration("HMAC key retirement authorization targets another lakehouse")
       )
-      _ <- collection.flatMap(_.insertOne(
-        new Document("_id", id(checked))
-          .append("lakehouseId", checked.lakehouseId)
-          .append("keyId", checked.keyId)
-          .append("originalVerifier", checked.originalVerifier)
-          .append("evidenceFacts", checked.evidenceFacts)
-          .append("evidenceDigest", checked.evidenceDigest)
-          .append("authorizedAt", Date.from(checked.authorizedAt)),
-        new mongo4cats.models.collection.InsertOneOptions()
-      ))
+      _ <- collection
+        .flatMap(
+          _.insertOne(
+            new Document("_id", id(checked))
+              .append("lakehouseId", checked.lakehouseId)
+              .append("keyId", checked.keyId)
+              .append("originalVerifier", checked.originalVerifier)
+              .append("evidenceFacts", checked.evidenceFacts)
+              .append("evidenceDigest", checked.evidenceDigest)
+              .append("authorizedAt", Date.from(checked.authorizedAt)),
+            new mongo4cats.models.collection.InsertOneOptions()
+          )
+        )
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(_)           =>

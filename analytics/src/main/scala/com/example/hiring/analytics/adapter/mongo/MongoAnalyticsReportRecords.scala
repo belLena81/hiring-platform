@@ -20,14 +20,14 @@ private[analytics] object MongoAnalyticsReportRecords {
       lastPublishedRevision: Long,
       lastRunId: Option[String],
       state: String,
-    extraFields: Map[String, BsonValue]
+      extraFields: Map[String, BsonValue]
   )
   final case class Snapshot(
       generation: Long,
       revision: Long,
       runId: RunId,
       expiresAt: Option[Date],
-    extraFields: Map[String, BsonValue]
+      extraFields: Map[String, BsonValue]
   ) {
     def matches(reservation: AnalyticsReportReservation): Boolean =
       generation == reservation.generation && revision == reservation.revision && runId == reservation.runId

@@ -1,7 +1,7 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
-import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.config.{KafkaConnection, KafkaSecurityProtocol}
 import com.example.hiring.analytics.adapter.spark.KafkaOffsetRangeSource
 import com.example.hiring.analytics.domain.PartitionOffsetRange
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -79,7 +79,8 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
       "broker.example:9093",
       Some(username),
       Some(password),
-      securityProtocol = "INVALID"
+      securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = false
     )
     val problem = KafkaConnection.validate(connection).toEither.left.toOption.get.toNonEmptyList.toList.mkString(" ")
 

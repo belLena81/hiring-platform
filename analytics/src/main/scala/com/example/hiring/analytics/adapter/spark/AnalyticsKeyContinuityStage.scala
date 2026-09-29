@@ -190,9 +190,8 @@ private[spark] object KeyMaterialContinuityDecision {
     else if (!registryExists) Right(configured)
     else {
       val rowsAreValid = existingRows.forall { case (keyId, verifier) =>
-        keyId != null && keyId.matches("[A-Za-z0-9-]{1,40}") && verifier != null && verifier.matches(
-          "[A-Za-z0-9_-]{43}"
-        )
+        Option(keyId).exists(_.matches("[A-Za-z0-9-]{1,40}")) &&
+        Option(verifier).exists(_.matches("[A-Za-z0-9_-]{43}"))
       }
       val existing = existingRows.toMap
       val authorizationsValid = authorizations.forall(record =>

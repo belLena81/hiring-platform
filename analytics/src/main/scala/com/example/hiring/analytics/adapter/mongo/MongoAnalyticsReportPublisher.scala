@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.mongo
 
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.AnalyticsReportOutput
 import com.example.hiring.analytics.domain.RangeFingerprint
@@ -161,7 +163,9 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
             for {
               current <- lift(
                 streams.optional(
-                  typedControl.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first
+                  typedControl
+                    .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
+                    .first
                 )
               )
               _ <- result(
@@ -229,7 +233,9 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           )
           state <- lift(
             streams.optional(
-              typedControl.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first
+              typedControl
+                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
+                .first
             )
           )
           stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))
@@ -278,7 +284,12 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
                   snapshots.replaceOne(
                     session.underlying,
                     Filters.eq(AnalyticsCollections.Fields.Id, "current"),
-                    reportDocument(reservation, report, expiresAt, snapshot.fold(Map.empty[String, org.bson.BsonValue])(_.extraFields)),
+                    reportDocument(
+                      reservation,
+                      report,
+                      expiresAt,
+                      snapshot.fold(Map.empty[String, org.bson.BsonValue])(_.extraFields)
+                    ),
                     new ReplaceOptions().upsert(true)
                   )
                 )
@@ -311,7 +322,12 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
                     snapshots.replaceOne(
                       session.underlying,
                       Filters.eq(AnalyticsCollections.Fields.Id, "current"),
-                      reportDocument(reservation, report, expiresAt, snapshot.fold(Map.empty[String, org.bson.BsonValue])(_.extraFields)),
+                      reportDocument(
+                        reservation,
+                        report,
+                        expiresAt,
+                        snapshot.fold(Map.empty[String, org.bson.BsonValue])(_.extraFields)
+                      ),
                       new ReplaceOptions().upsert(true)
                     )
                   )
@@ -391,7 +407,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           _ <- result(Either.cond(accountStatus == "Deleted", (), AnalyticsError.ErasureNotReady))
           fence <- lift(
             streams.optional(
-                  fences
+              fences
                 .find(
                   session.underlying,
                   Filters.and(
@@ -429,7 +445,9 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           )
           state <- lift(
             streams.optional(
-              typedControl.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first
+              typedControl
+                .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
+                .first
             )
           )
           stateRecord <- result(state.toRight(AnalyticsError.RunIdRangeConflict(reservation.runId.value)))

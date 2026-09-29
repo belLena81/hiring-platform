@@ -159,6 +159,13 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
     assert(observed.blockers.toList.exists(_.contains("malformed lease")))
   }
 
+  test("continuity registry validation rejects null keys and verifiers") {
+    val validVerifier = "a" * 43
+    assert(!validRegistryRows(Vector((null: String) -> validVerifier)))
+    assert(!validRegistryRows(Vector("key-1" -> (null: String))))
+    assert(!validRegistryRows(Vector("key-1" -> validVerifier, "key-1" -> validVerifier)))
+  }
+
   property("unrelated Mongo observations preserve blockers and active subjects") {
     forAll(Gen.chooseNum(0L, Long.MaxValue - 1L), Gen.chooseNum(0L, Long.MaxValue)) { (count: Long, rowId: Long) =>
       val active = Set("active-subject")

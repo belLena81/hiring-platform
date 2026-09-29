@@ -22,6 +22,9 @@ import mongo4cats.database.MongoDatabase
 import mongo4cats.codecs.CodecRegistry
 import mongo4cats.circe.MongoJsonCodecs
 import io.circe.{Decoder, Encoder, Json}
+import org.bson.BsonDocument
+import org.bson.codecs.{BsonDocumentCodec, Codec, DecoderContext, EncoderContext}
+import org.bson.codecs.configuration.{CodecProvider, CodecRegistry as JavaCodecRegistry}
 import com.mongodb.client.model.{FindOneAndUpdateOptions, Filters, ReturnDocument, Sorts, Updates}
 import com.mongodb.client.model.{ReplaceOneModel, ReplaceOptions, WriteModel}
 import org.bson.Document
@@ -94,22 +97,10 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
     document.hcursor.get[Option[A]](name).leftMap(_ => AnalyticsError.MalformedMarker)
 
   private def readInt32(document: Json, name: String): Either[AnalyticsError, Int] =
-    document.hcursor
-      .get[Json](name)
-      .toOption
-      .flatMap(_.asNumber)
-      .filter(_.getClass.getName == "io.circe.JsonInt")
-      .flatMap(_.toInt)
-      .toRight(AnalyticsError.MalformedMarker)
+    int32(document, name)
 
   private def readLong64(document: Json, name: String): Either[AnalyticsError, Long] =
-    document.hcursor
-      .get[Json](name)
-      .toOption
-      .flatMap(_.asNumber)
-      .filter(_.getClass.getName == "io.circe.JsonLong")
-      .flatMap(_.toLong)
-      .toRight(AnalyticsError.MalformedMarker)
+    int64(document, name)
 
   private given Decoder[Instant] = jsonCodecs.instantDecoder
   private given Decoder[Date] = jsonCodecs.instantDecoder.map(Date.from)
@@ -187,9 +178,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       }
 
   private def claimNext(now: Instant, leaseUntil: Instant): F[Option[ErasureClaim]] =
-    mongo {
-      db =>
-        val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+    mongo { db =>
+      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
       val token = UUID.randomUUID().toString
       val available = Filters.and(
         Filters.or(
@@ -232,11 +222,11 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       val options = new FindOneAndUpdateOptions()
         .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt, AnalyticsCollections.Fields.Id))
         .returnDocument(ReturnDocument.AFTER)
-      requests
+      db.requests
         .findOneAndUpdate(nonFinalizer, update, options)
         .flatMap {
           case some @ Some(_) => Async[F].pure(some)
-          case None           => requests.findOneAndUpdate(finalizer, update, options)
+          case None           => db.requests.findOneAndUpdate(finalizer, update, options)
         }
     }.flatMap(document =>
       Async[F].fromEither(document.traverse(decodeClaim(_).toRight(AnalyticsError.MalformedMarker)))
@@ -247,9 +237,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       subjectId: AccountSubjectId,
       now: Instant,
       deliveryTimeout: scala.concurrent.duration.FiniteDuration
-  ): F[Boolean] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  ): F[Boolean] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     streams
       .optional(fences.find(Filters.eq(AnalyticsCollections.Fields.Id, subjectId.value)).first)
       .map {
@@ -264,9 +253,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   }
 
   /** IDs are copied into the durable request in the account deletion transaction. */
-  def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
       .map(_.toRight(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing")))
@@ -326,23 +314,22 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): F[ErasureUpdate] = mongo {
     db =>
       val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
-    val partitionDocuments = barrier.partitions
-      .map(partition =>
-        new Document(AnalyticsCollections.Fields.PartitionNumber, partition.number)
-          .append(AnalyticsCollections.Fields.EndOffsetExclusive, partition.endOffsetExclusive)
+      val partitionDocuments = barrier.partitions
+        .map(partition =>
+          new Document(AnalyticsCollections.Fields.PartitionNumber, partition.number)
+            .append(AnalyticsCollections.Fields.EndOffsetExclusive, partition.endOffsetExclusive)
+        )
+        .asJava
+      val update = Updates.set(
+        AnalyticsCollections.Fields.KafkaRetentionBarrier,
+        new Document(AnalyticsCollections.Fields.Topic, barrier.topic)
+          .append(AnalyticsCollections.Fields.Partitions, partitionDocuments)
       )
-      .asJava
-    val update = Updates.set(
-      AnalyticsCollections.Fields.KafkaRetentionBarrier,
-      new Document(AnalyticsCollections.Fields.Topic, barrier.topic)
-        .append(AnalyticsCollections.Fields.Partitions, partitionDocuments)
-    )
-    matchedUpdate(requests, ownedClaim(claim, now), update).map(toErasureUpdate)
+      matchedUpdate(requests, ownedClaim(claim, now), update).map(toErasureUpdate)
   }
 
-  def readBarrier(requestId: AccountSubjectId): F[Option[KafkaRetentionBarrier]] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def readBarrier(requestId: AccountSubjectId): F[Option[KafkaRetentionBarrier]] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
       .map(
@@ -353,9 +340,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       )
   }.flatMap(Async[F].fromEither)
 
-  def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): F[ErasureUpdate] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def persistDeltaPurgedAt(claim: ErasureClaim, at: Instant, now: Instant): F[ErasureUpdate] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     matchedUpdate(
       requests,
       ownedClaim(claim, now),
@@ -363,9 +349,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
     ).map(toErasureUpdate)
   }
 
-  def persistDeltaGeneration(claim: ErasureClaim, generation: Long, now: Instant): F[ErasureUpdate] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def persistDeltaGeneration(claim: ErasureClaim, generation: Long, now: Instant): F[ErasureUpdate] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     matchedUpdate(
       requests,
       ownedClaim(claim, now),
@@ -454,9 +439,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
         }
     }
 
-  def readAffectedRows(requestId: AccountSubjectId): F[Long] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def readAffectedRows(requestId: AccountSubjectId): F[Long] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
       .flatMap(document =>
@@ -476,9 +460,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       )
   }
 
-  def readDeltaGeneration(requestId: AccountSubjectId): F[Option[Long]] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def readDeltaGeneration(requestId: AccountSubjectId): F[Option[Long]] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
       .flatMap(document =>
@@ -497,9 +480,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
       )
   }
 
-  def readDeltaPurgedAt(requestId: AccountSubjectId): F[Option[Instant]] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def readDeltaPurgedAt(requestId: AccountSubjectId): F[Option[Instant]] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     streams
       .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
       .flatMap(document =>
@@ -515,9 +497,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
   }
 
   /** Lets other requests progress while preserving the durable checkpoint for a final publication barrier. */
-  def releaseForOtherRequests(claim: ErasureClaim, now: Instant): F[ErasureUpdate] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def releaseForOtherRequests(claim: ErasureClaim, now: Instant): F[ErasureUpdate] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     matchedUpdate(
       requests,
       ownedClaim(claim, now),
@@ -660,9 +641,8 @@ final class MongoAnalyticsErasureWorkerStore[F[_]: Async](
           .void
       }
 
-  def preflight: F[Unit] = mongo {
-    db =>
-      val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
+  def preflight: F[Unit] = mongo { db =>
+    val Collections(requests, heartbeats, fences, outbox, deltaEvidence, ledger) = db
     // Delta file evidence is empty until the first erasure reaches physical reclamation;
     // Mongo creates the collection on its first evidence write.
     val required = Set(
@@ -811,9 +791,39 @@ private[analytics] object MongoAnalyticsErasureWorkerStore {
 
   private object jsonCodecs extends MongoJsonCodecs
   import jsonCodecs.*
-  private val jsonRegistry = CodecRegistry.mergeWithDefault(
-    CodecRegistry.from(deriveCirceCodecProvider[Json].get)
-  )
+  private val bsonDocumentCodec = new BsonDocumentCodec()
+  private val jsonDecoder = jsonCodecs.deriveJsonBsonValueDecoder[Json]
+  private val jsonEncoder = jsonCodecs.deriveJsonBsonValueEncoder[Json]
+
+  private[analytics] val jsonCodec: Codec[Json] = new Codec[Json] {
+    override def getEncoderClass: Class[Json] = classOf[Json]
+    override def encode(writer: org.bson.BsonWriter, value: Json, context: EncoderContext): Unit = {
+      val document = jsonEncoder.encode(value).asDocument.getOrElse(mongo4cats.bson.Document.empty).toBsonDocument
+      bsonDocumentCodec.encode(writer, document, context)
+    }
+    override def decode(reader: org.bson.BsonReader, context: DecoderContext): Json = {
+      val document = bsonDocumentCodec.decode(reader, context)
+      jsonDecoder
+        .decode(mongo4cats.bson.BsonValue.document(mongo4cats.bson.Document.fromJava(document)))
+        .getOrElse(Json.obj())
+    }
+  }
+
+  private val jsonProvider = new mongo4cats.codecs.MongoCodecProvider[Json] {
+    override def get: CodecProvider = new CodecProvider {
+      override def get[T](clazz: Class[T], registry: JavaCodecRegistry): Codec[T] =
+        if (clazz == classOf[Json]) jsonCodec.asInstanceOf[Codec[T]] else null
+    }
+  }
+
+  private val jsonRegistry = CodecRegistry.mergeWithDefault(CodecRegistry.from(jsonProvider.get))
+
+  private[analytics] def jsonFromBson(document: Document): Json = {
+    val raw = document.toBsonDocument(classOf[Document], com.mongodb.MongoClientSettings.getDefaultCodecRegistry)
+    jsonDecoder
+      .decode(mongo4cats.bson.BsonValue.document(mongo4cats.bson.Document.fromJava(raw)))
+      .getOrElse(Json.obj())
+  }
 
   private def malformed = AnalyticsError.MalformedMarker
   private def field[A: Decoder](document: Json, key: String): Either[AnalyticsError, A] =
@@ -821,21 +831,9 @@ private[analytics] object MongoAnalyticsErasureWorkerStore {
   private def optional[A: Decoder](document: Json, key: String): Either[AnalyticsError, Option[A]] =
     document.hcursor.get[Option[A]](key).leftMap(_ => malformed)
   private def int32(document: Json, key: String): Either[AnalyticsError, Int] =
-    document.hcursor
-      .get[Json](key)
-      .toOption
-      .flatMap(_.asNumber)
-      .filter(_.getClass.getName == "io.circe.JsonInt")
-      .flatMap(_.toInt)
-      .toRight(malformed)
+    document.hcursor.get[Int](key).leftMap(_ => malformed)
   private def int64(document: Json, key: String): Either[AnalyticsError, Long] =
-    document.hcursor
-      .get[Json](key)
-      .toOption
-      .flatMap(_.asNumber)
-      .filter(_.getClass.getName == "io.circe.JsonLong")
-      .flatMap(_.toLong)
-      .toRight(malformed)
+    document.hcursor.get[Long](key).leftMap(_ => malformed)
 
   private[analytics] def decodeRetentionBarrier(document: Json): Either[AnalyticsError, KafkaRetentionBarrier] =
     for {

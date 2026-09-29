@@ -16,12 +16,12 @@ import cats.effect.unsafe.implicits.global
 import cats.effect.syntax.all.*
 import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
 import com.mongodb.MongoException
-import com.mongodb.reactivestreams.client.ClientSession
+import mongo4cats.client.ClientSession
+import mongo4cats.models.client.TransactionOptions
 import munit.FunSuite
 import org.reactivestreams.{Publisher, Subscriber, Subscription}
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicLong}
-import java.lang.reflect.{InvocationHandler, Proxy}
 import scala.concurrent.duration.*
 
 final class MongoPublisherStreamSpec extends FunSuite {
@@ -51,17 +51,27 @@ final class MongoPublisherStreamSpec extends FunSuite {
     }
   }
 
-  private def sessionProxy(handler: (String, Array[Object]) => Object): ClientSession =
-    Proxy
-      .newProxyInstance(
-        classOf[ClientSession].getClassLoader,
-        Array(classOf[ClientSession]),
-        new InvocationHandler {
-          override def invoke(proxy: Any, method: java.lang.reflect.Method, args: Array[Object]): Object =
-            handler(method.getName, Option(args).getOrElse(Array.empty[Object]))
+  private def sessionProxy(handler: (String, Array[Object]) => Object): ClientSession[IO] =
+    new ClientSession[IO] {
+      override def underlying: com.mongodb.reactivestreams.client.ClientSession = null
+      override def hasActiveTransaction: Boolean =
+        handler("hasActiveTransaction", Array.empty[Object]).asInstanceOf[java.lang.Boolean].booleanValue()
+
+      private def invoke(name: String): IO[Unit] = IO.defer {
+        handler(name, Array.empty[Object]) match {
+          case publisher: Publisher[?] =>
+            fs2.interop.reactivestreams
+              .fromPublisher[IO, Void](publisher.asInstanceOf[Publisher[Void]], 1)
+              .compile
+              .drain
+          case _ => IO.unit
         }
-      )
-      .asInstanceOf[ClientSession]
+      }
+
+      override def startTransaction(options: TransactionOptions): IO[Unit] = invoke("startTransaction")
+      override def commitTransaction: IO[Unit] = invoke("commitTransaction")
+      override def abortTransaction: IO[Unit] = invoke("abortTransaction")
+    }
 
   test("Mongo transaction deadline clock is read when the returned IO runs") {
     val reads = new AtomicInteger(0)
@@ -73,20 +83,13 @@ final class MongoPublisherStreamSpec extends FunSuite {
         0.seconds
       }
     }
-    val session = Proxy
-      .newProxyInstance(
-        classOf[ClientSession].getClassLoader,
-        Array(classOf[ClientSession]),
-        new InvocationHandler {
-          override def invoke(proxy: Any, method: java.lang.reflect.Method, args: Array[Object]): Object =
-            method.getName match {
-              case "hasActiveTransaction" => java.lang.Boolean.FALSE
-              case "startTransaction"     => throw new IllegalStateException("test session stop")
-              case _                      => null
-            }
-        }
-      )
-      .asInstanceOf[ClientSession]
+    val session = sessionProxy { (method, _) =>
+      method match {
+        case "hasActiveTransaction" => java.lang.Boolean.FALSE
+        case "startTransaction"     => throw new IllegalStateException("test session stop")
+        case _                      => null
+      }
+    }
     val transaction = AnalyticsTestOperationalConfig.streams
       .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.pure(1)))(clock)
       .rethrowT

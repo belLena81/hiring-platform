@@ -125,7 +125,8 @@ object PartitionOffsetRange {
     val partitionValue = partition.validNec
     val startValue = startOffset.validNec
     val endValue = endOffsetExclusive.validNec
-    val validTopic = topicValue.andThen(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").toValidatedNec)
+    val validTopic =
+      topicValue.andThen(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").toValidatedNec)
     val validPartition = partitionValue.andThen(
       _.refineEither[Interval.Closed[0, 2147483647]].leftMap(_ => "partition must be non-negative").toValidatedNec
     )

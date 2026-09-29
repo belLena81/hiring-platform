@@ -78,6 +78,11 @@ private[analytics] object AnalyticsKeyRetirement {
   private[analytics] final case class ScanResult(count: Long, blockers: Chain[String] = Chain.empty)
   private[analytics] final case class MongoScanState(count: Long, activeSubjects: Set[String], blockers: Chain[String])
 
+  private[analytics] def validRegistryRows(rows: Vector[(String, String)]): Boolean =
+    rows.nonEmpty && rows.forall { case (id, verifier) =>
+      Option(id).exists(RegistryIdPattern.matches) && Option(verifier).exists(VerifierPattern.matches)
+    } && rows.map(_._1).distinct.size == rows.size
+
   /** Purely assesses one fetched Mongo row, retaining scan bounds and cross-collection active-subject tracking. */
   private[analytics] def reduceMongoObservation(
       state: MongoScanState,
@@ -502,11 +507,7 @@ private[analytics] object AnalyticsKeyRetirement {
           val sizeBlockers =
             if (rows.size > 1000) Chain.one("permanent HMAC continuity registry exceeds the audited key limit")
             else Chain.empty[String]
-          val valid = rows.nonEmpty && rows.forall { row =>
-            val id = row.getString(0)
-            val verifier = row.getString(1)
-            id != null && RegistryIdPattern.matches(id) && verifier != null && VerifierPattern.matches(verifier)
-          } && rows.map(_.getString(0)).distinct.size == rows.size
+          val valid = validRegistryRows(rows.map(row => row.getString(0) -> row.getString(1)))
           val validityBlockers =
             if (!valid) Chain.one("permanent HMAC continuity registry is empty, malformed, or contains duplicate IDs")
             else if (!rows.exists(_.getString(0) == keyId))

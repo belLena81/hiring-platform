@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+
 import com.example.hiring.analytics.adapter.kafka.TransactionalProducerFencer
 import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.config.KafkaConnection
@@ -127,12 +129,24 @@ final class AnalyticsErasureWorker[F[_]: Async](
       progress.recordFailure(claim, decision.category, nextAttempt, scheduled, current).flatMap {
         case ErasureUpdate.Applied =>
           logger.error(
-            "analytics erasure failed; persisted category=" + decision.category.persistedName + ", attempt=" + nextAttempt
+            "analytics erasure failed; persisted category=" + decision.category.persistedName +
+              ", errorCode=" + failureCode(error) + ", attempt=" + nextAttempt
           )
         case ErasureUpdate.LeaseLost =>
           logger.warn("analytics erasure failure could not be recorded because the lease is no longer owned")
       }
     }
+  }
+
+  /** Emits a stable, non-sensitive error code without logging exception messages or payloads. */
+  private def failureCode(error: Throwable): String = error match {
+    case _: AnalyticsError.InvalidConfiguration       => "INVALID_CONFIGURATION"
+    case AnalyticsError.MalformedMarker               => "MALFORMED_MARKER"
+    case AnalyticsError.InvalidSilverSchema           => "INVALID_SILVER_SCHEMA"
+    case AnalyticsError.InvalidGoldSchema             => "INVALID_GOLD_SCHEMA"
+    case AnalyticsError.PhysicalReclamationUnverified => "PHYSICAL_RECLAMATION_UNVERIFIED"
+    case _: AnalyticsError                            => "ANALYTICS_ERROR"
+    case _                                            => "UNEXPECTED_ERROR"
   }
 
   private[analytics] def renewForever(claim: ErasureClaim): F[Nothing] =

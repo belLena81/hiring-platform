@@ -29,9 +29,9 @@ final class SubjectPseudonymizer private (
   }
 
   def typedToken(subjectId: String): Either[String, SubjectToken] =
-    SubjectPseudonymizer.validateSubjectId(subjectId).map(id =>
-      SubjectPseudonymizer.hmacToken(id, copiedKeys.head, SubjectPseudonymizer.newMac(copiedKeys.head._2))
-    )
+    SubjectPseudonymizer
+      .validateSubjectId(subjectId)
+      .map(id => SubjectPseudonymizer.hmacToken(id, copiedKeys.head, SubjectPseudonymizer.newMac(copiedKeys.head._2)))
 
   /** Creates a tokenizer whose mutable Mac instances are owned by one Spark partition. */
   private[analytics] def primaryTokenFactory: SubjectPseudonymizer.PrimaryTokenFactory =
@@ -39,9 +39,11 @@ final class SubjectPseudonymizer private (
 
   /** Tokens used to match existing rows include every configured primary/retiring key. */
   def matchingTokens(subjectId: String): Either[String, Vector[SubjectToken]] =
-    SubjectPseudonymizer.validateSubjectId(subjectId).map(id =>
-      copiedKeys.toVector.map(key => SubjectPseudonymizer.hmacToken(id, key, SubjectPseudonymizer.newMac(key._2)))
-    )
+    SubjectPseudonymizer
+      .validateSubjectId(subjectId)
+      .map(id =>
+        copiedKeys.toVector.map(key => SubjectPseudonymizer.hmacToken(id, key, SubjectPseudonymizer.newMac(key._2)))
+      )
 }
 
 object SubjectPseudonymizer {

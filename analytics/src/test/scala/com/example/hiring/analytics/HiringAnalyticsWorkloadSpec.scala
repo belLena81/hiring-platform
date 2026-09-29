@@ -29,10 +29,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
 
-/** Run explicitly with `HAL07_WORKLOAD=1 sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 "testOnly
-  * com.example.hiring.analytics.HiringAnalyticsWorkloadSpec"`.
-  *
-  * This is a bounded local reproducibility baseline, not a throughput benchmark or SLO.
+/** This is a bounded local reproducibility baseline, not a throughput benchmark or SLO.
   */
 class HiringAnalyticsWorkloadSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 30.minutes
@@ -155,7 +152,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
       .validated("hal07-fixed-seed-424242", Vector(PartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
-    val paths = AnalyticsLakehousePaths.unsafe(root.toString)
+    val paths = AnalyticsLakehousePaths.unsafe(root.toUri.toString)
     for {
       generated <- IO.blocking {
         val generationStart = System.nanoTime()
@@ -220,16 +217,12 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
     } yield ()
   }
 
-  if (sys.env.get("HAL07_WORKLOAD").contains("1")) {
-    test("fixed 100000 record hiring analytics workload reports reconciliation and resource use") {
-      rootResource
-        .flatMap(root => sparkResource.map(spark => (root, spark)))
-        .use { case (root, spark) =>
-          runWorkload(spark, root)
-        }
-        .unsafeRunSync()
-    }
-  } else {
-    test("fixed 100000 record hiring analytics workload reports reconciliation and resource use".ignore) { () }
+  test("fixed 100000 record hiring analytics workload reports reconciliation and resource use") {
+    rootResource
+      .flatMap(root => sparkResource.map(spark => (root, spark)))
+      .use { case (root, spark) =>
+        runWorkload(spark, root)
+      }
+      .unsafeRunSync()
   }
 }

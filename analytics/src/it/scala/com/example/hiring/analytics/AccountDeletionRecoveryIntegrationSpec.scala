@@ -18,7 +18,8 @@ import cats.effect.{Clock, Deferred, IO, Ref, Resource}
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
-import com.mongodb.reactivestreams.client.{MongoClient as ReactiveMongoClient, MongoClients as ReactiveMongoClients}
+import mongo4cats.client.MongoClient as CatsMongoClient
+import mongo4cats.database.MongoDatabase as CatsMongoDatabase
 import com.mongodb.client.model.ReplaceOptions
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.errors.AuthenticationException
@@ -49,10 +50,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
   private def required(name: String): String =
     sys.env.get(name).filter(_.nonEmpty).getOrElse(fail(s"$name is required for recovery evidence"))
 
-  private def resources: Resource[IO, (MongoClient, ReactiveMongoClient, SparkSession, Path)] =
+  private def resources: Resource[IO, (MongoClient, CatsMongoClient[IO], SparkSession, Path)] =
     for {
       client <- Resource.fromAutoCloseable(IO.blocking(MongoClients.create(mongoUri)))
-      reactiveClient <- Resource.fromAutoCloseable(IO.delay(ReactiveMongoClients.create(mongoUri)))
+      reactiveClient <- CatsMongoClient.fromConnectionString[IO](mongoUri)
       root <- Resource.make(IO.blocking(Files.createTempDirectory("account-deletion-recovery-")))(deleteTree)
       spark <- Resource.make(IO.blocking {
         SparkSession
@@ -283,7 +284,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
 
       val test = resources.use { case (client, reactiveClient, spark, root) =>
         val database = client.getDatabase(databaseName)
-        val reactiveDatabase = reactiveClient.getDatabase(databaseName)
+        val reactiveDatabase: CatsMongoDatabase[IO] = reactiveClient.getDatabase(databaseName).unsafeRunSync()
         val store = new MongoAnalyticsErasureWorkerStore[IO](
           reactiveClient,
           reactiveDatabase,
