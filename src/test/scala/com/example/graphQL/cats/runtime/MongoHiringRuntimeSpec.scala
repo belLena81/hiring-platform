@@ -35,7 +35,7 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       candidateVectorIndex = "candidate-vector",
       jobLexicalIndex = "job-lexical",
       candidateLexicalIndex = "candidate-lexical",
-      fusionStrategy = com.example.graphQL.cats.service.search.SearchFusionStrategy.ApplicationRrf,
+      fusionStrategy = com.example.graphQL.cats.domain.search.SearchFusionStrategy.ApplicationRrf,
       rerankEnabled = false,
       rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 1000,
@@ -268,7 +268,7 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       release <- Deferred[IO, Unit]
       setupCalls <- Ref.of[IO, Int](0)
       setup = setupCalls.update(_ + 1) *> entered.complete(()).void *> release.get
-      result <- SetupLifecycle.resource(setup).use { lifecycle =>
+      result <- SetupLifecycle.resource(setup, com.example.graphQL.cats.service.Diagnostics.noop).use { lifecycle =>
         val probe = new DatabaseProbe {
           override def check: IO[ProbeResult] = lifecycle.ready.map {
             if (_) ProbeResult.Ready else ProbeResult.Unavailable
@@ -292,7 +292,7 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
     for {
       setupCalls <- Ref.of[IO, Int](0)
       setup = setupCalls.update(_ + 1) *> IO.raiseError[Unit](new RuntimeException("synthetic setup failure"))
-      result <- SetupLifecycle.resource(setup).use { lifecycle =>
+      result <- SetupLifecycle.resource(setup, com.example.graphQL.cats.service.Diagnostics.noop).use { lifecycle =>
         for {
           first <- lifecycle.await
           second <- lifecycle.await
@@ -315,7 +315,7 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       entered <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
       setup = entered.complete(()).void *> release.get
-      ready <- SetupLifecycle.resource(setup).use { lifecycle =>
+      ready <- SetupLifecycle.resource(setup, com.example.graphQL.cats.service.Diagnostics.noop).use { lifecycle =>
         entered.get *> lifecycle.ready.timeout(100.millis)
       }
     } yield assertEquals(ready, false)

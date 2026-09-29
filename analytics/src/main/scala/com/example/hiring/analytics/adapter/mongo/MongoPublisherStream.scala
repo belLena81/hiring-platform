@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.config.AnalyticsOperationalSettings
+import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MongoPublisherBufferSize}
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.EitherT
@@ -16,20 +16,18 @@ import scala.util.control.NonFatal
 
 /** FS2 boundary for Mongo's cold Reactive Streams publishers. */
 private[analytics] final class MongoPublisherStream(settings: AnalyticsOperationalSettings) {
-  def stream[F[_], A](query: Int => Stream[F, A]): Stream[F, A] = query(settings.mongoPublisherBufferSize)
+  def stream[F[_], A](query: Int => Stream[F, A]): Stream[F, A] =
+    query(MongoPublisherBufferSize.unwrap(settings.mongoPublisherBufferSize))
 
-  def stream[F[_], A](source: Stream[F, A]): Stream[F, A] = source
-
-  def optional[F[_], A](value: F[Option[A]]): F[Option[A]] = value
-
-  def one[F[_], A](value: F[A]): F[A] = value
-
-  def drain[F[_]: Async, A](source: Stream[F, A]): F[Unit] = stream(source).compile.drain
+  def drain[F[_]: Async, A](source: Stream[F, A]): F[Unit] = source.compile.drain
 
   def stream[F[_]: Async, A](publisher: => Publisher[A]): Stream[F, A] =
     Stream
       .eval(Async[F].delay(publisher))
-      .flatMap(value => fs2.interop.reactivestreams.fromPublisher[F, A](value, settings.mongoPublisherBufferSize))
+      .flatMap(value =>
+        fs2.interop.reactivestreams
+          .fromPublisher[F, A](value, MongoPublisherBufferSize.unwrap(settings.mongoPublisherBufferSize))
+      )
 
   def optional[F[_]: Async, A](publisher: => Publisher[A]): F[Option[A]] = stream[F, A](publisher).compile.last
 

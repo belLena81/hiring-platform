@@ -9,6 +9,7 @@ import mongo4cats.models.database.CreateCollectionOptions
 import com.mongodb.ReadPreference
 import org.bson.Document
 import org.bson.conversions.Bson
+import com.example.graphQL.cats.service.Diagnostics
 
 final case class AtlasSearchIndexConfig(
     jobVectorIndex: String,
@@ -76,12 +77,22 @@ object MongoHiringSetup {
   val AnalyticsReportExpiryIndex = "analytics_report_snapshots_expiry"
   val AnalyticsReportRunExpiryIndex = "analytics_report_runs_expiry"
 
-  def initialize(database: MongoDatabase[IO]): IO[Unit] = initialize(database, None, resetOnStart = false)
-  def initialize(database: MongoDatabase[IO], atlas: Option[AtlasSearchIndexConfig]): IO[Unit] =
-    initialize(database, atlas, resetOnStart = false)
-  def initialize(database: MongoDatabase[IO], atlas: Option[AtlasSearchIndexConfig], resetOnStart: Boolean): IO[Unit] =
+  def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics): IO[Unit] =
+    initialize(database, None, resetOnStart = false, diagnostics = diagnostics)
+  def initialize(
+      database: MongoDatabase[IO],
+      atlas: Option[AtlasSearchIndexConfig],
+      diagnostics: Diagnostics
+  ): IO[Unit] =
+    initialize(database, atlas, resetOnStart = false, diagnostics = diagnostics)
+  def initialize(
+      database: MongoDatabase[IO],
+      atlas: Option[AtlasSearchIndexConfig],
+      resetOnStart: Boolean,
+      diagnostics: Diagnostics
+  ): IO[Unit] =
     setupDatabase(database).flatMap { setup =>
-      MongoHiringMigrations.initialize(setup, resetOnStart) *>
+      MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics) *>
         MongoHiringValidators.createUserValidator(database) *>
         MongoHiringValidators.createJobValidator(database) *>
         MongoHiringIndexSetup.create(database) *>

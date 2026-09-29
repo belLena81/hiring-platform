@@ -15,16 +15,37 @@ object AnalyticsRetention {
 opaque type RunId = String :| Not[Blank]
 opaque type AccountSubjectId = java.util.UUID
 opaque type RangeFingerprint = String :| Match["[0-9a-f]{64}"]
+opaque type AnalyticsTopic = String :| Not[Blank]
 
 type AnalyticsPartition = Int :| Interval.Closed[0, 2147483647]
 type AnalyticsOffset = Long :| Interval.Closed[0L, 9223372036854775807L]
 
+object AnalyticsTopic {
+  def from(value: String): Either[String, AnalyticsTopic] =
+    value.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").map(_.asInstanceOf[AnalyticsTopic])
+
+  def unwrap(value: AnalyticsTopic): String = value.asInstanceOf[String]
+}
+
+object AnalyticsPartition {
+  def from(value: Int): Either[String, AnalyticsPartition] =
+    value.refineEither[Interval.Closed[0, 2147483647]].leftMap(_ => "partition must be non-negative")
+
+  def unwrap(value: AnalyticsPartition): Int = value.asInstanceOf[Int]
+}
+
+object AnalyticsOffset {
+  def from(value: Long): Either[String, AnalyticsOffset] =
+    value.refineEither[Interval.Closed[0L, 9223372036854775807L]].leftMap(_ => "offset must be non-negative")
+
+  def unwrap(value: AnalyticsOffset): Long = value.asInstanceOf[Long]
+}
+
 object RunId {
-  def from(value: String): ValidatedNec[String, RunId] =
+  def from(value: String): Either[String, RunId] =
     value
       .refineEither[Not[Blank]]
       .leftMap(_ => "run id must be non-empty")
-      .toValidatedNec
 
   extension (value: RunId) def value: String = value
 }
@@ -46,12 +67,8 @@ object RangeFingerprint {
   extension (value: RangeFingerprint) def value: String = value
 }
 
-final class SubjectToken private (private val tokenValue: String) {
-  override def equals(other: Any): Boolean = other match {
-    case token: SubjectToken => tokenValue == token.tokenValue
-    case _                   => false
-  }
-  override def hashCode(): Int = tokenValue.hashCode
+final case class SubjectToken private (private val tokenValue: String) {
+  override def toString: String = "SubjectToken([REDACTED])"
 }
 
 object SubjectToken {
@@ -59,7 +76,7 @@ object SubjectToken {
     value
       .refineEither[Match["[A-Za-z0-9-]{1,40}_[A-Za-z0-9_-]{43}"]]
       .leftMap(_ => "subject token has an invalid format")
-      .map(refined => new SubjectToken(refined.toString))
+      .map(refined => new SubjectToken(refined))
 
   /** Internal construction for a token produced by HmacSHA256 with a validated key ID. */
   private[domain] def fromDigest(keyId: String, digest: Array[Byte]): SubjectToken = {
@@ -96,21 +113,12 @@ enum AnalyticsApplicationStatus(val wire: String) {
   case Rejected extends AnalyticsApplicationStatus("Rejected")
 }
 
-final class PartitionOffsetRange private (
-    val topic: String,
+final case class PartitionOffsetRange private (
+    val topic: AnalyticsTopic,
     val partition: AnalyticsPartition,
     val startOffset: AnalyticsOffset,
     val endOffsetExclusive: AnalyticsOffset
-) {
-  override def equals(other: Any): Boolean = other match {
-    case that: PartitionOffsetRange =>
-      topic == that.topic && partition == that.partition && startOffset == that.startOffset &&
-      endOffsetExclusive == that.endOffsetExclusive
-    case _ => false
-  }
-
-  override def hashCode(): Int = (topic, partition, startOffset, endOffsetExclusive).hashCode()
-}
+)
 
 object PartitionOffsetRange {
   private[analytics] def partitionNumber(value: AnalyticsPartition): Int = value
@@ -120,55 +128,37 @@ object PartitionOffsetRange {
       partition: Int,
       startOffset: Long,
       endOffsetExclusive: Long
+  ): ValidatedNec[String, PartitionOffsetRange] =
+    from(AnalyticsTopic.from(topic).toValidatedNec, partition, startOffset, endOffsetExclusive)
+
+  def fromTopic(
+      topic: AnalyticsTopic,
+      partition: Int,
+      startOffset: Long,
+      endOffsetExclusive: Long
+  ): ValidatedNec[String, PartitionOffsetRange] =
+    from(topic.validNec[String], partition, startOffset, endOffsetExclusive)
+
+  private def from(
+      topicValue: ValidatedNec[String, AnalyticsTopic],
+      partition: Int,
+      startOffset: Long,
+      endOffsetExclusive: Long
   ): ValidatedNec[String, PartitionOffsetRange] = {
-    val topicValue = topic.validNec
-    val partitionValue = partition.validNec
-    val startValue = startOffset.validNec
-    val endValue = endOffsetExclusive.validNec
-    val validTopic =
-      topicValue.andThen(_.refineEither[Not[Blank]].leftMap(_ => "topic must be non-empty").toValidatedNec)
-    val validPartition = partitionValue.andThen(
-      _.refineEither[Interval.Closed[0, 2147483647]].leftMap(_ => "partition must be non-negative").toValidatedNec
-    )
-    val validStart = startValue.andThen(
-      _.refineEither[Interval.Closed[0L, 9223372036854775807L]]
-        .leftMap(_ => "start offset must be non-negative")
-        .toValidatedNec
-    )
-    val validEnd = endValue.andThen(
-      _.refineEither[Interval.Closed[0L, 9223372036854775807L]]
-        .leftMap(_ => "end offset must be non-negative")
-        .toValidatedNec
-    )
+    val validPartition = AnalyticsPartition.from(partition).toValidatedNec
+    val validStart = AnalyticsOffset.from(startOffset).leftMap(_ => "start offset must be non-negative").toValidatedNec
+    val validEnd =
+      AnalyticsOffset.from(endOffsetExclusive).leftMap(_ => "end offset must be non-negative").toValidatedNec
     val validOrdering = (validStart.toEither, validEnd.toEither) match {
       case (Right(start), Right(end)) => Validated.condNec(end >= start, (), "end offset must not precede start offset")
       case _                          => ().validNec[String]
     }
-    (validTopic, validPartition, validStart, validEnd, validOrdering)
+    (topicValue, validPartition, validStart, validEnd, validOrdering)
       .mapN((topic, partition, start, end, _) => new PartitionOffsetRange(topic, partition, start, end))
   }
-
-  private[analytics] def unsafe(
-      topic: String,
-      partition: Int,
-      startOffset: Long,
-      endOffsetExclusive: Long
-  ): PartitionOffsetRange =
-    from(topic, partition, startOffset, endOffsetExclusive).toEither.fold(
-      errors => throw new IllegalArgumentException(errors.toNonEmptyList.toList.mkString("; ")),
-      identity
-    )
-
 }
 
-final class AnalyticsRunManifest private (val runId: RunId, val offsetRanges: Vector[PartitionOffsetRange]) {
-  override def equals(other: Any): Boolean = other match {
-    case that: AnalyticsRunManifest => runId == that.runId && offsetRanges == that.offsetRanges
-    case _                          => false
-  }
-
-  override def hashCode(): Int = (runId, offsetRanges).hashCode()
-}
+final case class AnalyticsRunManifest private (runId: RunId, offsetRanges: Vector[PartitionOffsetRange])
 
 object AnalyticsRunManifest {
   private def validateRanges(
@@ -196,5 +186,5 @@ object AnalyticsRunManifest {
     (runId, ranges.andThen(validateRanges)).mapN((id, validRanges) => new AnalyticsRunManifest(id, validRanges))
 
   def validated(rawRunId: String, ranges: Vector[PartitionOffsetRange]): ValidatedNec[String, AnalyticsRunManifest] =
-    fromValidated(RunId.from(rawRunId), ranges.validNec)
+    fromValidated(RunId.from(rawRunId).toValidatedNec, ranges.validNec)
 }

@@ -2,8 +2,7 @@ package com.example.hiring.analytics.service.erasure
 
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.value
 
-import com.example.hiring.analytics.config.AnalyticsRetentionSettings
-import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.config.AnalyticsErasureWorkerPolicy
 import com.example.hiring.analytics.domain.AnalyticsDigest
 import com.example.hiring.analytics.domain.RangeFingerprint
 import com.example.hiring.analytics.domain.RunId
@@ -14,7 +13,7 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.batch.AnalyticsReportPublisher
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 
-import cats.effect.{Async, Clock, Outcome, Temporal}
+import cats.effect.{Async, Outcome, Temporal}
 import cats.Monad
 import cats.data.EitherT
 import cats.syntax.all.*
@@ -29,31 +28,28 @@ final class AnalyticsErasureWorker[F[_]: Async](
     queue: ErasureQueue[F],
     progress: ErasureProgress[F],
     barriers: ErasureBarrier[F],
-    kafka: KafkaConnection,
-    fencerKafka: KafkaConnection,
-    topic: String,
+    kafka: AnalyticsErasureKafkaRuntime[F],
     paths: AnalyticsLakehousePaths,
     publisher: AnalyticsReportPublisher[F],
     markers: ActiveDeletionMarkerSource[F],
     lakehouse: AnalyticsErasureLakehouse[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
-    clock: Clock[F],
     logger: Logger[F],
-    producerFencer: TransactionalProducerFencer[F],
-    kafkaRetention: KafkaRetention[F],
-    retention: AnalyticsRetentionSettings,
-    leaseDuration: FiniteDuration = 90.seconds,
-    deliveryTimeout: FiniteDuration = 30.seconds,
-    pollInterval: FiniteDuration = 5.seconds
+    policy: AnalyticsErasureWorkerPolicy,
+    private[analytics] val nowOverride: Option[F[Instant]] = None
 ) {
-  private def now: F[Instant] = clock.realTimeInstant
+  private val retention = policy.retention
+  private val leaseDuration = policy.timings.leaseDuration
+  private val deliveryTimeout = policy.timings.deliveryTimeout
+  private val pollInterval = policy.timings.pollInterval
+  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
   private def leaseUntil: F[Instant] = now.map(_.plusMillis(leaseDuration.toMillis))
 
   def run: F[Unit] =
     for {
       _ <- queue.preflight
       _ <- lakehouse.validateHmacConfiguration
-      _ <- kafkaRetention.capture(kafka, topic)
+      _ <- kafka.retention.capture()
       current <- now
       until <- leaseUntil
       _ <- queue.heartbeat(current, until)
@@ -77,7 +73,6 @@ final class AnalyticsErasureWorker[F[_]: Async](
       runId <- Async[F].fromEither(
         RunId
           .from("analytics-erasure-" + claim.requestId.value)
-          .toEither
           .leftMap(_ => AnalyticsError.InvalidConfiguration("invalid erasure run id"))
       )
       fingerprint <- Async[F].fromEither(
@@ -185,7 +180,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
         for {
           next <- nextPhase(claim, ErasurePhase.PublisherDrained)
           transactionalIds <- lift(queue.transactionalIds(claim.requestId))
-          _ <- lift(producerFencer.fence(fencerKafka, transactionalIds))
+          _ <- lift(kafka.producerFencer.fence(kafka.fencerConnection, transactionalIds))
           current <- lift(now)
           ready <- lift(queue.publisherDrainReady(claim.requestId, current, deliveryTimeout))
           _ <- if (ready) EitherT.rightT(()) else defer(claim, pollInterval)
@@ -202,7 +197,7 @@ final class AnalyticsErasureWorker[F[_]: Async](
           barrier <- maybeBarrier match {
             case Some(value) => fromEither(KafkaRetentionBarrier.validate(value))
             case None        =>
-              lift(kafkaRetention.capture(kafka, topic)).flatTap(value =>
+              lift(kafka.retention.capture()).flatTap(value =>
                 lift(now)
                   .flatMap(current => lift(barriers.persistBarrier(claim, value, current)))
                   .flatMap(requireApplied)
@@ -354,9 +349,14 @@ final class AnalyticsErasureWorker[F[_]: Async](
   private[analytics] def replayHorizonsPassed(barrier: KafkaRetentionBarrier, deltaPurgedAt: Instant): F[Boolean] =
     for {
       current <- now
-      kafkaExpired <- kafkaRetention.retentionPassed(kafka, barrier)
+      kafkaExpired <- kafka.retention.retentionPassed(barrier)
       dataDeadline = deltaPurgedAt.plusMillis(retention.deltaVacuumSafety.toMillis)
-      logDeadline = deltaPurgedAt.plusMillis(retention.deltaLogRetention.toMillis)
+      // Delta truncates the log-cleanup cutoff to the start of a UTC day.
+      // A log written on purge day cannot be reclaimed until the next day plus retention.
+      logDeadline = deltaPurgedAt
+        .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
+        .plus(1L, java.time.temporal.ChronoUnit.DAYS)
+        .plusMillis(retention.deltaLogRetention.toMillis)
       deltaDeadline = if (dataDeadline.isAfter(logDeadline)) dataDeadline else logDeadline
       deltaExpired = !current.isBefore(deltaDeadline)
     } yield kafkaExpired && deltaExpired

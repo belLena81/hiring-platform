@@ -3,7 +3,8 @@ package com.example.graphQL.cats.service.job
 import cats.effect.{Clock, IO}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics, LogEvent, LogFields, UseCaseError}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.port.{
   JobRepository,
@@ -51,6 +52,7 @@ final class JobService(
     jobs: JobRepository,
     embeddingWork: EmbeddingWorkPublisher,
     idempotent: Idempotent,
+    diagnostics: Diagnostics,
     clock: Clock[IO] = Clock[IO],
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends JobUseCases {
@@ -71,7 +73,7 @@ final class JobService(
         now <- UseCase.liftIO(clock.realTimeInstant)
         jobId <- UseCase.liftIO(uuidGen.randomUUID.map(JobId.apply))
         job <- UseCase.fromEither(validateNewJob(user.id, input, now, jobId))
-        created <- UseCase.fromIO(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context))
+        created <- persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context)
       } yield created
     }
 
@@ -88,9 +90,7 @@ final class JobService(
           now <- UseCase.liftIO(clock.realTimeInstant)
           update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
           replacement <- UseCase.fromEither(JobLifecycle.update(update).run(job).map(_._1).widenUseCase)
-          updated <- UseCase.fromIO(
-            persistUpdatedJob(observed, Right(replacement), actor.userId, context)
-          )
+          updated <- persistUpdatedJob(observed, Right(replacement), actor.userId, context)
         } yield updated
       }
     }
@@ -102,14 +102,12 @@ final class JobService(
         UseCase
           .liftIO(clock.realTimeInstant)
           .flatMap(now =>
-            UseCase.fromIO(
-              persistJob(
-                observed,
-                JobLifecycle.publish(now).run(job).map(_._1).widenUseCase,
-                actor.userId,
-                OperationalEventType.JOB_UPDATED,
-                context
-              )
+            persistJob(
+              observed,
+              JobLifecycle.publish(now).run(job).map(_._1).widenUseCase,
+              actor.userId,
+              OperationalEventType.JOB_UPDATED,
+              context
             )
           )
       }
@@ -122,14 +120,12 @@ final class JobService(
         UseCase
           .liftIO(clock.realTimeInstant)
           .flatMap(now =>
-            UseCase.fromIO(
-              persistJob(
-                observed,
-                JobLifecycle.close(now).run(job).map(_._1).widenUseCase,
-                actor.userId,
-                OperationalEventType.JOB_CLOSED,
-                context
-              )
+            persistJob(
+              observed,
+              JobLifecycle.close(now).run(job).map(_._1).widenUseCase,
+              actor.userId,
+              OperationalEventType.JOB_CLOSED,
+              context
             )
           )
       }
@@ -233,29 +229,24 @@ final class JobService(
       result: Either[UseCaseError, Job],
       actorId: UserId,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, Job]] =
-    result.fold(
-      error => IO.pure(error.asLeft[Job]),
-      job => {
-        val event = OperationalEvents.jobEvent(
-          OperationalEventType.JOB_CREATED,
-          eventId(job, OperationalEventType.JOB_CREATED, job.createdAt),
-          job,
-          actorId,
-          job.createdAt
-        )
-        notifyAfterCommit(
-          jobs.createWithEvents(job, job.createdAt, List(event), context).value.map(_.widenUseCase.as(job))
-        )
-      }
-    )
+  ): UseCaseIO[Job] =
+    UseCase.fromEither(result).flatMap { job =>
+      val event = OperationalEvents.jobEvent(
+        OperationalEventType.JOB_CREATED,
+        eventId(job, OperationalEventType.JOB_CREATED, job.createdAt),
+        job,
+        actorId,
+        job.createdAt
+      )
+      notifyAfterCommit(UseCase.repository(jobs.createWithEvents(job, job.createdAt, List(event), context)).as(job))
+    }
 
   private def persistUpdatedJob(
       expected: Versioned[Job],
       result: Either[UseCaseError, Job],
       actorId: UserId,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, Job]] =
+  ): UseCaseIO[Job] =
     persistJob(expected, result, actorId, OperationalEventType.JOB_UPDATED, context)
 
   private def persistJob(
@@ -264,22 +255,21 @@ final class JobService(
       actorId: UserId,
       eventType: OperationalEventType,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, Job]] =
-    result.fold(
-      error => IO.pure(error.asLeft[Job]),
-      job => {
-        val event =
-          OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
-        notifyAfterCommit(
-          jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).value.map(
-            _.map(_.value).widenUseCase
-          )
-        )
-      }
-    )
+  ): UseCaseIO[Job] =
+    UseCase.fromEither(result).flatMap { job =>
+      val event =
+        OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
+      notifyAfterCommit(
+        UseCase.repository(jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context)).map(_.value)
+      )
+    }
 
-  private def notifyAfterCommit(result: IO[Either[UseCaseError, Job]]): IO[Either[UseCaseError, Job]] =
-    result.flatTap(_.fold(_ => IO.unit, _ => embeddingWork.wake.handleError(_ => ())))
+  private def notifyAfterCommit(result: UseCaseIO[Job]): UseCaseIO[Job] =
+    result.semiflatTap(_ =>
+      embeddingWork.wake.handleErrorWith(error =>
+        diagnostics.emit(LogEvent.EmbeddingWakeFailed, fields = LogFields.failure(error))
+      )
+    )
 
   private def eventId(job: Job, eventType: OperationalEventType, occurredAt: Instant): UUID =
     UUID.nameUUIDFromBytes(s"job:${job.id.value}:$eventType:$occurredAt".getBytes(StandardCharsets.UTF_8))
@@ -290,7 +280,8 @@ object JobService {
       users: UserRepository,
       jobs: JobRepository,
       embeddingWork: EmbeddingWorkPublisher,
-      idempotent: Idempotent
+      idempotent: Idempotent,
+      diagnostics: Diagnostics
   ): JobService =
-    new JobService(users, jobs, embeddingWork, idempotent)
+    new JobService(users, jobs, embeddingWork, idempotent, diagnostics)
 }

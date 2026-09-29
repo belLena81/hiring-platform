@@ -15,7 +15,6 @@ import com.example.graphQL.cats.service.port.{
   UserRepository
 }
 import com.example.graphQL.cats.service.*
-import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.protocol.*
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
@@ -32,9 +31,11 @@ final class UserAccountService(
     erasureRequests: AnalyticsErasureRequestRepository = AnalyticsErasureRequestRepository.unavailable,
     embeddingWork: EmbeddingWorkPublisher,
     idempotent: Idempotent,
+    diagnostics: Diagnostics,
     clock: Clock[IO] = Clock[IO],
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends AccountUseCases {
+  import Diagnostics.*
   private val authorization = ActorAuthorization(users)
 
   override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
@@ -43,7 +44,7 @@ final class UserAccountService(
         for {
           now <- UseCaseIO.liftIO(clock.realTimeInstant)
           userId <- UseCaseIO.liftIO(uuidGen.randomUUID.map(UserId.apply))
-          result <- UseCaseIO.fromIO(signUpOnce(input, now, userId, context))
+          result <- signUpOnce(input, now, userId, context)
         } yield result
     }
 
@@ -52,34 +53,24 @@ final class UserAccountService(
       now: Instant,
       userId: UserId,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, (User, AccountToken)]] =
-    if (input.role == UserRole.Admin) IO.pure(Left(UseCaseError.Account(AccountError.AdminSignupForbidden)))
+  ): UseCaseIO[(User, AccountToken)] =
+    if (input.role == UserRole.Admin) UseCaseIO.left(UseCaseError.Account(AccountError.AdminSignupForbidden))
     else if (!UserProfile.matchesRole(input.role, input.profile))
-      IO.pure(Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
+      UseCaseIO.left(UseCaseError.Account(AccountError.ProfileRoleMismatch))
     else
-      validateRegistration(input).fold(
-        errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
-        _ =>
-          accounts.initialized
-            .value.flatMap {
-              case Left(error)  => IO.pure(Left(UseCaseError.Repository(error)))
-              case Right(false) => IO.pure(Left(UseCaseError.Account(AccountError.BootstrapRequired)))
-              case Right(true)  =>
-                hasher.hash(input.password).flatMap { hash =>
-                  val user = toUser(userId, input.name, input.role, input.profile, now)
-                  token(user, now).flatMap {
-                    case Left(error)              => IO.pure(Left(error))
-                    case Right((_, accountToken)) =>
-                      accounts.createAccount(user, hash, now, context).value.map {
-                        case Left(RepositoryError.Conflict) => Left(UseCaseError.Account(AccountError.NameTaken))
-                        case Left(error)                    => Left(UseCaseError.Repository(error))
-                        case Right(())                      => Right(user -> accountToken)
-                      }
-                  }
-                }
-            }
-            .flatTap(wakeCandidateAfterCommit)
-      )
+      (for {
+        _ <- UseCaseIO.fromEither(validateRegistration(input).toEither.leftMap(UseCaseError.ValidationFailed.apply))
+        _ <- UseCaseIO
+          .repository(accounts.initialized)
+          .subflatMap(initialized => Either.cond(initialized, (), UseCaseError.Account(AccountError.BootstrapRequired)))
+        hash <- UseCaseIO.liftIO(hasher.hash(input.password))
+        user = toUser(userId, input.name, input.role, input.profile, now)
+        issued <- token(user, now)
+        _ <- accounts.createAccount(user, hash, now, context).leftMap {
+          case RepositoryError.Conflict => UseCaseError.Account(AccountError.NameTaken)
+          case error                    => UseCaseError.Repository(error)
+        }
+      } yield issued).semiflatTap(_ => wakeCandidateAfterCommit)
 
   override def bootstrapAdmin(
       request: IdempotencyRequest,
@@ -95,7 +86,7 @@ final class UserAccountService(
       for {
         now <- UseCaseIO.liftIO(clock.realTimeInstant)
         userId <- UseCaseIO.liftIO(uuidGen.randomUUID.map(UserId.apply))
-        result <- UseCaseIO.fromIO(bootstrapAdminOnce(input, now, userId, context))
+        result <- bootstrapAdminOnce(input, now, userId, context)
       } yield result
     }
 
@@ -104,45 +95,37 @@ final class UserAccountService(
       now: Instant,
       userId: UserId,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, (User, AccountToken)]] =
-    validateCredentials(input.name, input.password).fold(
-      errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
-      _ =>
-        hasher.hash(input.password).flatMap { hash =>
-          val user = toUser(userId, input.name, UserRole.Admin, None, now).copy(adminSingleton = true)
-          token(user, now).flatMap {
-            case Left(error)              => IO.pure(Left(error))
-            case Right((_, accountToken)) =>
-              accounts.bootstrap(user, hash, context).value.map {
-                case Left(RepositoryError.Conflict) => Left(UseCaseError.Account(AccountError.AlreadyBootstrapped))
-                case Left(error)                    => Left(UseCaseError.Repository(error))
-                case Right(())                      => Right(user -> accountToken)
-              }
-          }
-        }
-    )
+  ): UseCaseIO[(User, AccountToken)] =
+    for {
+      _ <- UseCaseIO.fromEither(
+        validateCredentials(input.name, input.password).toEither.leftMap(UseCaseError.ValidationFailed.apply)
+      )
+      hash <- UseCaseIO.liftIO(hasher.hash(input.password))
+      user = toUser(userId, input.name, UserRole.Admin, None, now).copy(adminSingleton = true)
+      issued <- token(user, now)
+      _ <- accounts.bootstrap(user, hash, context).leftMap {
+        case RepositoryError.Conflict => UseCaseError.Account(AccountError.AlreadyBootstrapped)
+        case error                    => UseCaseError.Repository(error)
+      }
+    } yield issued
 
   override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
     idempotent.execute("login", Idempotent.publicActorScope(input.name), request, accountReference, replayAccount) {
       _ =>
-        UseCaseIO.liftIO(clock.realTimeInstant).flatMap(now => UseCaseIO.fromIO(loginOnce(input, now)))
+        UseCaseIO.liftIO(clock.realTimeInstant).flatMap(now => loginOnce(input, now))
     }
 
-  private def loginOnce(input: LoginInput, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] = {
-    val canonical = canonicalName(input.name)
-    accounts.findByCanonicalName(canonical).value.flatMap {
-      case Left(error) => IO.pure(Left(UseCaseError.Repository(error)))
-      case Right(None) =>
-        hasher.verifyUnknown(input.password).as(Left(UseCaseError.Account(AccountError.InvalidCredentials)))
-      case Right(Some(credentials)) if credentials.user.accountStatus != AccountStatus.Active =>
-        hasher.verifyUnknown(input.password).as(Left(UseCaseError.Account(AccountError.InvalidCredentials)))
-      case Right(Some(credentials)) =>
-        hasher.verify(credentials.passwordHash, input.password).flatMap {
-          case false => IO.pure(Left(UseCaseError.Account(AccountError.InvalidCredentials)))
+  private def loginOnce(input: LoginInput, now: Instant): UseCaseIO[(User, AccountToken)] =
+    UseCaseIO.repository(accounts.findByCanonicalName(canonicalName(input.name))).flatMap {
+      case Some(credentials) if credentials.user.accountStatus == AccountStatus.Active =>
+        UseCaseIO.liftIO(hasher.verify(credentials.passwordHash, input.password)).flatMap {
+          case false => UseCaseIO.left(UseCaseError.Account(AccountError.InvalidCredentials))
           case true  => token(credentials.user, now)
         }
+      case _ =>
+        UseCaseIO.liftIO(hasher.verifyUnknown(input.password)) *>
+          UseCaseIO.left(UseCaseError.Account(AccountError.InvalidCredentials))
     }
-  }
 
   private def issueToken(userId: UserId, now: Instant): UseCaseIO[(User, AccountToken)] =
     UseCaseIO
@@ -151,7 +134,7 @@ final class UserAccountService(
         case Some(user) if user.accountStatus == AccountStatus.Active => Right(user)
         case _ => Left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
       }
-      .flatMap(user => UseCaseIO.fromIO(token(user, now)))
+      .flatMap(user => token(user, now))
 
   override def me(actor: ActorContext): UseCaseIO[User] =
     authorization.resolve(actor)
@@ -170,7 +153,7 @@ final class UserAccountService(
     ) { context =>
       for {
         now <- UseCaseIO.liftIO(clock.realTimeInstant)
-        user <- UseCaseIO.fromIO(updateMyProfileOnce(actor, input, now, context))
+        user <- updateMyProfileOnce(actor, input, now, context)
       } yield user
     }
 
@@ -179,26 +162,19 @@ final class UserAccountService(
       input: AccountProfileInput,
       now: Instant,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, User]] =
-    authorization.resolve(actor).value.flatMap {
-      case Left(error)                                => IO.pure(Left(error))
-      case Right(user) if user.role == UserRole.Admin =>
-        IO.pure(Left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole)))
-      case Right(user) =>
-        if (!UserProfile.matchesRole(user.role, Some(input.profile)))
-          IO.pure(Left(UseCaseError.Account(AccountError.ProfileRoleMismatch)))
-        else
-          UserProfile
-            .validateFor(user.role, Some(input.profile))
-            .fold(
-              errors => IO.pure(Left(UseCaseError.ValidationFailed(errors))),
-              _ =>
-                accounts
-                  .updateProfile(user.id, input.profile, now, context)
-                  .value
-                  .map(_.leftMap(UseCaseError.Repository.apply))
-                  .flatTap(wakeCandidateAfterCommit)
-            )
+  ): UseCaseIO[User] =
+    authorization.resolve(actor).flatMap { user =>
+      if (user.role == UserRole.Admin)
+        UseCaseIO.left(UseCaseError.Account(AccountError.ProfileUnsupportedForRole))
+      else if (!UserProfile.matchesRole(user.role, Some(input.profile)))
+        UseCaseIO.left(UseCaseError.Account(AccountError.ProfileRoleMismatch))
+      else
+        UseCaseIO.fromEither(
+          UserProfile.validateFor(user.role, Some(input.profile)).toEither.leftMap(UseCaseError.ValidationFailed.apply)
+        ) *>
+          UseCaseIO
+            .repository(accounts.updateProfile(user.id, input.profile, now, context))
+            .semiflatTap(_ => wakeCandidateAfterCommit)
     }
 
   override def deleteMyAccount(request: IdempotencyRequest, actor: ActorContext): UseCaseIO[String] =
@@ -209,49 +185,43 @@ final class UserAccountService(
       receiptReference,
       replayDeletion(actor)
     ) { context =>
-      UseCaseIO.liftIO(clock.realTimeInstant).flatMap(now => UseCaseIO.fromIO(deleteMyAccountOnce(actor, now, context)))
+      UseCaseIO.liftIO(clock.realTimeInstant).flatMap(now => deleteMyAccountOnce(actor, now, context))
     }
 
   override def accountDeletionStatus(actor: ActorContext, receiptId: String): UseCaseIO[AccountDeletionStatus] =
-    UseCaseIO.fromIO(
-      erasureRequests.statusForSubject(actor.userId, receiptId).value.map(_.leftMap(UseCaseError.Repository.apply))
-    )
+    UseCaseIO.repository(erasureRequests.statusForSubject(actor.userId, receiptId))
 
   private def deleteMyAccountOnce(
       actor: ActorContext,
       now: Instant,
       context: MutationWriteContext
-  ): IO[Either[UseCaseError, String]] =
+  ): UseCaseIO[String] =
     if (context eq MutationWriteContext.directWrite)
-      IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired)))
+      UseCaseIO.left(UseCaseError.Analytics(AnalyticsError.ErasureContextRequired))
     else
-      authorization.resolve(actor, allowDeleted = true).value.flatMap {
-        case Left(error)                                => IO.pure(Left(error))
-        case Right(user) if user.role == UserRole.Admin =>
-          IO.pure(Left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation)))
-        case Right(user) if user.accountStatus == AccountStatus.Deleted =>
-          erasureRequests.enqueue(user.id, now, context).value.map(_.leftMap(UseCaseError.Repository.apply))
-        case Right(user) =>
-          erasureRequests.workerReady(now).value.flatMap {
-            case Left(_)   => IO.pure(Left(UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable)))
-            case Right(()) =>
-              erasureRequests.enqueue(user.id, now, context).value.flatMap {
-                case Left(error)      => IO.pure(Left(UseCaseError.Repository(error)))
-                case Right(receiptId) =>
-                  accounts
-                    .deleteAccount(user.id, now, s"deleted-${user.id.value}", context)
-                    .value
-                    .map(_.bimap(UseCaseError.Repository.apply, _ => receiptId))
-              }
-          }
+      authorization.resolve(actor, allowDeleted = true).flatMap {
+        case user if user.role == UserRole.Admin =>
+          UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.SingletonAdminViolation))
+        case user if user.accountStatus == AccountStatus.Deleted =>
+          UseCaseIO.repository(erasureRequests.enqueue(user.id, now, context))
+        case user =>
+          for {
+            _ <- erasureRequests
+              .workerReady(now)
+              .leftMap(_ => UseCaseError.Analytics(AnalyticsError.ErasureWorkerUnavailable))
+            receiptId <- UseCaseIO.repository(erasureRequests.enqueue(user.id, now, context))
+            _ <- UseCaseIO.repository(accounts.deleteAccount(user.id, now, s"deleted-${user.id.value}", context))
+          } yield receiptId
       }
 
   override def listUsers(actor: ActorContext, page: UserPageRequest): UseCaseIO[List[User]] =
-    UseCaseIO.fromIO(authorization.resolve(actor).value.flatMap {
-      case Right(user) if user.role == UserRole.Admin =>
-        accounts.listAccounts(page).value.map(_.widenUseCase)
-      case _ => IO.pure(Left(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
-    })
+    authorization
+      .resolve(actor)
+      .leftMap(_ => UseCaseError.Authentication(AuthenticationError.Unauthorized))
+      .flatMap {
+        case user if user.role == UserRole.Admin => UseCaseIO.repository(accounts.listAccounts(page))
+        case _ => UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
+      }
 
   private def replayAccount(
       reference: com.example.graphQL.cats.service.port.MutationEntityReference
@@ -300,11 +270,17 @@ final class UserAccountService(
   private def validReceiptId(value: String): Boolean =
     Parsing.parseUuid(value).exists(_.toString == value)
 
-  private def token(user: User, now: Instant): IO[Either[UseCaseError, (User, AccountToken)]] =
-    tokenIssuer
-      .issue(user, now)
-      .handleError(_ => Left(AccessTokenIssuanceError.Unavailable))
-      .map(_.leftMap(_ => UseCaseError.Availability(AvailabilityError.ServiceNotReady)).map(user -> _))
+  private def token(user: User, now: Instant): UseCaseIO[(User, AccountToken)] =
+    UseCaseIO.fromIO(
+      tokenIssuer
+        .issue(user, now)
+        .handleErrorWith(error =>
+          diagnostics
+            .emit(LogEvent.AccessTokenIssuanceFailed, fields = LogFields.failure(error))
+            .as(Left(AccessTokenIssuanceError.Unavailable))
+        )
+        .map(_.leftMap(_ => UseCaseError.Availability(AvailabilityError.ServiceNotReady)).map(user -> _))
+    )
 
   private def validateRegistration(input: SignUpInput): ValidatedNel[DomainValidationError, Unit] =
     (validateCredentials(input.name, input.password), UserProfile.validateFor(input.role, input.profile)).mapN((_, _) =>
@@ -334,6 +310,8 @@ final class UserAccountService(
   private def canonicalName(value: String): String =
     AccountName.canonical(value)
 
-  private def wakeCandidateAfterCommit[A](result: Either[UseCaseError, A]): IO[Unit] =
-    result.fold(_ => IO.unit, _ => embeddingWork.wake.handleError(_ => ()))
+  private def wakeCandidateAfterCommit: IO[Unit] =
+    embeddingWork.wake.handleErrorWith(error =>
+      diagnostics.emit(LogEvent.EmbeddingWakeFailed, fields = LogFields.failure(error))
+    )
 }

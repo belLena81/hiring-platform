@@ -138,7 +138,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       val openTransactionManifest = AnalyticsRunManifest
         .validated(
           "open-transaction-it-" + UUID.randomUUID().toString,
-          Vector(PartitionOffsetRange.unsafe(topic, 0, 0L, 1L))
+          Vector(IntegrationPartitionOffsetRange.unsafe(topic, 0, 0L, 1L))
         )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
@@ -193,18 +193,18 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()
       val barrier = KafkaRetentionAdapter
-        .capture[IO](connection, topic, AnalyticsBatchTestSupport.driverExecution)
+        .capture[IO](connection, AnalyticsTopic.from(topic).toOption.get, AnalyticsBatchTestSupport.driverExecution)
         .unsafeRunSync()
-      val endOffset = barrier.partitions.head.endOffsetExclusive
+      val endOffset = barrier.partitions.head.endOffsetExclusive.asInstanceOf[Long]
       val manifest = AnalyticsRunManifest
         .validated(
           "fencer-it-" + UUID.randomUUID().toString,
-          Vector(PartitionOffsetRange.unsafe(topic, 0, 0L, endOffset))
+          Vector(IntegrationPartitionOffsetRange.unsafe(topic, 0, 0L, endOffset))
         )
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
       val paths =
-        AnalyticsLakehousePaths.unsafe(
+        IntegrationAnalyticsLakehousePaths.unsafe(
           Files.createTempDirectory("analytics-read-committed").toUri.toString.stripSuffix("/")
         )
       val markers = AnalyticsSubjectPrivacy.emptyMarkers(spark.range(0L).toDF())

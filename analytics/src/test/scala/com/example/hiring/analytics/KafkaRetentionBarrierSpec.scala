@@ -16,10 +16,10 @@ import com.example.hiring.analytics.adapter.mongo.*
 import munit.FunSuite
 
 class KafkaRetentionBarrierSpec extends FunSuite {
-  private val barrier = KafkaRetentionBarrier(
-    "hiring.operational-events",
-    Vector(KafkaRetentionBarrier.Partition(1, 23L), KafkaRetentionBarrier.Partition(0, 41L))
-  )
+  private val barrier = KafkaRetentionBarrier
+    .from("hiring.operational-events", Vector(1 -> 23L, 0 -> 41L))
+    .toOption
+    .get
 
   test("retention is passed only after earliest offsets reach each captured exclusive end") {
     assertEquals(
@@ -37,12 +37,9 @@ class KafkaRetentionBarrierSpec extends FunSuite {
   }
 
   test("malformed and duplicate partition barriers are rejected") {
-    val malformed = KafkaRetentionBarrier(" ", Vector(KafkaRetentionBarrier.Partition(0, 1L)))
-    val duplicate = KafkaRetentionBarrier(
-      "hiring.operational-events",
-      Vector(KafkaRetentionBarrier.Partition(0, 1L), KafkaRetentionBarrier.Partition(0, 2L))
-    )
-    assert(KafkaRetentionBarrier.validate(malformed).isLeft)
-    assert(KafkaRetentionBarrier.validate(duplicate).isLeft)
+    assert(KafkaRetentionBarrier.from(" ", Vector(0 -> 1L)).isLeft)
+    assert(KafkaRetentionBarrier.from("hiring.operational-events", Vector(-1 -> 1L)).isLeft)
+    assert(KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> -1L)).isLeft)
+    assert(KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 1L, 0 -> 2L)).isLeft)
   }
 }

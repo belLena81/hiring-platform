@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.AnalyticsRunManifest
 import com.example.hiring.analytics.domain.PartitionOffsetRange
+import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.Async
@@ -18,7 +19,9 @@ private[analytics] object AnalyticsOffsetRanges {
   def requireNonEmpty[F[_]: Async](manifest: AnalyticsRunManifest): F[Unit] =
     manifest.offsetRanges.find(range => range.startOffset == range.endOffsetExclusive) match {
       case Some(range) =>
-        Async[F].raiseError(AnalyticsError.EmptyRequestedRange(range.topic, range.partition, range.startOffset))
+        Async[F].raiseError(
+          AnalyticsError.EmptyRequestedRange(AnalyticsTopic.unwrap(range.topic), range.partition, range.startOffset)
+        )
       case None => Async[F].unit
     }
 
@@ -30,7 +33,7 @@ private[analytics] object AnalyticsOffsetRanges {
     if (range.startOffset < earliestAvailable)
       Left(
         AnalyticsError.ExpiredOffsetRange(
-          range.topic,
+          AnalyticsTopic.unwrap(range.topic),
           range.partition,
           range.startOffset,
           earliestAvailable
@@ -39,7 +42,7 @@ private[analytics] object AnalyticsOffsetRanges {
     else if (range.endOffsetExclusive > latestExclusive)
       Left(
         AnalyticsError.MissingOffsetRange(
-          range.topic,
+          AnalyticsTopic.unwrap(range.topic),
           range.partition,
           range.endOffsetExclusive - range.startOffset,
           (latestExclusive - range.startOffset).max(0L)
@@ -55,7 +58,14 @@ private[analytics] object AnalyticsOffsetRanges {
             actual.last == range.endOffsetExclusive - 1L =>
         Right(())
       case other =>
-        Left(AnalyticsError.MissingOffsetRange(range.topic, range.partition, requested, other.fold(0L)(_.count)))
+        Left(
+          AnalyticsError.MissingOffsetRange(
+            AnalyticsTopic.unwrap(range.topic),
+            range.partition,
+            requested,
+            other.fold(0L)(_.count)
+          )
+        )
     }
   }
 
@@ -110,7 +120,7 @@ private[analytics] object AnalyticsOffsetRanges {
       allowKafkaGaps: Boolean
   ): F[Unit] = {
     val requested: Set[(String, Int)] = manifest.offsetRanges
-      .map(range => (range.topic, PartitionOffsetRange.partitionNumber(range.partition)))
+      .map(range => (AnalyticsTopic.unwrap(range.topic), PartitionOffsetRange.partitionNumber(range.partition)))
       .toSet
     found.keySet.diff(requested).headOption match {
       case Some((topic, partition)) =>
@@ -118,7 +128,7 @@ private[analytics] object AnalyticsOffsetRanges {
       case None =>
         Async[F].fromEither(manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
           result.flatMap { _ =>
-            val observation = found.get((range.topic, range.partition))
+            val observation = found.get((AnalyticsTopic.unwrap(range.topic), range.partition))
             if (allowKafkaGaps) verifyKafkaCoordinates(range, observation)
             else complete(range, observation)
           }
@@ -137,7 +147,14 @@ private[analytics] object AnalyticsOffsetRanges {
           if actual.count <= requested && actual.first >= range.startOffset && actual.last < range.endOffsetExclusive =>
         Right(())
       case other =>
-        Left(AnalyticsError.MissingOffsetRange(range.topic, range.partition, requested, other.fold(0L)(_.count)))
+        Left(
+          AnalyticsError.MissingOffsetRange(
+            AnalyticsTopic.unwrap(range.topic),
+            range.partition,
+            requested,
+            other.fold(0L)(_.count)
+          )
+        )
     }
   }
 }

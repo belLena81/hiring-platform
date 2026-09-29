@@ -2,7 +2,7 @@ package com.example.hiring.analytics.service.batch
 
 import cats.effect.{Async, Resource}
 import cats.effect.Ref
-import cats.effect.std.Semaphore
+import cats.effect.std.Mutex
 import cats.syntax.all.*
 
 /** Serializes every repository-managed batch, erasure, and retention operation for one lakehouse root. */
@@ -13,10 +13,10 @@ private[analytics] trait AnalyticsLakehouseLock[F[_]] {
 /** Process-local lock for explicitly selected local/test compositions. */
 private[analytics] object AnalyticsLakehouseLock {
   def processLocal[F[_]: Async]: Resource[F, AnalyticsLakehouseLock[F]] =
-    Resource.eval(Ref.of[F, Map[String, Semaphore[F]]](Map.empty)).map { locks => (root: String) =>
+    Resource.eval(Ref.of[F, Map[String, Mutex[F]]](Map.empty)).map { locks => (root: String) =>
       Resource
         .eval(
-          Semaphore[F](1L).flatMap { candidate =>
+          Mutex[F].flatMap { candidate =>
             locks.modify { current =>
               current.get(root) match {
                 case Some(existing) => current -> existing
@@ -25,6 +25,6 @@ private[analytics] object AnalyticsLakehouseLock {
             }
           }
         )
-        .flatMap(_.permit)
+        .flatMap(_.lock)
     }
 }

@@ -170,11 +170,11 @@ Job transitions over an existing aggregate (publish/update/close and later lifec
 
 # 5. Ports
 
-Infrastructure dependencies are represented through interfaces in `service.port`. The active application specializes those ports to Cats Effect `IO`: use cases use `UseCaseIO[A] = EitherT[IO, UseCaseError, A]`, while operational ports return `IO[Either[RepositoryError, A]]`. This is a deliberate single-runtime choice; typed ports and fake adapters provide service-test seams, while a second effect runtime would require a broader contract change.
+Infrastructure dependencies are represented through interfaces in `service.port`. The active application specializes those ports to Cats Effect `IO`: use cases use `UseCaseIO[A] = EitherT[IO, UseCaseError, A]`, while operational ports return `RepositoryIO[A] = EitherT[IO, RepositoryError, A]`. This is a deliberate single-runtime choice; typed ports and fake adapters provide service-test seams, while a second effect runtime would require a broader contract change.
 
 ```scala
 trait JobRepository:
-  def find(id: JobId): IO[Either[RepositoryError, Option[Job]]]
+  def find(id: JobId): RepositoryIO[Option[Job]]
 
 trait JobUseCases:
   def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job]
@@ -187,7 +187,7 @@ trait EmbeddingService:
   def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]]
 ```
 
-Application services depend on these interfaces. `RepositoryIO[A] = EitherT[IO, RepositoryError, A]` is also available as a helper, but port methods currently use the explicit `IO[Either[...]]` shape. `RepositoryError` belongs to this service boundary; adapters translate driver failures into it.
+Application services depend on these interfaces. `RepositoryError` belongs to this service boundary; adapters translate driver failures into it.
 
 ---
 
@@ -195,7 +195,7 @@ Application services depend on these interfaces. `RepositoryIO[A] = EitherT[IO, 
 
 Cats Effect controls all side effects.
 
-The main Hiring runtime intentionally selects `IO` at service and repository boundaries. `UseCaseIO` keeps expected use-case failures typed, and repository ports keep expected persistence failures typed in `Either`; neither alias makes the application effect-polymorphic. See [local engineering quality](docs/engineering-quality.md) for the rationale and revisit condition.
+The main Hiring runtime intentionally selects `IO` at service and repository boundaries. `UseCaseIO` and `RepositoryIO` keep expected failures typed in `EitherT`; neither alias makes the application effect-polymorphic. See [local engineering quality](docs/engineering-quality.md) for the rationale and revisit condition.
 
 ```text
                     IOApp

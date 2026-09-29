@@ -322,12 +322,13 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                     (IO.realTime, clockOffset.get).mapN(_ + _)
                 }
                 retention = new KafkaRetention[IO] {
-                  override def capture(connection: KafkaConnection, name: String): IO[KafkaRetentionBarrier] =
-                    KafkaRetentionAdapter.capture(connection, name, AnalyticsBatchTestSupport.driverExecution)
-                  override def retentionPassed(
-                      connection: KafkaConnection,
-                      barrier: KafkaRetentionBarrier
-                  ): IO[Boolean] =
+                  override def capture(): IO[KafkaRetentionBarrier] =
+                    KafkaRetentionAdapter.capture(
+                      reader,
+                      AnalyticsTopic.from(topic).toOption.get,
+                      AnalyticsBatchTestSupport.driverExecution
+                    )
+                  override def retentionPassed(barrier: KafkaRetentionBarrier): IO[Boolean] =
                     retentionReady.get
                 }
                 producerFencer = new TransactionalProducerFencer[IO] {
@@ -362,14 +363,14 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                   reader,
                   fencer,
                   topic,
-                  AnalyticsLakehousePaths.unsafe(root.toUri.toString.stripSuffix("/")),
+                  IntegrationAnalyticsLakehousePaths.unsafe(root.toUri.toString.stripSuffix("/")),
                   pseudonymizer,
                   publisher,
                   clock = clock,
                   leaseDuration = 4.seconds,
                   pollInterval = 200.millis,
                   producerFencer = producerFencer,
-                  kafkaRetention = retention
+                  kafkaRetention = Some(retention)
                 )
                 _ <- Resource.make(worker.run.start)(_.cancel).use { _ =>
                   for {
@@ -434,7 +435,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                     savedBarrier <- store.barrier.readBarrier(
                       AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)
                     )
-                    _ = assert(savedBarrier.exists(value => value.topic == topic && value.partitions.nonEmpty))
+                    _ = assert(
+                      savedBarrier
+                        .exists(value => AnalyticsTopic.unwrap(value.topic) == topic && value.partitions.nonEmpty)
+                    )
                     _ <- assertPublisherTransactionFenced(inFlightProducer)
                     _ <- retentionReady.set(true)
                     _ <- clockOffset.set(31.days)

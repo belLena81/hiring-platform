@@ -21,7 +21,7 @@ final class MongoJobRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     embeddingWork: MongoEmbeddingWorkEnqueuer,
-    diagnostics: Diagnostics = Diagnostics.noop
+    diagnostics: Diagnostics
 ) extends JobRepository
     with MongoConflictWriteMapping
     with MongoOperationalEventInsertion {
@@ -31,17 +31,17 @@ final class MongoJobRepository(
   override def find(id: JobId): RepositoryIO[Option[Job]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.find")(
-        collection
-          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
-          .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
+        RepositoryIO
+          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       )(_ => Left(RepositoryError.Unavailable))
 
   override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.findVersioned")(
-        collection
-          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
-          .map(document =>
+        RepositoryIO
+          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedJob))
           )
       )(_ => Left(RepositoryError.Unavailable))
@@ -98,17 +98,13 @@ final class MongoJobRepository(
       now: Instant,
       events: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): IO[Either[RepositoryError, Unit]] =
-    MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)).flatMap {
-      case Some(_) =>
-        embeddingWork
-          .enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
-          .flatMap {
-            case Right(())   => insertOperationalEvents(outbox, session, events, now, diagnostics)
-            case Left(error) => IO.pure(Left(error))
-          }
-      case None => IO.pure(Left(RepositoryError.MissingWriteResult))
-    }
+  ): RepositoryIO[Unit] =
+    for {
+      result <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)))
+      _ <- RepositoryIO.fromEither(MongoRepositorySupport.writeResult(result))
+      _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
+      _ <- insertOperationalEvents(outbox, session, events, now, diagnostics)
+    } yield ()
 
   override def updateWithEvents(
       expected: Versioned[Job],
@@ -134,35 +130,28 @@ final class MongoJobRepository(
       now: Instant,
       events: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): IO[Either[RepositoryError, Versioned[Job]]] =
-    Versioned.nextVersion(expected.version) match {
-      case None              => IO.pure(Left(RepositoryError.Conflict))
-      case Some(nextVersion) =>
-        MongoSessionOperations
-          .replaceOne(
-            collection,
-            session,
-            MongoFilter.and(
-              MongoFilter.eq(MongoFields.Id, expected.value.id.value.toString),
-              MongoFilter.eq(MongoFields.Version, expected.version)
-            ),
-            MongoHiringCodecs.job(replacement, nextVersion)
-          )
-          .flatMap {
-            case Some(result) if result.getMatchedCount == 1L =>
-              embeddingWork
-                .enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
-                .flatMap {
-                  case Right(()) =>
-                    insertOperationalEvents(outbox, session, events, now, diagnostics).map(
-                      _.as(Versioned(replacement, nextVersion))
-                    )
-                  case Left(error) => IO.pure(Left(error))
-                }
-            case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-            case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-          }
-    }
+  ): RepositoryIO[Versioned[Job]] =
+    for {
+      nextVersion <- RepositoryIO.fromEither(Versioned.nextVersion(expected.version).toRight(RepositoryError.Conflict))
+      result <- RepositoryIO.lift(
+        MongoSessionOperations.replaceOne(
+          collection,
+          session,
+          MongoFilter.and(
+            MongoFilter.eq(MongoFields.Id, expected.value.id.value.toString),
+            MongoFilter.eq(MongoFields.Version, expected.version)
+          ),
+          MongoHiringCodecs.job(replacement, nextVersion)
+        )
+      )
+      _ <- RepositoryIO.fromEither(result match {
+        case Some(value) if value.getMatchedCount == 1L => Right(())
+        case Some(_)                                    => Left(RepositoryError.Conflict)
+        case None                                       => Left(RepositoryError.MissingWriteResult)
+      })
+      _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
+      _ <- insertOperationalEvents(outbox, session, events, now, diagnostics)
+    } yield Versioned(replacement, nextVersion)
 
   override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit] =
     findVersioned(id).flatMap {
@@ -175,22 +164,25 @@ final class MongoJobRepository(
       embedding: EntityEmbedding
   ): RepositoryIO[Unit] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
-    MongoSessionOperations
-      .updateOne(
-        collection,
-        None,
-        MongoFilter.and(
-          MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
-          MongoFilter.eq(MongoFields.Version, observed.version),
-          MongoFilter.lt(MongoFields.Version, Long.MaxValue)
-        ),
-        MongoUpdate.combine(
-          MongoUpdate.set(MongoFields.Embedding, encoded.get(MongoFields.Embedding)),
-          MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta)),
-          MongoUpdate.inc(MongoFields.Version, 1L)
-        )
+    RepositoryIO
+      .lift(
+        MongoSessionOperations
+          .updateOne(
+            collection,
+            None,
+            MongoFilter.and(
+              MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
+              MongoFilter.eq(MongoFields.Version, observed.version),
+              MongoFilter.lt(MongoFields.Version, Long.MaxValue)
+            ),
+            MongoUpdate.combine(
+              MongoUpdate.set(MongoFields.Embedding, encoded.get(MongoFields.Embedding)),
+              MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta)),
+              MongoUpdate.inc(MongoFields.Version, 1L)
+            )
+          )
       )
-      .map {
+      .subflatMap {
         case Some(result) if result.getMatchedCount == 1L => Right(())
         case Some(_)                                      => Left(RepositoryError.Conflict)
         case None                                         => Left(RepositoryError.MissingWriteResult)
@@ -234,7 +226,7 @@ object MongoJobRepository {
       database: MongoDatabase[IO],
       client: MongoClient[IO],
       embeddingWork: MongoEmbeddingWorkEnqueuer,
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics
   ): MongoJobRepository =
     new MongoJobRepository(
       database,

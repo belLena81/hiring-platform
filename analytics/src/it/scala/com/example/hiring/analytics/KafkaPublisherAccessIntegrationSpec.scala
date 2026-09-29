@@ -150,7 +150,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
         KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
         topic,
-        AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
+        IntegrationAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
         new MongoAnalyticsReportPublisher[IO](
           reactiveClient,
@@ -203,7 +203,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
-          AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString),
+          IntegrationAnalyticsLakehousePaths.unsafe(
+            "file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString
+          ),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
           new MongoAnalyticsReportPublisher[IO](
             reactiveClient,
@@ -245,7 +247,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
           topic,
-          AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString),
+          IntegrationAnalyticsLakehousePaths.unsafe(
+            "file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString
+          ),
           AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
           new MongoAnalyticsReportPublisher[IO](
             reactiveClient,
@@ -454,7 +458,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         if (fencerPassword.isEmpty) KafkaConnection(workerBootstrapServers, None, None)
         else KafkaConnection(workerBootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
         topic,
-        AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
+        IntegrationAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
         publisher,
         leaseDuration = 250.millis,

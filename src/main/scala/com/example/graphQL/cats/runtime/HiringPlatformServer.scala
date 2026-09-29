@@ -15,7 +15,7 @@ object HiringPlatformServer {
       host: Host,
       port: Port,
       app: HttpApp[IO],
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics
   ): Resource[IO, Server] =
     EmberServerBuilder
       .default[IO]

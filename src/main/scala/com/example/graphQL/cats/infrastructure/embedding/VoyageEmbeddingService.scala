@@ -9,6 +9,8 @@ import com.example.graphQL.cats.service.port.{
   EmbeddingService,
   EmbeddingVector
 }
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import io.circe.{Decoder, Encoder}
 import io.circe.generic.semiauto.deriveDecoder
 import org.http4s.{AuthScheme, Credentials, Headers, Method, Request, Uri}
@@ -29,7 +31,8 @@ final class VoyageEmbeddingService(
     model: String,
     dimension: Int,
     timeout: FiniteDuration,
-    tracer: Tracer[IO] = Tracer.noop[IO]
+    tracer: Tracer[IO] = Tracer.noop[IO],
+    diagnostics: Diagnostics
 ) extends EmbeddingService {
   private given TextMapUpdater[Headers] with
     def updated(headers: Headers, key: String, value: String): Headers =
@@ -63,7 +66,11 @@ final class VoyageEmbeddingService(
               }
           }
           .timeout(timeout)
-          .handleError(_ => Left(EmbeddingError.ProviderUnavailable))
+          .handleErrorWith(error =>
+            diagnostics
+              .emit(LogEvent.EmbeddingProviderFailed, fields = LogFields.failure(error))
+              .as(Left(EmbeddingError.ProviderUnavailable))
+          )
       }
     }
   }
@@ -138,7 +145,8 @@ object VoyageEmbeddingService {
       model: String,
       dimension: Int,
       timeout: FiniteDuration,
-      tracer: Tracer[IO] = Tracer.noop[IO]
+      tracer: Tracer[IO] = Tracer.noop[IO],
+      diagnostics: Diagnostics
   ): Resource[IO, EmbeddingService] =
     Resource
       .eval(
@@ -151,7 +159,9 @@ object VoyageEmbeddingService {
           .default[IO]
           .withTimeout(timeout)
           .build
-          .map(client => new VoyageEmbeddingService(client, apiKey, uri, model, dimension, timeout, tracer))
+          .map(client =>
+            new VoyageEmbeddingService(client, apiKey, uri, model, dimension, timeout, tracer, diagnostics)
+          )
       }
 
 }

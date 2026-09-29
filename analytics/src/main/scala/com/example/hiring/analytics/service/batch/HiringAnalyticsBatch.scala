@@ -3,10 +3,11 @@ package com.example.hiring.analytics.service.batch
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.value
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.domain.{AnalyticsDigest, AnalyticsRunManifest, RangeFingerprint}
+import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.NonEmptyChain
-import cats.effect.{Async, Clock}
+import cats.effect.Async
 import cats.syntax.all.*
 
 import java.nio.charset.StandardCharsets
@@ -16,32 +17,32 @@ import java.time.Instant
 final class HiringAnalyticsBatch[F[_]: Async](
     paths: AnalyticsLakehousePaths,
     deletionMarkers: ActiveDeletionMarkerSource[F],
-    clock: Clock[F],
     reportPublisher: AnalyticsReportPublisher[F],
     manifestStore: AnalyticsRunManifestStore[F],
     lakehouse: AnalyticsBatchLakehouse[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
-    operational: AnalyticsOperationalSettings
+    operational: AnalyticsOperationalSettings,
+    private[analytics] val nowOverride: Option[F[Instant]] = None
 ) {
-  private val F = Async[F]
+  private val effect = Async[F]
   private val retention = operational.retention
-  private def now: F[Instant] = clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
+  private val now = nowOverride.getOrElse(effect.realTimeInstant)
 
   def run(manifest: AnalyticsRunManifest): F[AnalyticsPublication] =
     for {
       _ <- manifest.offsetRanges.find(range => range.startOffset == range.endOffsetExclusive) match {
         case Some(range) =>
-          F.raiseError[Unit](
-            AnalyticsError.EmptyRequestedRange(range.topic, range.partition, range.startOffset)
+          effect.raiseError[Unit](
+            AnalyticsError.EmptyRequestedRange(AnalyticsTopic.unwrap(range.topic), range.partition, range.startOffset)
           )
-        case None => F.unit
+        case None => effect.unit
       }
       publication <- lakehouseLock.resource(paths.root).use { _ =>
         for {
           markerTokens <- deletionMarkers.activeSubjectTokens
           _ <- lakehouse.validateHmacConfiguration
           reservedAt <- now
-          fingerprint <- F.fromEither(
+          fingerprint <- effect.fromEither(
             RangeFingerprint
               .from(rangeFingerprint(manifest))
               .leftMap(problem => AnalyticsError.InvalidInput(NonEmptyChain.one(problem)))
@@ -98,8 +99,10 @@ final class HiringAnalyticsBatch[F[_]: Async](
 
   private def rangeFingerprint(manifest: AnalyticsRunManifest): String = {
     val canonical = manifest.offsetRanges
-      .sortBy(range => (range.topic, range.partition))
-      .map(range => s"${range.topic}:${range.partition}:${range.startOffset}:${range.endOffsetExclusive}")
+      .sortBy(range => (AnalyticsTopic.unwrap(range.topic), range.partition))
+      .map(range =>
+        s"${AnalyticsTopic.unwrap(range.topic)}:${range.partition}:${range.startOffset}:${range.endOffsetExclusive}"
+      )
       .mkString("\n")
     AnalyticsDigest.sha256Hex(canonical.getBytes(StandardCharsets.UTF_8))
   }

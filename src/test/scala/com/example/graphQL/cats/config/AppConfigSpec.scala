@@ -117,7 +117,7 @@ class AppConfigSpec extends FunSuite {
       candidateVectorIndex = "candidates_embedding_vector_match_v1",
       jobLexicalIndex = "jobs_text_search",
       candidateLexicalIndex = "candidates_text_search",
-      fusionStrategy = com.example.graphQL.cats.service.search.SearchFusionStrategy.ApplicationRrf,
+      fusionStrategy = com.example.graphQL.cats.domain.search.SearchFusionStrategy.ApplicationRrf,
       rerankEnabled = false,
       rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 120000,

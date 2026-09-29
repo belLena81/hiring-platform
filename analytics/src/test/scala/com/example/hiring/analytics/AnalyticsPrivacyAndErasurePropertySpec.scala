@@ -93,11 +93,12 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
        | batch { run-id = "property-run", partition = "0", start-offset = "0", end-offset-exclusive = "1" }
        | operational {
        |   retention { bronze-days = 7, quarantine-days = 7, silver-days = 30, published-snapshot-days = 30, deletion-marker-days = 31, delta-vacuum-safety = 7 days, delta-log-retention = 30 days }
-       |   report-reservation-ttl-days = 90
-       |   mongo-transaction-window-seconds = 120
+       |   report-reservation-ttl = 90 days
+       |   mongo-transaction-window = 120 seconds
        |   maximum-erasure-evidence-files = 100000
-       |   mongo-publisher-buffer-size = 256
-       | }
+|   mongo-publisher-buffer-size = 256
+|   erasure-worker { lease-duration = 90 seconds, delivery-timeout = 30 seconds, poll-interval = 5 seconds }
+| }
        |}""".stripMargin
 
   private def asciiAlphaNumeric(value: Char): Boolean =

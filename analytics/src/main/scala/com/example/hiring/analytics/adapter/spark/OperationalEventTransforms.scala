@@ -8,6 +8,7 @@ import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.Async
+import cats.syntax.all.*
 import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{
   col,
@@ -27,25 +28,10 @@ import org.apache.spark.sql.functions.{
   unix_timestamp,
   when
 }
-import org.apache.spark.sql.types.{ArrayType, DataType, DataTypes, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
 
 object OperationalEventTransforms {
-  private val SilverSchema: Vector[(String, DataType)] = Vector(
-    Columns.EventId -> StringType,
-    Columns.EventType -> StringType,
-    Columns.OccurredAt -> DataTypes.TimestampType,
-    Columns.AggregateType -> StringType,
-    Columns.AggregateId -> StringType,
-    Columns.ApplicationId -> StringType,
-    Columns.JobId -> StringType,
-    Columns.NewStatus -> StringType,
-    Columns.JobSkills -> ArrayType(StringType),
-    Columns.SubjectToken -> StringType,
-    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false),
-    Columns.EventFingerprint -> StringType
-  )
-
-  private val PayloadSchema: StructType = StructType(
+  private[analytics] val payloadSchema: StructType = StructType(
     Seq(
       StructField(Columns.ApplicationId, StringType, nullable = true),
       StructField(Columns.CandidateId, StringType, nullable = true),
@@ -74,7 +60,7 @@ object OperationalEventTransforms {
       StructField(Columns.AggregateType, StringType, nullable = true),
       StructField(Columns.AggregateId, StringType, nullable = true),
       StructField(Columns.ActorId, StringType, nullable = true),
-      StructField(Columns.Payload, PayloadSchema, nullable = true)
+      StructField(Columns.Payload, payloadSchema, nullable = true)
     )
   )
 
@@ -151,18 +137,8 @@ object OperationalEventTransforms {
         // Silver is a derived, 30-day analytics dataset: it does not retain raw envelopes,
         // candidate identifiers, or actor identifiers.
         .select(
-          Columns.EventId,
-          Columns.EventType,
-          Columns.OccurredAt,
-          Columns.AggregateType,
-          Columns.AggregateId,
-          Columns.ApplicationId,
-          Columns.JobId,
-          Columns.NewStatus,
-          Columns.JobSkills,
-          Columns.SubjectToken,
-          Columns.SubjectTokens,
-          Columns.EventFingerprint
+          AnalyticsTableSchemas.silver.head._1,
+          AnalyticsTableSchemas.silver.tail.map(_._1)*
         )
       validateSilverSchema(selected)
     }
@@ -171,18 +147,10 @@ object OperationalEventTransforms {
   /** Validates the persisted Silver column order and data types before returning the original DataFrame shape.
     */
   private[analytics] def validateSilverSchema(silver: DataFrame): Either[AnalyticsError, DataFrame] = {
-    val fields = silver.schema.fields.toVector.map(field => field.name -> field.dataType.simpleString)
-    val expected = SilverSchema.map { case (name, dataType) => name -> dataType.simpleString }
-    val lifecycleSuffix = Vector(
-      Columns.IngestedAt -> DataTypes.TimestampType.simpleString,
-      Columns.ExpiresAt -> DataTypes.TimestampType.simpleString
-    )
-    val validShape = fields == expected || fields == expected ++ lifecycleSuffix
+    val validShape = AnalyticsTableSchemas.matches(silver.schema, AnalyticsTableSchemas.silver) ||
+      AnalyticsTableSchemas.matches(silver.schema, AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry)
     Either.cond(validShape, silver, AnalyticsError.InvalidSilverSchema)
   }
-
-  private[analytics] def requireSilverSchema(silver: DataFrame): DataFrame =
-    validateSilverSchema(silver).fold(error => throw error, identity)
 
   private def requiredEnvelopeFields: Column =
     Seq(
@@ -208,50 +176,49 @@ object HiringGoldTransforms {
   private val JobCreated = AnalyticsEventType.JobCreated.wire
   private val Hired = AnalyticsApplicationStatus.Hired.wire
 
-  private def applicationLifecycle(silver: DataFrame): DataFrame =
+  private def applicationLifecycle(silver: DataFrame): Either[AnalyticsError, DataFrame] =
     OperationalEventTransforms
-      .requireSilverSchema(silver)
-      .filter(col(Columns.EventType).isin(ApplicationCreated, ApplicationStatusChanged))
+      .validateSilverSchema(silver)
+      .map(_.filter(col(Columns.EventType).isin(ApplicationCreated, ApplicationStatusChanged)))
 
   /** The CANDIDATE_HIRED event duplicates the Hired status transition and is deliberately excluded. */
-  def funnelActivity(silver: DataFrame): DataFrame = {
-    val result = applicationLifecycle(silver)
-      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
-      .groupBy(Columns.Day, Columns.EventType, Columns.NewStatus)
-      .agg(
-        countDistinct(col(Columns.ApplicationId)).as(Columns.ContributingApplications),
-        countDistinct(col(Columns.SubjectToken)).as(Columns.ContributingSubjects)
-      )
-      .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
-      .drop(Columns.ContributingSubjects)
-    result
-  }
+  def funnelActivity(silver: DataFrame): Either[AnalyticsError, DataFrame] =
+    applicationLifecycle(silver).map { validated =>
+      validated
+        .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+        .groupBy(Columns.Day, Columns.EventType, Columns.NewStatus)
+        .agg(
+          countDistinct(col(Columns.ApplicationId)).as(Columns.ContributingApplications),
+          countDistinct(col(Columns.SubjectToken)).as(Columns.ContributingSubjects)
+        )
+        .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
+        .drop(Columns.ContributingSubjects)
+    }
 
   /** Only JOB_CREATED snapshots contribute; updates and close events never alter this metric. */
-  def skillPostingActivity(silver: DataFrame): DataFrame = {
-    val result = OperationalEventTransforms
-      .requireSilverSchema(silver)
-      .filter(col(Columns.EventType) === lit(JobCreated))
-      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
-      .withColumn(Columns.RawSkill, explode(col(Columns.JobSkills)))
-      .withColumn(Columns.Skill, lower(trim(col(Columns.RawSkill))))
-      .filter(length(col(Columns.Skill)) > lit(0))
-      .dropDuplicates(Columns.EventId, Columns.AggregateId, Columns.Skill)
-      .groupBy(Columns.Day, Columns.Skill)
-      .agg(
-        countDistinct(col(Columns.EventId)).as(Columns.Postings),
-        countDistinct(col(Columns.SubjectToken)).as(Columns.ContributingSubjects)
-      )
-      .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
-      .drop(Columns.ContributingSubjects)
-    result
-  }
+  def skillPostingActivity(silver: DataFrame): Either[AnalyticsError, DataFrame] =
+    OperationalEventTransforms.validateSilverSchema(silver).map { validated =>
+      validated
+        .filter(col(Columns.EventType) === lit(JobCreated))
+        .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+        .withColumn(Columns.RawSkill, explode(col(Columns.JobSkills)))
+        .withColumn(Columns.Skill, lower(trim(col(Columns.RawSkill))))
+        .filter(length(col(Columns.Skill)) > lit(0))
+        .dropDuplicates(Columns.EventId, Columns.AggregateId, Columns.Skill)
+        .groupBy(Columns.Day, Columns.Skill)
+        .agg(
+          countDistinct(col(Columns.EventId)).as(Columns.Postings),
+          countDistinct(col(Columns.SubjectToken)).as(Columns.ContributingSubjects)
+        )
+        .filter(col(Columns.ContributingSubjects) >= lit(AnalyticsRetention.MinimumContributors))
+        .drop(Columns.ContributingSubjects)
+    }
 
   def suppressSmallGroups(dataset: DataFrame, contributorColumn: String): DataFrame =
     dataset.filter(col(contributorColumn) >= lit(AnalyticsRetention.MinimumContributors))
 
   /** Wide daily shape consumed by the operational AnalyticsFunnelDay projection. */
-  def wideFunnelDay(silver: DataFrame): DataFrame = {
+  def wideFunnelDay(silver: DataFrame): Either[AnalyticsError, DataFrame] = {
     val statusCells = AnalyticsApplicationStatus.values.toSeq.map { status =>
       status.wire.toLowerCase(java.util.Locale.ROOT) -> (col(Columns.NewStatus) === lit(status.wire))
     }
@@ -265,60 +232,63 @@ object HiringGoldTransforms {
     val counts = subjectCounts ++ applicationCounts
     val subjectColumns = cells.map { case (name, _) => s"${name}Subjects" }
 
-    val result = applicationLifecycle(silver)
-      .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
-      .groupBy(Columns.Day)
-      .agg(counts.head, counts.tail*)
-      .filter(
-        subjectColumns
-          .map(name => col(name) === lit(0) || col(name) >= lit(AnalyticsRetention.MinimumContributors))
-          .reduce(_ && _)
-      )
-      .drop(subjectColumns*)
-    result
+    applicationLifecycle(silver).map { validated =>
+      validated
+        .withColumn(Columns.Day, date_trunc(Columns.Day, col(Columns.OccurredAt)))
+        .groupBy(Columns.Day)
+        .agg(counts.head, counts.tail*)
+        .filter(
+          subjectColumns
+            .map(name => col(name) === lit(0) || col(name) >= lit(AnalyticsRetention.MinimumContributors))
+            .reduce(_ && _)
+        )
+        .drop(subjectColumns*)
+    }
   }
 
   /** One K-anonymous distribution, with hours calculated only from application lifecycle events. */
   def timeToHireAction[F[_]: Async](
       silver: DataFrame,
       sparkExecution: SparkExecution[F]
-  ): F[DataFrame] = sparkExecution {
-    val lifecycle = applicationLifecycle(silver)
-      .groupBy(Columns.ApplicationId, Columns.SubjectToken)
-      .agg(
-        min(when(col(Columns.EventType) === lit(ApplicationCreated), col(Columns.OccurredAt))).as(Columns.CreatedAt),
-        min(when(col(Columns.NewStatus) === lit(Hired), col(Columns.OccurredAt))).as(Columns.HiredAt)
-      )
-    val eligible = lifecycle
-      .filter(col(Columns.CreatedAt).isNotNull && col(Columns.HiredAt).isNotNull)
-      .withColumn(
-        Columns.Hours,
-        (unix_timestamp(col(Columns.HiredAt)) - unix_timestamp(col(Columns.CreatedAt))) / lit(3600.0)
-      )
-      .filter(col(Columns.Hours) >= lit(0.0))
-    val eligibleSubjects = eligible.select(Columns.SubjectToken).distinct().count()
-    val excludedSubjects = lifecycle
-      .join(eligible.select(Columns.ApplicationId).distinct(), Seq(Columns.ApplicationId), "left_anti")
-      .select(Columns.SubjectToken)
-      .distinct()
-      .count()
-    val result = eligible
-      .agg(
-        percentile_approx(col(Columns.Hours), lit(0.5), lit(10000)).as(Columns.P50Hours),
-        percentile_approx(col(Columns.Hours), lit(0.75), lit(10000)).as(Columns.P75Hours),
-        percentile_approx(col(Columns.Hours), lit(0.9), lit(10000)).as(Columns.P90Hours),
-        percentile_approx(col(Columns.Hours), lit(0.95), lit(10000)).as(Columns.P95Hours),
-        count(lit(1)).as(Columns.EligibleApplications)
-      )
-      .withColumn(Columns.EligibleCount, lit(eligibleSubjects))
-      .withColumn(Columns.ExcludedCount, lit(excludedSubjects))
-      .filter(
-        col(Columns.EligibleCount) >= lit(AnalyticsRetention.MinimumContributors) &&
-          (col(Columns.ExcludedCount) === lit(0) || col(Columns.ExcludedCount) >= lit(
-            AnalyticsRetention.MinimumContributors
-          ))
-      )
-      .drop(Columns.EligibleApplications)
-    result
+  ): F[DataFrame] = sparkExecution.either(applicationLifecycle(silver)).flatMap { valid =>
+    sparkExecution {
+      val lifecycle = valid
+        .groupBy(Columns.ApplicationId, Columns.SubjectToken)
+        .agg(
+          min(when(col(Columns.EventType) === lit(ApplicationCreated), col(Columns.OccurredAt))).as(Columns.CreatedAt),
+          min(when(col(Columns.NewStatus) === lit(Hired), col(Columns.OccurredAt))).as(Columns.HiredAt)
+        )
+      val eligible = lifecycle
+        .filter(col(Columns.CreatedAt).isNotNull && col(Columns.HiredAt).isNotNull)
+        .withColumn(
+          Columns.Hours,
+          (unix_timestamp(col(Columns.HiredAt)) - unix_timestamp(col(Columns.CreatedAt))) / lit(3600.0)
+        )
+        .filter(col(Columns.Hours) >= lit(0.0))
+      val eligibleSubjects = eligible.select(Columns.SubjectToken).distinct().count()
+      val excludedSubjects = lifecycle
+        .join(eligible.select(Columns.ApplicationId).distinct(), Seq(Columns.ApplicationId), "left_anti")
+        .select(Columns.SubjectToken)
+        .distinct()
+        .count()
+      val result = eligible
+        .agg(
+          percentile_approx(col(Columns.Hours), lit(0.5), lit(10000)).as(Columns.P50Hours),
+          percentile_approx(col(Columns.Hours), lit(0.75), lit(10000)).as(Columns.P75Hours),
+          percentile_approx(col(Columns.Hours), lit(0.9), lit(10000)).as(Columns.P90Hours),
+          percentile_approx(col(Columns.Hours), lit(0.95), lit(10000)).as(Columns.P95Hours),
+          count(lit(1)).as(Columns.EligibleApplications)
+        )
+        .withColumn(Columns.EligibleCount, lit(eligibleSubjects))
+        .withColumn(Columns.ExcludedCount, lit(excludedSubjects))
+        .filter(
+          col(Columns.EligibleCount) >= lit(AnalyticsRetention.MinimumContributors) &&
+            (col(Columns.ExcludedCount) === lit(0) || col(Columns.ExcludedCount) >= lit(
+              AnalyticsRetention.MinimumContributors
+            ))
+        )
+        .drop(Columns.EligibleApplications)
+      result
+    }
   }
 }

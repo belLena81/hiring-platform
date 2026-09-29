@@ -1,9 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
-import cats.syntax.flatMap.*
-import cats.syntax.functor.*
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.port.RepositoryIO
 import mongo4cats.client.ClientSession
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
@@ -17,8 +15,8 @@ import org.bson.conversions.Bson
 private[graphQL] object MongoRepositoryTestSupport {
   val noTransaction: MongoTransactionRunner = new MongoTransactionRunner {
     override def run[A](
-        operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]
-    ): IO[Either[RepositoryError, A]] = operation(None)
+        operation: Option[ClientSession[IO]] => RepositoryIO[A]
+    ): RepositoryIO[A] = operation(None)
   }
 
   /** Acquire a mongo4cats-owned collection while retaining the Java BSON document type used by exact-shape fixtures. */

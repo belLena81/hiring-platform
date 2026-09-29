@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.service.protocol
 
-import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
@@ -11,7 +10,7 @@ import com.example.graphQL.cats.domain.pagination.{
   PageSize
 }
 import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, RankedJob}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.port.RepositoryIO
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.util.UUID
@@ -33,12 +32,12 @@ trait HiringReadModel {
 }
 
 trait UserAuthenticator {
-  def actorFor(userId: UserId): IO[Either[RepositoryError, Option[ActorContext]]]
+  def actorFor(userId: UserId): RepositoryIO[Option[ActorContext]]
 
   /** Resolves a cryptographically verified principal, including a deleted account for idempotent deletion replay.
     * Operations still resolve active ownership through their service authorization boundary.
     */
-  def actorForVerifiedToken(userId: UserId): IO[Either[RepositoryError, Option[ActorContext]]] = actorFor(userId)
+  def actorForVerifiedToken(userId: UserId): RepositoryIO[Option[ActorContext]] = actorFor(userId)
 }
 
 trait JobUseCases {

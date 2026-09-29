@@ -26,7 +26,18 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
 ) {
   private val retention = operational.retention
 
-  def configureRawTables(spark: SparkSession): F[Unit] = execution {
+  def configureRawTables(spark: SparkSession): F[Unit] =
+    execution {
+      AnalyticsTableSchemas.createOrValidate(spark, paths.bronze, AnalyticsTableSchemas.bronze, raw = true)
+      AnalyticsTableSchemas.createOrValidate(spark, paths.quarantine, AnalyticsTableSchemas.quarantine, raw = true)
+      AnalyticsTableSchemas.createOrValidate(
+        spark,
+        paths.silver,
+        AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry
+      )
+    } *> configureRawTablePrivacy(spark)
+
+  def configureRawTablePrivacy(spark: SparkSession): F[Unit] = execution {
     val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafety}"
     val desiredLogRetention = s"interval ${retention.deltaLogRetention}"
     val rawPaths = Set(paths.bronze, paths.quarantine)

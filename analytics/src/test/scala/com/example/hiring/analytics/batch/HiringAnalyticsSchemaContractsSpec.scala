@@ -9,6 +9,7 @@ import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.kafka.*
 import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
+import com.example.hiring.analytics.TestAnalyticsLakehousePaths
 
 import com.example.hiring.analytics.domain.{AnalyticsEventType, AnalyticsApplicationStatus}
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -151,7 +152,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
       Some(AnalyticsError.InvalidSilverSchema)
     )
 
-    val funnel = HiringGoldTransforms.funnelActivity(silver)
+    val funnel = HiringGoldTransforms.funnelActivity(silver).toOption.get
     assertEquals(funnel.schema.fieldNames.toSeq, Seq("day", "eventType", "newStatus", "contributingApplications"))
     assertEquals(
       funnel.schema.fields.map(_.dataType.simpleString).toSeq,
@@ -159,7 +160,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     )
     assertEquals(funnel.select("contributingApplications").as[Long].collect().toSeq, Seq(10L, 10L))
 
-    val wide = HiringGoldTransforms.wideFunnelDay(silver)
+    val wide = HiringGoldTransforms.wideFunnelDay(silver).toOption.get
     assertEquals(
       wide.schema.fieldNames.toSeq,
       Seq("day", "created", "accepted", "declined", "interview", "hired", "rejected")
@@ -172,7 +173,7 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
     assertEquals(wideRow.getAs[Long]("created"), 10L)
     assertEquals(wideRow.getAs[Long]("hired"), 10L)
 
-    val skills = HiringGoldTransforms.skillPostingActivity(silver)
+    val skills = HiringGoldTransforms.skillPostingActivity(silver).toOption.get
     assertEquals(skills.schema.fieldNames.toSeq, Seq("day", "skill", "postings"))
     assertEquals(skills.schema.fields.map(_.dataType.simpleString).toSeq, Seq("timestamp", "string", "bigint"))
     assertEquals(
@@ -220,8 +221,14 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
       Some(AnalyticsError.InvalidSilverSchema)
     )
     assertEquals(
-      intercept[AnalyticsError](HiringGoldTransforms.funnelActivity(wrongType)),
-      AnalyticsError.InvalidSilverSchema
+      HiringGoldTransforms.funnelActivity(wrongType),
+      Left(AnalyticsError.InvalidSilverSchema)
+    )
+    assertEquals(HiringGoldTransforms.wideFunnelDay(wrongType), Left(AnalyticsError.InvalidSilverSchema))
+    assertEquals(HiringGoldTransforms.skillPostingActivity(wrongType), Left(AnalyticsError.InvalidSilverSchema))
+    assertEquals(
+      HiringGoldTransforms.timeToHireAction[IO](wrongType, sparkExecution).attempt.unsafeRunSync().swap.toOption,
+      Some(AnalyticsError.InvalidSilverSchema)
     )
   }
 
@@ -244,7 +251,8 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   }
 
   test("report extraction rejects a persisted Gold table with a drifted schema") {
-    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-gold-schema-drift").toUri.toString)
+    val paths =
+      TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-gold-schema-drift").toUri.toString)
     val frame = spark.createDataFrame(
       spark.sparkContext.parallelize(Seq(Row("not-a-timestamp", Long.box(1L)))),
       StructType.fromDDL("day STRING, created BIGINT")
@@ -256,7 +264,8 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
   }
 
   test("report extraction rejects null values in a persisted Gold row") {
-    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-gold-null-output").toUri.toString)
+    val paths =
+      TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-gold-null-output").toUri.toString)
     val schema = StructType.fromDDL(
       "p50Hours DOUBLE, p75Hours DOUBLE, p90Hours DOUBLE, p95Hours DOUBLE, eligibleCount BIGINT, excludedCount BIGINT"
     )
@@ -270,6 +279,46 @@ class HiringAnalyticsSchemaContractsSpec extends FunSuite {
 
     val result = AnalyticsGoldStage.extract[IO](spark, paths, Instant.EPOCH, sparkExecution).attempt.unsafeRunSync()
     assertEquals(result.swap.toOption, Some(AnalyticsError.InvalidGoldSchema))
+  }
+
+  test("quarantine first write and replay merge once and reject an incompatible existing table") {
+    val paths =
+      TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-quarantine-first-write").toUri.toString)
+    val row = Row(
+      "hiring.operational-events",
+      Int.box(0),
+      Long.box(1L),
+      "hash",
+      Seq("token"),
+      "quarantine-id",
+      "INVALID_OPERATIONAL_EVENT_ENVELOPE",
+      ts(Instant.parse("2026-10-01T00:00:00Z"))
+    )
+    val frame = spark.createDataFrame(
+      spark.sparkContext.parallelize(Seq(row)),
+      AnalyticsTableSchemas.struct(AnalyticsTableSchemas.quarantine)
+    )
+    val writer = new DeltaBatchWriter[IO](paths, sparkExecution)
+    val condition = "target.quarantineId = source.quarantineId"
+
+    writer.merge(frame, paths.quarantine, condition).unsafeRunSync()
+    writer.merge(frame, paths.quarantine, condition).unsafeRunSync()
+    assertEquals(spark.read.format("delta").load(paths.quarantine).count(), 1L)
+
+    val drifted =
+      TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-quarantine-drift").toUri.toString)
+    spark
+      .createDataFrame(
+        spark.sparkContext.parallelize(Seq(Row("quarantine-id"))),
+        StructType.fromDDL("quarantineId STRING")
+      )
+      .write
+      .format("delta")
+      .save(drifted.quarantine)
+    val driftedWriter = new DeltaBatchWriter[IO](drifted, sparkExecution)
+    intercept[AnalyticsError.LakehouseFailure] {
+      driftedWriter.merge(frame, drifted.quarantine, condition).unsafeRunSync()
+    }
   }
 
   private def ts(value: Instant): Timestamp = Timestamp.from(value)

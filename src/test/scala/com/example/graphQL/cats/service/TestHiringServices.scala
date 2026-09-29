@@ -8,7 +8,7 @@ import com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher
 
 private[cats] object TestHiringServices {
   def job(users: UserRepository, jobs: JobRepository): JobService =
-    new JobService(users, jobs, TestEmbeddingWorkPublisher.noop, TestIdempotency.noop)
+    new JobService(users, jobs, TestEmbeddingWorkPublisher.noop, TestIdempotency.noop, Diagnostics.noop)
 
   def applications(
       users: UserRepository,

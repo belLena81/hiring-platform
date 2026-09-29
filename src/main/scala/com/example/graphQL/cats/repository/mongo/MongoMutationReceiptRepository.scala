@@ -28,13 +28,15 @@ private[mongo] object MongoMutationWriteContext {
       context: MutationWriteContext,
       transactionRunner: MongoTransactionRunner,
       transactionRequired: Boolean
-  )(operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]] =
+  )(operation: Option[ClientSession[IO]] => RepositoryIO[A]): RepositoryIO[A] =
     context match {
       case MongoMutationWriteContext(value)                   => operation(value)
       case value if value eq MutationWriteContext.directWrite =>
         if (transactionRequired) transactionRunner.run(operation) else operation(None)
       case _ =>
-        IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
+        RepositoryIO.lift(
+          IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
+        )
     }
 }
 
@@ -44,7 +46,7 @@ private[mongo] object MongoMutationWriteContext {
 final class MongoMutationReceiptRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics = Diagnostics.noop,
+    diagnostics: Diagnostics,
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends MutationReceiptRepository {
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.MutationReceipts)
@@ -60,31 +62,32 @@ final class MongoMutationReceiptRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.execute")(transactionRunner.run { session =>
         find(session, key).flatMap {
-          case Left(error) => IO.pure(Left(error))
-          case Right(None) =>
-            inProgress(key, fingerprint, now, expiresAt).flatMap(insert(session, _)).flatMap {
-              case Left(error) => IO.pure(Left(error))
-              case Right(())   =>
-                write(MongoMutationWriteContext(session)).value.flatMap {
-                  case Left(error)                                 => remove(session, key).as(Left(error))
-                  case Right(MutationWriteOutcome.Rejected(error)) =>
-                    remove(session, key).as(Right(MutationReceiptExecution.Rejected(error)))
-                  case Right(MutationWriteOutcome.Applied(completed)) =>
-                    complete(session, key, fingerprint, completed.entity, now, expiresAt).map(_.map { _ =>
-                      MutationReceiptExecution.Applied(completed.value, completed.entity)
-                    })
-                }
-            }
-          case Right(Some(receipt)) if receipt.fingerprint != fingerprint =>
-            IO.pure(Right(MutationReceiptExecution.FingerprintMismatch))
-          case Right(Some(receipt)) if receipt.state == MutationReceiptState.InProgress =>
-            IO.pure(Right(MutationReceiptExecution.InProgress))
-          case Right(Some(receipt)) =>
-            receipt.entity match {
-              case Some(entity) => IO.pure(Right(MutationReceiptExecution.Replay(entity)))
-              // A completed receipt without its rehydration key is corrupt; do not repeat the write.
-              case None => IO.pure(Left(RepositoryError.InvalidStoredData))
-            }
+          case None =>
+            for {
+              pending <- RepositoryIO.lift(inProgress(key, fingerprint, now, expiresAt))
+              _ <- insert(session, pending)
+              outcome <- write(MongoMutationWriteContext(session)).recoverWith { error =>
+                RepositoryIO.lift(remove(session, key)).flatMap(_ => RepositoryIO.fromEither(Left(error)))
+              }
+              result <- outcome match {
+                case MutationWriteOutcome.Rejected(error) =>
+                  RepositoryIO.lift(remove(session, key)).as(MutationReceiptExecution.Rejected(error))
+                case MutationWriteOutcome.Applied(completed) =>
+                  complete(session, key, fingerprint, completed.entity, now, expiresAt)
+                    .as(MutationReceiptExecution.Applied(completed.value, completed.entity))
+              }
+            } yield result
+          case Some(receipt) if receipt.fingerprint != fingerprint =>
+            RepositoryIO.fromEither(Right(MutationReceiptExecution.FingerprintMismatch))
+          case Some(receipt) if receipt.state == MutationReceiptState.InProgress =>
+            RepositoryIO.fromEither(Right(MutationReceiptExecution.InProgress))
+          case Some(receipt) =>
+            // A completed receipt without its rehydration key is corrupt; do not repeat the write.
+            RepositoryIO.fromEither(
+              receipt.entity
+                .toRight(RepositoryError.InvalidStoredData)
+                .map(MutationReceiptExecution.Replay.apply)
+            )
         }
         /*
          * The preceding branches keep receipt insertion, the caller write, and completion in the same
@@ -92,23 +95,21 @@ final class MongoMutationReceiptRepository(
          */
       })(mapWrite)
 
-
   private def find(
       session: Option[ClientSession[IO]],
       key: MutationReceiptKey
-  ): IO[Either[RepositoryError, Option[MutationReceipt]]] =
-    MongoSessionOperations
-      .findOne(collection, session, keyFilter(key))
-      .map(_.traverse(read))
+  ): RepositoryIO[Option[MutationReceipt]] =
+    RepositoryIO
+      .lift(MongoSessionOperations.findOne(collection, session, keyFilter(key)))
+      .subflatMap(_.traverse(read))
 
-  private def insert(session: Option[ClientSession[IO]], receipt: Document): IO[Either[RepositoryError, Unit]] =
+  private def insert(session: Option[ClientSession[IO]], receipt: Document): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.insert")(
-        MongoSessionOperations
-          .insertOne(collection, session, receipt)
-          .map(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ => Right(())))
+        RepositoryIO
+          .lift(MongoSessionOperations.insertOne(collection, session, receipt))
+          .subflatMap(MongoRepositorySupport.writeResult(_).void)
       )(mapWrite)
-      .value
 
   private def complete(
       session: Option[ClientSession[IO]],
@@ -117,7 +118,7 @@ final class MongoMutationReceiptRepository(
       entity: MutationEntityReference,
       now: Instant,
       expiresAt: Instant
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     val filter = MongoFilter.and(
       keyFilter(key),
       MongoFilter.eq(MongoFields.Fingerprint, fingerprint.value),
@@ -131,30 +132,25 @@ final class MongoMutationReceiptRepository(
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "mutationReceipt.complete")(
-        MongoSessionOperations
-          .updateOne(collection, session, filter, update)
-          .map {
+        RepositoryIO
+          .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
+          .subflatMap {
             case Some(result) if result.getMatchedCount == 1L => Right(())
             case Some(_)                                      => Left(RepositoryError.Conflict)
             case None                                         => Left(RepositoryError.MissingWriteResult)
           }
       )(mapWrite)
-      .value
 
   private def remove(session: Option[ClientSession[IO]], key: MutationReceiptKey): IO[Unit] =
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "mutationReceipt.remove")(
-        collection
-          .flatMap(c =>
-            session.fold(
-              c.deleteOne(keyFilter(key).bson, new com.mongodb.client.model.DeleteOptions)
-            )(active => c.deleteOne(active, keyFilter(key).sessionFilter, new com.mongodb.client.model.DeleteOptions))
-          )
-          .void
-          .map(_ => Right(()): Either[RepositoryError, Unit])
-      )(_ => Right(()))
-      .value
-      .void
+    MongoRepositorySupport.guard(diagnostics, "mutationReceipt.remove")(
+      collection
+        .flatMap(c =>
+          session.fold(
+            c.deleteOne(keyFilter(key).bson, new com.mongodb.client.model.DeleteOptions)
+          )(active => c.deleteOne(active, keyFilter(key).sessionFilter, new com.mongodb.client.model.DeleteOptions))
+        )
+        .void
+    )(_ => ())
 
   private def keyFilter(key: MutationReceiptKey): MongoFilter =
     MongoFilter.and(
@@ -232,7 +228,7 @@ object MongoMutationReceiptRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics = Diagnostics.noop,
+      diagnostics: Diagnostics,
       uuidGen: UUIDGen[IO] = UUIDGen[IO]
   ): MongoMutationReceiptRepository =
     new MongoMutationReceiptRepository(

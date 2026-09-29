@@ -1,6 +1,9 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
 import cats.syntax.all.*
@@ -10,9 +13,22 @@ import org.apache.spark.sql.functions.*
 
 import java.time.Instant
 
+private final case class AnalyticsBatchConflictCounts(
+    safeValidRecords: Long,
+    conflictingEventIds: Long,
+    conflictingRecords: Long
+)
+
 /** Validates incoming events, quarantines malformed/conflicting rows, and merges Silver facts. */
-private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverStagePorts[F]) {
-  import ports.*
+private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
+    paths: AnalyticsLakehousePaths,
+    pseudonymizer: SubjectPseudonymizer,
+    execution: SparkExecution[F],
+    deltaWriter: DeltaWriter[F],
+    deltaReader: DeltaReader[F],
+    quarantineId: QuarantineId,
+    retention: AnalyticsRetentionSettings
+) {
   private val blocking = execution
 
   def separateQuarantine(
@@ -39,8 +55,6 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
         )
       )
       malformedToPersist <- if (activeMarkersPresent) blocking(malformed.limit(0)) else Async[F].pure(malformed)
-      safeValidRecords <- blocking(safeValid.count())
-      suppressedRecords = bronze.validRecords - safeValidRecords
       newConflicts <- blocking(OperationalEventTransforms.conflictingEventIds(safeValid))
       incomingSilver <- blocking.either(OperationalEventTransforms.silver(safeValid, pseudonymizer, markerTokens))
       incomingSilverSchema <- blocking(incomingSilver.schema)
@@ -61,7 +75,27 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
           .distinct()
       )
       conflicts <- blocking(newConflicts.unionByName(historicalConflicts).distinct())
-      conflictingEventIds <- blocking(conflicts.count())
+      conflictCounts <- blocking {
+        val row = safeValid
+          .alias("safe")
+          .join(
+            conflicts.alias("conflicts"),
+            col("safe.eventId") === col("conflicts.eventId"),
+            "left"
+          )
+          .agg(
+            count(lit(1)).as("safeValidRecords"),
+            countDistinct(col("conflicts.eventId")).as("conflictingEventIds"),
+            count(col("conflicts.eventId")).as("conflictingRecords")
+          )
+          .head()
+        AnalyticsBatchConflictCounts(
+          row.getLong(0),
+          row.getLong(1),
+          row.getLong(2)
+        )
+      }
+      suppressedRecords = bronze.validRecords - conflictCounts.safeValidRecords
       conflictQuarantine <- blocking(
         deltaWriter.withExpiry(
           AnalyticsSubjectPrivacy
@@ -72,7 +106,6 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
           retention.quarantineDays.value
         )
       )
-      conflictingRecords <- blocking(conflictQuarantine.count())
       quarantine <- blocking(
         malformedToPersist
           .unionByName(conflictQuarantine)
@@ -95,8 +128,8 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
       conflicts,
       bronze.validRecords,
       suppressedRecords,
-      bronze.malformedRecords + conflictingRecords,
-      conflictingEventIds
+      bronze.malformedRecords + conflictCounts.conflictingRecords,
+      conflictCounts.conflictingEventIds
     )
   }
 

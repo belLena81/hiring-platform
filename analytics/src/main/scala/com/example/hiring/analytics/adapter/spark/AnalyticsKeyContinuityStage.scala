@@ -1,7 +1,9 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 
 import cats.effect.Async
@@ -16,9 +18,15 @@ import java.sql.Timestamp
 import scala.jdk.CollectionConverters.*
 
 /** Verifies the persisted HMAC key anchors and token continuity before reserving a report revision. */
-private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](ports: KeyContinuityStagePorts[F]) {
-  import ports.*
+private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
+    paths: AnalyticsLakehousePaths,
+    pseudonymizer: SubjectPseudonymizer,
+    execution: SparkExecution[F],
+    retirementAuthorizations: KeyRetirementLookup[F],
+    private[analytics] val nowOverride: Option[F[Instant]] = None
+) {
   private val blocking = execution
+  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
 
   private def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
     if (!DeltaTable.isDeltaTable(spark, paths.silver)) Right(())
@@ -137,8 +145,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](ports: K
   def validateHmacConfiguration(spark: SparkSession): F[Unit] =
     for {
       _ <- validateKeyMaterialContinuity(spark)
-      duration <- clock.realTime
-      keyCheckAt = Instant.ofEpochMilli(duration.toMillis)
+      keyCheckAt <- now
       _ <- validateStoredTokenKeys(spark)
       _ <- ensurePrimaryTokenCompatibility(spark, keyCheckAt)
     } yield ()

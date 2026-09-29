@@ -18,7 +18,7 @@ import scala.jdk.CollectionConverters.*
 final class MongoSearchSessionWorkRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics = Diagnostics.noop
+    diagnostics: Diagnostics
 ) extends SearchSessionWorkRepository
     with MongoOperationalEventInsertion
     with MongoConflictWriteMapping {
@@ -34,9 +34,12 @@ final class MongoSearchSessionWorkRepository(
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.enqueue") {
-        MongoSessionOperations
-          .updateOne(work, None, filter, setOnInsertDocument(sanitized), new UpdateOptions().upsert(true))
-          .map {
+        RepositoryIO
+          .lift(
+            MongoSessionOperations
+              .updateOne(work, None, filter, setOnInsertDocument(sanitized), new UpdateOptions().upsert(true))
+          )
+          .subflatMap {
             case Some(_) => Right(())
             case None    => Left(RepositoryError.MissingWriteResult)
           }
@@ -46,33 +49,39 @@ final class MongoSearchSessionWorkRepository(
   override def findForActor(actorId: UserId, searchId: UUID): RepositoryIO[Option[SearchSessionLookup]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.findForActor") {
-        MongoSessionOperations
-          .findOne(
-            sessions,
-            None,
-            MongoFilter.and(
-              MongoFilter.eq(MongoFields.Id, searchId.toString),
-              MongoFilter.eq(MongoFields.ActorId, actorId.value.toString)
-            )
+        RepositoryIO
+          .lift(
+            MongoSessionOperations
+              .findOne(
+                sessions,
+                None,
+                MongoFilter.and(
+                  MongoFilter.eq(MongoFields.Id, searchId.toString),
+                  MongoFilter.eq(MongoFields.ActorId, actorId.value.toString)
+                )
+              )
           )
           .flatMap {
             case Some(document) =>
-              IO.pure(
+              RepositoryIO.fromEither(
                 MongoStoredDocumentDecoding
                   .repository(MongoHiringCodecs.readSearchSession(document))
                   .map(session => Some(SearchSessionLookup.Materialized(session)))
               )
             case None =>
-              MongoSessionOperations
-                .findOne(
-                  work,
-                  None,
-                  MongoFilter.and(
-                    MongoFilter.eq(MongoFields.Id, searchId.toString),
-                    MongoFilter.eq(MongoFields.ActorId, actorId.value.toString)
-                  )
+              RepositoryIO
+                .lift(
+                  MongoSessionOperations
+                    .findOne(
+                      work,
+                      None,
+                      MongoFilter.and(
+                        MongoFilter.eq(MongoFields.Id, searchId.toString),
+                        MongoFilter.eq(MongoFields.ActorId, actorId.value.toString)
+                      )
+                    )
                 )
-                .map {
+                .subflatMap {
                   case None           => Right(None)
                   case Some(document) =>
                     MongoSearchSessionWorkCodecs
@@ -113,9 +122,12 @@ final class MongoSearchSessionWorkRepository(
         .returnDocument(ReturnDocument.AFTER)
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "searchSessionWork.claim") {
-          work
-            .flatMap(_.findOneAndUpdate(MongoFilter.or(ready, expired).bson, update.bson, options))
-            .map {
+          RepositoryIO
+            .lift(
+              work
+                .flatMap(_.findOneAndUpdate(MongoFilter.or(ready, expired).bson, update.bson, options))
+            )
+            .subflatMap {
               case None           => Right(None)
               case Some(document) =>
                 MongoSearchSessionWorkCodecs
@@ -134,26 +146,26 @@ final class MongoSearchSessionWorkRepository(
             val lease = leaseFilter(claim)
             val sessionDocument = MongoHiringCodecs.searchSession(claim.work.session.copy(query = None))
             sessionDocument.remove("query")
-            val saveSession = updateOne(
-              sessions,
-              active,
-              MongoFilter.and(
-                MongoFilter.eq(MongoFields.Id, claim.work.session.id.toString),
-                MongoFilter.eq(MongoFields.ActorId, claim.work.session.actorId.value.toString)
-              ),
-              setOnInsertDocument(sessionDocument),
-              new UpdateOptions().upsert(true)
+            val saveSession = RepositoryIO.lift(
+              updateOne(
+                sessions,
+                active,
+                MongoFilter.and(
+                  MongoFilter.eq(MongoFields.Id, claim.work.session.id.toString),
+                  MongoFilter.eq(MongoFields.ActorId, claim.work.session.actorId.value.toString)
+                ),
+                setOnInsertDocument(sessionDocument),
+                new UpdateOptions().upsert(true)
+              )
             )
             saveSession.flatMap {
-              case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+              case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
               case Some(_) =>
-                insertOperationalEvents(outbox, active, List(claim.work.event), now, diagnostics).flatMap {
-                  case Left(error) => IO.pure(Left(error))
-                  case Right(())   =>
-                    deleteOne(active, lease).map {
-                      case result if result.getDeletedCount == 1L => Right(())
-                      case _                                      => Left(RepositoryError.Conflict)
-                    }
+                insertOperationalEvents(outbox, active, List(claim.work.event), now, diagnostics).flatMap { _ =>
+                  RepositoryIO.lift(deleteOne(active, lease)).subflatMap {
+                    case result if result.getDeletedCount == 1L => Right(())
+                    case _                                      => Left(RepositoryError.Conflict)
+                  }
                 }
             }
           }
@@ -198,8 +210,9 @@ final class MongoSearchSessionWorkRepository(
   ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.transition") {
-        updateOne(work, None, leaseFilter(claim), update)
-          .map {
+        RepositoryIO
+          .lift(updateOne(work, None, leaseFilter(claim), update))
+          .subflatMap {
             case Some(result) if result.getMatchedCount == 1L => Right(())
             case Some(_)                                      => Left(RepositoryError.Conflict)
             case None                                         => Left(RepositoryError.MissingWriteResult)
@@ -238,7 +251,7 @@ object MongoSearchSessionWorkRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics
   ): MongoSearchSessionWorkRepository =
     new MongoSearchSessionWorkRepository(
       database,

@@ -134,7 +134,11 @@ class MongoDatabaseProbeSpec extends CatsEffectSuite {
   test("client acquisition does not ping; unavailable check is bounded") {
     cats.effect.Resource.fromAutoCloseable(IO.blocking(new ServerSocket(0))).use { socket =>
       MongoDatabaseProbe
-        .resource(s"mongodb://127.0.0.1:${socket.getLocalPort}", "foundation")
+        .resource(
+          s"mongodb://127.0.0.1:${socket.getLocalPort}",
+          "foundation",
+          com.example.graphQL.cats.service.Diagnostics.noop
+        )
         .allocated
         .timeout(1.second)
         .flatMap { case (probe, release) =>

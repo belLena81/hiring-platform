@@ -31,9 +31,11 @@ final class MongoApplicationRepository private (
   override def find(id: ApplicationId): RepositoryIO[Option[Application]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.find") {
-        collection
-          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
-          .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readApplication)))
+        RepositoryIO
+          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .subflatMap(document =>
+            MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readApplication))
+          )
       }(_ => Left(RepositoryError.Unavailable))
 
   override def findByCandidate(
@@ -60,7 +62,7 @@ final class MongoApplicationRepository private (
   ): RepositoryIO[Unit] =
     if (!isConsistentSubmit(observedJob, application, initialEvent))
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
-    else RepositoryIO.fromIOEither(submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2))
+    else submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2)
 
   def createForOpenJobWithEvents(
       observedJob: Versioned[Job],
@@ -71,9 +73,7 @@ final class MongoApplicationRepository private (
     if (!isConsistentSubmit(observedJob, application, initialEvent))
       EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
-      RepositoryIO.fromIOEither(
-        submitWithRetry(observedJob, application, initialEvent, operationalEvents, remainingRetries = 2)
-      )
+      submitWithRetry(observedJob, application, initialEvent, operationalEvents, remainingRetries = 2)
 
   override def createForOpenJobWithEvents(
       observedJob: Versioned[Job],
@@ -87,8 +87,8 @@ final class MongoApplicationRepository private (
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "applications.createWithEvents") {
-          MongoMutationWriteContext
-            .session(context)
+          RepositoryIO
+            .lift(MongoMutationWriteContext.session(context))
             .flatMap(session =>
               submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
             )
@@ -115,8 +115,8 @@ final class MongoApplicationRepository private (
   ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.updateStatusWithContext") {
-        MongoMutationWriteContext
-          .session(context)
+        RepositoryIO
+          .lift(MongoMutationWriteContext.session(context))
           .flatMap(session => updateStatusWithSession(application, event, operationalEvents, session))
       }(mapWrite)
 
@@ -125,31 +125,27 @@ final class MongoApplicationRepository private (
       event: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     val statusGuard = event.previousStatus
       .map(status => MongoFilter.eq(MongoFields.Status, status.toString))
       .getOrElse(MongoFilter.exists(MongoFields.Status))
     val filter = MongoFilter.and(MongoFilter.eq(MongoFields.Id, application.id.value.toString), statusGuard)
-    val update =
-      MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
-    update.flatMap {
-      case Some(result) if result.getMatchedCount == 1L =>
-        MongoRepositorySupport
-          .repositoryGuard(diagnostics, "applications.insertStatusEvent") {
-            insertApplicationEvent(events, session, event).map {
-              case Some(_) => Right(())
-              case None    => Left(RepositoryError.MissingWriteResult)
-            }
-          }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
-          .value
-          .flatMap {
-            case Right(()) =>
-              insertOperationalEvents(outbox, session, operationalEvents, application.updatedAt, diagnostics)
-            case Left(error) => IO.pure(Left(error))
-          }
-      case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-    }
+    for {
+      result <- RepositoryIO.lift(
+        MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
+      )
+      _ <- RepositoryIO.fromEither(result match {
+        case Some(value) if value.getMatchedCount == 1L => Right(())
+        case Some(_)                                    => Left(RepositoryError.Conflict)
+        case None                                       => Left(RepositoryError.MissingWriteResult)
+      })
+      _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
+        RepositoryIO
+          .lift(insertApplicationEvent(events, session, event))
+          .subflatMap(MongoRepositorySupport.writeResult(_).void)
+      }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
+      _ <- insertOperationalEvents(outbox, session, operationalEvents, application.updatedAt, diagnostics)
+    } yield ()
 
   private def findMany(
       filter: MongoFilter,
@@ -182,7 +178,7 @@ final class MongoApplicationRepository private (
       application: Application,
       initialEvent: ApplicationEvent,
       remainingRetries: Int
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     submitWithRetry(observedJob, application, initialEvent, Nil, remainingRetries)
 
   private def submitWithRetry(
@@ -191,16 +187,15 @@ final class MongoApplicationRepository private (
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       remainingRetries: Int
-  ): IO[Either[RepositoryError, Unit]] =
-    submitOnce(observedJob, application, initialEvent, operationalEvents).flatMap {
-      case Left(RepositoryError.Conflict) if remainingRetries > 0 =>
+  ): RepositoryIO[Unit] =
+    submitOnce(observedJob, application, initialEvent, operationalEvents).leftFlatMap {
+      case RepositoryError.Conflict if remainingRetries > 0 =>
         currentOpenJob(observedJob.value.id).flatMap {
-          case Right(Some(current)) =>
+          case Some(current) =>
             submitWithRetry(current, application, initialEvent, operationalEvents, remainingRetries - 1)
-          case Right(None) => IO.pure(Left(RepositoryError.Conflict))
-          case Left(error) => IO.pure(Left(error))
+          case None => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
         }
-      case result => IO.pure(result)
+      case error => RepositoryIO.fromEither(Left(error))
     }
 
   private def isConsistentSubmit(
@@ -219,13 +214,12 @@ final class MongoApplicationRepository private (
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.submit") {
         transactionRunner
           .run(session => submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session))
       }(mapWrite)
-      .value
 
   private def submitOnceWithSession(
       observedJob: Versioned[Job],
@@ -233,7 +227,7 @@ final class MongoApplicationRepository private (
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     val guardFilter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, observedJob.value.id.value.toString),
       MongoFilter.eq(MongoFields.Version, observedJob.version),
@@ -245,11 +239,11 @@ final class MongoApplicationRepository private (
       MongoUpdate.inc(MongoFields.Version, 1L)
     )
     val guard = MongoSessionOperations.updateOne(jobs, session, guardFilter, update)
-    guard.flatMap {
+    RepositoryIO.lift(guard).flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
         insertApplicationAndEvent(session, application, initialEvent, operationalEvents)
-      case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+      case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+      case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
     }
 
   private def insertApplicationAndEvent(
@@ -257,49 +251,32 @@ final class MongoApplicationRepository private (
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
-  ): IO[Either[RepositoryError, Unit]] = {
-    val insertApplication =
-      MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.application(application))
-    val insertEvent = insertApplicationEvent(events, session, initialEvent)
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "applications.insert") {
-        insertApplication.map {
-          case Some(_) => Right(())
-          case None    => Left(RepositoryError.MissingWriteResult)
-        }
+  ): RepositoryIO[Unit] =
+    for {
+      _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insert") {
+        RepositoryIO
+          .lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.application(application)))
+          .subflatMap(MongoRepositorySupport.writeResult(_).void)
       }(error => mapDuplicateAs(RepositoryError.DuplicateApplication)(error))
-      .value
-      .flatMap {
-        case Left(error) => IO.pure(Left(error))
-        case Right(())   =>
-          MongoRepositorySupport
-            .repositoryGuard(diagnostics, "applications.insertInitialEvent") {
-              insertEvent.map {
-                case Some(_) => Right(())
-                case None    => Left(RepositoryError.MissingWriteResult)
-              }
-            }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
-            .value
-            .flatMap {
-              case Left(error) => IO.pure(Left(error))
-              case Right(())   =>
-                insertOperationalEvents(outbox, session, operationalEvents, application.createdAt, diagnostics)
-            }
-      }
-  }
+      _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertInitialEvent") {
+        RepositoryIO
+          .lift(insertApplicationEvent(events, session, initialEvent))
+          .subflatMap(MongoRepositorySupport.writeResult(_).void)
+      }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
+      _ <- insertOperationalEvents(outbox, session, operationalEvents, application.createdAt, diagnostics)
+    } yield ()
 
-  private def currentOpenJob(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
+  private def currentOpenJob(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.findOpenJob") {
-        jobs
-          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
-          .map(document =>
+        RepositoryIO
+          .lift(jobs.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .subflatMap(document =>
             MongoStoredDocumentDecoding
               .repository(document.traverse(MongoHiringCodecs.readVersionedJob))
               .map(_.filter(_.value.status == JobStatus.Open))
           )
       }(_ => Left(RepositoryError.Unavailable))
-      .value
 
   private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
     error match {
@@ -322,7 +299,7 @@ object MongoApplicationRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics
   ): MongoApplicationRepository =
     new MongoApplicationRepository(
       database,

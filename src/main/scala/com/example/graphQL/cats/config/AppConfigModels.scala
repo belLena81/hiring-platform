@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.config
 
 import com.comcast.ip4s.{Cidr, IpAddress}
-import com.example.graphQL.cats.service.search.SearchFusionStrategy
+import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.collection.MaxLength
 import io.github.iltotore.iron.constraint.numeric.*

@@ -3,7 +3,15 @@ package com.example.graphQL.cats.service.job
 import cats.effect.{Clock, IO}
 import cats.effect.Ref
 import cats.effect.std.UUIDGen
-import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, TestHiringServices, UseCaseError}
+import com.example.graphQL.cats.service.{
+  ActorContext,
+  AuthenticationError,
+  Diagnostics,
+  LogEvent,
+  LogField,
+  TestHiringServices,
+  UseCaseError
+}
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.domain.pagination.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.service.ServiceFixtures.*
@@ -137,6 +145,54 @@ class JobServiceSpec extends CatsEffectSuite {
     } yield {
       assertEquals(result.map(_.id), Right(jobId))
       assertEquals(wakeCount, 1)
+    }
+  }
+
+  test("failed embedding wake records safe diagnostics without failing the committed job") {
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      captured <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
+      diagnostics = new Diagnostics {
+        override def event(
+            event: LogEvent,
+            requestId: Option[String],
+            fields: => Map[LogField, String]
+        ): IO[Unit] = captured.update((event, fields) :: _)
+      }
+      publisher = new EmbeddingWorkPublisher {
+        override def wake: IO[Unit] = IO.raiseError(new IllegalStateException("sensitive wake detail"))
+      }
+      service <- deterministicService(
+        InMemoryUsers(users),
+        InMemoryJobs(jobs),
+        List(now),
+        List(jobId.value),
+        publisher,
+        diagnostics
+      )
+      result <- service
+        .createJob(
+          request("create-with-failed-wake"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          CreateJobInput(
+            "New role",
+            "Build services",
+            List("Scala"),
+            Set("Scala"),
+            Location("Cyprus", "Nicosia", true),
+            JobStatus.Draft
+          )
+        )
+        .value
+      entries <- captured.get
+      stored <- jobs.get
+    } yield {
+      assertEquals(result.map(_.id), Right(jobId))
+      assert(stored.contains(jobId))
+      assertEquals(entries.map(_._1), List(LogEvent.EmbeddingWakeFailed))
+      assertEquals(entries.head._2.get(LogField.ErrorType), Some("java.lang.IllegalStateException"))
+      assert(!entries.head._2.values.exists(_.contains("sensitive wake detail")))
     }
   }
 
@@ -278,7 +334,8 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs: InMemoryJobs,
       times: List[java.time.Instant],
       ids: List[UUID],
-      embeddingWork: EmbeddingWorkPublisher = com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop
+      embeddingWork: EmbeddingWorkPublisher = com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
+      diagnostics: Diagnostics = Diagnostics.noop
   ): IO[JobService] =
     for {
       timeValues <- Ref.of[IO, List[java.time.Instant]](times)
@@ -288,6 +345,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs,
       embeddingWork,
       com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
+      diagnostics,
       clock = new Clock[IO] {
         override val applicative: cats.Applicative[IO] = IO.asyncForIO
         override def realTime: IO[FiniteDuration] = nextValue(timeValues, "timestamp").map(_.toEpochMilli.millis)

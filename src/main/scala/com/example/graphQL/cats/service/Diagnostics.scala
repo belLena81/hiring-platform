@@ -25,6 +25,21 @@ enum LogEvent(val category: String, val component: String, val message: String, 
   case MongoRepositoryFailed
       extends LogEvent("MONGO_REPOSITORY_FAILED", "MONGO", "Mongo repository operation failed", LogLevel.Error)
   case MongoSetupFailed extends LogEvent("MONGO_SETUP_FAILED", "MONGO", "MongoDB setup failed", LogLevel.Error)
+  case AccessTokenIssuanceFailed
+      extends LogEvent("ACCESS_TOKEN_ISSUANCE_FAILED", "AUTH", "Access token issuance failed", LogLevel.Error)
+  case EmbeddingWakeFailed
+      extends LogEvent("EMBEDDING_WAKE_FAILED", "SEARCH", "Embedding work wake failed", LogLevel.Warn)
+  case EmbeddingProcessingFailed
+      extends LogEvent("EMBEDDING_PROCESSING_FAILED", "SEARCH", "Embedding work processing failed", LogLevel.Warn)
+  case EmbeddingProviderFailed
+      extends LogEvent("EMBEDDING_PROVIDER_FAILED", "SEARCH", "Embedding provider request failed", LogLevel.Warn)
+  case SearchSessionVerificationFailed
+      extends LogEvent(
+        "SEARCH_SESSION_VERIFICATION_FAILED",
+        "MONGO",
+        "Retained search session verification failed",
+        LogLevel.Warn
+      )
   case LocalUnmasked
       extends LogEvent("LOCAL_UNMASKED", "SECURITY", "Diagnostic metadata masking is disabled", LogLevel.Warn)
 

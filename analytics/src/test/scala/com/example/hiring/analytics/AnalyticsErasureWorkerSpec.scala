@@ -1,12 +1,16 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.config.{
+  AnalyticsErasureWorkerPolicy,
+  AnalyticsErasureWorkerTimings,
+  KafkaConnection
+}
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.{Clock, IO, Outcome, Ref, Resource}
+import cats.effect.{IO, Outcome, Ref, Resource}
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import munit.CatsEffectSuite
@@ -118,10 +122,8 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
   }
 
   test("erasure waits for both Delta deadlines and the broker earliest offset barrier") {
-    val barrier = KafkaRetentionBarrier(
-      "hiring.operational-events",
-      Vector(KafkaRetentionBarrier.Partition(0, 12L))
-    )
+    val barrier = KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 12L)).toOption.get
+    val purgedAt = Instant.parse("1969-12-31T23:57:59Z")
     val horizons = AnalyticsTestOperationalConfig.operational.retention.copy(
       deltaVacuumSafety = 1.minute,
       deltaLogRetention = 2.minutes
@@ -130,15 +132,15 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       state <- Ref.of[IO, Counters](Counters())
       beforeBothDeltaDeadlines <- TestControl.executeEmbed {
         IO.sleep(70.seconds) *> workerForRetention(horizons, 12L, state)
-          .replayHorizonsPassed(barrier, Instant.EPOCH)
+          .replayHorizonsPassed(barrier, purgedAt)
       }
       beforeKafkaBarrier <- TestControl.executeEmbed {
         IO.sleep(130.seconds) *> workerForRetention(horizons, 11L, state)
-          .replayHorizonsPassed(barrier, Instant.EPOCH)
+          .replayHorizonsPassed(barrier, purgedAt)
       }
       afterAllGates <- TestControl.executeEmbed {
         IO.sleep(130.seconds) *> workerForRetention(horizons, 12L, state)
-          .replayHorizonsPassed(barrier, Instant.EPOCH)
+          .replayHorizonsPassed(barrier, purgedAt)
       }
       _ = assertEquals(beforeBothDeltaDeadlines, false)
       _ = assertEquals(beforeKafkaBarrier, false)
@@ -271,31 +273,26 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     }
     val noFencing: TransactionalProducerFencer[IO] = (_: KafkaConnection, _: Vector[String]) => IO.unit
     val noRetention: KafkaRetention[IO] = new KafkaRetention[IO] {
-      override def capture(connection: KafkaConnection, topic: String): IO[KafkaRetentionBarrier] =
+      override def capture(): IO[KafkaRetentionBarrier] =
         IO.raiseError(new AssertionError("polling and renewal tests do not capture retention barriers"))
-      override def retentionPassed(connection: KafkaConnection, barrier: KafkaRetentionBarrier): IO[Boolean] =
-        IO.pure(barrier.partitions.forall(_.endOffsetExclusive <= earliestOffset))
+      override def retentionPassed(barrier: KafkaRetentionBarrier): IO[Boolean] =
+        IO.pure(barrier.partitions.forall(_.endOffsetExclusive.asInstanceOf[Long] <= earliestOffset))
     }
     new AnalyticsErasureWorker[IO](
       store,
       store,
       store,
-      KafkaConnection("localhost:9092"),
-      KafkaConnection("localhost:9092"),
-      "hiring.operational-events",
-      AnalyticsLakehousePaths.unsafe("file:///tmp/analytics-erasure-worker-test"),
+      AnalyticsErasureKafkaRuntime(KafkaConnection("localhost:9092"), noFencing, noRetention),
+      TestAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-erasure-worker-test"),
       publisher,
       markers,
       lakehouse,
       lock,
-      Clock[IO],
       org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
-      noFencing,
-      noRetention,
-      retention,
-      leaseDuration,
-      1.second,
-      1.second
+      AnalyticsErasureWorkerPolicy(
+        retention,
+        AnalyticsErasureWorkerTimings(leaseDuration, 1.second, 1.second)
+      )
     )
   }
 }

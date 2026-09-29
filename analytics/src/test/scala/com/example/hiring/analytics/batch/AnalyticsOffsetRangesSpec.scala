@@ -11,6 +11,7 @@ import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.domain.PartitionOffsetRange
+import com.example.hiring.analytics.TestPartitionOffsetRange
 
 import munit.ScalaCheckSuite
 import org.scalacheck.Gen
@@ -20,7 +21,7 @@ final class AnalyticsOffsetRangesSpec extends ScalaCheckSuite {
   property("a complete dense offset interval accepts exactly its requested observation") {
     forAll(Gen.chooseNum(0L, 1000000000L), Gen.chooseNum(1L, 1000000L)) { (start: Long, length: Long) =>
       val end = start + length
-      val range = PartitionOffsetRange.unsafe("hiring.operational-events", 0, start, end)
+      val range = TestPartitionOffsetRange.unsafe("hiring.operational-events", 0, start, end)
       val observed = AnalyticsOffsetRanges.Observed(length, start, end - 1L)
 
       AnalyticsOffsetRanges.complete(range, Some(observed)).isRight
@@ -35,7 +36,7 @@ final class AnalyticsOffsetRangesSpec extends ScalaCheckSuite {
       Gen.chooseNum(0L, 1000000L)
     ) { (start: Long, length: Long, earlier: Long, later: Long) =>
       val end = start + length
-      val range = PartitionOffsetRange.unsafe("hiring.operational-events", 0, start, end)
+      val range = TestPartitionOffsetRange.unsafe("hiring.operational-events", 0, start, end)
 
       AnalyticsOffsetRanges.available(range, start - earlier, end + later).isRight
     }

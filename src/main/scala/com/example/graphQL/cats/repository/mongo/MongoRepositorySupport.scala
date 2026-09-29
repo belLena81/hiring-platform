@@ -53,7 +53,8 @@ private[mongo] object MongoFilter {
       )
     )
   def and(filters: MongoFilter*): MongoFilter =
-    MongoFilter(Filters.and(filters.map(_.bson).asJava), Filter.and(filters.map(_.sessionFilter)*))
+    if (filters.isEmpty) exists(MongoFields.Id)
+    else MongoFilter(Filters.and(filters.map(_.bson).asJava), Filter.and(filters.map(_.sessionFilter)*))
   def or(filters: MongoFilter*): MongoFilter =
     MongoFilter(Filters.or(filters.map(_.bson).asJava), Filter.or(filters.map(_.sessionFilter)*))
 }
@@ -158,8 +159,9 @@ private[mongo] object MongoRepositorySupport {
   def repositoryGuard[A](
       diagnostics: Diagnostics,
       operation: String
-  )(result: IO[Either[RepositoryError, A]])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
-    RepositoryIO.fromIOEither(guard(diagnostics, operation)(result)(map))
+  )(result: RepositoryIO[A])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
+    // This boundary observes unexpected driver failures; typed failures pass through unchanged.
+    RepositoryIO.fromIOEither(guard(diagnostics, operation)(result.value)(map))
 }
 
 private[mongo] trait MongoConflictWriteMapping {
@@ -186,29 +188,34 @@ private[mongo] trait MongoOperationalEventInsertion {
       session: Option[ClientSession[IO]],
       events: List[OperationalEventEnvelope],
       now: Instant,
-      diagnostics: Diagnostics = Diagnostics.noop
-  ): IO[Either[RepositoryError, Unit]] =
+      diagnostics: Diagnostics
+  ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "repository.outbox.insert")(
-        events.foldLeft(IO.pure[Either[RepositoryError, Unit]](Right(()))) { (previous, event) =>
-          previous.flatMap {
-            case Left(error) => IO.pure(Left(error))
-            case Right(_)    =>
-              MongoHiringCodecs.outboxRecord(event, now) match {
-                case Left(_)         => IO.pure(Left(RepositoryError.InvalidStoredData))
-                case Right(document) =>
-                  MongoSessionOperations
-                    .insertOne(outbox, session, document)
-                    .map(MongoRepositorySupport.writeResult(_).void)
-              }
-          }
-        }
+        MongoOperationalEventInsertion.insertSequence(events, now)(document =>
+          RepositoryIO
+            .lift(MongoSessionOperations.insertOne(outbox, session, document))
+            .subflatMap(MongoRepositorySupport.writeResult(_).void)
+        )
       ) {
         case write: MongoWriteException if write.getError.getCode == 11000 => Left(RepositoryError.Conflict)
         case _                                                             => Left(RepositoryError.Unavailable)
       }
-      .value
 
+}
+
+private[mongo] object MongoOperationalEventInsertion {
+  def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
+      write: org.bson.Document => RepositoryIO[Unit]
+  ): RepositoryIO[Unit] =
+    events.traverse_ { event =>
+      for {
+        document <- RepositoryIO.fromEither(
+          MongoHiringCodecs.outboxRecord(event, now).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- write(document)
+      } yield ()
+    }
 }
 
 private[mongo] object MongoStoredDocumentDecoding {
@@ -234,14 +241,17 @@ private[mongo] object MongoKeysetPaging {
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "repository.findMany")(
-          collection
-            .flatMap(
-              _.find(MongoFilter.in(MongoFields.Id, ids.distinct).bson)
-                .boundedStream(ids.distinct.size)
-                .compile
-                .toList
+          RepositoryIO
+            .lift(
+              collection
+                .flatMap(
+                  _.find(MongoFilter.in(MongoFields.Id, ids.distinct).bson)
+                    .boundedStream(ids.distinct.size)
+                    .compile
+                    .toList
+                )
             )
-            .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
+            .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
         )(_ => Left(RepositoryError.Unavailable))
 
   def page[A](
@@ -254,16 +264,19 @@ private[mongo] object MongoKeysetPaging {
   ): RepositoryIO[List[A]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "repository.page")(
-        collection
-          .flatMap(
-            _.find(filter.bson)
-              .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending(MongoFields.Id)))
-              .limit(pageSize.value)
-              .boundedStream(pageSize.value)
-              .compile
-              .toList
+        RepositoryIO
+          .lift(
+            collection
+              .flatMap(
+                _.find(filter.bson)
+                  .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending(MongoFields.Id)))
+                  .limit(pageSize.value)
+                  .boundedStream(pageSize.value)
+                  .compile
+                  .toList
+              )
           )
-          .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
+          .subflatMap(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
       )(_ => Left(RepositoryError.Unavailable))
 
   def filter(filters: List[Option[Bson]]): Bson =

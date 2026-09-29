@@ -12,7 +12,6 @@ import com.example.graphQL.cats.service.port.{
   SearchSessionWorkRepository,
   UserRepository
 }
-import com.example.graphQL.cats.service.UseCaseError.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.mutation.Idempotent
@@ -100,40 +99,25 @@ final class OperationalTelemetryService(
       searchId: UUID,
       resultId: String
   ): UseCaseIO[(Int, String)] =
-    UseCase.fromIO(
-      searchSessions
-        .find(searchId)
-        .value
-        .flatMap(
-          _.widenUseCase.fold(
-            error => IO.pure(error.asLeft[(Int, String)]),
-            session =>
-              session match {
-                case None => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[(Int, String)]
-                case Some(session) if session.actorId != actor.userId =>
-                  UseCaseError.Domain(DomainError.Forbidden).asLeft[(Int, String)]
-                case Some(session) =>
-                  session.results
-                    .find(_.resultId == resultId)
-                    .map(result => (result.rank, session.searchKind).asRight[UseCaseError])
-                    .getOrElse(UseCaseError.Domain(DomainError.Forbidden).asLeft[(Int, String)])
-              } match {
-                case value @ Right(_)                                                  => IO.pure(value)
-                case Left(UseCaseError.Domain(DomainError.NotFound("search session"))) =>
-                  searchSessionWork
-                    .findForActor(actor.userId, searchId)
-                    .value.map(_.widenUseCase.flatMap {
-                      case Some(SearchSessionLookup.Pending) =>
-                        UseCaseError.Domain(DomainError.SearchSessionPending).asLeft[(Int, String)]
-                      case Some(SearchSessionLookup.Failed) =>
-                        UseCaseError.Domain(DomainError.SearchSessionUnavailable).asLeft[(Int, String)]
-                      case _ => UseCaseError.Domain(DomainError.NotFound("search session")).asLeft[(Int, String)]
-                    })
-                case value => IO.pure(value)
-              }
-          )
+    UseCase.repository(searchSessions.find(searchId)).flatMap {
+      case None =>
+        UseCase.repository(searchSessionWork.findForActor(actor.userId, searchId)).subflatMap {
+          case Some(SearchSessionLookup.Pending) =>
+            Left(UseCaseError.Domain(DomainError.SearchSessionPending))
+          case Some(SearchSessionLookup.Failed) =>
+            Left(UseCaseError.Domain(DomainError.SearchSessionUnavailable))
+          case _ => Left(UseCaseError.Domain(DomainError.NotFound("search session")))
+        }
+      case Some(session) if session.actorId != actor.userId =>
+        UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
+      case Some(session) =>
+        UseCase.fromEither(
+          session.results
+            .find(_.resultId == resultId)
+            .map(result => (result.rank, session.searchKind))
+            .toRight(UseCaseError.Domain(DomainError.Forbidden))
         )
-    )
+    }
 
   private def interactionReference(
       eventId: UUID

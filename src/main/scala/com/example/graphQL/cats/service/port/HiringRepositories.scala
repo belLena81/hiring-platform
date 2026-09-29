@@ -192,9 +192,27 @@ trait AnalyticsReportRepository {
 }
 
 /** Stable publication epoch and ordering token reserved before a batch starts doing expensive work. */
+opaque type AnalyticsRunId = String
+
+object AnalyticsRunId {
+  def from(value: String): Option[AnalyticsRunId] =
+    Option(value).filter(_.trim.nonEmpty)
+
+  extension (runId: AnalyticsRunId) def value: String = runId
+}
+
+opaque type AnalyticsRangeFingerprint = String
+
+object AnalyticsRangeFingerprint {
+  def from(value: String): Option[AnalyticsRangeFingerprint] =
+    Option(value).filter(_.trim.nonEmpty)
+
+  extension (fingerprint: AnalyticsRangeFingerprint) def value: String = fingerprint
+}
+
 final case class AnalyticsReportRunReservation(
-    runId: String,
-    rangeFingerprint: String,
+    runId: AnalyticsRunId,
+    rangeFingerprint: AnalyticsRangeFingerprint,
     generation: Long,
     revision: Long
 )
@@ -204,8 +222,8 @@ final case class AnalyticsReportRunReservation(
   */
 trait AnalyticsReportSnapshotPublisher {
   def reserve(
-      runId: String,
-      rangeFingerprint: String,
+      runId: AnalyticsRunId,
+      rangeFingerprint: AnalyticsRangeFingerprint,
       now: Instant,
       reservationExpiresAt: Instant
   ): RepositoryIO[AnalyticsReportRunReservation]
@@ -220,8 +238,8 @@ trait AnalyticsReportSnapshotPublisher {
 object AnalyticsReportSnapshotPublisher {
   val unavailable: AnalyticsReportSnapshotPublisher = new AnalyticsReportSnapshotPublisher {
     override def reserve(
-        runId: String,
-        rangeFingerprint: String,
+        runId: AnalyticsRunId,
+        rangeFingerprint: AnalyticsRangeFingerprint,
         now: Instant,
         reservationExpiresAt: Instant
     ): RepositoryIO[AnalyticsReportRunReservation] =

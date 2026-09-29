@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
 import mongo4cats.client.{ClientSession, MongoClient}
@@ -12,7 +12,7 @@ import retry.RetryPolicies.*
 import scala.concurrent.duration.*
 
 private[mongo] trait MongoTransactionRunner {
-  def run[A](operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]]
+  def run[A](operation: Option[ClientSession[IO]] => RepositoryIO[A]): RepositoryIO[A]
 }
 
 private[mongo] object MongoTransactionRunner {
@@ -54,12 +54,12 @@ private[mongo] object MongoTransactionRunner {
       client: MongoClient[IO],
       duplicateKeyError: RepositoryError,
       retryPolicy: RetryPolicy = RetryPolicy(),
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics
   ): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
-          operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]
-      ): IO[Either[RepositoryError, A]] = {
+          operation: Option[ClientSession[IO]] => RepositoryIO[A]
+      ): RepositoryIO[A] = RepositoryIO.fromIOEither {
         def withSession[A](use: ClientSession[IO] => IO[A]): IO[A] =
           client.startSession(ClientSessionOptions()).use(use)
 
@@ -109,7 +109,8 @@ private[mongo] object MongoTransactionRunner {
               if (active.hasActiveTransaction) abort(active) else IO.unit
             }
             .use { active =>
-              operation(Some(active)).attempt.flatMap {
+              // IO owns session finalization and distinguishes typed rejection from driver failures.
+              operation(Some(active)).value.attempt.flatMap {
                 case Left(error) =>
                   error match {
                     case mongo: MongoException

@@ -58,7 +58,8 @@ class HiringPlatformServerSpec extends CatsEffectSuite {
       server <- HiringPlatformServer.resource(
         Host.fromString(host).getOrElse(fail(s"Invalid test host: $host")),
         Port.fromInt(port).getOrElse(fail(s"Invalid test port: $port")),
-        app
+        app,
+        Diagnostics.noop
       )
     } yield server
 

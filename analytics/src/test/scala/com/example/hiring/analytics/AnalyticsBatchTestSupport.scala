@@ -6,9 +6,14 @@ import com.example.hiring.analytics.adapter.spark.{
   BoundedOperationalEventSource,
   DeltaManifestStore,
   SparkAnalyticsBatchLakehouse,
-  KeyContinuityStagePorts,
   KeyRetirementLookup,
-  SparkExecution
+  SparkExecution,
+  AnalyticsBatchIngestionStage,
+  AnalyticsBatchSilverStage,
+  DeltaBatchReader,
+  DeltaBatchWriter,
+  LakehouseOperation,
+  QuarantineIdentifier
 }
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.service.batch.*
@@ -55,6 +60,7 @@ private[analytics] object AnalyticsBatchTestSupport {
 
   private val sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
     .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+  private val lakehouseExecution = new LakehouseOperation[IO](sparkExecution)
   val driverExecution: com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO] = sparkExecution
 
   final class BatchHarness private[AnalyticsBatchTestSupport] (
@@ -72,26 +78,44 @@ private[analytics] object AnalyticsBatchTestSupport {
     ) = {
       val store = manifests.getOrElse(new DeltaManifestStore[IO](spark, paths, sparkExecution))
       val maintenance = newMaintenance(spark, paths, pseudonymizer, clock)
+      val deltaWriter = new DeltaBatchWriter[IO](paths, lakehouseExecution)
+      val deltaReader = new DeltaBatchReader[IO](lakehouseExecution)
+      val ingestion = new AnalyticsBatchIngestionStage[IO](
+        paths,
+        pseudonymizer,
+        lakehouseExecution,
+        store,
+        deltaWriter,
+        AnalyticsTestOperationalConfig.operational.retention,
+        Some(clock.realTimeInstant)
+      )
+      val silver = new AnalyticsBatchSilverStage[IO](
+        paths,
+        pseudonymizer,
+        lakehouseExecution,
+        deltaWriter,
+        deltaReader,
+        QuarantineIdentifier,
+        AnalyticsTestOperationalConfig.operational.retention
+      )
       val lakehouse = new SparkAnalyticsBatchLakehouse[IO](
         spark,
         paths,
-        pseudonymizer,
         source,
-        clock,
-        store,
-        AnalyticsTestOperationalConfig.operational,
-        sparkExecution,
-        maintenance
+        lakehouseExecution,
+        maintenance,
+        ingestion,
+        silver
       )
       new HiringAnalyticsBatch[IO](
         paths,
         markers,
-        clock,
         reportPublisher,
         store,
         lakehouse,
         lakehouseLock,
-        AnalyticsTestOperationalConfig.operational
+        AnalyticsTestOperationalConfig.operational,
+        Some(clock.realTimeInstant)
       ).run(manifest)
     }
   }
@@ -116,12 +140,12 @@ private[analytics] object AnalyticsBatchTestSupport {
       spark,
       paths,
       pseudonymizer,
-      clock,
       lakehouseLock,
       retirementStore,
       AnalyticsTestOperationalConfig.operational,
-      sparkExecution,
-      Slf4jLogger.getLogger[IO]
+      lakehouseExecution,
+      Slf4jLogger.getLogger[IO],
+      Some(clock.realTimeInstant)
     )
 
   def newKeyContinuityStage(
@@ -137,6 +161,6 @@ private[analytics] object AnalyticsBatchTestSupport {
     val lookup = new KeyRetirementLookup[IO] {
       override def list(lakehouseRoot: String) = retirementStore.list(lakehouseRoot)
     }
-    new AnalyticsKeyContinuityStage[IO](KeyContinuityStagePorts(paths, pseudonymizer, execution, clock, lookup))
+    new AnalyticsKeyContinuityStage[IO](paths, pseudonymizer, execution, lookup, Some(clock.realTimeInstant))
   }
 }

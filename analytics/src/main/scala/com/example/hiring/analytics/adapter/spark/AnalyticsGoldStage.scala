@@ -11,7 +11,7 @@ import cats.effect.Async
 import cats.syntax.all.*
 import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.types.{DataType, DataTypes, StructType}
+import org.apache.spark.sql.types.{DataType, StructType}
 
 import java.sql.Timestamp
 import java.time.Instant
@@ -19,35 +19,12 @@ import java.time.Instant
 /** Gold table rebuilds and bounded report extraction, kept outside the batch coordinator. */
 private[spark] object AnalyticsGoldStage {
   private val MaximumReportRows = 10000
-  private val FunnelSchema = Vector(
-    Columns.Day -> DataTypes.TimestampType,
-    Columns.Created -> DataTypes.LongType,
-    Columns.Accepted -> DataTypes.LongType,
-    Columns.Declined -> DataTypes.LongType,
-    Columns.Interview -> DataTypes.LongType,
-    Columns.Hired -> DataTypes.LongType,
-    Columns.Rejected -> DataTypes.LongType
-  )
-  private val TimeToHireSchema = Vector(
-    Columns.P50Hours -> DataTypes.DoubleType,
-    Columns.P75Hours -> DataTypes.DoubleType,
-    Columns.P90Hours -> DataTypes.DoubleType,
-    Columns.P95Hours -> DataTypes.DoubleType,
-    Columns.EligibleCount -> DataTypes.LongType,
-    Columns.ExcludedCount -> DataTypes.LongType
-  )
-  private val SkillsSchema = Vector(
-    Columns.Day -> DataTypes.TimestampType,
-    Columns.Skill -> DataTypes.StringType,
-    Columns.Postings -> DataTypes.LongType
-  )
 
   private[spark] def validateOutputSchema(
       actual: StructType,
       expected: Vector[(String, DataType)]
   ): Either[AnalyticsError.InvalidGoldSchema.type, Unit] = {
-    val fields = actual.fields.toVector.map(field => field.name -> field.dataType)
-    Either.cond(fields == expected, (), AnalyticsError.InvalidGoldSchema)
+    Either.cond(AnalyticsTableSchemas.matches(actual, expected), (), AnalyticsError.InvalidGoldSchema)
   }
 
   def rebuild[F[_]: Async](
@@ -56,11 +33,11 @@ private[spark] object AnalyticsGoldStage {
       sparkExecution: SparkExecution[F]
   ): F[Unit] =
     for {
-      funnel <- lakehouse[F, DataFrame](HiringGoldTransforms.wideFunnelDay(silver), sparkExecution)
+      funnel <- lakehouseEither[F, DataFrame](HiringGoldTransforms.wideFunnelDay(silver), sparkExecution)
       _ <- write(funnel, paths.funnelGold, sparkExecution)
       timeToHire <- lakehouseIO[F, DataFrame](HiringGoldTransforms.timeToHireAction[F](silver, sparkExecution))
       _ <- write(timeToHire, paths.timeToHireGold, sparkExecution)
-      skills <- lakehouse[F, DataFrame](HiringGoldTransforms.skillPostingActivity(silver), sparkExecution)
+      skills <- lakehouseEither[F, DataFrame](HiringGoldTransforms.skillPostingActivity(silver), sparkExecution)
       _ <- write(skills, paths.skillsGold, sparkExecution)
     } yield ()
 
@@ -84,7 +61,7 @@ private[spark] object AnalyticsGoldStage {
       sparkExecution: SparkExecution[F]
   ): F[AnalyticsReportOutput] =
     for {
-      funnelRows <- rows(spark, paths.funnelGold, FunnelSchema, sparkExecution)
+      funnelRows <- rows(spark, paths.funnelGold, AnalyticsTableSchemas.funnel, sparkExecution)
       funnel = funnelRows.map(row =>
         AnalyticsFunnelDayOutput(
           row.getAs[Timestamp](Columns.Day).toInstant,
@@ -96,7 +73,7 @@ private[spark] object AnalyticsGoldStage {
           row.getAs[Long](Columns.Rejected)
         )
       )
-      timeRows <- rows(spark, paths.timeToHireGold, TimeToHireSchema, sparkExecution)
+      timeRows <- rows(spark, paths.timeToHireGold, AnalyticsTableSchemas.timeToHire, sparkExecution)
       _ <-
         if (timeRows.size > 1)
           Async[F].raiseError[Unit](
@@ -113,7 +90,7 @@ private[spark] object AnalyticsGoldStage {
           row.getAs[Long](Columns.ExcludedCount)
         )
       )
-      skillRows <- rows(spark, paths.skillsGold, SkillsSchema, sparkExecution)
+      skillRows <- rows(spark, paths.skillsGold, AnalyticsTableSchemas.skills, sparkExecution)
       skills = skillRows.map(row =>
         AnalyticsSkillPostingDayOutput(
           row.getAs[Timestamp](Columns.Day).toInstant,
@@ -164,9 +141,5 @@ private[spark] object AnalyticsGoldStage {
   ): F[A] =
     lakehouse[F, Either[AnalyticsError, A]](work, sparkExecution).flatMap(Async[F].fromEither)
 
-  private def adapt[F[_]: Async, A](work: F[A]): F[A] = work.handleErrorWith {
-    case error: AnalyticsError              => Async[F].raiseError(error)
-    case scala.util.control.NonFatal(error) => Async[F].raiseError(AnalyticsError.LakehouseFailure(error))
-    case error                              => Async[F].raiseError(error)
-  }
+  private def adapt[F[_]: Async, A](work: F[A]): F[A] = LakehouseErrors.adapt(work)
 }

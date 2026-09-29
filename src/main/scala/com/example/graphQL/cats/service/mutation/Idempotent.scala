@@ -1,6 +1,5 @@
 package com.example.graphQL.cats.service.mutation
 
-import cats.data.EitherT
 import cats.effect.{Clock, IO}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
@@ -21,32 +20,30 @@ final class Idempotent private (
       entity: A => MutationEntityReference,
       replay: MutationEntityReference => UseCaseIO[A]
   )(write: MutationWriteContext => UseCaseIO[A]): UseCaseIO[A] =
-    EitherT {
-      clock.realTimeInstant.flatMap { now =>
-        val key = MutationReceiptKey(operation, actorScope, request.idempotencyKey)
-        receipts
-          .execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
-            RepositoryIO.fromIOEither(
-              write(context).value.map {
-                case Left(UseCaseError.Repository(error)) => Left(error)
-                case Left(error)                          => Right(MutationWriteOutcome.Rejected(error))
-                case Right(value)                         =>
-                  Right(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value))))
-              }
+    UseCaseIO.liftIO(clock.realTimeInstant).flatMap { now =>
+      val key = MutationReceiptKey(operation, actorScope, request.idempotencyKey)
+      UseCaseIO
+        .repository(
+          receipts.execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
+            write(context).biflatMap(
+              {
+                case UseCaseError.Repository(error) => RepositoryIO.fromEither(Left(error))
+                case error => RepositoryIO.fromEither(Right(MutationWriteOutcome.Rejected(error)))
+              },
+              value =>
+                RepositoryIO.fromEither(Right(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value)))))
             )
           }
-          .value
-          .flatMap {
-            case Left(error)                                         => IO.pure(Left(UseCaseError.Repository(error)))
-            case Right(MutationReceiptExecution.Applied(value, _))   => IO.pure(Right(value))
-            case Right(MutationReceiptExecution.Replay(reference))   => replay(reference).value
-            case Right(MutationReceiptExecution.Rejected(error))     => IO.pure(Left(error))
-            case Right(MutationReceiptExecution.FingerprintMismatch) =>
-              IO.pure(Left(UseCaseError.Repository(RepositoryError.Conflict)))
-            case Right(MutationReceiptExecution.InProgress) =>
-              IO.pure(Left(UseCaseError.Repository(RepositoryError.Unavailable)))
-          }
-      }
+        )
+        .flatMap {
+          case MutationReceiptExecution.Applied(value, _)   => UseCaseIO.pure(value)
+          case MutationReceiptExecution.Replay(reference)   => replay(reference)
+          case MutationReceiptExecution.Rejected(error)     => UseCaseIO.left(error)
+          case MutationReceiptExecution.FingerprintMismatch =>
+            UseCaseIO.left(UseCaseError.Repository(RepositoryError.Conflict))
+          case MutationReceiptExecution.InProgress =>
+            UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable))
+        }
     }
 }
 

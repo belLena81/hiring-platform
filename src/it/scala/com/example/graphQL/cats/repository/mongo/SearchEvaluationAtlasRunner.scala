@@ -125,7 +125,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
           Resource
             .make(
               database.createCollection(collectionName).as(collection)
-            )(ownedCollection => ownedCollection.drop())
+            )(ownedCollection => ownedCollection.drop)
             .use { _ =>
               for {
                 _ <- seedCollection(collection, settings)

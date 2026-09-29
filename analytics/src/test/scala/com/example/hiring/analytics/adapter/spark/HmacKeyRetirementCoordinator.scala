@@ -13,6 +13,7 @@ import com.example.hiring.analytics.adapter.mongo.MongoHmacKeyRetirementPreparat
 import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.domain.{AnalyticsOffset, AnalyticsPartition, AnalyticsTopic}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
@@ -42,9 +43,10 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     streams: MongoPublisherStream,
     clock: Clock[F],
     mutex: AnalyticsLakehouseLock[F],
-    override protected val sparkExecution: SparkBlockingExecution[F]
-) extends LakehouseOperation[F] {
-  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database.underlying, streams)
+    sparkExecution: SparkBlockingExecution[F]
+) {
+  private val lakehouseExecution = new LakehouseOperation[F](sparkExecution)
+  private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database, streams)
   private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database, streams)
   private val kafkaVolumeName = writerSettings.volumeName.stripSuffix("_hmac-rotation-analytics") +
     "_hmac-rotation-kafka"
@@ -54,7 +56,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       AnalyticsError.InvalidConfiguration("retirement analytics volume does not identify its isolated Kafka volume")
     ) *> HmacKeyRetirementKafkaLineage.observe[F](kafka, topic, kafkaVolumeName, sparkExecution)
 
-  private def registryVerifier(keyId: String): F[String] = lakehouseEither {
+  private def registryVerifier(keyId: String): F[String] = lakehouseExecution.either {
     if (!DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry))
       Left(
         AnalyticsError.InvalidConfiguration("permanent HMAC continuity registry is missing")
@@ -83,51 +85,54 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     }
   }
 
-  private def verifyPreparedFixture(keyId: String, barrier: KafkaRetentionBarrier): F[Unit] = lakehouseEither {
-    val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
-    if (!DeltaTable.isDeltaTable(spark, paths.silver) || !DeltaTable.isDeltaTable(spark, fixturePath))
-      Left(AnalyticsError.InvalidConfiguration("old-key retirement fixture is missing"))
-    else {
-      val oldRows = spark.read
-        .format("delta")
-        .load(paths.silver)
-        .filter(org.apache.spark.sql.functions.col("subjectToken").startsWith(keyId + "_"))
-        .limit(1)
-        .count()
-      val published = spark.read
-        .format("delta")
-        .load(fixturePath)
-        .filter(org.apache.spark.sql.functions.col("stage") === "old-primary-event-published")
-        .select("reference")
-        .limit(2)
-        .collect()
-      val proof = published.headOption.map(_.getString(0).split(":", -1).toVector)
-      val valid = published.length == 1 && proof.exists {
-        case Vector(topicName, partition, end) =>
-          topicName == barrier.topic && partition.toIntOption.exists(number =>
-            end.toLongOption.exists(value =>
-              value > 0L && barrier.partitions.exists(p => p.number == number && p.endOffsetExclusive >= value)
+  private def verifyPreparedFixture(keyId: String, barrier: KafkaRetentionBarrier): F[Unit] =
+    lakehouseExecution.either {
+      val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
+      if (!DeltaTable.isDeltaTable(spark, paths.silver) || !DeltaTable.isDeltaTable(spark, fixturePath))
+        Left(AnalyticsError.InvalidConfiguration("old-key retirement fixture is missing"))
+      else {
+        val oldRows = spark.read
+          .format("delta")
+          .load(paths.silver)
+          .filter(org.apache.spark.sql.functions.col("subjectToken").startsWith(keyId + "_"))
+          .limit(1)
+          .count()
+        val published = spark.read
+          .format("delta")
+          .load(fixturePath)
+          .filter(org.apache.spark.sql.functions.col("stage") === "old-primary-event-published")
+          .select("reference")
+          .limit(2)
+          .collect()
+        val proof = published.headOption.map(_.getString(0).split(":", -1).toVector)
+        val valid = published.length == 1 && proof.exists {
+          case Vector(topicName, partition, end) =>
+            topicName == AnalyticsTopic.unwrap(barrier.topic) && partition.toIntOption.exists(number =>
+              end.toLongOption.exists(value =>
+                value > 0L && barrier.partitions.exists(p =>
+                  AnalyticsPartition.unwrap(p.number) == number && AnalyticsOffset.unwrap(p.endOffsetExclusive) >= value
+                )
+              )
             )
+          case _ => false
+        }
+        for {
+          _ <- Either.cond(
+            oldRows == 1L,
+            (),
+            AnalyticsError.InvalidConfiguration("no old-key Silver row exists for the retirement fixture")
           )
-        case _ => false
+          _ <- Either.cond(
+            valid,
+            (),
+            AnalyticsError.InvalidConfiguration("captured Kafka barrier does not cover the fixture event")
+          )
+        } yield ()
       }
-      for {
-        _ <- Either.cond(
-          oldRows == 1L,
-          (),
-          AnalyticsError.InvalidConfiguration("no old-key Silver row exists for the retirement fixture")
-        )
-        _ <- Either.cond(
-          valid,
-          (),
-          AnalyticsError.InvalidConfiguration("captured Kafka barrier does not cover the fixture event")
-        )
-      } yield ()
     }
-  }
 
   /** The fixture captures exact old-primary Silver data and log paths before the retention wait. */
-  private def verifyCapturedPhysicalPaths(expectedPresent: Boolean): F[Unit] = lakehouseEither {
+  private def verifyCapturedPhysicalPaths(expectedPresent: Boolean): F[Unit] = lakehouseExecution.either {
     val fixturePath = paths.root.stripSuffix("/") + "/control/hmac_retirement_fixture"
     if (!DeltaTable.isDeltaTable(spark, fixturePath))
       Left(AnalyticsError.InvalidConfiguration("old-key physical path evidence is missing"))
@@ -197,13 +202,24 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       lakehouseId <- Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(paths.root))
       verifier <- registryVerifier(keyId)
       lineageBefore <- observeKafkaLineage
-      barrier <- KafkaRetentionAdapter.capture[F](kafka, topic, sparkExecution).adaptError {
-        case error: AnalyticsError => error
-        case NonFatal(error)       =>
-          AnalyticsError.InvalidConfiguration(
-            s"Kafka retirement barrier capture failed (${error.getClass.getSimpleName})"
-          )
-      }
+      barrier <- KafkaRetentionAdapter
+        .capture[F](
+          kafka,
+          AnalyticsTopic
+            .from(topic)
+            .toOption
+            .getOrElse(
+              throw new IllegalArgumentException("test topic must be non-empty")
+            ),
+          sparkExecution
+        )
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(error)       =>
+            AnalyticsError.InvalidConfiguration(
+              s"Kafka retirement barrier capture failed (${error.getClass.getSimpleName})"
+            )
+        }
       lineageAfter <- observeKafkaLineage
       _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(lineageBefore, lineageAfter))(
         AnalyticsError.InvalidConfiguration("Kafka lineage changed during retirement preparation")
@@ -282,9 +298,9 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
           "actual-broker-earliest-offsets-for-every-captured-partition",
           preparation.barrier.partitions.map(partition =>
             (
-              partition.number,
-              partition.endOffsetExclusive,
-              earliest(partition.number)
+              AnalyticsPartition.unwrap(partition.number),
+              AnalyticsOffset.unwrap(partition.endOffsetExclusive),
+              earliest(AnalyticsPartition.unwrap(partition.number))
             )
           )
         ),
@@ -354,14 +370,17 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       preparation.keyId,
       preparation.originalVerifier,
       preparation.capturedAt.toString,
-      preparation.barrier.topic,
+      AnalyticsTopic.unwrap(preparation.barrier.topic),
       preparation.lineage.clusterId,
       preparation.lineage.topicId,
       preparation.lineage.volumeName,
       preparation.lineage.volumeMountpoint,
       preparation.lineage.volumeCreatedAt,
       preparation.lineage.bootstrapEndpoint,
-      preparation.barrier.partitions.sortBy(_.number).map(p => s"${p.number}:${p.endOffsetExclusive}").mkString(","),
+      preparation.barrier.partitions
+        .sortBy(p => AnalyticsPartition.unwrap(p.number))
+        .map(p => s"${AnalyticsPartition.unwrap(p.number)}:${AnalyticsOffset.unwrap(p.endOffsetExclusive)}")
+        .mkString(","),
       earliest.toVector.sortBy(_._1).map((partition, offset) => s"$partition:$offset").mkString(","),
       writers.volumeName,
       writers.oldImageId,

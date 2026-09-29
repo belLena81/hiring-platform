@@ -5,10 +5,6 @@ import com.example.graphQL.cats.domain.pagination.PageSize
 import java.time.Instant
 import java.util.UUID
 
-enum SearchFusionStrategy {
-  case ApplicationRrf, MongoRankFusion, MongoScoreFusion
-}
-
 final case class JobSearchFilter(
     city: Option[String],
     skills: Set[String],

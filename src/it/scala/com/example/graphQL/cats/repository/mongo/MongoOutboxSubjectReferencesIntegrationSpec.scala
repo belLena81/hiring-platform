@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.{Deferred, IO, Resource}
+import cats.syntax.all.*
 import com.example.graphQL.cats.repository.mongo.MongoRepositoryTestSupport.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{
@@ -14,7 +15,13 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.service.{AnalyticsFunnelDay, AnalyticsReportSnapshot, AnalyticsSkillPostingDay}
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError}
+import com.example.graphQL.cats.service.port.{
+  AnalyticsRangeFingerprint,
+  AnalyticsRunId,
+  MutationWriteContext,
+  RepositoryError,
+  RepositoryIO
+}
 import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
@@ -23,7 +30,7 @@ import com.example.graphQL.cats.service.events.{
   SearchSession,
   SearchSessionResult
 }
-import com.example.graphQL.cats.service.ActorContext
+import com.example.graphQL.cats.service.{ActorContext, Diagnostics}
 import com.example.graphQL.cats.service.auth.{
   AccessTokenIssuer,
   AccessTokenIssuanceError,
@@ -89,6 +96,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
     s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
 
   private def uuid(value: Long): UUID = new UUID(0L, value)
+  private def runId(value: String): AnalyticsRunId = AnalyticsRunId.from(value).getOrElse(fail("invalid test run ID"))
+  private def fingerprint(value: String): AnalyticsRangeFingerprint =
+    AnalyticsRangeFingerprint.from(value).getOrElse(fail("invalid test range fingerprint"))
 
   private def event(
       id: Long,
@@ -177,7 +187,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             _ <- MongoRepositoryTestSupport.first(outbox.insertOne(legacyClick)).void
             _ <- MongoRepositoryTestSupport.first(outbox.insertOne(outboxRecord(performed))).void
             _ <- MongoRepositoryTestSupport.first(outbox.insertOne(incompleteLegacyRecord)).void
-            failed <- MongoHiringSetup.initialize(database).attempt
+            failed <- MongoHiringSetup.initialize(database, Diagnostics.noop).attempt
             _ = assert(failed.isLeft, "migration must fail while a search click cannot be attributed")
             first <- MongoRepositoryTestSupport.first(outbox.find(org.bson.Document("_id", uuid(1L).toString)))
             _ = assertEquals(
@@ -201,7 +211,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                   )
               )
               .void
-            _ <- MongoHiringSetup.initialize(database)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
             clickDocument <- MongoRepositoryTestSupport.first(outbox.find(org.bson.Document("_id", uuid(2L).toString)))
             performedDocument <- MongoRepositoryTestSupport.first(
               outbox.find(org.bson.Document("_id", uuid(3L).toString))
@@ -252,15 +262,15 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
     replicaSet.use { instance =>
       awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         client.getDatabase(s"analytics_publication_${UUID.randomUUID()}").flatMap { database =>
-          val reports = MongoAnalyticsReportRepository.transactional(database, client)
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict)
+          val reports = MongoAnalyticsReportRepository.transactional(database, client, Diagnostics.noop)
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
+          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
           val deletedUser = UserId(UUID.randomUUID())
           val reservationExpiry = now.plusSeconds(90L * 24L * 60L * 60L)
           val reportExpiry = now.plusSeconds(120L * 24L * 60L * 60L)
 
           for {
-            _ <- MongoHiringSetup.initialize(database)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
             _ <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.Users)
@@ -271,7 +281,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                     .append("version", 0L)
                 )
             )
-            workerMissing <- erasures.workerReady(now)
+            workerMissing <- erasures.workerReady(now).value
             _ = assertEquals(workerMissing, Left(RepositoryError.Unavailable))
             _ <- MongoRepositoryTestSupport.first(
               database
@@ -282,7 +292,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                     .append("leaseUntil", java.util.Date.from(now.plusSeconds(60L)))
                 )
             )
-            workerReady <- erasures.workerReady(now)
+            workerReady <- erasures.workerReady(now).value
             _ = assertEquals(workerReady, Right(()))
             initial <- MongoRepositoryTestSupport.first(
               database
@@ -292,11 +302,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             _ = assertEquals(initial.map(_.getLong("generation").longValue()), Option(0L))
             _ = assertEquals(initial.map(_.getString("state")), Some("Unpublished"))
             rolledBack <- runner.run { session =>
-              erasures.enqueue(deletedUser, now, MongoMutationWriteContext(session)).flatMap {
-                case Right(_)    => IO.pure(Left(RepositoryError.Unavailable))
-                case Left(error) => IO.pure(Left(error))
-              }
-            }
+              erasures.enqueue(deletedUser, now, MongoMutationWriteContext(session)) *>
+                RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+            }.value
             _ = assertEquals(rolledBack, Left(RepositoryError.Unavailable))
             afterRollback <- MongoRepositoryTestSupport.first(
               database
@@ -310,56 +318,76 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             )
             _ = assertEquals(afterRollback.map(_.getLong("generation").longValue()), Option(0L))
             _ = assertEquals(requestAfterRollback, None)
-            oldRun <- reports.reserve("batch-old", "range-old", now, reservationExpiry)
-            sameOldRun <- reports.reserve("batch-old", "range-old", now, reservationExpiry)
-            conflictingOldRun <- reports.reserve("batch-old", "different-range", now, reservationExpiry)
-            newerRun <- reports.reserve("batch-new", "range-new", now, reservationExpiry)
+            oldRun <- reports.reserve(runId("batch-old"), fingerprint("range-old"), now, reservationExpiry).value
+            sameOldRun <- reports.reserve(runId("batch-old"), fingerprint("range-old"), now, reservationExpiry).value
+            conflictingOldRun <- reports
+              .reserve(
+                runId("batch-old"),
+                fingerprint("different-range"),
+                now,
+                reservationExpiry
+              )
+              .value
+            newerRun <- reports.reserve(runId("batch-new"), fingerprint("range-new"), now, reservationExpiry).value
             _ = assertEquals(oldRun, sameOldRun)
             _ = assertEquals(conflictingOldRun, Left(RepositoryError.Conflict))
             oldReservation <- right(oldRun)
             newerReservation <- right(newerRun)
-            newerPublished <- reports.publish(newerReservation, report(now.plusSeconds(2), 2L), reportExpiry)
-            stalePublished <- reports.publish(oldReservation, report(now.plusSeconds(1), 1L), reportExpiry)
+            newerPublished <- reports.publish(newerReservation, report(now.plusSeconds(2), 2L), reportExpiry).value
+            stalePublished <- reports.publish(oldReservation, report(now.plusSeconds(1), 1L), reportExpiry).value
             _ = assertEquals(newerPublished, Right(()))
             _ = assertEquals(stalePublished, Left(RepositoryError.Conflict))
-            retryAfterNewer <- reports.reserve("batch-old", "range-old", now.plusSeconds(2L), reservationExpiry)
+            retryAfterNewer <- reports
+              .reserve(
+                runId("batch-old"),
+                fingerprint("range-old"),
+                now.plusSeconds(2L),
+                reservationExpiry
+              )
+              .value
             retryAfterNewerReservation <- right(retryAfterNewer)
             _ = assertEquals(retryAfterNewerReservation.generation, oldReservation.generation)
             _ = assert(retryAfterNewerReservation.revision > newerReservation.revision)
-            visible <- reports.latest
+            visible <- reports.latest.value
             _ = assertEquals(visible.map(_.map(_.funnel.head.created)), Right(Some(2L)))
             _ <- MongoRepositoryTestSupport.first(
-              database
-                .getCollection(MongoCollections.AnalyticsReportSnapshots)
-                .updateOne(
-                  new Document("_id", "current"),
-                  com.mongodb.client.model.Updates.set("expiresAt", java.util.Date.from(now.minusSeconds(1L)))
+              MongoRepositoryTestSupport
+                .collection(database, MongoCollections.AnalyticsReportSnapshots)
+                .flatMap(
+                  _.updateOne(
+                    new Document("_id", "current"),
+                    com.mongodb.client.model.Updates.set("expiresAt", java.util.Date.from(now.minusSeconds(1L)))
+                  )
                 )
             )
-            expiredSnapshot <- reports.latest
+            expiredSnapshot <- reports.latest.value
             _ = assertEquals(expiredSnapshot, Right(None))
-            restoredRetry <- reports.publish(
-              newerReservation,
-              report(now.plusSeconds(2), 2L),
-              reportExpiry
-            )
+            restoredRetry <- reports
+              .publish(
+                newerReservation,
+                report(now.plusSeconds(2), 2L),
+                reportExpiry
+              )
+              .value
             _ = assertEquals(restoredRetry, Right(()))
-            visibleAfterRetry <- reports.latest
+            visibleAfterRetry <- reports.latest.value
             _ = assertEquals(visibleAfterRetry.map(_.map(_.funnel.head.created)), Right(Some(2L)))
-            _ <- MongoHiringSetup.initialize(database)
-            receiptIdResult <- erasures.enqueue(deletedUser, now.plusSeconds(3L), MutationWriteContext.directWrite)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            receiptIdResult <- erasures
+              .enqueue(deletedUser, now.plusSeconds(3L), MutationWriteContext.directWrite)
+              .value
             receiptId <- receiptIdResult.fold(
               error => IO.raiseError[String](new AssertionError(error.toString)),
               IO.pure
             )
-            pendingStatus <- erasures.statusForSubject(deletedUser, receiptId)
+            pendingStatus <- erasures.statusForSubject(deletedUser, receiptId).value
             _ = assertEquals(pendingStatus, Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
-            foreignPendingStatus <- erasures.statusForSubject(UserId(UUID.randomUUID()), receiptId)
+            foreignPendingStatus <- erasures.statusForSubject(UserId(UUID.randomUUID()), receiptId).value
             _ = assertEquals(
               foreignPendingStatus,
               Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.NotFound)
             )
-            hiddenBeforeCompletion <- reports.latest
+            hiddenBeforeCompletion <- reports.latest.value
             _ = assertEquals(hiddenBeforeCompletion, Right(None))
             generationAfterDelete <- MongoRepositoryTestSupport.first(
               database
@@ -367,11 +395,20 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .find(new Document("_id", "analytics-report"))
             )
             _ = assertEquals(generationAfterDelete.map(_.getLong("generation").longValue()), Option(1L))
-            refreshedRetry <- reports.reserve("batch-old", "range-old", now.plusSeconds(3L), reservationExpiry)
+            refreshedRetry <- reports
+              .reserve(
+                runId("batch-old"),
+                fingerprint("range-old"),
+                now.plusSeconds(3L),
+                reservationExpiry
+              )
+              .value
             refreshedReservation <- right(refreshedRetry)
             _ = assertEquals(refreshedReservation.generation, 1L)
             _ = assert(refreshedReservation.revision > oldReservation.revision)
-            oldGenerationPublish <- reports.publish(newerReservation, report(now.plusSeconds(4), 3L), reportExpiry)
+            oldGenerationPublish <- reports
+              .publish(newerReservation, report(now.plusSeconds(4), 3L), reportExpiry)
+              .value
             _ = assertEquals(oldGenerationPublish, Left(RepositoryError.Conflict))
             _ <- MongoRepositoryTestSupport.first(
               database
@@ -382,19 +419,19 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                     .append("subjectRefsVersion", Integer.valueOf(1))
                 )
             )
-            purged <- erasures.purgeSubjectOutbox(deletedUser)
+            purged <- erasures.purgeSubjectOutbox(deletedUser).value
             _ = assertEquals(purged, Right(()))
             remainingOutbox <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.EventOutbox).find(new Document("_id", "delete-subject-event"))
             )
             _ = assertEquals(remainingOutbox, None)
-            _ <- erasures.markComplete(deletedUser, now.plusSeconds(4L)).flatMap {
+            _ <- erasures.markComplete(deletedUser, now.plusSeconds(4L)).value.flatMap {
               case Right(())   => IO.unit
               case Left(error) => IO.raiseError(new AssertionError(s"Could not complete erasure request: $error"))
             }
-            completed <- erasures.statusForSubject(deletedUser, receiptId)
+            completed <- erasures.statusForSubject(deletedUser, receiptId).value
             _ = assertEquals(completed, Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Complete))
-            foreignCompletedStatus <- erasures.statusForSubject(UserId(UUID.randomUUID()), receiptId)
+            foreignCompletedStatus <- erasures.statusForSubject(UserId(UUID.randomUUID()), receiptId).value
             _ = assertEquals(
               foreignCompletedStatus,
               Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.NotFound)
@@ -410,7 +447,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .flatMap(document => Option(document.getDate("expiresAt")))
                 .exists(_.after(java.util.Date.from(now)))
             )
-            duplicateEnqueue <- erasures.enqueue(deletedUser, now.plusSeconds(5L), MutationWriteContext.directWrite)
+            duplicateEnqueue <- erasures
+              .enqueue(deletedUser, now.plusSeconds(5L), MutationWriteContext.directWrite)
+              .value
             _ = assertEquals(duplicateEnqueue, Right(receiptId))
             generationAfterDuplicateEnqueue <- MongoRepositoryTestSupport.first(
               database
@@ -423,16 +462,18 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .getCollection(MongoCollections.AnalyticsErasureRequests)
                 .deleteOne(new Document("_id", deletedUser.value.toString))
             )
-            completionSurvivesMarkerTtl <- erasures.statusForSubject(deletedUser, receiptId)
+            completionSurvivesMarkerTtl <- erasures.statusForSubject(deletedUser, receiptId).value
             _ = assertEquals(
               completionSurvivesMarkerTtl,
               Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Complete)
             )
-            enqueueAfterMarkerTtl <- erasures.enqueue(
-              deletedUser,
-              now.plusSeconds(6L),
-              MutationWriteContext.directWrite
-            )
+            enqueueAfterMarkerTtl <- erasures
+              .enqueue(
+                deletedUser,
+                now.plusSeconds(6L),
+                MutationWriteContext.directWrite
+              )
+              .value
             _ = assertEquals(enqueueAfterMarkerTtl, Right(receiptId))
             noRecreatedMarker <- MongoRepositoryTestSupport.first(
               database
@@ -446,11 +487,18 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .find(new Document("_id", "analytics-report"))
             )
             _ = assertEquals(generationAfterTtlReplay.map(_.getLong("generation").longValue()), Option(1L))
-            postDeleteRun <- reports.reserve("batch-after-delete", "range-after-delete", now, reservationExpiry)
+            postDeleteRun <- reports
+              .reserve(
+                runId("batch-after-delete"),
+                fingerprint("range-after-delete"),
+                now,
+                reservationExpiry
+              )
+              .value
             postDeleteReservation <- right(postDeleteRun)
-            hiddenPublish <- reports.publish(postDeleteReservation, report(now.plusSeconds(5), 3L), reportExpiry)
+            hiddenPublish <- reports.publish(postDeleteReservation, report(now.plusSeconds(5), 3L), reportExpiry).value
             _ = assertEquals(hiddenPublish, Left(RepositoryError.Conflict))
-            visibleAfterCompletion <- reports.latest
+            visibleAfterCompletion <- reports.latest.value
             _ = assertEquals(visibleAfterCompletion, Right(None))
           } yield ()
         }
@@ -462,9 +510,14 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
     replicaSet.use { instance =>
       awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         client.getDatabase(s"account_deletion_receipts_${UUID.randomUUID()}").flatMap { database =>
-          val users = MongoUserRepository.transactional(database, client, new MongoEmbeddingWorkRepository(database))
-          val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client)
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client)
+          val users = MongoUserRepository.transactional(
+            database,
+            client,
+            new MongoEmbeddingWorkRepository(database, Diagnostics.noop),
+            Diagnostics.noop
+          )
+          val mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, Diagnostics.noop)
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
           val userId = UserId(UUID.randomUUID())
           val actor = ActorContext(userId, UserRole.Recruiter)
           val serviceNow = Instant.now()
@@ -480,12 +533,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             erasures,
             com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
             idempotent = Idempotent(mutationReceipts),
+            diagnostics = Diagnostics.noop,
             clock = com.example.graphQL.cats.FixedTestClock.at(serviceNow)
           )
 
           for {
-            _ <- MongoHiringSetup.initialize(database)
-            _ <- users.insert(recruiterUser(userId)).flatMap {
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- users.insert(recruiterUser(userId)).value.flatMap {
               case Right(())   => IO.unit
               case Left(error) => IO.raiseError(new AssertionError(s"Could not insert deletion-test user: $error"))
             }
@@ -509,7 +563,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
               .accountDeletionStatus(ActorContext(UserId(UUID.randomUUID()), UserRole.Candidate), receiptId)
               .value
             _ = assertEquals(foreignPending, Right(AccountDeletionStatus.NotFound))
-            deleted <- users.find(userId)
+            deleted <- users.find(userId).value
             _ = assertEquals(deleted.map(_.map(_.accountStatus)), Right(Some(AccountStatus.Deleted)))
             mutationReceipt <- MongoRepositoryTestSupport.first(
               database
@@ -531,7 +585,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             _ = assertEquals(replay, Right(receiptId))
             pendingAfterReplay <- service.accountDeletionStatus(actor, receiptId).value
             _ = assertEquals(pendingAfterReplay, Right(AccountDeletionStatus.Pending))
-            completion <- erasures.markComplete(userId, serviceNow.plusSeconds(1L))
+            completion <- erasures.markComplete(userId, serviceNow.plusSeconds(1L)).value
             _ = assertEquals(completion, Right(()))
             complete <- service.accountDeletionStatus(actor, receiptId).value
             _ = assertEquals(complete, Right(AccountDeletionStatus.Complete))
@@ -560,12 +614,12 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
     replicaSet.use { instance =>
       awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         client.getDatabase(s"analytics_fencing_${UUID.randomUUID()}").flatMap { database =>
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict)
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
+          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
           val userId = UserId(UUID.randomUUID())
           val transactionalIds = List("hiring-publisher-generation-a", "hiring-publisher-generation-b")
           for {
-            _ <- MongoHiringSetup.initialize(database)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
             _ <- MongoRepositoryTestSupport.first(
               database
                 .getCollection(MongoCollections.OutboxSubjectFences)
@@ -584,7 +638,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                     .append("leaseUntil", java.util.Date.from(now.plusSeconds(60L)))
                 )
             )
-            receipt <- runner.run(session => erasures.enqueue(userId, now, MongoMutationWriteContext(session)))
+            receipt <- runner.run(session => erasures.enqueue(userId, now, MongoMutationWriteContext(session))).value
             _ = assert(receipt.isRight)
             request <- MongoRepositoryTestSupport.first(
               database
@@ -606,7 +660,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
     replicaSet.use { instance =>
       awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
         client.getDatabase(s"analytics_claim_fencing_${UUID.randomUUID()}").flatMap { database =>
-          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
           val actor = UserId(UUID.randomUUID())
           val value = event(
             700L,
@@ -619,13 +673,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
           val secondValue = value.copy(eventId = uuid(702L))
           val transactionalId = "hiring-publisher-test-generation"
           for {
-            _ <- MongoHiringSetup.initialize(database)
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
             _ <- MongoRepositoryTestSupport.first(
-              database
-                .getCollection(MongoCollections.EventOutbox)
-                .insertMany(List(outboxRecord(value), outboxRecord(secondValue)).asJava)
+              MongoRepositoryTestSupport
+                .collection(database, MongoCollections.EventOutbox)
+                .flatMap(_.insertMany(List(outboxRecord(value), outboxRecord(secondValue))))
             )
-            claimed <- outbox.claim("fence-test", transactionalId, now, now.plusSeconds(60L), 50)
+            claimed <- outbox.claim("fence-test", transactionalId, now, now.plusSeconds(60L), 50).value
             _ = assert(claimed.exists(_.size == 1), clues(claimed))
             fence <- MongoRepositoryTestSupport.first(
               database
@@ -656,15 +710,20 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             userId,
             Json.obj("job" -> Json.obj("jobId" -> Json.fromString(uuid(801L).toString)))
           )
-          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client)
-          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
-          val users = MongoUserRepository.transactional(database, client, new MongoEmbeddingWorkRepository(database))
-          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict)
+          val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
+          val users = MongoUserRepository.transactional(
+            database,
+            client,
+            new MongoEmbeddingWorkRepository(database, Diagnostics.noop),
+            Diagnostics.noop
+          )
+          val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
           val deletionAt = now.plusSeconds(122L)
 
           for {
-            _ <- MongoHiringSetup.initialize(database)
-            _ <- users.insert(recruiterUser(userId)).flatMap {
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- users.insert(recruiterUser(userId)).value.flatMap {
               case Right(())   => IO.unit
               case Left(error) => IO.raiseError(new AssertionError(s"Could not insert race-test user: $error"))
             }
@@ -680,21 +739,25 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                     .append("leaseUntil", java.util.Date.from(deletionAt.plusSeconds(300L)))
                 )
             )
-            firstClaim <- outbox.claim(
-              "publisher-a",
-              firstPublisher,
-              now,
-              now.plusSeconds(60L),
-              1
-            )
+            firstClaim <- outbox
+              .claim(
+                "publisher-a",
+                firstPublisher,
+                now,
+                now.plusSeconds(60L),
+                1
+              )
+              .value
             _ = assertEquals(firstClaim.map(_.map(_.event.eventId)), Right(List(eventValue.eventId)))
-            expiredLeaseClaim <- outbox.claim(
-              "publisher-b",
-              secondPublisher,
-              now.plusSeconds(61L),
-              now.plusSeconds(121L),
-              1
-            )
+            expiredLeaseClaim <- outbox
+              .claim(
+                "publisher-b",
+                secondPublisher,
+                now.plusSeconds(61L),
+                now.plusSeconds(121L),
+                1
+              )
+              .value
             _ = assertEquals(expiredLeaseClaim.map(_.map(_.event.eventId)), Right(List(eventValue.eventId)))
             fenceBeforeRace <- MongoRepositoryTestSupport.first(
               database
@@ -706,24 +769,27 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             _ = assertEquals(generationsBeforeRace, List(firstPublisher, secondPublisher))
             requestWritten <- Deferred[IO, Unit]
             allowDeletionToContinue <- Deferred[IO, Unit]
-            deletionFiber <- runner.run { session =>
-              val context = MongoMutationWriteContext(session)
-              erasures.enqueue(userId, deletionAt, context).flatMap {
-                case Left(error)      => IO.pure(Left(error))
-                case Right(receiptId) =>
-                  requestWritten.complete(()).void *>
-                    allowDeletionToContinue.get *>
-                    users.deleteAccount(userId, deletionAt, "deleted-race-account", context).map(_.map(_ => receiptId))
+            deletionFiber <- runner
+              .run { session =>
+                val context = MongoMutationWriteContext(session)
+                for {
+                  receiptId <- erasures.enqueue(userId, deletionAt, context)
+                  _ <- RepositoryIO.lift(requestWritten.complete(()).void *> allowDeletionToContinue.get)
+                  _ <- users.deleteAccount(userId, deletionAt, "deleted-race-account", context)
+                } yield receiptId
               }
-            }.start
+              .value
+              .start
             _ <- requestWritten.get
-            racingClaim <- outbox.claim(
-              "publisher-c",
-              racingPublisher,
-              deletionAt,
-              deletionAt.plusSeconds(60L),
-              1
-            )
+            racingClaim <- outbox
+              .claim(
+                "publisher-c",
+                racingPublisher,
+                deletionAt,
+                deletionAt.plusSeconds(60L),
+                1
+              )
+              .value
             _ = assertEquals(racingClaim.map(_.map(_.event.eventId)), Right(List(eventValue.eventId)))
             _ <- allowDeletionToContinue.complete(()).void
             firstDeletion <- deletionFiber.joinWithNever
@@ -744,14 +810,12 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
               case Left(_)          =>
                 runner.run { session =>
                   val context = MongoMutationWriteContext(session)
-                  erasures.enqueue(userId, deletionAt.plusSeconds(1L), context).flatMap {
-                    case Left(error)      => IO.pure(Left(error))
-                    case Right(receiptId) =>
-                      users
-                        .deleteAccount(userId, deletionAt.plusSeconds(1L), "deleted-race-account", context)
-                        .map(_.map(_ => receiptId))
+                  erasures.enqueue(userId, deletionAt.plusSeconds(1L), context).flatMap { receiptId =>
+                    users
+                      .deleteAccount(userId, deletionAt.plusSeconds(1L), "deleted-race-account", context)
+                      .as(receiptId)
                   }
-                }
+                }.value
             }
             receiptId <- finalDeletion.fold(
               error => IO.raiseError[String](new AssertionError(s"Deletion retry failed after fence race: $error")),
@@ -771,13 +835,15 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             )
             _ = assertEquals(storedUser.map(_.getString("accountStatus")), Some("Deleted"))
             _ = assertEquals(requestAfterDeletion.map(_.getString("receiptId")), Some(receiptId))
-            lateClaim <- outbox.claim(
-              "publisher-d",
-              "hiring-publisher-generation-d",
-              deletionAt.plusSeconds(200L),
-              deletionAt.plusSeconds(260L),
-              1
-            )
+            lateClaim <- outbox
+              .claim(
+                "publisher-d",
+                "hiring-publisher-generation-d",
+                deletionAt.plusSeconds(200L),
+                deletionAt.plusSeconds(260L),
+                1
+              )
+              .value
             _ = assertEquals(lateClaim, Right(Nil))
             outboxAfterLateClaim <- MongoRepositoryTestSupport.first(
               database
@@ -785,7 +851,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .find(new Document("_id", eventValue.eventId.toString))
             )
             _ = assertEquals(outboxAfterLateClaim.map(_.getString("state")), Some("Failed"))
-            status <- erasures.statusForSubject(userId, receiptId)
+            status <- erasures.statusForSubject(userId, receiptId).value
             _ = assertEquals(status, Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
           } yield ()
         }

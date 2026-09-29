@@ -1,62 +1,58 @@
 package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AccountSubjectId
+import com.example.hiring.analytics.domain.AnalyticsTopic
+import com.example.hiring.analytics.domain.{AnalyticsOffset, AnalyticsPartition}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.data.{Chain, EitherT}
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
-import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
-import mongo4cats.codecs.CodecRegistry
-import mongo4cats.circe.MongoJsonCodecs
-import io.circe.{Decoder, Json}
-import org.bson.BsonDocument
-import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
-import org.bson.codecs.configuration.CodecProvider
-import com.mongodb.client.model.{FindOneAndUpdateOptions, Filters, ReturnDocument, Sorts, Updates}
-import com.mongodb.client.model.{ReplaceOneModel, ReplaceOptions, WriteModel}
+import com.mongodb.client.model.{Filters, Projections, Updates}
 import org.bson.Document
-import org.bson.conversions.Bson
 
 import java.time.Instant
-import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
 
 /** Mongo persistence for the durable Kafka retention barrier. */
 final class MongoAnalyticsErasureBarrier[F[_]: Async] private (
-    requests: MongoCollection[F, Json],
+    requests: MongoCollection[F, AnalyticsMongoRecords.ErasureRequest],
     streams: MongoPublisherStream
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureBarrier[F] {
   import MongoAnalyticsErasureStoreSupport.*
 
   def persistBarrier(claim: ErasureClaim, barrier: KafkaRetentionBarrier, now: Instant): F[ErasureUpdate] = mongo {
-    val partitionDocuments = barrier.partitions
-      .map(partition =>
-        new Document(AnalyticsCollections.Fields.PartitionNumber, partition.number)
-          .append(AnalyticsCollections.Fields.EndOffsetExclusive, partition.endOffsetExclusive)
-      )
-      .asJava
     val update = Updates.set(
       AnalyticsCollections.Fields.KafkaRetentionBarrier,
-      new Document(AnalyticsCollections.Fields.Topic, barrier.topic)
-        .append(AnalyticsCollections.Fields.Partitions, partitionDocuments)
+      new Document(AnalyticsCollections.Fields.Topic, AnalyticsTopic.unwrap(barrier.topic)).append(
+        AnalyticsCollections.Fields.Partitions,
+        barrier.partitions
+          .map(partition =>
+            new Document(AnalyticsCollections.Fields.PartitionNumber, AnalyticsPartition.unwrap(partition.number))
+              .append(
+                AnalyticsCollections.Fields.EndOffsetExclusive,
+                AnalyticsOffset.unwrap(partition.endOffsetExclusive)
+              )
+          )
+          .asJava
+      )
     )
     matchedUpdate(requests, ownedClaim(claim, now), update).map(toErasureUpdate)
   }
 
   def readBarrier(requestId: AccountSubjectId): F[Option[KafkaRetentionBarrier]] = mongo {
-    streams
-      .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
+    requests
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value))
+      .projection(
+        Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.KafkaRetentionBarrier)
+      )
+      .first
       .map(
-        _.traverse(document =>
-          readOptional[Json](document, AnalyticsCollections.Fields.KafkaRetentionBarrier)
-            .flatMap(_.traverse(decodeRetentionBarrier))
-        ).map(_.flatten)
+        _.traverse(document => decodeRetentionBarrier(document.kafkaRetentionBarrier)).map(_.flatten)
       )
   }.flatMap(Async[F].fromEither)
 }
@@ -68,7 +64,12 @@ object MongoAnalyticsErasureBarrier {
       collectionName: String = MongoAnalyticsErasureStoreSupport.RequestCollection
   ): Resource[F, MongoAnalyticsErasureBarrier[F]] =
     Resource
-      .eval(database.getCollection[Json](collectionName, MongoAnalyticsErasureStoreSupport.jsonRegistry))
+      .eval(
+        database.getCollection[AnalyticsMongoRecords.ErasureRequest](
+          collectionName,
+          AnalyticsMongoRecords.erasureRequestRegistry
+        )
+      )
       .map(requests => new MongoAnalyticsErasureBarrier(requests, streams))
 }
 

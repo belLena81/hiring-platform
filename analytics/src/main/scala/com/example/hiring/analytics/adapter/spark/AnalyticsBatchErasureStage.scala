@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
 import cats.syntax.all.*
@@ -12,8 +13,12 @@ import org.apache.spark.sql.functions.*
 import scala.util.Try
 
 /** Owns erasure matching, Delta evidence capture, checkpointing, and physical-presence verification. */
-private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](ports: ErasureStagePorts[F]) {
-  import ports.*
+private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
+    paths: AnalyticsLakehousePaths,
+    execution: SparkExecution[F],
+    configureRawTablePrivacy: SparkSession => F[Unit],
+    maximumEvidenceFiles: Int
+) {
   private val blocking = execution
   private val MaximumErasureEvidenceFiles = maximumEvidenceFiles
 

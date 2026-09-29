@@ -3,6 +3,7 @@ package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.{AnalyticsRunManifest, PartitionOffsetRange}
+import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.effect.{Async, Resource}
@@ -78,25 +79,27 @@ object KafkaOffsetRangeSource {
     consumer[F](connection, driverExecution).use { client =>
       driverExecution
         .blocking {
-          val topic = manifest.offsetRanges.head.topic
+          val topic = AnalyticsTopic.unwrap(manifest.offsetRanges.head.topic)
           val partitions = Option(client.partitionsFor(topic)).toVector.flatMap(_.asScala).map(_.partition()).toSet
           val missing = manifest.offsetRanges.find(range => !partitions.contains(range.partition))
           missing match {
             case Some(range) =>
               Left(
                 AnalyticsError.MissingOffsetRange(
-                  range.topic,
+                  AnalyticsTopic.unwrap(range.topic),
                   range.partition,
                   range.endOffsetExclusive - range.startOffset,
                   0L
                 )
               )
             case None =>
-              val requested = manifest.offsetRanges.map(range => new TopicPartition(range.topic, range.partition))
+              val requested = manifest.offsetRanges.map(range =>
+                new TopicPartition(AnalyticsTopic.unwrap(range.topic), range.partition)
+              )
               val earliest = client.beginningOffsets(requested.asJava)
               val latest = client.endOffsets(requested.asJava)
               manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
-                val partition = new TopicPartition(range.topic, range.partition)
+                val partition = new TopicPartition(AnalyticsTopic.unwrap(range.topic), range.partition)
                 result.flatMap { _ =>
                   (Option(earliest.get(partition)), Option(latest.get(partition))) match {
                     case (Some(first), Some(last)) =>
@@ -104,7 +107,7 @@ object KafkaOffsetRangeSource {
                     case _ =>
                       Left(
                         AnalyticsError.MissingOffsetRange(
-                          range.topic,
+                          AnalyticsTopic.unwrap(range.topic),
                           range.partition,
                           range.endOffsetExclusive - range.startOffset,
                           0L
@@ -129,9 +132,9 @@ object KafkaOffsetRangeSource {
     val byTopic = ranges
       .groupBy(_.topic)
       .toSeq
-      .sortBy(_._1)
+      .sortBy(entry => AnalyticsTopic.unwrap(entry._1))
       .map { case (topic, topicRanges) =>
-        topic -> Json.fromFields(
+        AnalyticsTopic.unwrap(topic) -> Json.fromFields(
           topicRanges.sortBy(_.partition).map(range => range.partition.toString -> Json.fromLong(select(range)))
         )
       }
@@ -142,9 +145,9 @@ object KafkaOffsetRangeSource {
     val byTopic = ranges
       .groupBy(_.topic)
       .toSeq
-      .sortBy(_._1)
+      .sortBy(entry => AnalyticsTopic.unwrap(entry._1))
       .map { case (topic, topicRanges) =>
-        topic -> Json.arr(topicRanges.map(_.partition).distinct.sorted.map(Json.fromInt)*)
+        AnalyticsTopic.unwrap(topic) -> Json.arr(topicRanges.map(_.partition).distinct.sorted.map(Json.fromInt)*)
       }
     Json.fromFields(byTopic).noSpaces
   }
@@ -169,7 +172,7 @@ private[analytics] final case class DataFrameBatchSource[F[_]: Async](
       sparkExecution {
         val inManifest = manifest.offsetRanges.foldLeft(lit(false): Column) { (condition, range) =>
           condition || (
-            col("topic") === lit(range.topic) &&
+            col("topic") === lit(AnalyticsTopic.unwrap(range.topic)) &&
               col("partition") === lit(range.partition) &&
               col("offset") >= lit(range.startOffset) &&
               col("offset") < lit(range.endOffsetExclusive)

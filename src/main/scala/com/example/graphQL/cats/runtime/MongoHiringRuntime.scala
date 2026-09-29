@@ -88,7 +88,6 @@ private[runtime] object SetupLifecycle {
         .as(new SetupLifecycle(completion))
     }
 
-  def resource(setup: IO[Unit]): Resource[IO, SetupLifecycle] = resource(setup, Diagnostics.noop)
 }
 
 object MongoHiringRuntime {
@@ -105,7 +104,8 @@ object MongoHiringRuntime {
       passwordHash: PasswordHashConfig,
       kafka: KafkaConfig,
       resetOnStart: Boolean,
-      embeddingService: (VectorSearchConfig, String) => Resource[IO, EmbeddingService] = voyageEmbeddingService
+      embeddingService: (VectorSearchConfig, String, Diagnostics) => Resource[IO, EmbeddingService] =
+        voyageEmbeddingService
   )
 
   def resource(config: RuntimeConfig): Resource[IO, MongoHiringRuntime] =
@@ -114,7 +114,7 @@ object MongoHiringRuntime {
       client <- MongoDatabaseProbe.clientResource(config.uri)
       database <- Resource.eval(client.getDatabase(config.databaseName))
       setup <- SetupLifecycle.resource(
-        setupEffect(database, config.vectorSearch, config.resetOnStart),
+        setupEffect(database, config.vectorSearch, config.resetOnStart, config.diagnostics),
         config.diagnostics
       )
       capability <- embeddingCapability(database, client, config, setup.await)
@@ -199,7 +199,7 @@ object MongoHiringRuntime {
           config.diagnostics
         )
       ),
-      config.embeddingService,
+      (vectorSearch, apiKey) => config.embeddingService(vectorSearch, apiKey, config.diagnostics),
       (work, users, jobs, embeddings) => {
         val embeddingLease =
           (config.vectorSearch.retryAttempts.toLong *
@@ -216,7 +216,8 @@ object MongoHiringRuntime {
             config.vectorSearch.retryAttempts,
             config.vectorSearch.retryDelayMillis.millis,
             embeddingLease,
-            embeddingWorkerReady
+            embeddingWorkerReady,
+            config.diagnostics
           )
           .map(publisher => publisher: EmbeddingWorkPublisher)
       }
@@ -283,14 +284,24 @@ object MongoHiringRuntime {
                     tokenIssuer,
                     erasureRequests,
                     disabledEmbeddingPublisher,
-                    idempotent
+                    idempotent,
+                    diagnostics
                   )
-                val jobService = JobService.live(users, jobs, disabledEmbeddingPublisher, idempotent)
+                val jobService = JobService.live(users, jobs, disabledEmbeddingPublisher, idempotent, diagnostics)
                 assemble(jobService, account, searchSessionHandoff = searchSessionHandoff)
               case EmbeddingCapability.Enabled(_, _, _, search, embeddings, publisher, model) =>
-                val jobService = JobService.live(users, jobs, publisher, idempotent)
+                val jobService = JobService.live(users, jobs, publisher, idempotent, diagnostics)
                 val accountService =
-                  UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, publisher, idempotent)
+                  UserAccountService(
+                    users,
+                    users,
+                    hasher,
+                    tokenIssuer,
+                    erasureRequests,
+                    publisher,
+                    idempotent,
+                    diagnostics
+                  )
                 val semanticSearch = SemanticSearchService(
                   users,
                   jobs,
@@ -303,13 +314,18 @@ object MongoHiringRuntime {
         }
       }
 
-  private def voyageEmbeddingService(config: VectorSearchConfig, apiKey: String): Resource[IO, EmbeddingService] =
+  private def voyageEmbeddingService(
+      config: VectorSearchConfig,
+      apiKey: String,
+      diagnostics: Diagnostics
+  ): Resource[IO, EmbeddingService] =
     VoyageEmbeddingService.resource(
       apiKey,
       config.voyageEndpoint,
       config.voyageModel,
       config.voyageDimension,
-      config.timeoutMillis.millis
+      config.timeoutMillis.millis,
+      diagnostics = diagnostics
     )
 
   private def probe(
@@ -333,7 +349,8 @@ object MongoHiringRuntime {
   private def setupEffect(
       database: MongoDatabase[IO],
       vectorSearch: VectorSearchConfig,
-      resetOnStart: Boolean
+      resetOnStart: Boolean,
+      diagnostics: Diagnostics
   ): IO[Unit] =
     MongoHiringSetup.initialize(
       database,
@@ -348,7 +365,8 @@ object MongoHiringRuntime {
           vectorSearch.indexPollIntervalMillis
         )
       ),
-      resetOnStart
+      resetOnStart,
+      diagnostics
     )
 
 }

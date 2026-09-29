@@ -1,8 +1,8 @@
 package com.example.hiring.analytics.adapter.kafka
 
-import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+import com.example.hiring.analytics.domain.{AnalyticsPartition, AnalyticsTopic}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.{KafkaRetention, KafkaRetentionBarrier}
 
@@ -16,6 +16,18 @@ import java.util.Properties
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
+private[analytics] final class KafkaRetentionAdapter[F[_]: Async](
+    connection: KafkaConnection,
+    topic: AnalyticsTopic,
+    driverExecution: SparkBlockingExecution[F]
+) extends KafkaRetention[F] {
+  override def capture(): F[KafkaRetentionBarrier] =
+    KafkaRetentionAdapter.capture[F](connection, topic, driverExecution)
+
+  override def retentionPassed(barrier: KafkaRetentionBarrier): F[Boolean] =
+    KafkaRetentionAdapter.retentionPassed[F](connection, barrier, driverExecution)
+}
+
 private[analytics] object KafkaRetentionAdapter {
 
   /** Captures the topic's exclusive end offsets. Callers must first prove that no subject lease or retryable outbox
@@ -23,15 +35,16 @@ private[analytics] object KafkaRetentionAdapter {
     */
   def capture[F[_]: Async](
       connection: KafkaConnection,
-      topic: String,
+      topic: AnalyticsTopic,
       driverExecution: SparkBlockingExecution[F]
   ): F[KafkaRetentionBarrier] =
     consumer[F](connection, driverExecution).use { client =>
       driverExecution
         .blocking {
-          val partitions = Option(client.partitionsFor(topic)).toVector
+          val topicName = AnalyticsTopic.unwrap(topic)
+          val partitions = Option(client.partitionsFor(topicName)).toVector
             .flatMap(_.asScala)
-            .map(partition => new TopicPartition(topic, partition.partition()))
+            .map(partition => new TopicPartition(topicName, partition.partition()))
             .sortBy(_.partition())
           for {
             _ <- Either.cond(
@@ -45,13 +58,9 @@ private[analytics] object KafkaRetentionAdapter {
                 .map(_.longValue())
                 .toRight(AnalyticsError.InvalidConfiguration("Kafka erasure barrier end offset is unavailable"))
             }
-            barrier <- KafkaRetentionBarrier.validate(
-              KafkaRetentionBarrier(
-                topic,
-                partitions.zip(offsets).map { case (partition, offset) =>
-                  KafkaRetentionBarrier.Partition(partition.partition(), offset)
-                }
-              )
+            barrier <- KafkaRetentionBarrier.from(
+              topicName,
+              partitions.zip(offsets).map { case (partition, offset) => partition.partition() -> offset }
             )
           } yield barrier
         }
@@ -72,11 +81,13 @@ private[analytics] object KafkaRetentionAdapter {
       consumer[F](connection, driverExecution).use { client =>
         driverExecution
           .blocking {
-            val partitions = valid.partitions.map(partition => new TopicPartition(valid.topic, partition.number))
+            val topicName = AnalyticsTopic.unwrap(valid.topic)
+            val partitions = valid.partitions
+              .map(partition => new TopicPartition(topicName, AnalyticsPartition.unwrap(partition.number)))
             val beginnings = client.beginningOffsets(partitions.asJava)
             val earliest = valid.partitions.flatMap { partition =>
-              Option(beginnings.get(new TopicPartition(valid.topic, partition.number)))
-                .map(offset => partition.number -> offset.longValue())
+              Option(beginnings.get(new TopicPartition(topicName, AnalyticsPartition.unwrap(partition.number))))
+                .map(offset => AnalyticsPartition.unwrap(partition.number) -> offset.longValue())
             }.toMap
             KafkaRetentionBarrier.hasExpired(valid, earliest)
           }
@@ -88,14 +99,12 @@ private[analytics] object KafkaRetentionAdapter {
       }
     }
 
-  def liveRetention[F[_]: Async](driverExecution: SparkBlockingExecution[F]): KafkaRetention[F] =
-    new KafkaRetention[F] {
-      override def capture(connection: KafkaConnection, topic: String): F[KafkaRetentionBarrier] =
-        KafkaRetentionAdapter.capture[F](connection, topic, driverExecution)
-
-      override def retentionPassed(connection: KafkaConnection, barrier: KafkaRetentionBarrier): F[Boolean] =
-        KafkaRetentionAdapter.retentionPassed[F](connection, barrier, driverExecution)
-    }
+  def liveRetention[F[_]: Async](
+      connection: KafkaConnection,
+      topic: AnalyticsTopic,
+      driverExecution: SparkBlockingExecution[F]
+  ): KafkaRetention[F] =
+    new KafkaRetentionAdapter[F](connection, topic, driverExecution)
 
   private def consumer[F[_]: Async](
       connection: KafkaConnection,

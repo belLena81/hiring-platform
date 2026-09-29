@@ -10,14 +10,7 @@ import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
-import mongo4cats.codecs.CodecRegistry
-import mongo4cats.circe.MongoJsonCodecs
-import io.circe.{Decoder, Json}
-import org.bson.BsonDocument
-import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
-import org.bson.codecs.configuration.CodecProvider
-import com.mongodb.client.model.{FindOneAndUpdateOptions, Filters, ReturnDocument, Sorts, Updates}
-import com.mongodb.client.model.{ReplaceOneModel, ReplaceOptions, WriteModel}
+import com.mongodb.client.model.{FindOneAndUpdateOptions, Filters, Projections, ReturnDocument, Sorts, Updates}
 import org.bson.Document
 import org.bson.conversions.Bson
 
@@ -29,11 +22,11 @@ import scala.util.control.NonFatal
 /** Mongo persistence for erasure claiming, publisher drain, worker liveness, and repair operations. */
 final class MongoAnalyticsErasureQueue[F[_]: Async] private (
     database: MongoDatabase[F],
-    requests: MongoCollection[F, Json],
-    heartbeats: MongoCollection[F, Json],
-    fences: MongoCollection[F, Json],
-    outbox: MongoCollection[F, Json],
-    ledger: MongoCollection[F, Json],
+    requests: MongoCollection[F, AnalyticsMongoRecords.ErasureRequest],
+    heartbeats: MongoCollection[F, AnalyticsMongoRecords.WorkerHeartbeat],
+    fences: MongoCollection[F, AnalyticsMongoRecords.PublisherFence],
+    outbox: MongoCollection[F, AnalyticsMongoRecords.EventOutboxReferences],
+    ledger: MongoCollection[F, AnalyticsMongoRecords.MigrationEntry],
     streams: MongoPublisherStream
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureQueue[F] {
@@ -41,16 +34,16 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
 
   final case class RepairRequest(requestId: AccountSubjectId, phase: String, attemptCount: Int, failureCategory: String)
 
-  private def decodeRepairRequest(document: Json): Either[AnalyticsError, RepairRequest] = {
+  private def decodeRepairRequest(
+      document: AnalyticsMongoRecords.ErasureRequest
+  ): Either[AnalyticsError, RepairRequest] = {
     val malformed = AnalyticsError.MalformedMarker
     for {
-      id <- readField[String](document, AnalyticsCollections.Fields.Id)
-      subjectId <- AccountSubjectId.from(id).leftMap(_ => malformed)
-      phase <- readOptional[String](document, AnalyticsCollections.Fields.Phase)
-        .map(_.getOrElse(ErasurePhase.Requested.persistedName))
+      subjectId <- AccountSubjectId.from(document._id).leftMap(_ => malformed)
+      phase = document.phase.getOrElse(ErasurePhase.Requested.persistedName)
       _ <- Either.cond(ErasurePhase.fromString(phase).nonEmpty, (), malformed)
-      attempt <- readInt32(document, AnalyticsCollections.Fields.AttemptCount)
-      category <- readField[String](document, AnalyticsCollections.Fields.FailureCategory)
+      attempt <- document.attemptCount.toRight(malformed)
+      category <- document.failureCategory.toRight(malformed)
       _ <- Either.cond(ErasureFailureCategory.values.exists(_.persistedName == category), (), malformed)
     } yield RepairRequest(subjectId, phase, attempt, category)
   }
@@ -64,6 +57,14 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
           .stream { capacity =>
             requests
               .find(Filters.eq(AnalyticsCollections.Fields.RepairRequired, true))
+              .projection(
+                Projections.include(
+                  AnalyticsCollections.Fields.Id,
+                  AnalyticsCollections.Fields.Phase,
+                  AnalyticsCollections.Fields.AttemptCount,
+                  AnalyticsCollections.Fields.FailureCategory
+                )
+              )
               .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt))
               .limit(limit)
               .boundedStream(capacity)
@@ -170,6 +171,18 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       )
       val options = new FindOneAndUpdateOptions()
         .sort(Sorts.ascending(AnalyticsCollections.Fields.RequestedAt, AnalyticsCollections.Fields.Id))
+        .projection(
+          Projections.include(
+            AnalyticsCollections.Fields.Id,
+            AnalyticsCollections.Fields.FencingVersion,
+            AnalyticsCollections.Fields.Phase,
+            AnalyticsCollections.Fields.LeaseToken,
+            AnalyticsCollections.Fields.LeaseUntil,
+            AnalyticsCollections.Fields.Progress,
+            AnalyticsCollections.Fields.ProgressKey,
+            AnalyticsCollections.Fields.AttemptCount
+          )
+        )
         .returnDocument(ReturnDocument.AFTER)
       requests
         .findOneAndUpdate(nonFinalizer, update, options)
@@ -188,8 +201,17 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       now: Instant,
       deliveryTimeout: scala.concurrent.duration.FiniteDuration
   ): F[Boolean] = mongo {
-    streams
-      .optional(fences.find(Filters.eq(AnalyticsCollections.Fields.Id, subjectId.value)).first)
+    fences
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, subjectId.value))
+      .projection(
+        Projections.include(
+          AnalyticsCollections.Fields.Id,
+          AnalyticsCollections.Fields.Deleted,
+          AnalyticsCollections.Fields.LeaseToken,
+          AnalyticsCollections.Fields.LeaseUntil
+        )
+      )
+      .first
       .map {
         case None        => false
         case Some(fence) =>
@@ -204,24 +226,25 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
   /** IDs are copied into the durable request in the account deletion transaction. */
 
   def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo {
-    streams
-      .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
+    requests
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value))
+      .projection(
+        Projections.include(
+          AnalyticsCollections.Fields.Id,
+          AnalyticsCollections.Fields.FencingVersion,
+          AnalyticsCollections.Fields.TransactionalIds
+        )
+      )
+      .first
       .map(_.toRight(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing")))
       .map(_.flatMap { request =>
-        request.hcursor
-          .get[Json](AnalyticsCollections.Fields.FencingVersion)
-          .toOption
-          .fold[Either[AnalyticsError, Option[Int]]](Right(None))(_ =>
-            readInt32(request, AnalyticsCollections.Fields.FencingVersion).map(Some(_))
-          )
-          .flatMap { fencingVersion =>
-            if (!fencingVersion.contains(1))
-              Left(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing"))
-            else
-              readField[Vector[String]](request, AnalyticsCollections.Fields.TransactionalIds)
-                .flatMap(values => Either.cond(values.forall(_.trim.nonEmpty), values, AnalyticsError.MalformedMarker))
-                .map(_.distinct.sorted)
-          }
+        if (request.fencingVersion.isEmpty || !request.fencingVersion.contains(1))
+          Left(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing"))
+        else
+          request.transactionalIds
+            .toRight(AnalyticsError.MalformedMarker)
+            .flatMap(values => Either.cond(values.forall(_.trim.nonEmpty), values, AnalyticsError.MalformedMarker))
+            .map(_.distinct.sorted)
       })
       .flatMap(Async[F].fromEither)
   }
@@ -247,7 +270,16 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
         }.flatMap { filter =>
           mongo {
             streams
-              .stream(capacity => outbox.find(filter).limit(1).boundedStream(capacity))
+              .stream(capacity =>
+                outbox
+                  .find(filter)
+                  .projection(
+                    Projections
+                      .include(AnalyticsCollections.Fields.SubjectRefsVersion, AnalyticsCollections.Fields.SubjectIds)
+                  )
+                  .limit(1)
+                  .boundedStream(capacity)
+              )
               .take(1)
               .compile
               .count
@@ -271,7 +303,13 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
     )
     mongo {
       streams
-        .stream(capacity => requests.find(filter).limit(1).boundedStream(capacity))
+        .stream(capacity =>
+          requests
+            .find(filter)
+            .projection(Projections.include(AnalyticsCollections.Fields.Id))
+            .limit(1)
+            .boundedStream(capacity)
+        )
         .take(1)
         .compile
         .count
@@ -330,19 +368,15 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
     }
   }
 
-  private def migrationValidation(ledger: MongoCollection[F, Json]): F[Unit] = {
-    streams
-      .optional(
-        ledger
-          .find(Filters.eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.OutboxSubjectReferences))
-          .first
-      )
+  private def migrationValidation(ledger: MongoCollection[F, AnalyticsMongoRecords.MigrationEntry]): F[Unit] = {
+    ledger
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, AnalyticsCollections.MigrationIds.OutboxSubjectReferences))
+      .projection(Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.State))
+      .first
       .flatMap(migration =>
         Either
           .cond(
-            migration.exists { document =>
-              readField[String](document, AnalyticsCollections.Fields.State).toOption.contains("Complete")
-            },
+            migration.exists(_.state.contains("Complete")),
             (),
             AnalyticsError.InvalidConfiguration("outbox subject-reference migration is incomplete")
           )
@@ -350,9 +384,12 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       )
   }
 
-  private def outboxValidation(outbox: MongoCollection[F, Json]): F[Unit] =
-    streams
-      .optional(outbox.find(unverifiedOutboxFilter).limit(1).first)
+  private def outboxValidation(outbox: MongoCollection[F, AnalyticsMongoRecords.EventOutboxReferences]): F[Unit] =
+    outbox
+      .find(unverifiedOutboxFilter)
+      .projection(Projections.include(AnalyticsCollections.Fields.Id))
+      .limit(1)
+      .first
       .flatMap(row =>
         Either
           .cond(
@@ -420,25 +457,33 @@ object MongoAnalyticsErasureQueue {
   ): Resource[F, MongoAnalyticsErasureQueue[F]] =
     for {
       requests <- Resource.eval(
-        database.getCollection[Json](collectionName, MongoAnalyticsErasureStoreSupport.jsonRegistry)
+        database.getCollection[AnalyticsMongoRecords.ErasureRequest](
+          collectionName,
+          AnalyticsMongoRecords.erasureRequestRegistry
+        )
       )
       heartbeats <- Resource.eval(
-        database.getCollection[Json](
+        database.getCollection[AnalyticsMongoRecords.WorkerHeartbeat](
           MongoAnalyticsErasureStoreSupport.HeartbeatCollection,
-          MongoAnalyticsErasureStoreSupport.jsonRegistry
+          AnalyticsMongoRecords.workerHeartbeatRegistry
         )
       )
       fences <- Resource.eval(
-        database
-          .getCollection[Json](AnalyticsCollections.OutboxSubjectFences, MongoAnalyticsErasureStoreSupport.jsonRegistry)
+        database.getCollection[AnalyticsMongoRecords.PublisherFence](
+          AnalyticsCollections.OutboxSubjectFences,
+          AnalyticsMongoRecords.publisherFenceRegistry
+        )
       )
       outbox <- Resource.eval(
-        database.getCollection[Json](AnalyticsCollections.EventOutbox, MongoAnalyticsErasureStoreSupport.jsonRegistry)
+        database.getCollection[AnalyticsMongoRecords.EventOutboxReferences](
+          AnalyticsCollections.EventOutbox,
+          AnalyticsMongoRecords.eventOutboxReferencesRegistry
+        )
       )
       ledger <- Resource.eval(
-        database.getCollection[Json](
+        database.getCollection[AnalyticsMongoRecords.MigrationEntry](
           AnalyticsCollections.HiringMigrationLedger,
-          MongoAnalyticsErasureStoreSupport.jsonRegistry
+          AnalyticsMongoRecords.migrationEntryRegistry
         )
       )
     } yield new MongoAnalyticsErasureQueue(database, requests, heartbeats, fences, outbox, ledger, streams)

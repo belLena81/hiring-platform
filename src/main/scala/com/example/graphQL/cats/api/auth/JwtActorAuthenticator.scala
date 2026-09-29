@@ -27,14 +27,10 @@ final class JwtActorAuthenticator(config: JwtAuthConfig, users: UserAuthenticato
             JwtActorAuthenticator.verify(value, config.hmacSecret, config.issuer, config.audience, clock),
             AuthFailure.InvalidToken
           )
-          actor <- EitherT(
-            users
-              .actorForVerifiedToken(userId)
-              .map(
-                _.leftMap(_ => AuthFailure.Unavailable)
-                  .flatMap(_.toRight(AuthFailure.UnknownActor))
-              )
-          )
+          actor <- users
+            .actorForVerifiedToken(userId)
+            .leftMap(_ => AuthFailure.Unavailable)
+            .subflatMap(_.toRight(AuthFailure.UnknownActor))
         } yield actor
       }
     } yield actor).value

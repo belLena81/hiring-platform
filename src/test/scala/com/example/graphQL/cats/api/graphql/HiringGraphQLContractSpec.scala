@@ -63,14 +63,19 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     for {
       reportCount <- Ref.of[IO, Int](0)
       diagnostics = new Diagnostics {
-        def event(event: com.example.graphQL.cats.service.LogEvent, requestId: Option[String],
-            fields: => Map[com.example.graphQL.cats.service.LogField, String]) = reportCount.update(_ + 1)
+        def event(
+            event: com.example.graphQL.cats.service.LogEvent,
+            requestId: Option[String],
+            fields: => Map[com.example.graphQL.cats.service.LogField, String]
+        ) = reportCount.update(_ + 1)
       }
       request <- parseRequest("{ readiness { status } }")
-      result <- TestGraphQLSupport.context(
-        IO.raiseError[ProbeResult](new IllegalStateException("private resolver detail")),
-        diagnostics = diagnostics
-      ).use(context => TestGraphQLSupport.parseAndExecute(request, context))
+      result <- TestGraphQLSupport
+        .context(
+          IO.raiseError[ProbeResult](new IllegalStateException("private resolver detail")),
+          diagnostics = diagnostics
+        )
+        .use(context => TestGraphQLSupport.parseAndExecute(request, context))
       reports <- reportCount.get
     } yield {
       val body = result.fold(failure => fail(failure.toString), identity)
@@ -95,6 +100,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
                 None,
                 dependencies.hiring,
                 dependencies.ensureHiringReady,
+                diagnostics = Diagnostics.noop,
                 requestId = Some("00000000-0000-0000-0000-000000000001")
               )
             )
@@ -116,7 +122,8 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
               service.readiness(Some("00000000-0000-0000-0000-000000000001")),
               None,
               dependencies.hiring,
-              dependencies.ensureHiringReady
+              dependencies.ensureHiringReady,
+              diagnostics = Diagnostics.noop
             )
           )
         )
@@ -145,6 +152,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
                   None,
                   dependencies.hiring,
                   dependencies.ensureHiringReady,
+                  diagnostics = Diagnostics.noop,
                   requestId = Some("00000000-0000-0000-0000-000000000001")
                 )
               )
@@ -172,6 +180,7 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
                   None,
                   dependencies.hiring,
                   dependencies.ensureHiringReady,
+                  diagnostics = Diagnostics.noop,
                   requestId = Some("00000000-0000-0000-0000-000000000001")
                 )
               )

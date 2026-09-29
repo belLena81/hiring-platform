@@ -36,8 +36,9 @@ final class MongoAnalyticsLakehouseLockSpec extends FunSuite {
         IO {
           val lock = new MongoAnalyticsLakehouseLock(
             database,
-            clock,
-            AnalyticsTestOperationalConfig.streams
+            AnalyticsTestOperationalConfig.streams,
+            Some(clock.realTimeInstant),
+            Some(clock.monotonic)
           )
           val resource = lock.resource("file:///tmp/analytics-lock-laziness")
           assert(resource != null)

@@ -11,7 +11,7 @@ import com.example.hiring.analytics.adapter.local.*
 import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
-import cats.effect.{Clock, Deferred, IO}
+import cats.effect.{Deferred, IO}
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.reactivestreams.client.{
@@ -93,7 +93,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
       .insertOne(
         new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
       )
-    seedRegistry(AnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString))
+    seedRegistry(IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString))
   }
 
   override def afterAll(): Unit = if (enabled) {
@@ -108,7 +108,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
   }
 
   if (enabled) test("audit passes empty verified surfaces and blocks a live marker or old-key Delta row") {
-    val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString)
+    val paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.toUri.toString)
     val passed = audit(paths)
     assert(passed.isRight, passed.swap.toOption.toString)
 
@@ -150,13 +150,11 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     val firstLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         catsMongo.getDatabase(database.getName).unsafeRunSync(),
-        Clock[IO],
         AnalyticsTestOperationalConfig.streams
       )
     val secondLock =
       new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
         catsPeerMongo.getDatabase(database.getName).unsafeRunSync(),
-        Clock[IO],
         AnalyticsTestOperationalConfig.streams
       )
     val result = (for {
@@ -184,7 +182,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
           .append("subjectRefsVersion", 1)
           .append("state", "Retryable")
       )
-    val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("second").toUri.toString)
+    val paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("second").toUri.toString)
     seedRegistry(paths)
     val result = audit(paths)
     assert(result.isRight, result.swap.toOption.toString)
@@ -211,7 +209,7 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
     assert(missingExpiry.exists(_.contains("missing or invalid retention expiry")), "assertion failed")
     database.getCollection("analytics_erasure_requests").deleteMany(new Document())
 
-    val missingRegistry = AnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("third").toUri.toString)
+    val missingRegistry = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot.resolve("third").toUri.toString)
     val registryReasons = audit(missingRegistry).swap.toOption.get
     assert(registryReasons.exists(_.contains("continuity registry is missing")), "assertion failed")
     database.getCollection("event_outbox").deleteMany(new Document())
@@ -248,7 +246,6 @@ final class AnalyticsKeyRetirementIntegrationSpec extends munit.FunSuite {
         now,
         new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
           catsMongo.getDatabase(database.getName).unsafeRunSync(),
-          Clock[IO],
           AnalyticsTestOperationalConfig.streams
         ),
         AnalyticsTestOperationalConfig.streams,

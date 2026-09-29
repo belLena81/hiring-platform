@@ -4,33 +4,25 @@ import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.data.{Chain, EitherT}
+import cats.data.EitherT
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
-import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
-import mongo4cats.codecs.CodecRegistry
-import mongo4cats.circe.MongoJsonCodecs
-import io.circe.{Decoder, Json}
-import org.bson.BsonDocument
-import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
-import org.bson.codecs.configuration.CodecProvider
-import com.mongodb.client.model.{FindOneAndUpdateOptions, Filters, ReturnDocument, Sorts, Updates}
+import com.mongodb.client.model.{Filters, Projections, Updates}
 import com.mongodb.client.model.{ReplaceOneModel, ReplaceOptions, WriteModel}
-import org.bson.Document
-import org.bson.conversions.Bson
 
 import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.Date
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Mongo persistence for lease-owned erasure progress and physical-file evidence. */
 final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     client: MongoClient[F],
-    requests: MongoCollection[F, Json],
-    deltaEvidence: MongoCollection[F, Json],
+    requests: MongoCollection[F, AnalyticsMongoRecords.ErasureRequest],
+    deltaEvidence: MongoCollection[F, AnalyticsMongoRecords.DeltaFileEvidence],
     streams: MongoPublisherStream
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureProgress[F] {
@@ -70,21 +62,17 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     if (files.distinct.size != files.size || files.exists(path => path == null || path.trim.isEmpty))
       Async[F].raiseError(AnalyticsError.InvalidConfiguration("analytics erasure file evidence is malformed"))
     else {
-      val operations: java.util.List[WriteModel[Json]] = files.map { path =>
+      val operations: java.util.List[WriteModel[AnalyticsMongoRecords.DeltaFileEvidence]] = files.map { path =>
         val id = java.util.UUID
           .nameUUIDFromBytes(
             (claim.requestId.value + "\u0000" + path).getBytes(java.nio.charset.StandardCharsets.UTF_8)
           )
           .toString
-        new ReplaceOneModel[Json](
+        new ReplaceOneModel[AnalyticsMongoRecords.DeltaFileEvidence](
           Filters.eq(AnalyticsCollections.Fields.Id, id),
-          Json.obj(
-            AnalyticsCollections.Fields.Id -> Json.fromString(id),
-            AnalyticsCollections.Fields.RequestId -> Json.fromString(claim.requestId.value),
-            AnalyticsCollections.Fields.FilePath -> Json.fromString(path)
-          ),
+          AnalyticsMongoRecords.DeltaFileEvidence(id, claim.requestId.value, path),
           new ReplaceOptions().upsert(true)
-        ): WriteModel[Json]
+        ): WriteModel[AnalyticsMongoRecords.DeltaFileEvidence]
       }.asJava
       val prepared = operations
 
@@ -116,15 +104,20 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     mongo {
       streams
         .stream(capacity =>
-          deltaEvidence.find(Filters.eq(AnalyticsCollections.Fields.RequestId, requestId.value)).boundedStream(capacity)
+          deltaEvidence
+            .find(Filters.eq(AnalyticsCollections.Fields.RequestId, requestId.value))
+            .projection(
+              Projections.include(
+                AnalyticsCollections.Fields.Id,
+                AnalyticsCollections.Fields.RequestId,
+                AnalyticsCollections.Fields.FilePath
+              )
+            )
+            .boundedStream(capacity)
         )
         .compile
         .toVector
-        .flatMap { documents =>
-          Async[F].fromEither(
-            documents.traverse(document => readField[String](document, AnalyticsCollections.Fields.FilePath))
-          )
-        }
+        .map(_.map(_.filePath))
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(error)       => AnalyticsError.MarkerStorageFailure(error)
@@ -132,57 +125,29 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
     }
 
   def readAffectedRows(requestId: AccountSubjectId): F[Long] = mongo {
-    streams
-      .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
-      .flatMap(document =>
-        Async[F].fromEither(
-          document
-            .traverse(value =>
-              value.hcursor
-                .get[Json](AnalyticsCollections.Fields.DeltaAffectedRows)
-                .toOption
-                .fold[Either[AnalyticsError, Option[Long]]](Right(None))(_ =>
-                  readLong64(value, AnalyticsCollections.Fields.DeltaAffectedRows).map(Some(_))
-                )
-                .map(_.getOrElse(0L))
-            )
-            .map(_.getOrElse(0L))
-        )
+    requests
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value))
+      .projection(
+        Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.DeltaAffectedRows)
       )
+      .first
+      .flatMap(document => Async[F].pure(document.fold(0L)(_.deltaAffectedRows.getOrElse(0L))))
   }
 
   def readDeltaGeneration(requestId: AccountSubjectId): F[Option[Long]] = mongo {
-    streams
-      .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
-      .flatMap(document =>
-        Async[F].fromEither(
-          document
-            .traverse(value =>
-              value.hcursor
-                .get[Json](AnalyticsCollections.Fields.DeltaGeneration)
-                .toOption
-                .fold[Either[AnalyticsError, Option[Long]]](Right(None))(_ =>
-                  readLong64(value, AnalyticsCollections.Fields.DeltaGeneration).map(Some(_))
-                )
-            )
-            .map(_.flatten)
-        )
-      )
+    requests
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value))
+      .projection(Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.DeltaGeneration))
+      .first
+      .flatMap(document => Async[F].pure(document.flatMap(_.deltaGeneration)))
   }
 
   def readDeltaPurgedAt(requestId: AccountSubjectId): F[Option[Instant]] = mongo {
-    streams
-      .optional(requests.find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value)).first)
-      .flatMap(document =>
-        Async[F].fromEither(
-          document
-            .traverse(value =>
-              readOptional[Date](value, AnalyticsCollections.Fields.DeltaPurgedAt)
-                .map(_.map(_.toInstant))
-            )
-            .map(_.flatten)
-        )
-      )
+    requests
+      .find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value))
+      .projection(Projections.include(AnalyticsCollections.Fields.Id, AnalyticsCollections.Fields.DeltaPurgedAt))
+      .first
+      .flatMap(document => Async[F].pure(document.flatMap(_.deltaPurgedAt)))
   }
 
   /** Lets other requests progress while preserving the durable checkpoint for a final publication barrier. */
@@ -293,11 +258,16 @@ object MongoAnalyticsErasureProgress {
   ): Resource[F, MongoAnalyticsErasureProgress[F]] =
     for {
       requests <- Resource.eval(
-        database.getCollection[Json](collectionName, MongoAnalyticsErasureStoreSupport.jsonRegistry)
+        database.getCollection[AnalyticsMongoRecords.ErasureRequest](
+          collectionName,
+          AnalyticsMongoRecords.erasureRequestRegistry
+        )
       )
       deltaEvidence <- Resource.eval(
-        database
-          .getCollection[Json](AnalyticsCollections.ErasureDeltaFiles, MongoAnalyticsErasureStoreSupport.jsonRegistry)
+        database.getCollection[AnalyticsMongoRecords.DeltaFileEvidence](
+          AnalyticsCollections.ErasureDeltaFiles,
+          AnalyticsMongoRecords.deltaFileEvidenceRegistry
+        )
       )
     } yield new MongoAnalyticsErasureProgress(client, requests, deltaEvidence, streams)
 }

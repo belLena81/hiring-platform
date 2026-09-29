@@ -34,7 +34,7 @@ object OperationalEventKafkaRuntime {
       outbox: OperationalEventOutboxRepository,
       receipts: ConsumerReceiptRepository,
       quarantine: EventQuarantineRepository,
-      diagnostics: Diagnostics = Diagnostics.noop
+      diagnostics: Diagnostics
   ): Resource[IO, Unit] =
     if (!config.enabled) Resource.unit
     else {
@@ -103,72 +103,75 @@ object OperationalEventKafkaRuntime {
   ): IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
       val leaseUntil = now.plusSeconds(config.publisher.leaseSeconds.toLong)
-      outbox.claim(config.publisher.workerId, transactionalId, now, leaseUntil, config.publisher.batchSize).value.flatMap {
-        case Left(error) =>
-          IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
-        case Right(claims) =>
-          publishClaims(claims) { claim =>
-            val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
-            val send = producer.produceWithoutOffsets(ProducerRecords.one(record)).void
-            val renewEvery = (config.publisher.leaseSeconds.seconds / 3).max(1.second)
-            def renewalStream: Stream[IO, Unit] =
-              Stream
-                .awakeEvery[IO](renewEvery)
-                .evalMap { _ =>
-                  IO.realTimeInstant.flatMap(now =>
-                    requireOutboxSuccess(
-                      outbox.renewLease(
-                        claim.event.eventId,
-                        claim.leaseToken,
-                        claim.subjectIds,
-                        now.plusSeconds(config.publisher.leaseSeconds.toLong)
+      outbox
+        .claim(config.publisher.workerId, transactionalId, now, leaseUntil, config.publisher.batchSize)
+        .value
+        .flatMap {
+          case Left(error) =>
+            IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
+          case Right(claims) =>
+            publishClaims(claims) { claim =>
+              val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
+              val send = producer.produceWithoutOffsets(ProducerRecords.one(record)).void
+              val renewEvery = (config.publisher.leaseSeconds.seconds / 3).max(1.second)
+              def renewalStream: Stream[IO, Unit] =
+                Stream
+                  .awakeEvery[IO](renewEvery)
+                  .evalMap { _ =>
+                    IO.realTimeInstant.flatMap(now =>
+                      requireOutboxSuccess(
+                        outbox.renewLease(
+                          claim.event.eventId,
+                          claim.leaseToken,
+                          claim.subjectIds,
+                          now.plusSeconds(config.publisher.leaseSeconds.toLong)
+                        )
                       )
                     )
-                  )
+                  }
+              val heartbeat = renewalStream.compile.drain
+              IO.race(send.attempt, heartbeat)
+                .flatMap {
+                  case Left(outcome) => IO.pure(outcome)
+                  case Right(_)      =>
+                    IO.raiseError[Either[Throwable, Unit]](
+                      new IllegalStateException("outbox lease heartbeat stopped before Kafka send completed")
+                    )
                 }
-            val heartbeat = renewalStream.compile.drain
-            IO.race(send.attempt, heartbeat)
-              .flatMap {
-                case Left(outcome) => IO.pure(outcome)
-                case Right(_)      =>
-                  IO.raiseError[Either[Throwable, Unit]](
-                    new IllegalStateException("outbox lease heartbeat stopped before Kafka send completed")
-                  )
-              }
-              .flatMap {
-                case Right(_) =>
-                  IO.realTimeInstant.flatMap(done =>
-                    requireOutboxSuccess(
-                      outbox.markPublished(
-                        claim.event.eventId,
-                        claim.leaseToken,
-                        done,
-                        done.plusSeconds(7.days.toSeconds)
+                .flatMap {
+                  case Right(_) =>
+                    IO.realTimeInstant.flatMap(done =>
+                      requireOutboxSuccess(
+                        outbox.markPublished(
+                          claim.event.eventId,
+                          claim.leaseToken,
+                          done,
+                          done.plusSeconds(7.days.toSeconds)
+                        )
                       )
                     )
-                  )
-                case Left(error) =>
-                  if (isProducerFenced(error)) IO.raiseError(ProducerGenerationFenced(error))
-                  else
-                    diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> IO.realTimeInstant
-                      .flatMap { failedAt =>
-                        if (claim.attempts >= config.publisher.maxAttempts)
-                          requireOutboxSuccess(
-                            outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error))
-                          )
-                        else
-                          requireOutboxSuccess(
-                            outbox.releaseForRetry(
-                              claim.event.eventId,
-                              claim.leaseToken,
-                              failedAt,
-                              failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+                  case Left(error) =>
+                    if (isProducerFenced(error)) IO.raiseError(ProducerGenerationFenced(error))
+                    else
+                      diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> IO.realTimeInstant
+                        .flatMap { failedAt =>
+                          if (claim.attempts >= config.publisher.maxAttempts)
+                            requireOutboxSuccess(
+                              outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error))
                             )
-                          )
-                      }
-              }
-          }
-      }
+                          else
+                            requireOutboxSuccess(
+                              outbox.releaseForRetry(
+                                claim.event.eventId,
+                                claim.leaseToken,
+                                failedAt,
+                                failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+                              )
+                            )
+                        }
+                }
+            }
+        }
     }
 
   private def requireOutboxSuccess(result: RepositoryIO[Unit]): IO[Unit] =
@@ -275,7 +278,8 @@ object OperationalEventKafkaRuntime {
                   now,
                   now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)
                 )
-                .value.map {
+                .value
+                .map {
                   case Right(_)                       => true
                   case Left(RepositoryError.Conflict) => true
                   case Left(_)                        => false

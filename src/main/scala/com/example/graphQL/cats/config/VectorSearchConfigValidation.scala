@@ -3,7 +3,7 @@ package com.example.graphQL.cats.config
 import cats.data.ValidatedNel
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.pagination.PageSize
-import com.example.graphQL.cats.service.search.SearchFusionStrategy
+import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 
 private[config] object VectorSearchConfigValidation {
   def read(vector: RawVectorSearchConfig): ValidatedNel[ConfigError, VectorSearchConfig] = {

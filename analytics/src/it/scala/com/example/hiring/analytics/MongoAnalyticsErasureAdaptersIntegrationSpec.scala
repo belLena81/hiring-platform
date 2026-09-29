@@ -155,13 +155,10 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         )
       val store =
         AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, databaseName))
-      val barrier = KafkaRetentionBarrier(
-        "hiring.operational-events",
-        Vector(
-          KafkaRetentionBarrier.Partition(0, 21L),
-          KafkaRetentionBarrier.Partition(1, 14L)
-        )
-      )
+      val barrier = KafkaRetentionBarrier
+        .from("hiring.operational-events", Vector(0 -> 21L, 1 -> 14L))
+        .toOption
+        .get
       val fileEvidence = Vector("file:/analytics/silver/part-00001.parquet", "file:/analytics/gold/part-00003.parquet")
       val inFlightFileEvidence = "file:/analytics/quarantine/part-00004.parquet"
       val staleWorkerNow = requestedAt.plusSeconds(9)
@@ -234,7 +231,11 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
             restartedStore.queue.claim(requestedAt.plusSeconds(11), requestedAt.plusSeconds(61), 1).map(_.head)
         }
         _ = assert(!evidencePauseTimedOut.get(), "test synchronization expired before releasing the file write")
-        staleBarrier <- store.barrier.persistBarrier(checkpoint, barrier.copy(topic = "wrong-topic"), staleWorkerNow)
+        staleBarrier <- store.barrier.persistBarrier(
+          checkpoint,
+          barrier.copy(topic = AnalyticsTopic.from("wrong-topic").toOption.get),
+          staleWorkerNow
+        )
         staleFiles <- store.progress.persistDeltaFiles(
           checkpoint,
           Vector("file:/analytics/forged.parquet"),
@@ -346,21 +347,18 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
     val receiptId = UUID.randomUUID().toString
     val startedAt = Instant.now()
     val afterRetention = startedAt.plusSeconds(31L * 24L * 60L * 60L)
-    val barrier = KafkaRetentionBarrier(
-      "hiring.operational-events",
-      Vector(KafkaRetentionBarrier.Partition(0, 0L))
-    )
+    val barrier = KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 0L)).toOption.get
     val retentionHasPassed = new AtomicBoolean(false)
     val retention = new KafkaRetention[IO] {
-      override def capture(connection: KafkaConnection, topic: String): IO[KafkaRetentionBarrier] = IO.pure(barrier)
-      override def retentionPassed(connection: KafkaConnection, value: KafkaRetentionBarrier): IO[Boolean] =
+      override def capture(): IO[KafkaRetentionBarrier] = IO.pure(barrier)
+      override def retentionPassed(value: KafkaRetentionBarrier): IO[Boolean] =
         IO.pure(retentionHasPassed.get())
     }
     val producerFencer = new TransactionalProducerFencer[IO] {
       override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] = IO.unit
     }
     val lakehouseRoot = Files.createTempDirectory("analytics-erasure-process-restart").toUri.toString.stripSuffix("/")
-    val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
+    val paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot)
     val secret = "analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8")
     var client: MongoClient = null
     var restartedClient: MongoClient = null
@@ -433,7 +431,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         clock = fixedClock(startedAt),
         leaseDuration = 60.days,
         producerFencer = producerFencer,
-        kafkaRetention = retention
+        kafkaRetention = Some(retention)
       )
       val runId = AnalyticsErasureWorkerTestSupport.runId("analytics-erasure-" + requestId)
       val rangeFingerprint = AnalyticsErasureWorkerTestSupport.fingerprint("erasure:" + requestId)
@@ -483,7 +481,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
           clock = fixedClock(afterRetention),
           leaseDuration = 60.days,
           producerFencer = producerFencer,
-          kafkaRetention = retention
+          kafkaRetention = Some(retention)
         )
         resumedOutcome <- restartedWorker.process(resumedClaim, resumedReservation)
         _ = assertEquals(resumedOutcome, ErasureClaimOutcome.Completed)
@@ -518,7 +516,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
           clock = fixedClock(afterRetention),
           leaseDuration = 60.days,
           producerFencer = producerFencer,
-          kafkaRetention = retention
+          kafkaRetention = Some(retention)
         )
         finalizerOutcome <- finalizerWorker.process(finalizerClaim, finalizerReservation)
         _ = assertEquals(finalizerOutcome, ErasureClaimOutcome.Completed)
@@ -604,7 +602,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         KafkaConnection("unused:9092"),
         KafkaConnection("unused:9092"),
         "hiring.operational-events",
-        AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-fence-failure").toUri.toString),
+        IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-fence-failure").toUri.toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8")),
         new AnalyticsReportPublisher[IO] {
           override def reserve(
@@ -925,6 +923,70 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       assertEquals(reportState.getString("state"), "Hidden")
       assertEquals(reportState.getLong("generation"), Long.box(7L))
       assertEquals(reportState.getLong("lastPublishedRevision"), Long.box(3L))
+    } finally {
+      client.close()
+      container.stop()
+    }
+  }
+
+  test("typed HMAC authorization and preparation stores round trip derived records") {
+    val container = replicaSet()
+    val connectionString =
+      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val client = syncClient(connectionString)
+    val databaseName = s"analytics_hmac_records_${UUID.randomUUID()}"
+    val database = mongo4catsDatabase(client, databaseName)
+    val root = s"s3a://analytics-test/${UUID.randomUUID()}"
+    val lakehouseId = MongoAnalyticsLakehouseLock.lockId(root).toOption.get
+    val facts = "operator-confirmed retention horizons and writer exclusion"
+    val authorization = HmacKeyRetirementAuthorization(
+      lakehouseId,
+      "retiring-key",
+      "v" * 43,
+      facts,
+      HmacKeyRetirementAuthorization.digest(facts),
+      Instant.parse("2026-09-27T12:00:00Z")
+    )
+    val volumeName = "unit_hmac-rotation-kafka"
+    val lineage = HmacKeyRetirementKafkaLineage(
+      "cluster-id",
+      "topic-id",
+      volumeName,
+      s"/var/lib/docker/volumes/$volumeName/_data",
+      "2026-09-27T12:00:00Z",
+      "127.0.0.1:19093"
+    )
+    val preparation = HmacKeyRetirementPreparation(
+      lakehouseId,
+      "retiring-key",
+      "v" * 43,
+      Instant.parse("2026-09-27T12:00:00Z"),
+      KafkaRetentionBarrier.from("hiring.phase6.runtime", Vector(0 -> 10L)).toOption.get,
+      lineage
+    )
+
+    try {
+      val authStore = new MongoHmacKeyRetirementAuthorizationStore[IO](database, AnalyticsTestOperationalConfig.streams)
+      val preparationStore =
+        new MongoHmacKeyRetirementPreparationStore[IO](database, AnalyticsTestOperationalConfig.streams)
+      val listed = for {
+        _ <- authStore.insert(root, authorization)
+        _ <- preparationStore.insert(root, preparation)
+        authorizations <- authStore.list(root)
+        prepared <- preparationStore.read(root, "retiring-key")
+      } yield authorizations -> prepared
+      val (authorizations, prepared) = listed.unsafeRunSync()
+
+      assertEquals(authorizations, Vector(authorization))
+      assertEquals(prepared, Some(preparation))
+      val persisted = client
+        .getDatabase(databaseName)
+        .getCollection("analytics_hmac_key_retirement_preparations")
+        .find(new Document("_id", s"$lakehouseId:retiring-key"))
+        .first()
+      assert(
+        persisted.getList("partitions", classOf[Document]).get(0).get("endOffsetExclusive").isInstanceOf[java.lang.Long]
+      )
     } finally {
       client.close()
       container.stop()

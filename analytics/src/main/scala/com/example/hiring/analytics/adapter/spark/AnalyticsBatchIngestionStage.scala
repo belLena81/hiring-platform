@@ -3,8 +3,15 @@ package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 
 import com.example.hiring.analytics.domain.AnalyticsRunManifest
+import com.example.hiring.analytics.domain.AnalyticsTopic
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.AnalyticsManifestStatus
+import com.example.hiring.analytics.config.AnalyticsRetentionSettings
+import com.example.hiring.analytics.service.batch.{
+  AnalyticsLakehousePaths,
+  AnalyticsManifestStatus,
+  AnalyticsRunManifestStore
+}
 
 import cats.effect.Async
 import cats.effect.Resource
@@ -14,18 +21,25 @@ import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
 
-import java.time.Instant
-
 /** Reads a bounded operational range and commits its replayable Bronze representation. */
-private[spark] final class AnalyticsBatchIngestionStage[F[_]: Async](ports: IngestionStagePorts[F]) {
-  import ports.*
+private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
+    paths: AnalyticsLakehousePaths,
+    pseudonymizer: SubjectPseudonymizer,
+    execution: SparkExecution[F],
+    manifestStore: AnalyticsRunManifestStore[F],
+    deltaWriter: DeltaWriter[F],
+    retention: AnalyticsRetentionSettings,
+    private[analytics] val nowOverride: Option[F[java.time.Instant]] = None
+) {
   private val blocking = execution
+  private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
 
   def ingest(
       spark: SparkSession,
       source: BoundedOperationalEventSource[F],
       manifest: AnalyticsRunManifest,
-      markerTokens: DataFrame
+      markerTokens: DataFrame,
+      configureTables: F[Unit]
   ): Resource[F, AnalyticsBronzeInput] =
     Resource
       .make(
@@ -40,12 +54,13 @@ private[spark] final class AnalyticsBatchIngestionStage[F[_]: Async](ports: Inge
         for {
           _ <- source.verifyOffsets(parsed, manifest)
           _ <- validateRunIdentity(spark, manifest)
+          _ <- configureTables
           valid <- blocking(OperationalEventTransforms.validEvents(parsed))
           pseudonymized <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
           safeToPersist <- blocking.either(
             AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens)
           )
-          startedAt <- clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
+          startedAt <- now
           incoming <- blocking(
             deltaWriter.withExpiry(
               OperationalEventTransforms.bronze(safeToPersist),
@@ -85,7 +100,9 @@ private[spark] final class AnalyticsBatchIngestionStage[F[_]: Async](ports: Inge
         .map(row => (row.getString(0), row.getInt(1), row.getLong(2), row.getLong(3)))
         .toSet
       val expected = manifest.offsetRanges
-        .map(range => (range.topic, range.partition, range.startOffset, range.endOffsetExclusive))
+        .map(range =>
+          (AnalyticsTopic.unwrap(range.topic), range.partition, range.startOffset, range.endOffsetExclusive)
+        )
         .toSet
       Either.cond(existing.isEmpty || existing == expected, (), AnalyticsError.RunIdRangeConflict(manifest.runId.value))
     } else Right(())

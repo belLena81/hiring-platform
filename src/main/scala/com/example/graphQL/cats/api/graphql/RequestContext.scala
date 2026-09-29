@@ -50,7 +50,7 @@ final case class RequestContextParameters(
     hiring: HiringGraphQLServices,
     ensureHiringReady: IO[ProbeResult],
     tracer: Tracer[IO] = Tracer.noop[IO],
-    diagnostics: Diagnostics = Diagnostics.noop,
+    diagnostics: Diagnostics,
     requestId: Option[String] = None,
     clientAddress: Option[IpAddress] = None,
     rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))

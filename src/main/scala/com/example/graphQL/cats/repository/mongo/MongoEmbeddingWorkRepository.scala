@@ -18,7 +18,7 @@ trait MongoEmbeddingWorkEnqueuer {
       session: Option[ClientSession[IO]],
       key: EmbeddingWorkKey,
       now: Instant
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
 }
 
 object MongoEmbeddingWorkEnqueuer {
@@ -31,12 +31,12 @@ object MongoEmbeddingWorkEnqueuer {
         _session: Option[ClientSession[IO]],
         _key: EmbeddingWorkKey,
         _now: Instant
-    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    ): RepositoryIO[Unit] = RepositoryIO.fromEither(Right(()))
   }
 }
 
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
-final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostics: Diagnostics = Diagnostics.noop)
+final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostics: Diagnostics)
     extends EmbeddingWorkRepository
     with MongoEmbeddingWorkEnqueuer {
   override val requiresTransaction: Boolean = true
@@ -47,19 +47,19 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.EmbeddingWork)
 
   override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] =
-    RepositoryIO.fromIOEither(enqueue(None, key, now))
+    enqueue(None, key, now)
 
   /** Persists work in the caller's Mongo transaction. This is deliberately a concrete Mongo capability: the generic
     * work port has no transaction/session concept.
     */
-  def enqueue(session: ClientSession[IO], key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
+  def enqueue(session: ClientSession[IO], key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] =
     enqueue(Some(session), key, now)
 
   override def enqueue(
       session: Option[ClientSession[IO]],
       key: EmbeddingWorkKey,
       now: Instant
-  ): IO[Either[RepositoryError, Unit]] = {
+  ): RepositoryIO[Unit] = {
     val readyUpdate = MongoUpdate.combine(
       MongoUpdate.setOnInsert(MongoFields.Kind, key.kind.toString),
       MongoUpdate.setOnInsert(MongoFields.WorkEntityId, key.entityId),
@@ -81,28 +81,37 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.enqueue") {
-        updateOne(
-          session,
-          MongoFilter.and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.ne(MongoFields.State, "Processing")),
-          readyUpdate,
-          new UpdateOptions().upsert(true)
-        ).flatMap {
-          case Some(result) if result.getMatchedCount == 1L || result.getUpsertedId != null => IO.pure(Right(()))
-          case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-          case Some(_) =>
+        RepositoryIO
+          .lift(
             updateOne(
               session,
               MongoFilter
-                .and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.eq(MongoFields.State, "Processing")),
-              refreshActiveLease
-            ).map {
-              case Some(result) if result.getMatchedCount == 1L => Right(())
-              case Some(_)                                      => Left(RepositoryError.Conflict)
-              case None                                         => Left(RepositoryError.MissingWriteResult)
-            }
-        }
+                .and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.ne(MongoFields.State, "Processing")),
+              readyUpdate,
+              new UpdateOptions().upsert(true)
+            )
+          )
+          .flatMap {
+            case Some(result) if result.getMatchedCount == 1L || Option(result.getUpsertedId).nonEmpty =>
+              RepositoryIO.fromEither(Right(()))
+            case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+            case Some(_) =>
+              RepositoryIO
+                .lift(
+                  updateOne(
+                    session,
+                    MongoFilter
+                      .and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.eq(MongoFields.State, "Processing")),
+                    refreshActiveLease
+                  )
+                )
+                .subflatMap {
+                  case Some(result) if result.getMatchedCount == 1L => Right(())
+                  case Some(_)                                      => Left(RepositoryError.Conflict)
+                  case None                                         => Left(RepositoryError.MissingWriteResult)
+                }
+          }
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private def updateOne(
@@ -139,9 +148,12 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
         .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id))
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "embeddingWork.claim") {
-          collection
-            .flatMap(_.findOneAndUpdate(MongoFilter.or(available, expiredLease).bson, update.bson, options))
-            .map {
+          RepositoryIO
+            .lift(
+              collection
+                .flatMap(_.findOneAndUpdate(MongoFilter.or(available, expiredLease).bson, update.bson, options))
+            )
+            .subflatMap {
               case Some(document) =>
                 readClaim(document) match {
                   case Right(claim) => Right(Some(claim))
@@ -156,9 +168,12 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
   override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.complete") {
-        collection
-          .flatMap(_.deleteOne(leaseFilter(claim).bson, new com.mongodb.client.model.DeleteOptions))
-          .map(result => if (result.getDeletedCount == 1L) Right(()) else Left(RepositoryError.Conflict))
+        RepositoryIO
+          .lift(
+            collection
+              .flatMap(_.deleteOne(leaseFilter(claim).bson, new com.mongodb.client.model.DeleteOptions))
+          )
+          .subflatMap(result => if (result.getDeletedCount == 1L) Right(()) else Left(RepositoryError.Conflict))
       }(_ => Left(RepositoryError.Unavailable))
 
   override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] =
@@ -197,9 +212,12 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
   ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.transition") {
-        MongoSessionOperations
-          .updateOne(collection, None, leaseFilter(claim), update)
-          .map {
+        RepositoryIO
+          .lift(
+            MongoSessionOperations
+              .updateOne(collection, None, leaseFilter(claim), update)
+          )
+          .subflatMap {
             case Some(result) if result.getMatchedCount == 1L => Right(())
             case Some(_)                                      => Left(RepositoryError.Conflict)
             case None                                         => Left(RepositoryError.MissingWriteResult)

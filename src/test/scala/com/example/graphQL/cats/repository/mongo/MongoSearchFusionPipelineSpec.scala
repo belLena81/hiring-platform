@@ -2,12 +2,8 @@ package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.SearchMode
 import com.example.graphQL.cats.domain.pagination.PageSize
-import com.example.graphQL.cats.service.search.{
-  CandidateMatchFilters,
-  JobSearchFilter,
-  SearchFusionStrategy,
-  VectorSearchQuery
-}
+import com.example.graphQL.cats.domain.search.SearchFusionStrategy
+import com.example.graphQL.cats.service.search.{CandidateMatchFilters, JobSearchFilter, VectorSearchQuery}
 import munit.FunSuite
 import org.bson.Document
 import com.mongodb.MongoClientSettings
@@ -47,7 +43,8 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
       "candidates_lexical",
       numCandidates = 60,
       fusionStrategy = strategy,
-      rerankEnabled = rerank
+      rerankEnabled = rerank,
+      diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
     )
 
   private def bsonJson(value: org.bson.conversions.Bson): String =

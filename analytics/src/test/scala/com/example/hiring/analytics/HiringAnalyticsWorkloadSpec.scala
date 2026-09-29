@@ -149,10 +149,10 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
 
   private def runWorkload(spark: SparkSession, root: Path): IO[Unit] = {
     val manifest = AnalyticsRunManifest
-      .validated("hal07-fixed-seed-424242", Vector(PartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
+      .validated("hal07-fixed-seed-424242", Vector(TestPartitionOffsetRange.unsafe(Topic, 0, 0L, TotalRecords.toLong)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
-    val paths = AnalyticsLakehousePaths.unsafe(root.toUri.toString)
+    val paths = TestAnalyticsLakehousePaths.unsafe(root.toUri.toString)
     for {
       generated <- IO.blocking {
         val generationStart = System.nanoTime()
@@ -167,7 +167,7 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
           OperationalEventTransforms.silver(valid, Pseudonymizer, markers).fold(error => throw error, identity)
         (
           silver.queryExecution.executedPlan.toString,
-          HiringGoldTransforms.wideFunnelDay(silver).queryExecution.executedPlan.toString
+          HiringGoldTransforms.wideFunnelDay(silver).toOption.get.queryExecution.executedPlan.toString
         )
       }
       (silverPlan, goldPlan) = plans

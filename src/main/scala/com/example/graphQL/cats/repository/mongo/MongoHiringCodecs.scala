@@ -381,7 +381,7 @@ private[mongo] object MongoHiringCodecs {
           .orElse(Option(value.getCause).flatMap(missingField))
       }
 
-    missingField(error).map(MissingField.apply).getOrElse(InvalidField(MongoFields.Id))
+    missingField(error).map(MissingField.apply).getOrElse(InvalidField("document"))
   }
 
   private def noUnexpectedFields(document: Document, fields: Set[String]): ValidatedNel[StoredDocumentError, Unit] =

@@ -27,8 +27,4 @@ object AnalyticsLakehousePaths {
       .leftMap(_ => "lakehouse root must be non-empty")
       .toValidatedNec
       .map(validRoot => new AnalyticsLakehousePaths(validRoot))
-
-  private[analytics] def unsafe(root: String): AnalyticsLakehousePaths =
-    from(root).toEither
-      .fold(errors => throw new IllegalArgumentException(errors.toNonEmptyList.toList.mkString("; ")), identity)
 }

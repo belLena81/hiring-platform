@@ -4,6 +4,8 @@ import cats.effect.IO
 import cats.syntax.all.*
 import io.circe.Json
 import com.example.graphQL.cats.domain.model.*
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.*
 import com.mongodb.*
 import com.mongodb.client.model.*
@@ -60,10 +62,10 @@ private[mongo] object MongoHiringMigrations {
   private def index(collection: SetupCollection, keys: Bson, options: IndexOptions): IO[Unit] =
     collection.createIndex(keys, options).void
 
-  def initialize(database: SetupDatabase, resetOnStart: Boolean): IO[Unit] =
+  def initialize(database: SetupDatabase, resetOnStart: Boolean, diagnostics: Diagnostics): IO[Unit] =
     Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
       migrateAggregateVersions(database) *> verifyCandidateSearchProfiles(database) *>
-      migrateOutboxSubjectReferences(database) *> migrateAnalyticsReportControl(database) *>
+      migrateOutboxSubjectReferences(database, diagnostics) *> migrateAnalyticsReportControl(database) *>
       migrateAnalyticsDeletionReceipts(database) *> createAccountRegistry(database)
 
   private def migrateAggregateVersions(database: SetupDatabase): IO[Unit] = {
@@ -115,7 +117,7 @@ private[mongo] object MongoHiringMigrations {
   }
 
   /** Backfills the internal subject index needed to fence/purge events without changing the Kafka envelope. */
-  private def migrateOutboxSubjectReferences(database: SetupDatabase): IO[Unit] = {
+  private def migrateOutboxSubjectReferences(database: SetupDatabase, diagnostics: Diagnostics): IO[Unit] = {
     val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
     val outbox = database.getCollection(MongoCollections.EventOutbox)
     val migration = Filters.eq(MongoFields.Id, OutboxSubjectReferencesMigrationId)
@@ -146,7 +148,7 @@ private[mongo] object MongoHiringMigrations {
         RevisionMigrationBatchSize
       )
         .flatMap { batch =>
-          batch.traverse_(backfillOutboxSubjectReferences(database, outbox, ledger, migration, _)) *>
+          batch.traverse_(backfillOutboxSubjectReferences(database, outbox, ledger, migration, _, diagnostics)) *>
             (if (batch.size == RevisionMigrationBatchSize) backfillNextBatch else verifyAndComplete)
         }
 
@@ -182,14 +184,15 @@ private[mongo] object MongoHiringMigrations {
       outbox: SetupCollection,
       ledger: SetupCollection,
       migration: Bson,
-      document: Document
+      document: Document,
+      diagnostics: Diagnostics
   ): IO[Unit] = {
     val id = Option(document.getString(MongoFields.Id))
     val event = MongoHiringCodecs.readOperationalEvent(document).toEither.leftMap(_ => "undecodable event")
 
     (id, event) match {
       case (Some(eventId), Right(value)) =>
-        outboxCandidateIds(database, value).flatMap {
+        outboxCandidateIds(database, value, diagnostics).flatMap {
           case Left(reason) =>
             IO.raiseError(
               new IllegalStateException(
@@ -292,7 +295,8 @@ private[mongo] object MongoHiringMigrations {
 
   private def outboxCandidateIds(
       database: SetupDatabase,
-      event: com.example.graphQL.cats.service.events.OperationalEventEnvelope
+      event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,
+      diagnostics: Diagnostics
   ): IO[Either[String, List[String]]] = {
     import com.example.graphQL.cats.service.events.{OperationalAggregateType, OperationalEventType}
 
@@ -323,7 +327,7 @@ private[mongo] object MongoHiringMigrations {
         case OperationalEventType.SEARCH_PERFORMED =>
           candidateIdsFromSearchPerformed(event.payload)
         case OperationalEventType.SEARCH_RESULT_CLICKED =>
-          candidateIdFromSearchClick(database, event)
+          candidateIdFromSearchClick(database, event, diagnostics)
         case _ => IO.pure(Right(Nil))
       }
   }
@@ -354,7 +358,23 @@ private[mongo] object MongoHiringMigrations {
 
   private def candidateIdFromSearchClick(
       database: SetupDatabase,
-      event: com.example.graphQL.cats.service.events.OperationalEventEnvelope
+      event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,
+      diagnostics: Diagnostics
+  ): IO[Either[String, List[String]]] =
+    verifyRetainedSearchSessionForClick(
+      event,
+      id =>
+        database
+          .getCollection(MongoCollections.SearchSessions)
+          .find(Filters.eq(MongoFields.Id, id.toString))
+          .first,
+      diagnostics
+    )
+
+  private[mongo] def verifyRetainedSearchSessionForClick(
+      event: com.example.graphQL.cats.service.events.OperationalEventEnvelope,
+      findSession: java.util.UUID => IO[Option[Document]],
+      diagnostics: Diagnostics
   ): IO[Either[String, List[String]]] = {
     val payload = event.payload.hcursor
     val searchId = payload
@@ -364,10 +384,7 @@ private[mongo] object MongoHiringMigrations {
     val resultId = payload.get[String](MongoFields.ResultId).toOption
     (searchId, resultId) match {
       case (Some(id), Some(result)) =>
-        database
-          .getCollection(MongoCollections.SearchSessions)
-          .find(Filters.eq(MongoFields.Id, id.toString))
-          .first
+        findSession(id)
           .map {
             case None           => Left("a search click without its retained search session")
             case Some(document) =>
@@ -392,7 +409,11 @@ private[mongo] object MongoHiringMigrations {
                   case _ => Left("a search click with an unknown searchKind")
                 }
           }
-          .handleError(_ => Left("an unavailable retained search session"))
+          .handleErrorWith(error =>
+            diagnostics
+              .emit(LogEvent.SearchSessionVerificationFailed, fields = LogFields.failure(error))
+              .as(Left("an unavailable retained search session"))
+          )
       case _ => IO.pure(Left("a search click without valid searchId or resultId"))
     }
   }

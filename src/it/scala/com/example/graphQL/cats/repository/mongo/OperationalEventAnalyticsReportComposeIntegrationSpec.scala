@@ -50,9 +50,14 @@ final class OperationalEventAnalyticsReportComposeIntegrationSpec extends CatsEf
           val storedUsers = MongoUserRepository.transactional(
             database,
             client,
-            new MongoEmbeddingWorkRepository(database)
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
+            com.example.graphQL.cats.service.Diagnostics.noop
           )
-          val reports = MongoAnalyticsReportRepository.transactional(database, client)
+          val reports = MongoAnalyticsReportRepository.transactional(
+            database,
+            client,
+            com.example.graphQL.cats.service.Diagnostics.noop
+          )
           val adminId = com.example.graphQL.cats.domain.model.Identifiers.UserId(
             UUID.fromString("00000000-0000-0000-0000-00000000a611")
           )
@@ -60,8 +65,8 @@ final class OperationalEventAnalyticsReportComposeIntegrationSpec extends CatsEf
           val actor = ActorContext(adminId, UserRole.Admin)
 
           for {
-            _ <- MongoHiringSetup.initialize(database)
-            existingAdmin <- storedUsers.find(adminId)
+            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+            existingAdmin <- storedUsers.find(adminId).value
             _ <- existingAdmin match {
               case Right(Some(existing))
                   if existing.role == UserRole.Admin && existing.accountStatus == AccountStatus.Active =>
@@ -69,7 +74,7 @@ final class OperationalEventAnalyticsReportComposeIntegrationSpec extends CatsEf
               case Right(Some(_)) =>
                 IO.raiseError(new AssertionError("Compose analytics test identity is not an active Admin"))
               case Right(None) =>
-                storedUsers.insert(admin).flatMap {
+                storedUsers.insert(admin).value.flatMap {
                   case Right(())   => IO.unit
                   case Left(error) =>
                     IO.raiseError(new AssertionError(s"Could not initialize Compose Admin identity: $error"))
@@ -85,7 +90,7 @@ final class OperationalEventAnalyticsReportComposeIntegrationSpec extends CatsEf
               new AssertionError("expected a current analytics report document")
             )
             _ = assertEquals(currentDocument.getString("runId"), expectedRunId)
-            published <- reports.latest
+            published <- reports.latest.value
             snapshot <- published.fold(
               error =>
                 IO.raiseError[com.example.graphQL.cats.service.AnalyticsReportSnapshot](

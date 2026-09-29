@@ -11,8 +11,44 @@ for variable in KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_P
   [[ -n "${!variable:-}" ]] || { printf 'Required local setting %s is missing from .env.\n' "$variable" >&2; exit 1; }
 done
 
-nonce="$(openssl rand -hex 8)"
-subject_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+check_state_directory() {
+  local create="${1:-false}" current="$repo_root" component permissions
+  for component in .local config; do
+    current="$current/$component"
+    if [[ ! -e "$current" && ! -L "$current" && "$create" == true ]]; then
+      mkdir -m 700 -- "$current"
+    fi
+    [[ ! -L "$current" && -d "$current" ]] || { printf 'Smoke state path must use real directories.\n' >&2; exit 1; }
+    permissions="$(stat -c '%a' "$current")"
+    [[ "$permissions" =~ ^[0-7]{3,4}$ ]] && (( (8#$permissions & 0022) == 0 )) || {
+      printf 'Smoke state path must not be group- or world-writable.\n' >&2; exit 1;
+    }
+  done
+  [[ "$(stat -c '%u:%a' "$current")" == "$(id -u):700" ]] || {
+    printf 'Smoke state directory must be owned by this user with mode 700.\n' >&2; exit 1;
+  }
+}
+
+mode="${1:-start}"
+if [[ "$mode" == start && $# -le 1 ]]; then
+  nonce="$(openssl rand -hex 8)"
+  subject_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+elif [[ "$mode" == resume && $# -eq 2 && "$2" =~ ^[a-f0-9]{16}$ ]]; then
+  nonce="$2"
+  state_file=".local/config/analytics-erasure-smoke-$nonce.state"
+  check_state_directory
+  [[ -f "$state_file" && ! -L "$state_file" ]] || { printf 'Smoke state is missing: %s\n' "$state_file" >&2; exit 1; }
+  [[ "$(stat -c '%u:%a' "$state_file")" == "$(id -u):600" ]] || {
+    printf 'Smoke state must be owned by this user with mode 600.\n' >&2; exit 1;
+  }
+  read -r stored_nonce subject_id < "$state_file"
+  [[ "$stored_nonce" == "$nonce" && "$subject_id" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || {
+    printf 'Smoke state has invalid identity.\n' >&2; exit 1;
+  }
+else
+  printf 'Usage: %s [start | resume <16-hex-nonce>]\n' "$0" >&2
+  exit 2
+fi
 project="hiring-analytics-erasure-smoke-$nonce"
 export HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE="hiring_erasure_smoke_$nonce"
 export HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC="hiring.erasure.smoke.$nonce"
@@ -20,6 +56,13 @@ export HIRING_ANALYTICS_RETENTION_PROOF_NONCE="$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$subject_id"
 export KAFKA_TOPIC="$HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC"
 export KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_PASSWORD KAFKA_FENCER_PASSWORD HIRING_ANALYTICS_HMAC_SECRET_BASE64
+
+if [[ "$mode" == start ]]; then
+  state_file=".local/config/analytics-erasure-smoke-$nonce.state"
+  check_state_directory true
+  git check-ignore -q "$state_file" || { printf 'Smoke state path is not ignored by Git.\n' >&2; exit 1; }
+  [[ ! -e "$state_file" && ! -L "$state_file" ]] || { printf 'Smoke state already exists: %s\n' "$state_file" >&2; exit 1; }
+fi
 
 compose() {
   docker compose --profile analytics --profile analytics-erasure \
@@ -51,7 +94,8 @@ wait_for_phase() {
     actual="$(compose exec -T mongodb mongosh --quiet --eval \
       "const r=db.getSiblingDB('$HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE').analytics_erasure_requests.findOne({_id:'$subject_id'}); print(r ? r.state+':'+r.phase : 'MISSING')" \
       2>/dev/null | tail -n 1 || true)"
-    if [[ "$actual" == "Processing:$phase" || "$actual" == "Complete:ReportPublished" ]]; then
+    if [[ "$phase" == ReportPublished && "$actual" == "Complete:ReportPublished" ||
+          "$phase" != ReportPublished && "$actual" == "Processing:$phase" ]]; then
       printf 'Smoke worker checkpoint: %s\n' "$actual"
       return 0
     fi
@@ -63,20 +107,43 @@ wait_for_phase() {
   return 1
 }
 
-printf 'Starting isolated analytics erasure smoke project %s.\n' "$project"
-compose build analytics-batch analytics-erasure-worker
-compose up -d mongodb kafka kafka-acl-init
-run_fixture prepare
-compose up -d analytics-erasure-worker
-wait_for_phase DeltaPurged 180
-run_fixture append-retention-tail
-run_fixture smoke-pre-horizon
-compose stop analytics-erasure-worker
-printf 'Worker stopped; waiting for the configured one-minute Delta and Kafka retention periods.\n'
-sleep 75
-compose up -d analytics-erasure-worker
-wait_for_phase ReportPublished 600
-run_fixture smoke-verify
-compose stop
-trap - EXIT
-printf 'Smoke proof passed: populated synthetic Delta rows, worker restart, actual Kafka earliest offsets, completion receipt, report publication, and captured file absence. Project-scoped named volumes remain available as local evidence. This is flow evidence only; the full-horizon retention gate remains open.\n'
+if [[ "$mode" == start ]]; then
+  printf 'Starting isolated analytics erasure smoke project %s.\n' "$project"
+  compose build analytics-batch analytics-erasure-worker
+  compose up -d mongodb kafka kafka-acl-init
+  run_fixture prepare
+  compose up -d analytics-erasure-worker
+  wait_for_phase DeltaPurged 600
+  run_fixture smoke-pre-horizon
+  compose stop analytics-erasure-worker
+  run_fixture append-retention-tail
+  state_file=".local/config/analytics-erasure-smoke-$nonce.state"
+  check_state_directory
+  git check-ignore -q "$state_file" || { printf 'Smoke state path is not ignored by Git.\n' >&2; exit 1; }
+  [[ ! -e "$state_file" && ! -L "$state_file" ]] || { printf 'Smoke state already exists: %s\n' "$state_file" >&2; exit 1; }
+  printf '%s %s\n' "$nonce" "$subject_id" > "$state_file"
+  chmod 600 "$state_file"
+  printf 'Smoke staged on preserved volumes. Resume after the next UTC day plus one minute: %s resume %s\n' "$0" "$nonce"
+else
+  compose up -d mongodb kafka kafka-acl-init
+  deadline_ms=""
+  for attempt in {1..60}; do
+    deadline_ms="$(compose exec -T mongodb mongosh --quiet --eval \
+      "const r=db.getSiblingDB('$HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE').analytics_erasure_requests.findOne({_id:'$subject_id'}); if (!r || !r.deltaPurgedAt || r.repairRequired) { print('INVALID'); } else { const d=r.deltaPurgedAt; print(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()+1)+60000); }" \
+      2>/dev/null | tail -n 1 || true)"
+    [[ "$deadline_ms" == INVALID || "$deadline_ms" =~ ^[0-9]+$ ]] && break
+    sleep 2
+  done
+  [[ "$deadline_ms" =~ ^[0-9]+$ ]] || { printf 'Smoke request is missing, invalid, or requires repair.\n' >&2; exit 1; }
+  now_ms="$(date -u +%s%3N)"
+  if (( now_ms < deadline_ms )); then
+    printf 'Delta log cleanup is pending until %s UTC. Resume with: %s resume %s\n' \
+      "$(date -u -d "@$((deadline_ms / 1000))" '+%Y-%m-%d %H:%M:%S')" "$0" "$nonce"
+    exit 0
+  fi
+  printf 'Resuming smoke worker after the physical Delta log-cleanup horizon.\n'
+  compose up -d analytics-erasure-worker
+  wait_for_phase ReportPublished 1200
+  run_fixture smoke-verify
+  printf 'Smoke proof passed: populated synthetic Delta rows, worker restart, actual Kafka earliest offsets, completion receipt, report publication, and captured file absence. Project-scoped named volumes remain available as local evidence. This is flow evidence only; the full-horizon retention gate remains open.\n'
+fi

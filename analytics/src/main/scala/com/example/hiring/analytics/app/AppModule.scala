@@ -5,12 +5,18 @@ import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.service.batch.HiringAnalyticsBatch
 import com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker
-import com.example.hiring.analytics.config.{AnalyticsBatchSettings, AnalyticsCommonSettings, AnalyticsWorkerSettings}
+import com.example.hiring.analytics.config.{
+  AnalyticsBatchSettings,
+  AnalyticsCommonSettings,
+  AnalyticsErasureWorkerPolicy,
+  AnalyticsWorkerSettings
+}
+import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.{Async, Clock, Resource}
+import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
@@ -30,6 +36,7 @@ object AppModule {
       client: MongoClient[F],
       database: MongoDatabase[F],
       sparkExecution: SparkBlockingExecution[F],
+      lakehouseExecution: LakehouseOperation[F],
       streams: MongoPublisherStream,
       markers: MongoActiveDeletionMarkerSource[F],
       lock: MongoAnalyticsLakehouseLock[F],
@@ -43,25 +50,44 @@ object AppModule {
       .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
 
   def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
-    shared[F](settings.common, appName = "hiring-analytics-batch").map { shared =>
+    for {
+      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+      shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-batch")
+    } yield {
       val common = settings.common
       val manifestStore = new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution)
+      val deltaWriter = new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution)
+      val deltaReader = new DeltaBatchReader[F](shared.lakehouseExecution)
+      val ingestionStage = new AnalyticsBatchIngestionStage[F](
+        shared.paths,
+        pseudonymizer,
+        shared.lakehouseExecution,
+        manifestStore,
+        deltaWriter,
+        common.operational.retention
+      )
+      val silverStage = new AnalyticsBatchSilverStage[F](
+        shared.paths,
+        pseudonymizer,
+        shared.lakehouseExecution,
+        deltaWriter,
+        deltaReader,
+        QuarantineIdentifier,
+        common.operational.retention
+      )
       val job = new HiringAnalyticsBatch[F](
         shared.paths,
         shared.markers,
-        Clock[F],
         new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational),
         manifestStore,
         new SparkAnalyticsBatchLakehouse[F](
           shared.spark,
           shared.paths,
-          common.pseudonymizer,
           new KafkaOffsetRangeSource[F](common.kafka, shared.sparkExecution, shared.sparkExecution),
-          Clock[F],
-          manifestStore,
-          common.operational,
-          shared.sparkExecution,
-          shared.maintenance
+          shared.lakehouseExecution,
+          shared.maintenance,
+          ingestionStage,
+          silverStage
         ),
         shared.lock,
         common.operational
@@ -72,31 +98,35 @@ object AppModule {
     }
 
   def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
-    shared[F](settings.common, appName = "hiring-analytics-erasure-worker").flatMap { shared =>
-      val common = settings.common
-      MongoAnalyticsErasureStores.resource(shared.client, shared.database, shared.streams).map { stores =>
+    for {
+      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+      shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-erasure-worker")
+      program <- MongoAnalyticsErasureStores.resource(shared.client, shared.database, shared.streams).map { stores =>
+        val common = settings.common
         val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
         val job = new AnalyticsErasureWorker[F](
           stores.queue,
           stores.progress,
           stores.barrier,
-          common.kafka,
-          settings.fencerKafka,
-          settings.topic,
+          AnalyticsErasureKafkaRuntime(
+            settings.fencerKafka,
+            KafkaProducerFencer[F](shared.sparkExecution),
+            KafkaRetentionAdapter.liveRetention[F](common.kafka, settings.topic, shared.sparkExecution)
+          ),
           shared.paths,
           publisher,
           shared.markers,
           shared.maintenance,
           shared.lock,
-          Clock[F],
           Slf4jLogger.getLogger[F],
-          KafkaProducerFencer[F](shared.sparkExecution),
-          KafkaRetentionAdapter.liveRetention[F](shared.sparkExecution),
-          common.operational.retention
+          AnalyticsErasureWorkerPolicy(
+            common.operational.retention,
+            common.operational.erasureWorkerTimings
+          )
         )
         WorkerProgram(job.run)
       }
-    }
+    } yield program
 
   def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureQueue[F]] =
     for {
@@ -107,6 +137,7 @@ object AppModule {
 
   private def shared[F[_]: Async](
       common: AnalyticsCommonSettings,
+      pseudonymizer: SubjectPseudonymizer,
       appName: String
   ): Resource[F, Shared[F]] =
     for {
@@ -115,29 +146,43 @@ object AppModule {
       database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
     } yield {
       val streams = new MongoPublisherStream(common.operational)
-      val lock = new MongoAnalyticsLakehouseLock[F](database, Clock[F], streams)
+      val lock = new MongoAnalyticsLakehouseLock[F](database, streams)
+      val lakehouseExecution = new LakehouseOperation[F](sparkExecution)
       Shared(
         paths,
         spark,
         client,
         database,
         sparkExecution,
+        lakehouseExecution,
         streams,
-        new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams),
+        new MongoActiveDeletionMarkerSource[F](database, pseudonymizer, streams),
         lock,
         new DeltaAnalyticsErasureLakehouse[F](
           spark,
           paths,
-          common.pseudonymizer,
-          Clock[F],
+          pseudonymizer,
           lock,
           new MongoHmacKeyRetirementAuthorizationStore[F](database, streams),
           common.operational,
-          sparkExecution,
+          lakehouseExecution,
           Slf4jLogger.getLogger[F]
         )
       )
     }
+
+  private def buildPseudonymizer[F[_]: Async](common: AnalyticsCommonSettings): F[SubjectPseudonymizer] =
+    Async[F].fromEither(
+      SubjectPseudonymizer
+        .validateFromBase64(
+          Some(common.hmac.secretBase64),
+          common.hmac.keyId,
+          common.hmac.previousKeyId,
+          common.hmac.previousSecretBase64
+        )
+        .toEither
+        .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toChain.toList.mkString("; ")))
+    )
 
   /** Shared resource boundary for operator diagnostics that need Spark and Mongo without batch services. */
   def sparkMongo[F[_]: Async](
@@ -194,7 +239,7 @@ object AppModule {
       sparkExecution: SparkExecution[F]
   ): F[SparkSession] =
     sparkExecution {
-      val builder = org.apache.spark.sql.classic.SparkSession
+      val builder = SparkSession
         .builder()
         .appName(appName)
         .master(master)

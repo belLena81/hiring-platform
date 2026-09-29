@@ -21,6 +21,9 @@ import munit.FunSuite
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{array_contains, col}
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType, TimestampType}
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
+import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
+import org.apache.kafka.common.serialization.StringSerializer
 
 import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
@@ -31,9 +34,10 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
-import java.util.{Date, UUID}
+import java.util.{Date, Properties, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
+import scala.util.Try
 import scala.util.Using
 
 /** Live API-to-Compose-worker proof on a disposable task-scoped Mongo/Kafka/Delta stack. */
@@ -89,7 +93,9 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     val request = builder.POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8)).build()
     val response = HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
     assertEquals(response.statusCode(), 200)
-    assert(!response.body().contains("\"errors\":"), "GraphQL returned errors")
+    val errors = Option(Document.parse(response.body()).getList("errors", classOf[Document]))
+      .fold(Vector.empty[String])(_.asScala.toVector.map(_.getString("message")))
+    assert(errors.isEmpty, s"GraphQL returned errors: ${errors.mkString("; ")}")
     response.body()
   }
 
@@ -113,35 +119,77 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     value
   }
 
-  private def seedPublishedOutboxEvent(database: MongoDatabase, subjectId: String): String = {
+  private def seedOutboxEvent(database: MongoDatabase, subjectId: String, state: String): String = {
+    assert(Set("Published", "Retryable").contains(state))
     val now = new Date()
     val eventId = UUID.randomUUID().toString
     val eventJson =
       s"""{"eventId":"$eventId","eventType":"SEARCH_PERFORMED","occurredAt":"${now.toInstant}","aggregateType":"Search","aggregateId":"deletion-proof-$eventId","actorId":"$subjectId","payload":{"searchKind":"jobs","query":"proof","results":[]}}"""
+    val event = new Document("_id", eventId)
+      .append("topic", "hiring.operational-events")
+      .append("eventType", "SEARCH_PERFORMED")
+      .append("occurredAt", now)
+      .append("aggregateType", "Search")
+      .append("aggregateId", s"deletion-proof-$eventId")
+      .append("actorId", subjectId)
+      .append("subjectIds", java.util.List.of(subjectId))
+      .append("subjectRefsVersion", 1)
+      .append("payload", "{\"searchKind\":\"jobs\",\"query\":\"proof\",\"results\":[]}")
+      .append("envelopeBytes", eventJson.getBytes(StandardCharsets.UTF_8))
+      .append("partitionKey", s"deletion-proof-$eventId")
+      .append("state", state)
+      .append("attempts", if (state == "Published") 1 else 0)
+      .append("availableAt", now)
+      .append("createdAt", now)
+      .append("updatedAt", now)
+    if (state == "Published") event.append("publishedAt", now)
     database
       .getCollection("event_outbox")
-      .insertOne(
-        new Document("_id", eventId)
-          .append("topic", "hiring.operational-events")
-          .append("eventType", "SEARCH_PERFORMED")
-          .append("occurredAt", now)
-          .append("aggregateType", "Search")
-          .append("aggregateId", s"deletion-proof-$eventId")
-          .append("actorId", subjectId)
-          .append("subjectIds", java.util.List.of(subjectId))
-          .append("subjectRefsVersion", 1)
-          .append("payload", "{\"searchKind\":\"jobs\",\"query\":\"proof\",\"results\":[]}")
-          .append("envelopeBytes", eventJson.getBytes(StandardCharsets.UTF_8))
-          .append("partitionKey", s"deletion-proof-$eventId")
-          .append("state", "Published")
-          .append("publishedAt", now)
-          .append("attempts", 1)
-          .append("availableAt", now)
-          .append("createdAt", now)
-          .append("updatedAt", now)
-      )
+      .insertOne(event)
     eventId
   }
+
+  private def heldPublisherTransaction(kafka: String, transactionalId: String): KafkaProducer[String, String] = {
+    val connection = KafkaConnection(
+      kafka,
+      saslUsername = Some("hiring_publisher_v2"),
+      saslPassword = Some(required("KAFKA_PUBLISHER_V2_PASSWORD")),
+      securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = true
+    )
+    val properties = new Properties()
+    KafkaClientProperties
+      .clientProperties(connection)
+      .fold(
+        error => fail(s"invalid Compose proof Kafka connection: $error"),
+        _.foreach { case (key, value) => properties.setProperty(key, value) }
+      )
+    properties.setProperty(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka)
+    properties.setProperty(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
+    properties.setProperty(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
+    properties.setProperty(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
+    properties.setProperty(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, "600000")
+    properties.setProperty(ProducerConfig.ACKS_CONFIG, "all")
+    properties.setProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "15000")
+    properties.setProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "20000")
+    val producer = new KafkaProducer[String, String](properties)
+    try {
+      producer.initTransactions()
+      producer.beginTransaction()
+      producer
+    } catch {
+      case error: Throwable =>
+        producer.close()
+        throw error
+    }
+  }
+
+  private def isFenced(error: Throwable): Boolean =
+    Iterator.iterate(error)(_.getCause).takeWhile(_ != null).exists {
+      case _: ProducerFencedException       => true
+      case _: InvalidProducerEpochException => true
+      case _                                => false
+    }
 
   private def seedAttributedDeltaRows(subjectId: String): (String, String) = {
     val nonce = UUID.randomUUID().toString
@@ -158,7 +206,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       root.isAbsolute && root.getCanonicalPath == root.getAbsolutePath,
       "proof Delta directory must be an absolute, non-symlink task path"
     )
-    val paths = AnalyticsLakehousePaths.unsafe(root.toURI.toString.stripSuffix("/") + "/lakehouse")
+    val paths = IntegrationAnalyticsLakehousePaths.unsafe(root.toURI.toString.stripSuffix("/") + "/lakehouse")
     val schema = StructType(
       Seq(
         StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false),
@@ -216,7 +264,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       .getOrElse(fail("missing deletion status in authenticated GraphQL response"))
   }
 
-  test("account deletion purges a published outbox event and only the subject's Delta data") {
+  test("account deletion fences a registered publisher transaction and purges only the subject's data") {
     if (enabled) {
       val databaseName = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_DATABASE")
       assert(databaseName.matches("account_deletion_[0-9a-f]{16}"))
@@ -275,31 +323,55 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
         )
         val (token, subjectId) = authResult(login, "login")
         val (subjectToken, controlToken) = seedAttributedDeltaRows(subjectId)
-        val eventId = seedPublishedOutboxEvent(database, subjectId)
-        val deletion = graphql(
-          api,
-          s"""mutation { deleteMyAccount(input: { idempotencyKey: "${UUID
-              .randomUUID()}" }) { __typename ... on DeletionReceipt { receiptId status } ... on DomainError { code message } ... on ValidationError { code message } } }""",
-          Some(token)
-        )
-        val receiptId =
-          "(?s)\\\"deleteMyAccount\\\".*?\\\"receiptId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\".*?\\\"status\\\"\\s*:\\s*\\\"PENDING\\\"".r
-            .findFirstMatchIn(deletion)
-            .map(_.group(1))
-            .getOrElse(fail("deleteMyAccount did not return PENDING"))
-        val request = eventually(
-          Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
-        )(_.nonEmpty).get
-        assert(request.getString("receiptId") == receiptId, "deletion receipt must match the durable request")
-        val purgedRequest = eventually(
-          Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
-        )(doc => doc.exists(_.getString("phase") == ErasurePhase.DeltaPurged.toString)).get
-        assertEquals(
-          deletionStatus(api, receiptId, token),
-          "PENDING",
-          "real Delta retention horizon must remain pending"
-        )
-        val deletedFence = database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first()
+        val eventId = seedOutboxEvent(database, subjectId, "Published")
+        val claimEventId = seedOutboxEvent(database, subjectId, "Retryable")
+        eventually(
+          Option(database.getCollection("event_outbox").find(Filters.eq("_id", claimEventId)).first())
+        )(_.exists(_.getString("state") == "Published"))
+        val registeredIds = eventually(
+          Option(database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first())
+            .flatMap(doc => Option(doc.getList("transactionalIds", classOf[String])))
+            .map(_.asScala.toVector)
+        )(_.exists(_.nonEmpty)).get
+        val heldTransactionalId = registeredIds.last
+        val (purgedRequest, deletedFence) = Using.resource(
+          heldPublisherTransaction(kafka, heldTransactionalId)
+        ) { producer =>
+          producer.send(new ProducerRecord(topic, s"held-deletion-proof-$claimEventId", "{}")).get()
+          val deletion = graphql(
+            api,
+            s"""mutation { deleteMyAccount(input: { idempotencyKey: "${UUID
+                .randomUUID()}" }) { __typename ... on DeletionReceipt { receiptId status } ... on DomainError { code message } ... on ValidationError { code message } } }""",
+            Some(token)
+          )
+          val receiptId =
+            "(?s)\\\"deleteMyAccount\\\".*?\\\"receiptId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\".*?\\\"status\\\"\\s*:\\s*\\\"PENDING\\\"".r
+              .findFirstMatchIn(deletion)
+              .map(_.group(1))
+              .getOrElse(fail("deleteMyAccount did not return PENDING"))
+          val request = eventually(
+            Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
+          )(_.nonEmpty).get
+          assert(request.getString("receiptId") == receiptId, "deletion receipt must match the durable request")
+          assert(
+            Option(request.getList("transactionalIds", classOf[String]))
+              .exists(_.asScala.contains(heldTransactionalId)),
+            "deletion must copy the real publisher claim's transactional ID"
+          )
+          val purgedRequest = eventually(
+            Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
+          )(doc => doc.exists(_.getString("phase") == ErasurePhase.DeltaPurged.toString)).get
+          val staleCommit = Try(producer.commitTransaction()).failed.toOption
+          assert(staleCommit.exists(isFenced), "held publisher transaction must fail after worker fencing")
+          assertEquals(
+            deletionStatus(api, receiptId, token),
+            "PENDING",
+            "real Delta retention horizon must remain pending"
+          )
+          val deletedFence =
+            database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first()
+          (purgedRequest, deletedFence)
+        }
         assert(
           java.lang.Boolean.TRUE == deletedFence.getBoolean("deleted"),
           "account deletion must close the publisher fence"
@@ -334,7 +406,9 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
           .getOrCreate()
         try {
           val paths =
-            AnalyticsLakehousePaths.unsafe(new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse")
+            IntegrationAnalyticsLakehousePaths.unsafe(
+              new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse"
+            )
           val currentBronze = spark.read.format("delta").load(paths.bronze)
           assertEquals(
             currentBronze.filter(array_contains(col("subjectTokens"), subjectToken)).count(),

@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.Identifiers.parse as parseIdentifier
+import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO, SemanticSearchRepository}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.service.search.*
@@ -27,7 +28,7 @@ final class MongoSemanticSearchRepository(
     fusionStrategy: SearchFusionStrategy = SearchFusionStrategy.ApplicationRrf,
     rerankEnabled: Boolean = false,
     rerankModel: String = "rerank-2.5-lite",
-    diagnostics: Diagnostics = Diagnostics.noop
+    diagnostics: Diagnostics
 ) extends SemanticSearchRepository {
 
   private def collectWithin[A](stream: Stream[IO, A], maximum: Int): IO[List[A]] =
@@ -37,10 +38,10 @@ final class MongoSemanticSearchRepository(
     }
 
   override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
-    RepositoryIO.fromIOEither(rankedJobs(query, query.filter))
+    rankedJobs(query, query.filter)
 
   override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
-    RepositoryIO.fromIOEither(rankedJobs(query, JobSearchFilter(None, Set.empty, None)))
+    rankedJobs(query, JobSearchFilter(None, Set.empty, None))
 
   override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = {
     val filter = candidateFilter(query, includeEmbeddingModel = true)
@@ -52,50 +53,44 @@ final class MongoSemanticSearchRepository(
       case Some(queryVector) =>
         val queryVectorResults = candidateVectorSearch(query, queryVector, filter)
         val lexicalResults = candidateLexicalSearch(query, filter)
-        (jobVector, queryVectorResults, lexicalResults).parMapN { (jobHits, queryHits, lexicalHits) =>
-          (jobHits, queryHits, lexicalHits) match {
-            case (Right(jobs), Right(text), Right(lexical)) =>
-              Right(HybridRankFusion.candidates(jobs, text, lexical, query.first.value))
-            case _ => Left(RepositoryError.Unavailable)
-          }
-        }
+        MongoSemanticSearchResult.fuseCandidates(jobVector, queryVectorResults, lexicalResults, query.first.value)
     }
-    RepositoryIO.fromIOEither(result)
+    result
   }
 
   private def candidateVectorSearch(
       query: VectorSearchQuery,
       vector: List[Float],
       filter: Bson
-  ): IO[Either[RepositoryError, List[RankedCandidate]]] = {
+  ): RepositoryIO[List[RankedCandidate]] = {
     val pipeline = candidateVectorPipeline(vector, filter)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.candidateVector") {
-        Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-          collectWithin(users.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), numCandidates).map {
-            documents =>
-              MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
-          }
-        }
+        RepositoryIO
+          .lift(
+            Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+              collectWithin(users.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), numCandidates)
+            }
+          )
+          .subflatMap(documents => MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private def candidateLexicalSearch(
       query: VectorSearchQuery,
       filter: Bson
-  ): IO[Either[RepositoryError, List[RankedCandidate]]] = {
+  ): RepositoryIO[List[RankedCandidate]] = {
     val pipeline = candidateLexicalPipeline(query, filter)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.candidateLexical") {
-        Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-          collectWithin(users.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), numCandidates).map {
-            documents =>
-              MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
-          }
-        }
+        RepositoryIO
+          .lift(
+            Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+              collectWithin(users.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), numCandidates)
+            }
+          )
+          .subflatMap(documents => MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private[mongo] def candidateFilter(query: VectorSearchQuery, includeEmbeddingModel: Boolean): Bson = {
@@ -147,7 +142,7 @@ final class MongoSemanticSearchRepository(
   private def rankedJobs(
       query: VectorSearchQuery,
       filter: JobSearchFilter
-  ): IO[Either[RepositoryError, List[RankedJob]]] = {
+  ): RepositoryIO[List[RankedJob]] = {
     val mongoFilter = jobFilter(query, filter)
     query.lexicalQuery.filter(_ => query.mode == SearchMode.HYBRID) match {
       case Some(text) if fusionStrategy != SearchFusionStrategy.ApplicationRrf =>
@@ -155,13 +150,7 @@ final class MongoSemanticSearchRepository(
       case Some(text) =>
         val vector = vectorJobs(query, mongoFilter, numCandidates)
         val lexical = lexicalJobs(query, text, mongoFilter)
-        (vector, lexical).parMapN { (vectorResults, lexicalResults) =>
-          (vectorResults, lexicalResults) match {
-            case (Right(vectorHits), Right(lexicalHits)) =>
-              Right(HybridRankFusion.jobs(vectorHits, lexicalHits, query.first.value))
-            case _ => Left(RepositoryError.Unavailable)
-          }
-        }
+        MongoSemanticSearchResult.fuseJobs(vector, lexical, query.first.value)
       case None => vectorJobs(query, mongoFilter, query.first.value)
     }
   }
@@ -170,18 +159,18 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       text: String,
       filter: Bson
-  ): IO[Either[RepositoryError, List[RankedJob]]] = {
+  ): RepositoryIO[List[RankedJob]] = {
     val stages = nativeJobFusionStages(query, text, filter)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.nativeJobs") {
-        Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-          collectWithin(jobs.aggregate[Document](stages.asJava.asScala.toSeq).boundedStream(32), query.first.value)
-            .map { documents =>
-              MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
+        RepositoryIO
+          .lift(
+            Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+              collectWithin(jobs.aggregate[Document](stages.asJava.asScala.toSeq).boundedStream(32), query.first.value)
             }
-        }
+          )
+          .subflatMap(documents => MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private[mongo] def nativeJobFusionStages(
@@ -233,18 +222,21 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       queryVector: List[Float],
       filter: Bson
-  ): IO[Either[RepositoryError, List[RankedCandidate]]] = {
+  ): RepositoryIO[List[RankedCandidate]] = {
     val pipeline = nativeCandidateFusionStages(query, queryVector, filter)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.nativeCandidates") {
-        Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-          collectWithin(users.aggregate[Document](pipeline.asJava.asScala.toSeq).boundedStream(32), query.first.value)
-            .map { documents =>
-              MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten)
+        RepositoryIO
+          .lift(
+            Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
+              collectWithin(
+                users.aggregate[Document](pipeline.asJava.asScala.toSeq).boundedStream(32),
+                query.first.value
+              )
             }
-        }
+          )
+          .subflatMap(documents => MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private[mongo] def nativeCandidateFusionStages(
@@ -305,17 +297,18 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       filter: Bson,
       limit: Int
-  ): IO[Either[RepositoryError, List[RankedJob]]] = {
+  ): RepositoryIO[List[RankedJob]] = {
     val pipeline = jobVectorPipeline(query.vector, filter, limit)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.vectorJobs") {
-        Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-          collectWithin(jobs.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), limit).map { documents =>
-            MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
-          }
-        }
+        RepositoryIO
+          .lift(
+            Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+              collectWithin(jobs.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), limit)
+            }
+          )
+          .subflatMap(documents => MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private[mongo] def jobVectorPipeline(vector: List[Float], filter: Bson, limit: Int): java.util.List[Document] =
@@ -348,7 +341,7 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       text: String,
       filter: Bson
-  ): IO[Either[RepositoryError, List[RankedJob]]] = {
+  ): RepositoryIO[List[RankedJob]] = {
     val search = new Document("index", jobLexicalIndex)
       .append(
         "text",
@@ -366,14 +359,14 @@ final class MongoSemanticSearchRepository(
     ).asJava
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.lexicalJobs") {
-        Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-          collectWithin(jobs.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), numCandidates).map {
-            documents =>
-              MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten)
-          }
-        }
+        RepositoryIO
+          .lift(
+            Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
+              collectWithin(jobs.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), numCandidates)
+            }
+          )
+          .subflatMap(documents => MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
   }
 
   private[mongo] def jobFilter(query: VectorSearchQuery, filter: JobSearchFilter): Bson =
@@ -466,6 +459,25 @@ private[mongo] object MongoSearchFusionPipeline {
 }
 
 private[mongo] object MongoSemanticSearchResult {
+  def fuseJobs(
+      vector: RepositoryIO[List[RankedJob]],
+      lexical: RepositoryIO[List[RankedJob]],
+      limit: Int
+  ): RepositoryIO[List[RankedJob]] =
+    (vector, lexical)
+      .parMapN((vectorHits, lexicalHits) => HybridRankFusion.jobs(vectorHits, lexicalHits, limit))
+      .leftMap(_ => RepositoryError.Unavailable)
+
+  def fuseCandidates(
+      jobVector: RepositoryIO[List[RankedCandidate]],
+      queryVector: RepositoryIO[List[RankedCandidate]],
+      lexical: RepositoryIO[List[RankedCandidate]],
+      limit: Int
+  ): RepositoryIO[List[RankedCandidate]] =
+    (jobVector, queryVector, lexical)
+      .parMapN((jobs, text, lexicalHits) => HybridRankFusion.candidates(jobs, text, lexicalHits, limit))
+      .leftMap(_ => RepositoryError.Unavailable)
+
   def rankedJobs(
       documents: List[Document],
       query: VectorSearchQuery

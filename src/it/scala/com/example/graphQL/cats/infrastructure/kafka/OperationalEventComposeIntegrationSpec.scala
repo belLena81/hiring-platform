@@ -140,10 +140,20 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
     else {
       MongoDatabaseProbe.clientResource(mongoUri).use { client =>
         client.getDatabase(databaseName).flatMap { database =>
-          val jobs = MongoJobRepository.transactional(database, client, new MongoEmbeddingWorkRepository(database))
-          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
-          val receipts = new MongoConsumerReceiptRepository(database)
-          val quarantine = new MongoEventQuarantineRepository(database)
+          val jobs = MongoJobRepository.transactional(
+            database,
+            client,
+            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
+            com.example.graphQL.cats.service.Diagnostics.noop
+          )
+          val outbox = MongoOperationalEventOutboxRepository.transactional(
+            database,
+            client,
+            com.example.graphQL.cats.service.Diagnostics.noop
+          )
+          val receipts = new MongoConsumerReceiptRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
+          val quarantine =
+            new MongoEventQuarantineRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
           val diagnosticEvents = Ref.of[IO, Vector[String]](Vector.empty)
           val diagnosticsIO = diagnosticEvents.map { events =>
             val diagnostics = new Diagnostics {
@@ -174,84 +184,88 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
                     List(event),
                     com.example.graphQL.cats.service.port.MutationWriteContext.directWrite
                   )
+                  .value
                   .map(result => (event.eventId, result))
               }
             }
             (events, evidence, work)
           }
-          MongoHiringSetup.initialize(database) *> diagnosticsIO.flatMap { case (observedEvents, evidence, work) =>
-            evidence.use { _ =>
-              for {
-                startOffset <- readCommittedEndOffset
-                writes <- work
-                _ = assert(writes.forall(_._2.isRight), clues(writes.count(_._2.isRight)))
-                eventIds = writes.map(_._1.toString).toSet
-                receiptResult <- waitForReceipts(database, eventIds).attempt
-                observedDiagnostics <- observedEvents.get
-                _ = assert(
-                  receiptResult.isRight,
-                  clues(
-                    s"${receiptResult.swap.toOption.map(_.getMessage)} diagnostics=${observedDiagnostics.mkString(",")}"
+          MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop) *> diagnosticsIO
+            .flatMap { case (observedEvents, evidence, work) =>
+              evidence.use { _ =>
+                for {
+                  startOffset <- readCommittedEndOffset
+                  writes <- work
+                  _ = assert(writes.forall(_._2.isRight), clues(writes.count(_._2.isRight)))
+                  eventIds = writes.map(_._1.toString).toSet
+                  receiptResult <- waitForReceipts(database, eventIds).attempt
+                  observedDiagnostics <- observedEvents.get
+                  _ = assert(
+                    receiptResult.isRight,
+                    clues(
+                      s"${receiptResult.swap.toOption.map(_.getMessage)} diagnostics=${observedDiagnostics.mkString(",")}"
+                    )
                   )
-                )
-                _ <- IO.fromEither(receiptResult.leftMap(identity))
-                endOffset <- readCommittedEndOffset
-                _ = assert(endOffset > startOffset, clues(startOffset, endOffset))
-                subjectFence <- MongoRepositoryTestSupport.first(
-                  database
-                    .getCollection(MongoCollections.OutboxSubjectFences)
-                    .find(Filters.eq("_id", actors.head.value.toString))
-                )
-                transactionalIds = subjectFence.toList.flatMap(
-                  _.getList("transactionalIds", classOf[String]).asScala.toList
-                )
-                _ = assert(transactionalIds.nonEmpty && transactionalIds.forall(_.startsWith("hiring-publisher-")))
-                outboxRows <- MongoRepositoryTestSupport.collectWithin(
-                  database
-                    .getCollection(MongoCollections.EventOutbox)
-                    .find(
-                      Filters.and(
-                        Filters.eq("state", "Published"),
-                        Filters.in("_id", eventIds.toList.asJava)
+                  _ <- IO.fromEither(receiptResult.leftMap(identity))
+                  endOffset <- readCommittedEndOffset
+                  _ = assert(endOffset > startOffset, clues(startOffset, endOffset))
+                  subjectFence <- MongoRepositoryTestSupport.first(
+                    database
+                      .getCollection(MongoCollections.OutboxSubjectFences)
+                      .find(Filters.eq("_id", actors.head.value.toString))
+                  )
+                  transactionalIds = subjectFence.toList.flatMap(
+                    _.getList("transactionalIds", classOf[String]).asScala.toList
+                  )
+                  _ = assert(transactionalIds.nonEmpty && transactionalIds.forall(_.startsWith("hiring-publisher-")))
+                  outboxRows <- MongoRepositoryTestSupport.collectWithin(
+                    database
+                      .getCollection(MongoCollections.EventOutbox)
+                      .find(
+                        Filters.and(
+                          Filters.eq("state", "Published"),
+                          Filters.in("_id", eventIds.toList.asJava)
+                        )
                       )
-                    )
-                    .limit(100),
-                  101
-                )
-                receiptRows <- MongoRepositoryTestSupport.collectWithin(
-                  database
-                    .getCollection(MongoCollections.ConsumerReceipts)
-                    .find(
-                      Filters.and(
-                        Filters.eq("consumerGroup", kafka.consumerGroup),
-                        Filters.in("eventId", eventIds.toList.asJava)
+                      .limit(100),
+                    101
+                  )
+                  receiptRows <- MongoRepositoryTestSupport.collectWithin(
+                    database
+                      .getCollection(MongoCollections.ConsumerReceipts)
+                      .find(
+                        Filters.and(
+                          Filters.eq("consumerGroup", kafka.consumerGroup),
+                          Filters.in("eventId", eventIds.toList.asJava)
+                        )
                       )
-                    )
-                    .limit(100),
-                  120
-                )
-                p95 <- IO {
-                  val receiptById =
-                    receiptRows.map(row => row.get("eventId").toString -> row.getDate("createdAt").toInstant).toMap
-                  val latencies = outboxRows.flatMap { row =>
-                    Option(row.getDate("createdAt")).flatMap(created =>
-                      receiptById
-                        .get(row.get("_id").toString)
-                        .map(received => Duration.between(created.toInstant, received).toMillis)
-                    )
-                  }.sorted
-                  assertEquals(latencies.size, 100)
-                  latencies((latencies.size * 95 + 99) / 100 - 1)
+                      .limit(100),
+                    120
+                  )
+                  p95 <- IO {
+                    val receiptById =
+                      receiptRows.map(row => row.get("eventId").toString -> row.getDate("createdAt").toInstant).toMap
+                    val latencies = outboxRows.flatMap { row =>
+                      Option(row.getDate("createdAt")).flatMap(created =>
+                        receiptById
+                          .get(row.get("_id").toString)
+                          .map(received => Duration.between(created.toInstant, received).toMillis)
+                      )
+                    }.sorted
+                    assertEquals(latencies.size, 100)
+                    latencies((latencies.size * 95 + 99) / 100 - 1)
+                  }
+                } yield {
+                  assert(p95 < 30000L, clues(p95))
+                  println(
+                    s"analyticsRange database=$databaseName topic=${kafka.topic} partition=0 start=$startOffset end=$endOffset fixtureEvents=100"
+                  )
+                  println(
+                    s"Operational event evidence: consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95"
+                  )
                 }
-              } yield {
-                assert(p95 < 30000L, clues(p95))
-                println(
-                  s"analyticsRange database=$databaseName topic=${kafka.topic} partition=0 start=$startOffset end=$endOffset fixtureEvents=100"
-                )
-                println(s"Operational event evidence: consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95")
               }
             }
-          }
         }
       }
     }

@@ -4,13 +4,17 @@ import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.adapter.local.LocalProcess
 import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
 import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.domain.{AnalyticsOffset, AnalyticsPartition, AnalyticsTopic}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.KafkaRetentionBarrier
 
 import cats.effect.kernel.{Async, Resource}
 import cats.syntax.all.*
 import com.mongodb.{ReadConcern, WriteConcern}
-import com.mongodb.reactivestreams.client.MongoDatabase
+import com.mongodb.client.model.Projections
+import io.circe.generic.auto.*
+import mongo4cats.circe.MongoJsonCodecs
+import mongo4cats.database.MongoDatabase
 import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
@@ -18,7 +22,7 @@ import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.bson.Document
 
 import java.time.Instant
-import java.util.{Date, Properties}
+import java.util.Properties
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
@@ -34,53 +38,64 @@ private[analytics] final case class HmacKeyRetirementPreparation(
 )
 
 private[analytics] object HmacKeyRetirementPreparation {
-  private[analytics] given BsonDecoder[HmacKeyRetirementPreparation] = BsonDecoder.instance { document =>
-    import BsonValueDecoder.given
+  private object circeCodecs extends MongoJsonCodecs
+  import circeCodecs.*
+
+  private[analytics] final case class PartitionRecord(number: Int, endOffsetExclusive: Long)
+  private[analytics] final case class MongoRecord(
+      _id: String,
+      lakehouseId: String,
+      keyId: String,
+      originalVerifier: String,
+      capturedAt: Instant,
+      topic: String,
+      partitions: Vector[PartitionRecord],
+      clusterId: String,
+      topicId: String,
+      kafkaVolumeName: String,
+      kafkaVolumeMountpoint: String,
+      kafkaVolumeCreatedAt: String,
+      kafkaBootstrapEndpoint: String
+  )
+
+  private[analytics] val mongoRecordRegistry: mongo4cats.codecs.CodecRegistry =
+    AnalyticsMongoRecords.registry[MongoRecord](Set("endOffsetExclusive"), Set("number"))
+
+  private[analytics] def decode(record: MongoRecord): Either[AnalyticsError, HmacKeyRetirementPreparation] = {
     val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
     for {
-      lakehouseId <- BsonDecoder.required[String](document, "lakehouseId", malformed)
-      keyId <- BsonDecoder.required[String](document, "keyId", malformed)
       _ <- Either.cond(
-        lakehouseId.matches("[0-9a-f]{64}") && keyId.matches("[A-Za-z0-9-]{1,40}"),
+        record.lakehouseId.matches("[0-9a-f]{64}") && record.keyId.matches("[A-Za-z0-9-]{1,40}"),
         (),
         malformed
       )
-      storedId <- BsonDecoder.required[String](document, "_id", malformed)
-      _ <- Either.cond(storedId == s"$lakehouseId:$keyId", (), malformed)
-      verifier <- BsonDecoder.required[String](document, "originalVerifier", malformed)
-      _ <- Either.cond(verifier.matches("[A-Za-z0-9_-]{43}"), (), malformed)
-      capturedAt <- BsonDecoder.required[Date](document, "capturedAt", malformed).map(_.toInstant)
-      topic <- BsonDecoder.required[String](document, "topic", malformed)
-      rows <- BsonDecoder.required[Vector[Any]](document, "partitions", malformed)
-      partitions <- rows.traverse {
-        case partition: Document =>
-          for {
-            number <- BsonDecoder.required[Int](partition, "number", malformed)
-            offset <- BsonDecoder.required[Long](partition, "endOffsetExclusive", malformed)
-          } yield KafkaRetentionBarrier.Partition(number, offset)
-        case _ => Left(malformed)
-      }
-      barrier <- KafkaRetentionBarrier.validate(KafkaRetentionBarrier(topic, partitions))
-      clusterId <- BsonDecoder.required[String](document, "clusterId", malformed)
-      topicId <- BsonDecoder.required[String](document, "topicId", malformed)
-      volumeName <- BsonDecoder.required[String](document, "kafkaVolumeName", malformed)
-      volumeMountpoint <- BsonDecoder.required[String](document, "kafkaVolumeMountpoint", malformed)
-      volumeCreatedAt <- BsonDecoder.required[String](document, "kafkaVolumeCreatedAt", malformed)
-      bootstrapEndpoint <- BsonDecoder.required[String](document, "kafkaBootstrapEndpoint", malformed)
+      _ <- Either.cond(record._id == s"${record.lakehouseId}:${record.keyId}", (), malformed)
+      _ <- Either.cond(record.originalVerifier.matches("[A-Za-z0-9_-]{43}"), (), malformed)
+      barrier <- KafkaRetentionBarrier.from(
+        record.topic,
+        record.partitions.map(partition => partition.number -> partition.endOffsetExclusive)
+      )
       lineage = HmacKeyRetirementKafkaLineage(
-        clusterId,
-        topicId,
-        volumeName,
-        volumeMountpoint,
-        volumeCreatedAt,
-        bootstrapEndpoint
+        record.clusterId,
+        record.topicId,
+        record.kafkaVolumeName,
+        record.kafkaVolumeMountpoint,
+        record.kafkaVolumeCreatedAt,
+        record.kafkaBootstrapEndpoint
       )
       _ <- Either.cond(
         HmacKeyRetirementKafkaLineage.matches(lineage, lineage),
         (),
         AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
       )
-    } yield HmacKeyRetirementPreparation(lakehouseId, keyId, verifier, capturedAt, barrier, lineage)
+    } yield HmacKeyRetirementPreparation(
+      record.lakehouseId,
+      record.keyId,
+      record.originalVerifier,
+      record.capturedAt,
+      barrier,
+      lineage
+    )
   }
 }
 
@@ -323,13 +338,16 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
 }
 
 private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Async](
-    database: MongoDatabase,
+    database: MongoDatabase[F],
     streams: MongoPublisherStream
 ) {
   private val collection = database
-    .getCollection("analytics_hmac_key_retirement_preparations", classOf[Document])
     .withReadConcern(ReadConcern.MAJORITY)
-    .withWriteConcern(WriteConcern.MAJORITY.withJournal(true).withWTimeout(15000L, TimeUnit.MILLISECONDS))
+    .getCollection[HmacKeyRetirementPreparation.MongoRecord](
+      "analytics_hmac_key_retirement_preparations",
+      HmacKeyRetirementPreparation.mongoRecordRegistry
+    )
+    .map(_.withWriteConcern(WriteConcern.MAJORITY.withJournal(true).withWTimeout(15000L, TimeUnit.MILLISECONDS)))
 
   private def id(lakehouseId: String, keyId: String): String = lakehouseId + ":" + keyId
 
@@ -346,31 +364,32 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
       _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(value.lineage, value.lineage))(
         AnalyticsError.InvalidConfiguration("HMAC key retirement Kafka lineage is malformed")
       )
-      _ <- streams
-        .drain {
-          collection.insertOne(
-            new Document("_id", id(value.lakehouseId, value.keyId))
-              .append("lakehouseId", value.lakehouseId)
-              .append("keyId", value.keyId)
-              .append("originalVerifier", value.originalVerifier)
-              .append("capturedAt", Date.from(value.capturedAt))
-              .append("topic", barrier.topic)
-              .append("clusterId", value.lineage.clusterId)
-              .append("topicId", value.lineage.topicId)
-              .append("kafkaVolumeName", value.lineage.volumeName)
-              .append("kafkaVolumeMountpoint", value.lineage.volumeMountpoint)
-              .append("kafkaVolumeCreatedAt", value.lineage.volumeCreatedAt)
-              .append("kafkaBootstrapEndpoint", value.lineage.bootstrapEndpoint)
-              .append(
-                "partitions",
-                barrier.partitions
-                  .map(partition =>
-                    new Document("number", partition.number).append("endOffsetExclusive", partition.endOffsetExclusive)
-                  )
-                  .asJava
-              )
+      _ <- collection
+        .flatMap(
+          _.insertOne(
+            HmacKeyRetirementPreparation.MongoRecord(
+              id(value.lakehouseId, value.keyId),
+              value.lakehouseId,
+              value.keyId,
+              value.originalVerifier,
+              value.capturedAt,
+              AnalyticsTopic.unwrap(barrier.topic),
+              barrier.partitions.map(partition =>
+                HmacKeyRetirementPreparation.PartitionRecord(
+                  AnalyticsPartition.unwrap(partition.number),
+                  AnalyticsOffset.unwrap(partition.endOffsetExclusive)
+                )
+              ),
+              value.lineage.clusterId,
+              value.lineage.topicId,
+              value.lineage.volumeName,
+              value.lineage.volumeMountpoint,
+              value.lineage.volumeCreatedAt,
+              value.lineage.bootstrapEndpoint
+            )
           )
-        }
+        )
+        .void
         .adaptError {
           case error: AnalyticsError => error
           case NonFatal(_)           =>
@@ -380,15 +399,35 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
 
   def read(root: String, keyId: String): F[Option[HmacKeyRetirementPreparation]] =
     Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(root)).flatMap { lakehouseId =>
-      streams
-        .optional[F, Document](collection.find(new Document("_id", id(lakehouseId, keyId))).first)
+      collection
+        .flatMap(
+          _.find(new Document("_id", id(lakehouseId, keyId)))
+            .projection(
+              Projections.include(
+                "_id",
+                "lakehouseId",
+                "keyId",
+                "originalVerifier",
+                "capturedAt",
+                "topic",
+                "partitions",
+                "clusterId",
+                "topicId",
+                "kafkaVolumeName",
+                "kafkaVolumeMountpoint",
+                "kafkaVolumeCreatedAt",
+                "kafkaBootstrapEndpoint"
+              )
+            )
+            .first
+        )
         .flatMap {
-          case Some(document) =>
+          case Some(record) =>
             val malformed = AnalyticsError.InvalidConfiguration("HMAC key retirement preparation is malformed")
             Async[F]
               .fromEither(
-                BsonDecoder[HmacKeyRetirementPreparation]
-                  .decode(document)
+                HmacKeyRetirementPreparation
+                  .decode(record)
                   .flatMap(value =>
                     Either.cond(
                       value.lakehouseId == lakehouseId && value.keyId == keyId,
@@ -438,7 +477,9 @@ private[analytics] object HmacKeyRetirementKafkaOffsets {
       consumer[F](connection, driverExecution).use { client =>
         driverExecution
           .blocking {
-            val partitions = valid.partitions.map(partition => new TopicPartition(valid.topic, partition.number))
+            val topicName = AnalyticsTopic.unwrap(valid.topic)
+            val partitions = valid.partitions
+              .map(partition => new TopicPartition(topicName, AnalyticsPartition.unwrap(partition.number)))
             val actual = client.beginningOffsets(partitions.asJava)
             val offsets = partitions
               .flatMap(partition =>

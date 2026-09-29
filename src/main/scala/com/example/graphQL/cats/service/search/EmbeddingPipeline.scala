@@ -6,6 +6,8 @@ import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse a
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant
@@ -58,7 +60,8 @@ final class EmbeddingPipeline(
     retryDelay: FiniteDuration,
     leaseDuration: FiniteDuration,
     now: IO[Instant],
-    workerId: String
+    workerId: String,
+    diagnostics: Diagnostics
 ) {
   def stream: Stream[IO, Unit] =
     Stream
@@ -90,7 +93,13 @@ final class EmbeddingPipeline(
     limitRetries[IO](math.max(retryAttempts - 1, 0)) join constantDelay[IO](retryDelay)
 
   private def processClaim(claim: ClaimedEmbeddingWork): IO[Unit] =
-    retryingOnFailures(process(claim).handleError(_ => ProcessingOutcome.Retry))(
+    retryingOnFailures(
+      process(claim).handleErrorWith(error =>
+        diagnostics
+          .emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
+          .as(ProcessingOutcome.Retry)
+      )
+    )(
       policy = retryPolicy,
       valueHandler = (outcome, _) =>
         IO.pure(outcome match {
@@ -133,9 +142,10 @@ final class EmbeddingPipeline(
         if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
         else
           embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(observed, embedding).value.map(writeOutcome)
-            case EmbeddingOutcome.Retry               => IO.pure(ProcessingOutcome.Retry)
-            case EmbeddingOutcome.Discarded           =>
+            case EmbeddingOutcome.Embedded(embedding) =>
+              jobs.updateEmbedding(observed, embedding).value.map(writeOutcome)
+            case EmbeddingOutcome.Retry     => IO.pure(ProcessingOutcome.Retry)
+            case EmbeddingOutcome.Discarded =>
               IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
           }
       case Right(None) => IO.pure(ProcessingOutcome.Completed)
@@ -170,9 +180,9 @@ final class EmbeddingPipeline(
 
   private def writeOutcome(result: Either[RepositoryError, Unit]): ProcessingOutcome = result match {
     case Right(_) | Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
-    case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) |
-        Left(RepositoryError.InvalidStoredData) | Left(RepositoryError.MissingWriteResult) |
-        Left(RepositoryError.MissingStoredResult) =>
+    case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) | Left(
+          RepositoryError.InvalidStoredData
+        ) | Left(RepositoryError.MissingWriteResult) | Left(RepositoryError.MissingStoredResult) =>
       ProcessingOutcome.Retry
   }
 
@@ -202,7 +212,8 @@ object EmbeddingPipeline {
       retryAttempts: Int,
       retryDelay: FiniteDuration,
       leaseDuration: FiniteDuration,
-      workerReady: IO[Boolean] = IO.pure(true)
+      workerReady: IO[Boolean] = IO.pure(true),
+      diagnostics: Diagnostics
   ): Resource[IO, DurableEmbeddingWorkPublisher] =
     Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
       for {
@@ -220,7 +231,8 @@ object EmbeddingPipeline {
           retryDelay,
           leaseDuration,
           IO.realTimeInstant,
-          workerId
+          workerId,
+          diagnostics
         )
         _ <- Resource.make(
           workerReady.flatMap(ready => if (ready) pipeline.stream.compile.drain else IO.unit).start

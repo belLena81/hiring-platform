@@ -29,7 +29,7 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
-  private def asRunId(value: String): RunId = RunId.from(value).toEither.toOption.get
+  private def asRunId(value: String): RunId = RunId.from(value).toOption.get
   private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
   private def asFingerprint(value: String): RangeFingerprint =
     RangeFingerprint
@@ -532,13 +532,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
           progress = 0,
           progressKey = ErasurePhase.PublisherDrained.ordinal.toLong * ErasurePhase.ProgressPerPhase
         )
-        barrier = KafkaRetentionBarrier(
-          "hiring.operational-events",
-          Vector(
-            KafkaRetentionBarrier.Partition(0, 21L),
-            KafkaRetentionBarrier.Partition(1, 14L)
-          )
-        )
+        barrier = KafkaRetentionBarrier
+          .from("hiring.operational-events", Vector(0 -> 21L, 1 -> 14L))
+          .toOption
+          .get
         saved <- store.barrier.persistBarrier(advanced, barrier, now.plusSeconds(63))
         loaded <- store.barrier.readBarrier(asAccountSubjectId(subjectId))
         _ <- store.progress.releaseForOtherRequests(advanced, now.plusSeconds(64))
@@ -591,13 +588,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(
         loaded,
         Some(
-          KafkaRetentionBarrier(
-            "hiring.operational-events",
-            Vector(
-              KafkaRetentionBarrier.Partition(0, 21L),
-              KafkaRetentionBarrier.Partition(1, 14L)
-            )
-          )
+          KafkaRetentionBarrier
+            .from("hiring.operational-events", Vector(0 -> 21L, 1 -> 14L))
+            .toOption
+            .get
         )
       )
       assertNotEquals(reclaimed.leaseToken, claim.leaseToken)

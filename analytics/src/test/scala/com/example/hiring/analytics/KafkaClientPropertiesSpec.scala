@@ -58,9 +58,9 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
   test("Kafka assignment and offset JSON round-trip unusual topics in sorted partition order") {
     val topic = "topic\"\\\n\u0001"
     val ranges = Vector(
-      PartitionOffsetRange.unsafe(topic, 3, 12L, 15L),
-      PartitionOffsetRange.unsafe(topic, 1, 4L, 9L),
-      PartitionOffsetRange.unsafe("a-topic", 2, 7L, 10L)
+      TestPartitionOffsetRange.unsafe(topic, 3, 12L, 15L),
+      TestPartitionOffsetRange.unsafe(topic, 1, 4L, 9L),
+      TestPartitionOffsetRange.unsafe("a-topic", 2, 7L, 10L)
     )
     val assignments = parse(KafkaOffsetRangeSource.assignJson(ranges)).toOption.get
     val offsets = parse(KafkaOffsetRangeSource.offsetJson(ranges, _.startOffset)).toOption.get

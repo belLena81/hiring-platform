@@ -52,7 +52,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
 
   private def manifest(runId: String): AnalyticsRunManifest =
     AnalyticsRunManifest
-      .validated(runId, Vector(PartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
+      .validated(runId, Vector(IntegrationPartitionOffsetRange.unsafe("topic", 0, 0L, 1L)))
       .toEither
       .fold(errors => fail(errors.toString), identity)
 
@@ -159,7 +159,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   test("missing or malformed Mongo marker data fails before any Delta mutation") {
     val missingCollectionDatabase = mongoClient.getDatabase(s"missing_${UUID.randomUUID()}")
     val missingPaths =
-      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-missing-markers").toUri.toString)
+      IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-missing-markers").toUri.toString)
     val missingBatch = AnalyticsBatchTestSupport.newBatch(
       missingPaths,
       pseudonymizer,
@@ -187,7 +187,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       .getCollection("analytics_erasure_requests")
       .insertOne(new Document("_id", "not-a-uuid").append("state", "Pending"))
     val malformedPaths =
-      AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-malformed-markers").toUri.toString)
+      IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-malformed-markers").toUri.toString)
     val malformedBatch = AnalyticsBatchTestSupport.newBatch(
       malformedPaths,
       pseudonymizer,
@@ -216,7 +216,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
           new Document("_id", UUID.randomUUID().toString).append("state", "Pending")
         ).asJava
       )
-    val paths = AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-overflow").toUri.toString)
+    val paths =
+      IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-marker-overflow").toUri.toString)
     val markers = new MongoActiveDeletionMarkerSource[IO](
       mongo4catsDatabase(database.getName),
       pseudonymizer,
@@ -248,7 +249,9 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       .unsafeRunSync()
     try {
       val paths =
-        AnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-unavailable-markers").toUri.toString)
+        IntegrationAnalyticsLakehousePaths.unsafe(
+          Files.createTempDirectory("analytics-unavailable-markers").toUri.toString
+        )
       val batch = AnalyticsBatchTestSupport.newBatch(
         paths,
         pseudonymizer,

@@ -11,12 +11,21 @@ import com.example.hiring.analytics.adapter.mongo.{
   MongoAnalyticsReportPublisher,
   MongoHmacKeyRetirementAuthorizationStore
 }
-import com.example.hiring.analytics.adapter.spark.DeltaAnalyticsErasureLakehouse
-import com.example.hiring.analytics.config.KafkaConnection
-import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.adapter.spark.{
+  DeltaAnalyticsErasureLakehouse,
+  LakehouseOperation,
+  SparkBlockingExecution
+}
+import com.example.hiring.analytics.config.{
+  AnalyticsErasureWorkerPolicy,
+  AnalyticsErasureWorkerTimings,
+  KafkaConnection
+}
+import com.example.hiring.analytics.domain.{AnalyticsTopic, SubjectPseudonymizer}
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsReportPublisher}
 import com.example.hiring.analytics.service.erasure.{
   AnalyticsErasureWorker,
+  AnalyticsErasureKafkaRuntime,
   KafkaRetention,
   KafkaRetentionBarrier,
   TransactionalProducerFencer
@@ -48,7 +57,7 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       .map(_._1)
       .unsafeRunSync()
 
-  def runId(raw: String): RunId = RunId.from(raw).toEither.toOption.get
+  def runId(raw: String): RunId = RunId.from(raw).toOption.get
   def accountSubjectId(raw: String): AccountSubjectId = AccountSubjectId.from(raw).toOption.get
 
   def fingerprint(raw: String): RangeFingerprint =
@@ -70,50 +79,63 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       pollInterval: FiniteDuration = 5.seconds,
       producerFencer: TransactionalProducerFencer[IO] =
         KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution),
-      kafkaRetention: KafkaRetention[IO] =
-        com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter.liveRetention[IO](
-          AnalyticsBatchTestSupport.driverExecution
-        )
+      kafkaRetention: Option[KafkaRetention[IO]] = None
   ): AnalyticsErasureWorker[IO] = {
-    val lock = new MongoAnalyticsLakehouseLock(database, clock, AnalyticsTestOperationalConfig.streams)
+    val lock = new MongoAnalyticsLakehouseLock(
+      database,
+      AnalyticsTestOperationalConfig.streams,
+      Some(clock.realTimeInstant),
+      Some(clock.monotonic)
+    )
     val markers =
       new MongoActiveDeletionMarkerSource[IO](
         database,
         pseudonymizer,
         streams = AnalyticsTestOperationalConfig.streams
       )
+    val lakehouseExecution = new LakehouseOperation[IO](
+      SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+    )
     val maintenance = new DeltaAnalyticsErasureLakehouse[IO](
       spark,
       paths,
       pseudonymizer,
-      clock,
       lock,
       new MongoHmacKeyRetirementAuthorizationStore[IO](database, AnalyticsTestOperationalConfig.streams),
       AnalyticsTestOperationalConfig.operational,
-      com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-        .forTests[IO](scala.concurrent.ExecutionContext.parasitic),
-      Slf4jLogger.getLogger[IO]
+      lakehouseExecution,
+      Slf4jLogger.getLogger[IO],
+      Some(clock.realTimeInstant)
+    )
+    val refinedTopic = AnalyticsTopic
+      .from(topic)
+      .toOption
+      .getOrElse(
+        throw new IllegalArgumentException("test topic must be non-empty")
+      )
+    val retention = kafkaRetention.getOrElse(
+      com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter.liveRetention[IO](
+        kafka,
+        refinedTopic,
+        AnalyticsBatchTestSupport.driverExecution
+      )
     )
     new AnalyticsErasureWorker[IO](
       stores.queue,
       stores.progress,
       stores.barrier,
-      kafka,
-      fencerKafka,
-      topic,
+      AnalyticsErasureKafkaRuntime(fencerKafka, producerFencer, retention),
       paths,
       publisher,
       markers,
       maintenance,
       lock,
-      clock,
       Slf4jLogger.getLogger[IO],
-      producerFencer,
-      kafkaRetention,
-      AnalyticsTestOperationalConfig.operational.retention,
-      leaseDuration,
-      deliveryTimeout,
-      pollInterval
+      AnalyticsErasureWorkerPolicy(
+        AnalyticsTestOperationalConfig.operational.retention,
+        AnalyticsErasureWorkerTimings(leaseDuration, deliveryTimeout, pollInterval)
+      ),
+      Some(clock.realTimeInstant)
     )
   }
 }

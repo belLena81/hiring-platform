@@ -107,7 +107,6 @@ object AnalyticsKeyRetirementAuditMain extends IOApp {
                 now,
                 new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
                   database,
-                  Clock[IO],
                   streams
                 ),
                 streams,

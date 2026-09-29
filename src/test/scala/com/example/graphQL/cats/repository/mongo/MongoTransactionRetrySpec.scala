@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
-import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError}
+import cats.syntax.all.*
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
 import com.mongodb.client.result.UpdateResult
 import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
@@ -48,6 +49,32 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
     )
   }
 
+  test("retry decisions cover every stage and relevant label combination") {
+    import MongoTransactionRunner.{RetryDecision, RetryStage}
+
+    val labels = List(
+      Set.empty[String],
+      Set("TransientTransactionError"),
+      Set("UnknownTransactionCommitResult"),
+      Set("TransientTransactionError", "UnknownTransactionCommitResult")
+    )
+    val expectedOperation = List(
+      RetryDecision.Fail,
+      RetryDecision.RetryTransaction,
+      RetryDecision.Fail,
+      RetryDecision.RetryTransaction
+    )
+    val expectedCommit = List(
+      RetryDecision.Fail,
+      RetryDecision.RetryTransaction,
+      RetryDecision.RetryCommit,
+      RetryDecision.RetryCommit
+    )
+
+    assertEquals(labels.map(RetryDecision.decide(RetryStage.Operation, _)), expectedOperation)
+    assertEquals(labels.map(RetryDecision.decide(RetryStage.Commit, _)), expectedCommit)
+  }
+
   test("cats-retry bounds transaction attempts") {
     val policy = MongoTransactionRunner.RetryPolicy(
       maxTransactionAttempts = 3,
@@ -72,14 +99,16 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runs <- Ref.of[IO, Int](0)
       operations <- Ref.of[IO, Int](0)
       runner = recordingRunner(runs)
-      atomic <- MongoMutationWriteContext.run(MutationWriteContext.directWrite, runner, transactionRequired = true) {
-        _ =>
-          operations.update(_ + 1).as(Right("atomic"))
-      }
-      direct <- MongoMutationWriteContext.run(MutationWriteContext.directWrite, runner, transactionRequired = false) {
-        _ =>
-          operations.update(_ + 1).as(Right("direct"))
-      }
+      atomic <- MongoMutationWriteContext
+        .run(MutationWriteContext.directWrite, runner, transactionRequired = true) { _ =>
+          RepositoryIO.lift(operations.update(_ + 1)).as("atomic")
+        }
+        .value
+      direct <- MongoMutationWriteContext
+        .run(MutationWriteContext.directWrite, runner, transactionRequired = false) { _ =>
+          RepositoryIO.lift(operations.update(_ + 1)).as("direct")
+        }
+        .value
       runCount <- runs.get
       operationCount <- operations.get
     } yield {
@@ -94,10 +123,11 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
     for {
       runs <- Ref.of[IO, Int](0)
       runner = recordingRunner(runs)
-      result <- MongoMutationWriteContext.run(MongoMutationWriteContext(None), runner, transactionRequired = true) {
-        session =>
-          IO.pure(Right(session))
-      }
+      result <- MongoMutationWriteContext
+        .run(MongoMutationWriteContext(None), runner, transactionRequired = true) { session =>
+          RepositoryIO.fromEither(Right(session))
+        }
+        .value
       runCount <- runs.get
     } yield {
       assertEquals(result, Right(None))
@@ -112,8 +142,9 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       sessionFailure <- MongoMutationWriteContext.session(foreign).attempt
       runFailure <- MongoMutationWriteContext
         .run(foreign, recordingRunner(runs), transactionRequired = false)(_ =>
-          IO.pure(Right("unused"): Either[RepositoryError, String])
+          RepositoryIO.fromEither(Right("unused"): Either[RepositoryError, String])
         )
+        .value
         .attempt
       runCount <- runs.get
     } yield {
@@ -135,7 +166,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
-          operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]
-      ): IO[Either[RepositoryError, A]] = runs.update(_ + 1) *> operation(None)
+          operation: Option[ClientSession[IO]] => RepositoryIO[A]
+      ): RepositoryIO[A] = RepositoryIO.lift(runs.update(_ + 1)) *> operation(None)
     }
 }

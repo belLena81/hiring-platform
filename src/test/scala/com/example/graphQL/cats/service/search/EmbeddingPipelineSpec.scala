@@ -6,6 +6,7 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
@@ -40,7 +41,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           retryAttempts = 3,
           retryDelay = 10.millis,
           leaseDuration = 1.second,
-          workerReady = setup.get
+          workerReady = setup.get,
+          diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
         )
         .use { publisher =>
           for {
@@ -173,7 +175,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           1,
           retryAttempts = 3,
           retryDelay = 10.millis,
-          leaseDuration = 1.second
+          leaseDuration = 1.second,
+          diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
         )
         .use { publisher =>
           val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
@@ -189,6 +192,53 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       assertEquals(attempts, 3)
       assertEquals(stored.attempts, 0)
       assertEquals(stored.state, "Failed")
+    }
+  }
+
+  test("embedding worker reports unexpected processing failure and records retry exhaustion") {
+    val provider = new EmbeddingService {
+      override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+        IO.raiseError(new IllegalStateException("private embedding detail"))
+    }
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      work <- InMemoryEmbeddingWorkRepository.create
+      observed <- Ref.of[IO, List[(LogEvent, Map[LogField, String])]](Nil)
+      diagnostics = new Diagnostics {
+        override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          observed.update(_ :+ (event -> fields))
+      }
+      _ <- EmbeddingPipeline
+        .resource(
+          work,
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          provider,
+          "voyage-4-lite",
+          8,
+          1,
+          retryAttempts = 1,
+          retryDelay = 10.millis,
+          leaseDuration = 1.second,
+          diagnostics = diagnostics
+        )
+        .use { publisher =>
+          val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+          publisher.offer(EmbeddingWork.JobChanged(jobId)) *>
+            eventually(work.snapshot)(
+              _.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.RetryExhausted))
+            ).void
+        }
+      events <- observed.get
+      snapshot <- work.snapshot
+    } yield {
+      val key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+      assertEquals(snapshot.get(key.value).flatMap(_.failure), Some(EmbeddingWorkFailure.RetryExhausted))
+      assertEquals(events.map(_._1), List(LogEvent.EmbeddingProcessingFailed))
+      assertEquals(events.headOption.flatMap(_._2.get(LogField.ErrorType)), Some("java.lang.IllegalStateException"))
+      assertEquals(events.headOption.map(_._2.keySet), Some(LogFields.failure(new IllegalStateException()).keySet))
+      assert(!events.exists(_._2.values.exists(_.contains("private embedding detail"))))
     }
   }
 
@@ -217,13 +267,15 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         for {
           _ <- queue.offer(EmbeddingWork.JobChanged(jobId))
           _ <- started.get
-          updated <- jobs.updateWithEvents(
-            Versioned(openJob, 0L),
-            openJob.copy(title = "Staff Scala Developer"),
-            now,
-            Nil,
-            com.example.graphQL.cats.service.port.MutationWriteContext.directWrite
-          ).value
+          updated <- jobs
+            .updateWithEvents(
+              Versioned(openJob, 0L),
+              openJob.copy(title = "Staff Scala Developer"),
+              now,
+              Nil,
+              com.example.graphQL.cats.service.port.MutationWriteContext.directWrite
+            )
+            .value
           _ = assert(updated.isRight)
           _ <- release.complete(()).void
           staleResult <- writeResult.get
@@ -362,7 +414,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           1,
           retryAttempts = 1,
           retryDelay = 10.millis,
-          leaseDuration = 1.second
+          leaseDuration = 1.second,
+          diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
         )
         .use { publisher =>
           publisher.offer(EmbeddingWork.JobChanged(jobId)) *> publisher.offer(EmbeddingWork.JobChanged(otherJobId)) *>
@@ -398,7 +451,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
           1,
           retryAttempts = 1,
           retryDelay = 10.millis,
-          leaseDuration = 1.second
+          leaseDuration = 1.second,
+          diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
         )
         .use { publisher =>
           publisher.wake *> eventually(work.snapshot)(snapshot =>
@@ -423,7 +477,19 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       .eval(InMemoryEmbeddingWorkRepository.create)
       .flatMap(work =>
         EmbeddingPipeline
-          .resource(work, users, jobs, embeddings, model, queueSize, parallelism, retryAttempts, retryDelay, 1.second)
+          .resource(
+            work,
+            users,
+            jobs,
+            embeddings,
+            model,
+            queueSize,
+            parallelism,
+            retryAttempts,
+            retryDelay,
+            1.second,
+            diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
+          )
       )
 
   private def waitFor(done: IO[Boolean], remaining: Int = 20): IO[Unit] =
@@ -546,31 +612,33 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       extends EmbeddingWorkRepository {
     def snapshot: IO[Map[String, StoredWork]] = ref.get
 
-    override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      ref
-        .update { current =>
-          val next = current.get(key.value).fold(StoredWork(key, 1L, 0, "Ready", now, None, None, None)) { existing =>
-            if (existing.state == "Processing") existing.copy(generation = existing.generation + 1L, attempts = 0)
-            else
-              existing.copy(
-                generation = existing.generation + 1L,
-                state = "Ready",
-                availableAt = now,
-                leaseToken = None,
-                leaseUntil = None,
-                failure = None
-              )
+    override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        ref
+          .update { current =>
+            val next = current.get(key.value).fold(StoredWork(key, 1L, 0, "Ready", now, None, None, None)) { existing =>
+              if (existing.state == "Processing") existing.copy(generation = existing.generation + 1L, attempts = 0)
+              else
+                existing.copy(
+                  generation = existing.generation + 1L,
+                  state = "Ready",
+                  availableAt = now,
+                  leaseToken = None,
+                  leaseUntil = None,
+                  failure = None
+                )
+            }
+            current.updated(key.value, next)
           }
-          current.updated(key.value, next)
-        }
-        .as(Right(())) )
+          .as(Right(()))
+      )
 
     override def claim(
         workerId: String,
         now: Instant,
         leaseUntil: Instant
-    ): RepositoryIO[Option[ClaimedEmbeddingWork]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.randomUUID.flatMap { token =>
+    ): RepositoryIO[Option[ClaimedEmbeddingWork]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.randomUUID.flatMap { token =>
         ref.modify { current =>
           current.values.toList
             .sortBy(_.key.value)
@@ -586,28 +654,31 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
               )
             }
         }
-      } )
+      })
 
-    override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      transition(claim)(_ => None) )
+    override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(transition(claim)(_ => None))
 
-    override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      transition(claim)(
-        _.copy(
-          state = "Retry",
-          attempts = claim.attempts + 1,
-          availableAt = availableAt,
-          leaseToken = None,
-          leaseUntil = None
-        ).some
-      ) )
+    override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        transition(claim)(
+          _.copy(
+            state = "Retry",
+            attempts = claim.attempts + 1,
+            availableAt = availableAt,
+            leaseToken = None,
+            leaseUntil = None
+          ).some
+        )
+      )
 
     override def fail(
         claim: ClaimedEmbeddingWork,
         failure: EmbeddingWorkFailure,
         now: Instant
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      transition(claim)(_.copy(state = "Failed", leaseToken = None, leaseUntil = None, failure = Some(failure)).some) )
+      transition(claim)(_.copy(state = "Failed", leaseToken = None, leaseUntil = None, failure = Some(failure)).some)
+    )
 
     private def transition(
         claim: ClaimedEmbeddingWork

@@ -100,12 +100,12 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     result
   }
 
-  private def configureTopic(): Unit = {
+  private def configureTopic(configuredRetentionMs: Long): Unit = {
     val admin = Admin.create(adminProperties)
     try {
       val resource = new ConfigResource(ConfigResource.Type.TOPIC, topic)
       val configs = Vector(
-        new ConfigEntry("retention.ms", retentionMs.toString),
+        new ConfigEntry("retention.ms", configuredRetentionMs.toString),
         new ConfigEntry("retention.bytes", "-1"),
         new ConfigEntry("cleanup.policy", "delete"),
         new ConfigEntry("segment.bytes", segmentBytes.toString)
@@ -124,7 +124,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         .asScala
         .map(entry => entry.name() -> entry.value())
         .toMap
-      assertEquals(effective.get("retention.ms"), Some(retentionMs.toString))
+      assertEquals(effective.get("retention.ms"), Some(configuredRetentionMs.toString))
       assertEquals(effective.get("segment.bytes"), Some(segmentBytes.toString))
       assertEquals(effective.get("cleanup.policy"), Some("delete"))
     } finally admin.close()
@@ -206,7 +206,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       println("RETENTION_PROOF_PREPARED_ALREADY topic=" + topic + " request=" + subjectId)
       return
     }
-    configureTopic()
+    configureTopic(if (shortHorizon) 15L * 60L * 1000L else retentionMs)
 
     val producer = new KafkaProducer[String, String](
       properties("hiring_publisher_v2", required("KAFKA_PUBLISHER_V2_PASSWORD"), Some(producerId))
@@ -229,7 +229,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     val spark = sparkSession()
     try {
       val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
-      val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
+      val paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot)
       val batch = AnalyticsBatchTestSupport.newBatch(
         paths,
         pseudonymizer,
@@ -242,7 +242,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       val manifest = AnalyticsRunManifest
         .validated(
           runId(rangeEnd),
-          Vector(PartitionOffsetRange.unsafe(topic, 0, 0L, rangeEnd))
+          Vector(IntegrationPartitionOffsetRange.unsafe(topic, 0, 0L, rangeEnd))
         )
         .toEither
         .fold(errors => fail(errors.toString), identity)
@@ -268,7 +268,15 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         "ALTER TABLE delta." + tick + paths.bronze + tick +
           " SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '32')"
       )
-      spark.read.format("delta").load(paths.bronze).limit(1).write.format("delta").mode("append").save(paths.bronze)
+      spark.read
+        .format("delta")
+        .load(paths.bronze)
+        .limit(1)
+        .write
+        .format("delta")
+        .option("delta.dataSkippingNumIndexedCols", "32")
+        .mode("append")
+        .save(paths.bronze)
       spark.sql(
         "ALTER TABLE delta." + tick + paths.bronze + tick +
           " SET TBLPROPERTIES ('delta.dataSkippingNumIndexedCols' = '0')"
@@ -373,6 +381,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     assertEquals(mode, "append-retention-tail")
     val staged = db.getCollection(proofCollection).find(Filters.eq("_id", nonce)).first()
     if (staged != null && staged.get("rolloverTailOffset", classOf[java.lang.Long]) != null) {
+      if (shortHorizon) configureTopic(retentionMs)
       println(
         "RETENTION_PROOF_TAIL_ALREADY_STAGED topic=" + topic + " barrierOffsetExclusive=" +
           staged.getLong("barrierOffsetExclusive") + " firstTailOffset=" + staged.getLong("tailOffset") +
@@ -388,9 +397,9 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       .readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(subjectId))
       .unsafeRunSync()
       .getOrElse(fail("worker must persist its Kafka barrier"))
-    assertEquals(barrier.topic, topic)
+    assertEquals(AnalyticsTopic.unwrap(barrier.topic), topic)
     assertEquals(barrier.partitions.size, 1)
-    val barrierOffset = barrier.partitions.head.endOffsetExclusive
+    val barrierOffset = barrier.partitions.head.endOffsetExclusive.asInstanceOf[Long]
     val unrelated = UUID.randomUUID().toString
     val producer = new KafkaProducer[String, String](
       properties(
@@ -427,6 +436,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           Updates.set("tailAppendedAt", Date.from(Instant.now()))
         )
       )
+    if (shortHorizon) configureTopic(retentionMs)
     println(
       "RETENTION_PROOF_TAIL topic=" + topic + " barrierOffsetExclusive=" + barrierOffset +
         " firstTailOffset=" + sent.head.offset() + " rolloverTailOffset=" + sent.last.offset()
@@ -451,14 +461,21 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       .unsafeRunSync()
       .getOrElse(fail("Kafka barrier is missing"))
     val kafkaPassed = KafkaRetentionAdapter
-      .liveRetention[IO](AnalyticsBatchTestSupport.driverExecution)
-      .retentionPassed(
+      .liveRetention[IO](
         connection("analytics_reader", required("KAFKA_READER_PASSWORD")),
+        barrier.topic,
+        AnalyticsBatchTestSupport.driverExecution
+      )
+      .retentionPassed(
         barrier
       )
       .unsafeRunSync()
     val deltaLogHorizon = if (shortHorizon) 60L else 30L * 86400L
-    val deltaDeadline = purgedAt.plusSeconds(deltaLogHorizon)
+    // Delta truncates the log-cleanup cutoff to a UTC day before deleting old logs.
+    val deltaDeadline = purgedAt
+      .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
+      .plus(1L, java.time.temporal.ChronoUnit.DAYS)
+      .plusSeconds(deltaLogHorizon)
     val deltaPassed = !Instant.now().isBefore(deltaDeadline)
     val evidence = db
       .getCollection("analytics_erasure_delta_files")
@@ -503,7 +520,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       assertEquals(request.getString("phase"), ErasurePhase.ReportPublished.toString)
       val spark = sparkSession()
       try {
-        val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
+        val paths = IntegrationAnalyticsLakehousePaths.unsafe(lakehouseRoot)
         val pseudonymizer =
           AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
         val maintenance = AnalyticsBatchTestSupport.newMaintenance(spark, paths, pseudonymizer)
@@ -549,6 +566,13 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   test("actual local retention proof stages, checks, and verifies durable erasure") {
     if (enabled) {
       assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
+      if (shortHorizon) {
+        assertEquals(databaseName, "hiring_erasure_smoke_" + nonce)
+        assertEquals(topic, "hiring.erasure.smoke." + nonce)
+      } else {
+        assertEquals(databaseName, "hiring_retention_" + nonce)
+        assertEquals(topic, "hiring.retention." + nonce)
+      }
       val client = MongoClients.create(required("MONGODB_URI"))
       val (reactiveClient, releaseReactiveClient) = CatsMongoClient
         .fromConnectionString[IO](required("MONGODB_URI"))

@@ -8,9 +8,9 @@ import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
-import mongo4cats.codecs.CodecRegistry
 import mongo4cats.database.MongoDatabase
-import com.mongodb.client.model.{Filters, Sorts}
+import mongo4cats.errors.MongoJsonParsingException
+import com.mongodb.client.model.{Filters, Projections, Sorts}
 import fs2.Stream
 import org.bson.Document
 
@@ -29,9 +29,14 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
 ) extends ActiveDeletionMarkerSource[F] {
   private val requestCollection = com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.ErasureRequests
 
-  private def activeRequests(now: Instant): Stream[F, Document] =
+  private def activeRequests(now: Instant): Stream[F, AnalyticsMongoRecords.ErasureRequest] =
     Stream
-      .eval(database.getCollection[Document](requestCollection, CodecRegistry.Default))
+      .eval(
+        database.getCollection[AnalyticsMongoRecords.ErasureRequest](
+          requestCollection,
+          AnalyticsMongoRecords.erasureRequestRegistry
+        )
+      )
       .flatMap(collection =>
         streams.stream(
           collection.underlying
@@ -59,13 +64,21 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
                 )
               )
             )
+            .projection(
+              Projections.include(
+                AnalyticsCollections.Fields.Id,
+                AnalyticsCollections.Fields.State,
+                AnalyticsCollections.Fields.ExpiresAt
+              )
+            )
             .sort(Sorts.ascending(AnalyticsCollections.Fields.Id))
             .batchSize(256)
         )
       )
       .handleErrorWith {
-        case error: AnalyticsError => Stream.raiseError[F](error)
-        case cause                 => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
+        case error: AnalyticsError        => Stream.raiseError[F](error)
+        case _: MongoJsonParsingException => Stream.raiseError[F](AnalyticsError.MalformedMarker)
+        case cause                        => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
       }
 
   override def activeSubjectTokens: F[Vector[SubjectToken]] =
@@ -98,48 +111,38 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
 private[analytics] object MongoActiveDeletionMarkerSource {
   val MaximumPendingMarkers: Int = 100000
 
-  def tokenFor(request: Document, pseudonymizer: SubjectPseudonymizer): Either[AnalyticsError, SubjectToken] =
+  def tokenFor(
+      request: AnalyticsMongoRecords.ErasureRequest,
+      pseudonymizer: SubjectPseudonymizer
+  ): Either[AnalyticsError, SubjectToken] =
     tokensFor(request, pseudonymizer).map(_.head)
 
-  def tokensFor(
-      request: Document,
+  private[analytics] def tokensFor(
+      request: AnalyticsMongoRecords.ErasureRequest,
       pseudonymizer: SubjectPseudonymizer
   ): Either[AnalyticsError, Vector[SubjectToken]] = {
-    import BsonValueDecoder.given
-    BsonDecoder
-      .required[String](request, AnalyticsCollections.Fields.Id, AnalyticsError.MalformedMarker)
-      .flatMap { subjectId =>
-        val validId = scala.util.Try(UUID.fromString(subjectId)).toOption.exists(_.toString == subjectId)
-        Either.cond(validId, subjectId, AnalyticsError.MalformedMarker).flatMap { id =>
-          pseudonymizer
-            .matchingTokens(id)
-            .leftMap(AnalyticsError.InvalidConfiguration.apply)
-        }
-      }
+    val subjectId = request._id
+    val validId = scala.util.Try(UUID.fromString(subjectId)).toOption.exists(_.toString == subjectId)
+    Either.cond(validId, subjectId, AnalyticsError.MalformedMarker).flatMap { id =>
+      pseudonymizer.matchingTokens(id).leftMap(AnalyticsError.InvalidConfiguration.apply)
+    }
   }
 
   private[analytics] def activeTokens(
-      request: Document,
+      request: AnalyticsMongoRecords.ErasureRequest,
       now: Instant,
       pseudonymizer: SubjectPseudonymizer
-  ): Either[AnalyticsError, Option[Vector[SubjectToken]]] = {
-    import BsonValueDecoder.given
-    BsonDecoder
-      .required[ErasureRequestState](
-        request,
-        AnalyticsCollections.Fields.State,
-        AnalyticsError.MalformedMarker
-      )
-      .flatMap {
-        case ErasureRequestState.Pending | ErasureRequestState.Processing =>
-          tokensFor(request, pseudonymizer).map(Some(_))
-        case ErasureRequestState.Complete =>
-          BsonDecoder
-            .required[Date](request, AnalyticsCollections.Fields.ExpiresAt, AnalyticsError.MalformedMarker)
-            .flatMap(expiresAt =>
-              if (expiresAt.after(Date.from(now))) tokensFor(request, pseudonymizer).map(Some(_))
-              else Right(None)
-            )
-      }
-  }
+  ): Either[AnalyticsError, Option[Vector[SubjectToken]]] =
+    request.state.flatMap(ErasureRequestState.fromString).toRight(AnalyticsError.MalformedMarker).flatMap {
+      case ErasureRequestState.Pending | ErasureRequestState.Processing =>
+        tokensFor(request, pseudonymizer).map(Some(_))
+      case ErasureRequestState.Complete =>
+        request.expiresAt
+          .map(Date.from)
+          .toRight(AnalyticsError.MalformedMarker)
+          .flatMap(expiresAt =>
+            if (expiresAt.after(Date.from(now))) tokensFor(request, pseudonymizer).map(Some(_))
+            else Right(None)
+          )
+    }
 }
