@@ -168,7 +168,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
             .getCollection("analytics_report_snapshots")
             .updateOne(
               new Document("_id", "current"),
-              Updates.set("expiresAt", Date.from(now.minusSeconds(1L)))
+              Updates.combine(
+                Updates.set("expiresAt", Date.from(now.minusSeconds(1L))),
+                Updates.set("operatorExtension", "preserved")
+              )
             )
         }
         replay <- publisher.reserve(asRunId("newer"), asFingerprint("range-newer"), now)
@@ -182,6 +185,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       assertEquals(snapshot.getLong("revision"), Long.box(2L))
       assertEquals(snapshot.getString("runId"), "newer")
       assert(snapshot.getDate("expiresAt").after(Date.from(now)))
+      assertEquals(snapshot.getString("operatorExtension"), "preserved")
       database
         .getCollection("analytics_report_runs")
         .insertOne(

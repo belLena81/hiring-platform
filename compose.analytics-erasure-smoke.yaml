@@ -1,0 +1,40 @@
+services:
+  mongodb:
+    ports: !override []
+    volumes: !override
+      - erasure-smoke-mongodb:/data/db
+
+  kafka:
+    ports: !override []
+    environment:
+      KAFKA_LOG_RETENTION_HOURS: "1"
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "1000"
+    volumes: !override
+      - erasure-smoke-kafka:/var/lib/kafka/data
+
+  analytics-batch:
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+      MONGODB_DATABASE: ${HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE:?Set HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE}
+      ANALYTICS_TOPIC: ${HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC:?Set HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC}
+      ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY: 1 minute
+      ANALYTICS_RETENTION_DELTA_LOG_RETENTION: 1 minute
+      HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON: "true"
+    volumes: !override
+      - erasure-smoke-analytics:/var/lib/hiring-analytics
+
+  analytics-erasure-worker:
+    environment:
+      MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
+      MONGODB_DATABASE: ${HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE:?Set HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE}
+      ANALYTICS_TOPIC: ${HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC:?Set HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC}
+      ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY: 1 minute
+      ANALYTICS_RETENTION_DELTA_LOG_RETENTION: 1 minute
+      HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON: "true"
+    volumes: !override
+      - erasure-smoke-analytics:/var/lib/hiring-analytics
+
+volumes:
+  erasure-smoke-mongodb:
+  erasure-smoke-kafka:
+  erasure-smoke-analytics:

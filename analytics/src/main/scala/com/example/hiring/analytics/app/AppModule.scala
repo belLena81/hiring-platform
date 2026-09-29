@@ -9,7 +9,7 @@ import com.example.hiring.analytics.adapter.spark.AnalyticsErasureWorker
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 
-import cats.effect.{Async, Clock, Resource, Temporal}
+import cats.effect.{Async, Clock, Resource}
 import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
@@ -41,7 +41,7 @@ object AppModule {
       .toEither
       .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
 
-  def batch[F[_]: Async: Clock](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
+  def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
     shared[F](settings.common, appName = "hiring-analytics-batch").map { shared =>
       val common = settings.common
       val job = new HiringAnalyticsBatch[F](
@@ -65,7 +65,7 @@ object AppModule {
       )
     }
 
-  def worker[F[_]: Async: Clock: Temporal](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
+  def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
     shared[F](settings.common, appName = "hiring-analytics-erasure-worker").map { shared =>
       val common = settings.common
       val store = new MongoAnalyticsErasureWorkerStore[F](shared.client, shared.database, shared.streams)
@@ -102,7 +102,7 @@ object AppModule {
       new MongoPublisherStream(settings.common.operational)
     )
 
-  private def shared[F[_]: Async: Clock](
+  private def shared[F[_]: Async](
       common: AnalyticsCommonSettings,
       appName: String
   ): Resource[F, Shared[F]] =

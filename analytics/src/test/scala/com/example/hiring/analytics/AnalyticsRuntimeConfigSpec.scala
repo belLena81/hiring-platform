@@ -79,10 +79,10 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     |      published-snapshot-days = ${?ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS}
     |      deletion-marker-days = 31
     |      deletion-marker-days = ${?ANALYTICS_RETENTION_DELETION_MARKER_DAYS}
-    |      delta-vacuum-safety-days = 7
-    |      delta-vacuum-safety-days = ${?ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY_DAYS}
-    |      delta-log-retention-days = 30
-    |      delta-log-retention-days = ${?ANALYTICS_RETENTION_DELTA_LOG_RETENTION_DAYS}
+    |      delta-vacuum-safety = 7 days
+    |      delta-vacuum-safety = ${?ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY}
+    |      delta-log-retention = 30 days
+    |      delta-log-retention = ${?ANALYTICS_RETENTION_DELTA_LOG_RETENTION}
     |    }
     |    report-reservation-ttl-days = 90
     |    report-reservation-ttl-days = ${?ANALYTICS_REPORT_RESERVATION_TTL_DAYS}
@@ -159,8 +159,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
           "ANALYTICS_RETENTION_SILVER_DAYS" -> "60",
           "ANALYTICS_RETENTION_PUBLISHED_SNAPSHOT_DAYS" -> "15",
           "ANALYTICS_RETENTION_DELETION_MARKER_DAYS" -> "20",
-          "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY_DAYS" -> "3",
-          "ANALYTICS_RETENTION_DELTA_LOG_RETENTION_DAYS" -> "10",
+          "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "3 days",
+          "ANALYTICS_RETENTION_DELTA_LOG_RETENTION" -> "10 days",
           "ANALYTICS_REPORT_RESERVATION_TTL_DAYS" -> "45",
           "ANALYTICS_MONGO_TRANSACTION_WINDOW_SECONDS" -> "30",
           "ANALYTICS_MAXIMUM_ERASURE_EVIDENCE_FILES" -> "8000",
@@ -174,9 +174,9 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(configured.retention.silverDays.value, 60)
     assertEquals(configured.retention.publishedSnapshotDays.value, 15)
     assertEquals(configured.retention.deletionMarkerDays.value, 20)
-    assertEquals(configured.retention.deltaVacuumSafetyDays.value, 3)
+    assertEquals(configured.retention.deltaVacuumSafety, 3.days)
     assertEquals(configured.retention.deltaVacuumSafetyCheckEnabled, false)
-    assertEquals(configured.retention.deltaLogRetentionDays.value, 10)
+    assertEquals(configured.retention.deltaLogRetention, 10.days)
     assertEquals(configured.reportReservationTtl, 45.days)
     assertEquals(configured.mongoTransactionWindow, 30.seconds)
     assertEquals(configured.maximumErasureEvidenceFiles, 8000)
@@ -189,6 +189,19 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val message = invalid.swap.toOption.getOrElse(fail("expected rejected operational settings")).getMessage
     assert(message.contains("retention.bronze-days must be greater than zero"))
     assert(message.contains("mongo-publisher-buffer-size must be between one and"))
+
+    val invalidDeltaDurations = AnalyticsRuntimeConfig.operationalFromHocon(
+      hocon,
+      Map(
+        "ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "0 seconds",
+        "ANALYTICS_RETENTION_DELTA_LOG_RETENTION" -> "-1 day"
+      )
+    )
+    val deltaDurationMessage = invalidDeltaDurations.swap.toOption
+      .getOrElse(fail("expected rejected Delta retention durations"))
+      .getMessage
+    assert(deltaDurationMessage.contains("retention.delta-vacuum-safety must be greater than zero"))
+    assert(deltaDurationMessage.contains("retention.delta-log-retention must be greater than zero"))
 
     val invalidTimeWindows = AnalyticsRuntimeConfig.operationalFromHocon(
       hocon,
@@ -209,11 +222,13 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     val safeVacuum = AnalyticsRuntimeConfig
       .operationalFromHocon(
         hocon,
-        Map("ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY_DAYS" -> "7")
+        Map("ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY" -> "7 days")
       )
       .toOption
       .getOrElse(fail("expected valid Delta vacuum config"))
     assertEquals(safeVacuum.retention.deltaVacuumSafetyCheckEnabled, true)
+    assertEquals(safeVacuum.retention.deltaVacuumSafety, 7.days)
+    assertEquals(safeVacuum.retention.deltaLogRetention, 30.days)
   }
 
   test("Kafka configuration allows plaintext only with an explicit opt-in") {

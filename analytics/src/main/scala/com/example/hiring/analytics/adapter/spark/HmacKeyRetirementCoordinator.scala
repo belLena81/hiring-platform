@@ -246,10 +246,10 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       )
       now <- clock.realTimeInstant
       dataDeadline = preparation.capturedAt.plus(
-        java.time.Duration.ofDays(operational.retention.deltaVacuumSafetyDays.value.toLong)
+        java.time.Duration.ofMillis(operational.retention.deltaVacuumSafety.toMillis)
       )
       logsDeadline = preparation.capturedAt.plus(
-        java.time.Duration.ofDays(operational.retention.deltaLogRetentionDays.value.toLong)
+        java.time.Duration.ofMillis(operational.retention.deltaLogRetention.toMillis)
       )
       reportsDeadline = preparation.capturedAt.plus(
         java.time.Duration.ofDays(operational.retention.publishedSnapshotDays.value.toLong)

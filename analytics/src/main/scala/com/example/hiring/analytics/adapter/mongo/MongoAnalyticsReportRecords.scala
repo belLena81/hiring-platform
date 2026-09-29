@@ -5,14 +5,14 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 
 import cats.syntax.all.*
-import org.bson.BsonValue
+import com.mongodb.MongoClientSettings
+import org.bson.{BsonDocument, BsonValue, Document}
 
 import java.util.Date
+import scala.jdk.CollectionConverters.*
 
-/** Validates driver-decoded report records before they enter report publication logic. */
+/** Validates raw driver documents before they enter report publication logic. */
 private[analytics] object MongoAnalyticsReportRecords {
-  type Record = MongoPojoCodecs.ReportRecord
-
   final case class Run(reservation: AnalyticsReportReservation, state: String)
   final case class Control(
       generation: Long,
@@ -51,7 +51,16 @@ private[analytics] object MongoAnalyticsReportRecords {
   private def date(value: BsonValue): Option[Date] =
     Option(value).filter(_.isDateTime).map(v => new Date(v.asDateTime().getValue))
 
-  def decodeRun(record: Record): Either[AnalyticsError, Run] =
+  private def bsonDocument(record: Document): BsonDocument =
+    record.toBsonDocument(classOf[Document], MongoClientSettings.getDefaultCodecRegistry)
+
+  private def extraFields(record: BsonDocument, known: Set[String]): Map[String, BsonValue] =
+    record.entrySet().asScala.iterator.map(entry => entry.getKey -> entry.getValue).toMap.filterNot { case (name, _) =>
+      known(name)
+    }
+
+  def decodeRun(rawRecord: Document): Either[AnalyticsError, Run] = {
+    val record = bsonDocument(rawRecord)
     for {
       id <- required(record.get(AnalyticsCollections.Fields.Id))(string)
       fingerprint <- required(record.get(AnalyticsCollections.Fields.RangeFingerprint))(string)
@@ -63,8 +72,10 @@ private[analytics] object MongoAnalyticsReportRecords {
         Either.cond(Set("Reserved", "Published").contains(value), value, malformed)
       }
     } yield Run(AnalyticsReportReservation(runId, rangeFingerprint, generation, revision), state)
+  }
 
-  def decodeControl(record: Record): Either[AnalyticsError, Control] =
+  def decodeControl(rawRecord: Document): Either[AnalyticsError, Control] = {
+    val record = bsonDocument(rawRecord)
     for {
       generation <- required(record.get(AnalyticsCollections.Fields.Generation))(int64)
       nextRevision <- optional(record.get(AnalyticsCollections.Fields.NextRevision))(int64)
@@ -77,7 +88,8 @@ private[analytics] object MongoAnalyticsReportRecords {
       lastRevision,
       lastRunId,
       state,
-      record.extraFields(
+      extraFields(
+        record,
         Set(
           AnalyticsCollections.Fields.Id,
           AnalyticsCollections.Fields.Generation,
@@ -88,8 +100,10 @@ private[analytics] object MongoAnalyticsReportRecords {
         )
       )
     )
+  }
 
-  def decodeSnapshot(record: Record): Either[AnalyticsError, Snapshot] =
+  def decodeSnapshot(rawRecord: Document): Either[AnalyticsError, Snapshot] = {
+    val record = bsonDocument(rawRecord)
     for {
       generation <- required(record.get(AnalyticsCollections.Fields.Generation))(int64)
       revision <- required(record.get(AnalyticsCollections.Fields.Revision))(int64)
@@ -101,7 +115,8 @@ private[analytics] object MongoAnalyticsReportRecords {
       revision,
       runId,
       expiresAt,
-      record.extraFields(
+      extraFields(
+        record,
         Set(
           AnalyticsCollections.Fields.Id,
           AnalyticsCollections.Fields.State,
@@ -116,4 +131,5 @@ private[analytics] object MongoAnalyticsReportRecords {
         )
       )
     )
+  }
 }

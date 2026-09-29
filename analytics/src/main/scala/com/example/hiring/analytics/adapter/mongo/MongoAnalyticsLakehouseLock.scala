@@ -21,7 +21,7 @@ import scala.concurrent.duration.*
 import scala.util.control.NonFatal
 
 /** Mongo mutex with no expiry or automatic takeover. A stale row must be cleared manually after its owner stops. */
-private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: Temporal](
+private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
     database: MongoDatabase[F],
     clock: Clock[F],
     streams: MongoPublisherStream

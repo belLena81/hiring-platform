@@ -43,13 +43,14 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   override val munitTimeout: FiniteDuration = 15.minutes
   private val enabled = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_ENABLED").contains("true")
   private val mode = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_MODE", "")
+  private val shortHorizon = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON").contains("true")
   private val nonce = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_NONCE", "")
   private val subjectId = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID", "")
   private val databaseName = sys.env.getOrElse("MONGODB_DATABASE", "")
   private val topic = sys.env.getOrElse("ANALYTICS_TOPIC", "")
   private val bootstrap = sys.env.getOrElse("ANALYTICS_BOOTSTRAP_SERVERS", "kafka:9092")
   private val lakehouseRoot = sys.env.getOrElse("ANALYTICS_LAKEHOUSE_ROOT", "")
-  private val retentionMs = 7L * 24L * 60L * 60L * 1000L
+  private val retentionMs = if (shortHorizon) 60L * 1000L else 7L * 24L * 60L * 60L * 1000L
   private val segmentBytes = 16 * 1024
   private val producerId = "hiring-publisher-retention-" + nonce
   private def runId(rangeEnd: Long): String = "retention-proof-" + nonce + "-" + rangeEnd
@@ -60,7 +61,13 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     sys.env.get(name).filter(_.nonEmpty).getOrElse(fail(name + " is required for retention proof"))
 
   private def connection(user: String, password: String): KafkaConnection =
-    KafkaConnection(bootstrap, Some(user), Some(password))
+    KafkaConnection(
+      bootstrap,
+      Some(user),
+      Some(password),
+      KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = true
+    )
 
   private def properties(user: String, password: String, transactionalId: Option[String] = None): Properties = {
     val result = new Properties()
@@ -189,8 +196,9 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     assertEquals(mode, "prepare")
     assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
     assert(UUID.fromString(subjectId).toString == subjectId, "assertion failed")
-    assert(databaseName.matches("hiring_retention_[a-f0-9]{16}"), "assertion failed")
-    assert(topic.matches("hiring\\.retention\\.[a-f0-9]{16}"), "assertion failed")
+    val namespace = if (shortHorizon) "hiring_erasure_smoke_" else "hiring_retention_"
+    assert(databaseName.matches(namespace + "[a-f0-9]{16}"), "assertion failed")
+    assert(topic.matches("hiring\\.(?:retention|erasure\\.smoke)\\.[a-f0-9]{16}"), "assertion failed")
     assert(lakehouseRoot.startsWith("file:///var/lib/hiring-analytics/lakehouse"), "assertion failed")
     initializeDatabase(db)
     val fixture = db.getCollection(proofCollection).find(Filters.eq("_id", nonce)).first()
@@ -454,10 +462,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         barrier
       )
       .unsafeRunSync()
-    val deltaDeadline =
-      purgedAt.plusSeconds(
-        AnalyticsTestOperationalConfig.operational.retention.deltaLogRetentionDays.value.toLong * 86400L
-      )
+    val deltaLogHorizon = if (shortHorizon) 60L else 30L * 86400L
+    val deltaDeadline = purgedAt.plusSeconds(deltaLogHorizon)
     val deltaPassed = !Instant.now().isBefore(deltaDeadline)
     val evidence = db
       .getCollection("analytics_erasure_delta_files")
@@ -478,7 +484,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     if (requireKafka) assert(kafkaPassed, "Kafka earliest offsets have not passed the persisted barrier")
     if (requireAll) {
       assert(kafkaPassed, "assertion failed")
-      assert(deltaPassed, "the full 30-day Delta log horizon has not elapsed")
+      assert(deltaPassed, "the configured Delta log horizon has not elapsed")
       if (request.getString("state") == "Processing")
         assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
       else {
@@ -557,6 +563,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           case "require-all-retention" =>
             inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = false)
           case "verify" =>
+            inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = true)
+          case "smoke-verify" =>
             inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = true)
           case other => fail("unsupported retention proof mode: " + other)
         }

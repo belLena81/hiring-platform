@@ -40,8 +40,47 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
     )
     .asCompatibleSubstituteFor("apache/kafka")
 
+  private val brokerUsername = "broker"
+  private val brokerPassword = "broker-test-secret"
+  private val publisherUsername = "hiring_publisher_v2"
+  private val publisherPassword = "publisher-test-secret"
+  private val readerUsername = "analytics_reader"
+  private val readerPassword = "reader-test-secret"
+  private val fencerUsername = "analytics_fencer"
+  private val fencerPassword = "fencer-test-secret"
+
+  private val brokerJaasConfig =
+    s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"$brokerUsername\" " +
+      s"password=\"$brokerPassword\" user_$brokerUsername=\"$brokerPassword\" " +
+      s"user_$publisherUsername=\"$publisherPassword\" user_$readerUsername=\"$readerPassword\" " +
+      s"user_$fencerUsername=\"$fencerPassword\";"
+
+  private def kafkaContainer: KafkaContainer =
+    new KafkaContainer(image)
+      .withEnv(
+        "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+        "BROKER:SASL_PLAINTEXT,PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT"
+      )
+      .withEnv("KAFKA_SASL_ENABLED_MECHANISMS", "PLAIN")
+      .withEnv("KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL", "PLAIN")
+      .withEnv("KAFKA_SASL_JAAS_CONFIG", brokerJaasConfig)
+      .withEnv("KAFKA_LISTENER_NAME_BROKER_PLAIN_SASL_JAAS_CONFIG", brokerJaasConfig)
+      .withEnv("KAFKA_LISTENER_NAME_PLAINTEXT_PLAIN_SASL_JAAS_CONFIG", brokerJaasConfig)
+
+  private def clientProperties(connection: KafkaConnection): Properties =
+    KafkaClientProperties
+      .clientProperties(connection)
+      .fold(
+        error => throw new AssertionError(s"Invalid Kafka fixture connection: $error"),
+        properties => {
+          val result = new Properties()
+          properties.foreach { case (key, value) => result.setProperty(key, value) }
+          result
+        }
+      )
+
   private def producerSettings(bootstrapServers: String, transactionalId: String): Properties = {
-    val properties = new Properties()
+    val properties = clientProperties(localKafkaConnection(bootstrapServers, publisherUsername, publisherPassword))
     properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
     properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
     properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
@@ -62,19 +101,23 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
   private def applicationCreated(eventId: String): String =
     s"""{"eventId":"$eventId","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-24T12:00:00Z","aggregateType":"Application","aggregateId":"application-$eventId","actorId":"candidate-$eventId","payload":{"applicationId":"application-$eventId","candidateId":"candidate-$eventId","jobId":"job-$eventId","newStatus":"Accepted"}}"""
 
-  private def localKafkaConnection(bootstrapServers: String): KafkaConnection =
+  private def localKafkaConnection(bootstrapServers: String, username: String, password: String): KafkaConnection =
     KafkaConnection(
       bootstrapServers,
+      saslUsername = Some(username),
+      saslPassword = Some(password),
       securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
       allowPlaintext = true
     )
 
   test("the production fencer fences an open transaction and read_committed hides its record") {
-    val kafka = new KafkaContainer(image)
+    val kafka = kafkaContainer
     kafka.start()
     val topic = "fencer-it-" + UUID.randomUUID().toString
     val transactionalId = "hiring-publisher-" + UUID.randomUUID().toString
-    val adminProperties = new Properties()
+    val adminProperties = clientProperties(
+      localKafkaConnection(kafka.getBootstrapServers, fencerUsername, fencerPassword)
+    )
     adminProperties.put("bootstrap.servers", kafka.getBootstrapServers)
     val admin = Admin.create(adminProperties)
     val staleProducer = new KafkaProducer[String, String](producerSettings(kafka.getBootstrapServers, transactionalId))
@@ -91,7 +134,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .send(new ProducerRecord(topic, "subject", applicationCreated("aborted-before-fence")))
         .get(30, java.util.concurrent.TimeUnit.SECONDS)
 
-      val connection = localKafkaConnection(kafka.getBootstrapServers)
+      val connection = localKafkaConnection(kafka.getBootstrapServers, readerUsername, readerPassword)
       val openTransactionManifest = AnalyticsRunManifest
         .validated(
           "open-transaction-it-" + UUID.randomUUID().toString,
@@ -109,7 +152,10 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       )
 
       KafkaProducerFencer[IO]
-        .fence(localKafkaConnection(kafka.getBootstrapServers), Vector(transactionalId))
+        .fence(
+          localKafkaConnection(kafka.getBootstrapServers, fencerUsername, fencerPassword),
+          Vector(transactionalId)
+        )
         .unsafeRunSync()
 
       val staleCommit = try {

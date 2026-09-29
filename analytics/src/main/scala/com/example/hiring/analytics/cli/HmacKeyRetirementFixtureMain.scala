@@ -525,10 +525,11 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       _ <- Right[AnalyticsError, Unit](()).map { _ =>
         if (
           !at.isBefore(
-            expiredAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.value.toLong))
+            expiredAt.plusMillis(retention.deltaVacuumSafety.toMillis)
           ) && reclaimed.isEmpty
         ) {
-          DeltaTable.forPath(spark, paths.silver).vacuum().count()
+          val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
+          DeltaTable.forPath(spark, paths.silver).vacuum(retentionHours).count()
           fixtureRecord(spark, paths, at, "old-primary-data-reclaimed")
         }
       }
@@ -536,7 +537,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       _ <- Right[AnalyticsError, Unit](()).map { _ =>
         if (
           !at.isBefore(
-            expiredAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.value.toLong))
+            expiredAt.plusMillis(retention.deltaLogRetention.toMillis)
           ) && logCleaned.isEmpty
         ) {
           val tableIdentifier = paths.silver.replace("`", "``")
@@ -614,11 +615,11 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                   .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                   .config(
                     "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
-                    s"interval ${operational.retention.deltaVacuumSafetyDays.value} days"
+                    s"interval ${operational.retention.deltaVacuumSafety}"
                   )
                   .config(
                     "spark.databricks.delta.properties.defaults.logRetentionDuration",
-                    s"interval ${operational.retention.deltaLogRetentionDays.value} days"
+                    s"interval ${operational.retention.deltaLogRetention}"
                   )
                   .config(
                     "spark.databricks.delta.retentionDurationCheck.enabled",

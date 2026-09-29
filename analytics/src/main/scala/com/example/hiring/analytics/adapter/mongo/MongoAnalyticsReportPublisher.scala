@@ -30,7 +30,7 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Report revision allocation and publication use Mongo's reactive driver and transaction boundary. */
-final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
+final class MongoAnalyticsReportPublisher[F[_]: Async](
     client: MongoClient[F],
     database: MongoDatabase[F],
     operational: AnalyticsOperationalSettings
@@ -41,19 +41,6 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
   private val control = rawDatabase.getCollection(AnalyticsCollections.ReportControl, classOf[Document])
   private val reservations = rawDatabase.getCollection(AnalyticsCollections.ReportRuns, classOf[Document])
   private val snapshots = rawDatabase.getCollection(AnalyticsCollections.ReportSnapshots, classOf[Document])
-  private val pojoDatabase = rawDatabase.withCodecRegistry(MongoPojoCodecs.registry)
-  private val typedControl = pojoDatabase.getCollection(
-    AnalyticsCollections.ReportControl,
-    classOf[MongoPojoCodecs.ReportRecord]
-  )
-  private val typedReservations = pojoDatabase.getCollection(
-    AnalyticsCollections.ReportRuns,
-    classOf[MongoPojoCodecs.ReportRecord]
-  )
-  private val typedSnapshots = pojoDatabase.getCollection(
-    AnalyticsCollections.ReportSnapshots,
-    classOf[MongoPojoCodecs.ReportRecord]
-  )
 
   private type Result[A] = EitherT[F, AnalyticsError, A]
   private def lift[A](io: F[A]): Result[A] = EitherT.liftF(io)
@@ -83,7 +70,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
       )
       updated <- lift(
         streams.optional(
-          typedControl.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first
+          control.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report")).first
         )
       )
       updatedControl <- result(
@@ -105,7 +92,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
       rangeFingerprint: RangeFingerprint,
       now: Instant
   ): Result[AnalyticsReportReservation] =
-    lift(streams.optional(typedReservations.find(Filters.eq(AnalyticsCollections.Fields.Id, runId.value)).first))
+    lift(streams.optional(reservations.find(Filters.eq(AnalyticsCollections.Fields.Id, runId.value)).first))
       .flatMap {
         case Some(previous) =>
           result(MongoAnalyticsReportRecords.decodeRun(previous)).flatMap { record =>
@@ -118,7 +105,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
                 for {
                   current <- lift(
                     streams.optional(
-                      typedControl
+                      control
                         .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
                         .first
                     )
@@ -163,7 +150,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
             for {
               current <- lift(
                 streams.optional(
-                  typedControl
+                  control
                     .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
                     .first
                 )
@@ -215,7 +202,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
         for {
           reserved <- lift(
             streams.optional(
-              typedReservations
+              reservations
                 .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
                 .first
             )
@@ -233,7 +220,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           )
           state <- lift(
             streams.optional(
-              typedControl
+              control
                 .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
                 .first
             )
@@ -242,7 +229,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           decodedState <- result(MongoAnalyticsReportRecords.decodeControl(stateRecord))
           currentSnapshotRecord <- lift(
             streams.optional(
-              typedSnapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
+              snapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
             )
           )
           currentSnapshot <- result(currentSnapshotRecord.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
@@ -257,7 +244,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           currentTime <- lift(clock.realTimeInstant)
           snapshotRecord <- lift(
             streams.optional(
-              typedSnapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
+              snapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
             )
           )
           snapshot <- result(snapshotRecord.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
@@ -423,13 +410,13 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.ErasureNotReady))
           currentSnapshotRecord <- lift(
             streams.optional(
-              typedSnapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
+              snapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
             )
           )
           currentSnapshot <- result(currentSnapshotRecord.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
           reserved <- lift(
             streams.optional(
-              typedReservations
+              reservations
                 .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
                 .first
             )
@@ -445,7 +432,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async: Clock](
           )
           state <- lift(
             streams.optional(
-              typedControl
+              control
                 .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
                 .first
             )

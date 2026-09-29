@@ -27,8 +27,8 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
   private val retention = operational.retention
 
   def configureRawTables(spark: SparkSession): F[Unit] = execution {
-    val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafetyDays.value} days"
-    val desiredLogRetention = s"interval ${retention.deltaLogRetentionDays.value} days"
+    val desiredVacuumRetention = s"interval ${retention.deltaVacuumSafety}"
+    val desiredLogRetention = s"interval ${retention.deltaLogRetention}"
     val rawPaths = Set(paths.bronze, paths.quarantine)
     val tables = Vector(
       paths.bronze,
@@ -100,7 +100,8 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
                   .option("overwriteSchema", "true")
                   .save(path)
                 // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
-                count + DeltaTable.forPath(spark, path).vacuum().count()
+                val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
+                count + DeltaTable.forPath(spark, path).vacuum(retentionHours).count()
               }
             }
         }

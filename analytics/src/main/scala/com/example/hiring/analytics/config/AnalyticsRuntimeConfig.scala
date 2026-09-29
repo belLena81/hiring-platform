@@ -126,8 +126,8 @@ object AnalyticsRuntimeConfig {
       silverDays: Int,
       publishedSnapshotDays: Int,
       deletionMarkerDays: Int,
-      deltaVacuumSafetyDays: Int,
-      deltaLogRetentionDays: Int
+      deltaVacuumSafety: FiniteDuration,
+      deltaLogRetention: FiniteDuration
   )
   private final case class RawOperational(
       retention: RawRetention,
@@ -444,8 +444,8 @@ object AnalyticsRuntimeConfig {
       positive(raw.retention.silverDays, "analytics.operational.retention.silver-days"),
       positive(raw.retention.publishedSnapshotDays, "analytics.operational.retention.published-snapshot-days"),
       positive(raw.retention.deletionMarkerDays, "analytics.operational.retention.deletion-marker-days"),
-      positive(raw.retention.deltaVacuumSafetyDays, "analytics.operational.retention.delta-vacuum-safety-days"),
-      positive(raw.retention.deltaLogRetentionDays, "analytics.operational.retention.delta-log-retention-days")
+      positiveDuration(raw.retention.deltaVacuumSafety, "analytics.operational.retention.delta-vacuum-safety"),
+      positiveDuration(raw.retention.deltaLogRetention, "analytics.operational.retention.delta-log-retention")
     ).mapN(AnalyticsRetentionSettings.apply)
     val reportReservationTtl =
       positive(raw.reportReservationTtlDays, "analytics.operational.report-reservation-ttl-days")
@@ -490,6 +490,9 @@ object AnalyticsRuntimeConfig {
 
   private def positive(value: Int, field: String): ValidatedNec[String, AnalyticsPositiveInt] =
     value.refineEither[Positive].leftMap(_ => s"$field must be greater than zero").toValidatedNec
+
+  private def positiveDuration(value: FiniteDuration, field: String): ValidatedNec[String, FiniteDuration] =
+    Either.cond(value.length > 0L, value, s"$field must be greater than zero").toValidatedNec
 
   private def positiveAtMost(value: Int, maximum: Int, field: String): ValidatedNec[String, Int] =
     Either.cond(value > 0 && value <= maximum, value, s"$field must be between one and $maximum").toValidatedNec

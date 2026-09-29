@@ -333,12 +333,12 @@ final class AnalyticsErasureWorker[F[_]: Async](
       _ <- lakehouse.verifyFilesAbsent(spark, allAffectedFiles)
     } yield ()
 
-  private def replayHorizonsPassed(barrier: KafkaRetentionBarrier, deltaPurgedAt: Instant): F[Boolean] =
+  private[analytics] def replayHorizonsPassed(barrier: KafkaRetentionBarrier, deltaPurgedAt: Instant): F[Boolean] =
     for {
       current <- now
       kafkaExpired <- kafkaRetention.retentionPassed(kafka, barrier)
-      dataDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaVacuumSafetyDays.value.toLong))
-      logDeadline = deltaPurgedAt.plus(java.time.Duration.ofDays(retention.deltaLogRetentionDays.value.toLong))
+      dataDeadline = deltaPurgedAt.plusMillis(retention.deltaVacuumSafety.toMillis)
+      logDeadline = deltaPurgedAt.plusMillis(retention.deltaLogRetention.toMillis)
       deltaDeadline = if (dataDeadline.isAfter(logDeadline)) dataDeadline else logDeadline
       deltaExpired = !current.isBefore(deltaDeadline)
     } yield kafkaExpired && deltaExpired

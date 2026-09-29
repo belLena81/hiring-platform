@@ -21,8 +21,8 @@ private[analytics] object AnalyticsTestOperationalConfig {
       silverDays = positive(30),
       publishedSnapshotDays = positive(30),
       deletionMarkerDays = positive(31),
-      deltaVacuumSafetyDays = positive(7),
-      deltaLogRetentionDays = positive(30)
+      deltaVacuumSafety = 7.days,
+      deltaLogRetention = 30.days
     ),
     reportReservationTtl = 90.days,
     mongoTransactionWindow = 120.seconds,

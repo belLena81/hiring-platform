@@ -121,6 +121,35 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("erasure waits for both Delta deadlines and the broker earliest offset barrier") {
+    val barrier = KafkaRetentionBarrier(
+      "hiring.operational-events",
+      Vector(KafkaRetentionBarrier.Partition(0, 12L))
+    )
+    val horizons = AnalyticsTestOperationalConfig.operational.retention.copy(
+      deltaVacuumSafety = 1.minute,
+      deltaLogRetention = 2.minutes
+    )
+    for {
+      state <- Ref.of[IO, Counters](Counters())
+      beforeBothDeltaDeadlines <- TestControl.executeEmbed {
+        IO.sleep(70.seconds) *> workerForRetention(horizons, 12L, state)
+          .replayHorizonsPassed(barrier, Instant.EPOCH)
+      }
+      beforeKafkaBarrier <- TestControl.executeEmbed {
+        IO.sleep(130.seconds) *> workerForRetention(horizons, 11L, state)
+          .replayHorizonsPassed(barrier, Instant.EPOCH)
+      }
+      afterAllGates <- TestControl.executeEmbed {
+        IO.sleep(130.seconds) *> workerForRetention(horizons, 12L, state)
+          .replayHorizonsPassed(barrier, Instant.EPOCH)
+      }
+      _ = assertEquals(beforeBothDeltaDeadlines, false)
+      _ = assertEquals(beforeKafkaBarrier, false)
+      _ = assertEquals(afterAllGates, true)
+    } yield ()
+  }
+
   private final case class Counters(claims: Int = 0, heartbeats: Int = 0, renewals: Int = 0)
 
   private final class TestErasureStore(
@@ -185,6 +214,24 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       leaseDuration: FiniteDuration = 90.seconds,
       renewalFailure: Option[Throwable] = None
   ): AnalyticsErasureWorker[IO] = {
+    workerForRetention(
+      AnalyticsTestOperationalConfig.operational.retention,
+      0L,
+      state,
+      renewal,
+      leaseDuration,
+      renewalFailure
+    )
+  }
+
+  private def workerForRetention(
+      retention: com.example.hiring.analytics.config.AnalyticsRetentionSettings,
+      earliestOffset: Long,
+      state: Ref[IO, Counters],
+      renewal: ErasureUpdate = ErasureUpdate.Applied,
+      leaseDuration: FiniteDuration = 90.seconds,
+      renewalFailure: Option[Throwable] = None
+  ): AnalyticsErasureWorker[IO] = {
     val store = new TestErasureStore(state, renewal, renewalFailure)
     val lock: AnalyticsLakehouseLock[IO] = (_: String) => Resource.pure[IO, Unit](())
     val markers: ActiveDeletionMarkerSource[IO] = (_: SparkSession) => IO.pure(null.asInstanceOf[DataFrame])
@@ -230,7 +277,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       override def capture(connection: KafkaConnection, topic: String): IO[KafkaRetentionBarrier] =
         IO.raiseError(new AssertionError("polling and renewal tests do not capture retention barriers"))
       override def retentionPassed(connection: KafkaConnection, barrier: KafkaRetentionBarrier): IO[Boolean] =
-        IO.pure(false)
+        IO.pure(barrier.partitions.forall(_.endOffsetExclusive <= earliestOffset))
     }
     new AnalyticsErasureWorker[IO](
       null.asInstanceOf[SparkSession],
@@ -249,7 +296,7 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       org.typelevel.log4cats.slf4j.Slf4jLogger.getLogger[IO],
       noFencing,
       noRetention,
-      AnalyticsTestOperationalConfig.operational.retention,
+      retention,
       leaseDuration,
       1.second,
       1.second

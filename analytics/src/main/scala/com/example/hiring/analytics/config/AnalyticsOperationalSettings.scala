@@ -18,15 +18,15 @@ final case class AnalyticsRetentionSettings(
     silverDays: AnalyticsPositiveInt,
     publishedSnapshotDays: AnalyticsPositiveInt,
     deletionMarkerDays: AnalyticsPositiveInt,
-    deltaVacuumSafetyDays: AnalyticsPositiveInt,
-    deltaLogRetentionDays: AnalyticsPositiveInt
+    deltaVacuumSafety: FiniteDuration,
+    deltaLogRetention: FiniteDuration
 ) {
   def deltaVacuumSafetyCheckEnabled: Boolean =
-    deltaVacuumSafetyDays.value >= AnalyticsRetentionSettings.DeltaMinimumSafeVacuumDays
+    deltaVacuumSafety >= AnalyticsRetentionSettings.DeltaMinimumSafeVacuum
 }
 
 object AnalyticsRetentionSettings {
-  val DeltaMinimumSafeVacuumDays: Int = 7
+  val DeltaMinimumSafeVacuum: FiniteDuration = 7.days
 }
 
 final case class AnalyticsOperationalSettings(

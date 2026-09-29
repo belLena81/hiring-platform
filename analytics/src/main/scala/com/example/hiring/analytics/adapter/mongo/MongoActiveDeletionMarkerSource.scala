@@ -24,7 +24,7 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
 /** Reads pending account-erasure requests before an analytics run can mutate Delta data. */
-private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async: Clock](
+private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
     database: MongoDatabase[F],
     pseudonymizer: SubjectPseudonymizer,
     streams: MongoPublisherStream,

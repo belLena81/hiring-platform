@@ -12,26 +12,12 @@ import com.example.hiring.analytics.service.erasure.*
 
 import com.example.hiring.analytics.adapter.mongo.{BsonDecoder, BsonValueDecoder, MongoAnalyticsReportRecords}
 import com.example.hiring.analytics.adapter.mongo.HmacKeyRetirementAuthorizationBson.given
-import com.example.hiring.analytics.adapter.mongo.MongoPojoCodecs
-import com.mongodb.MongoClientSettings
 
 import munit.FunSuite
-import org.bson.{BsonDocument, BsonDocumentReader, BsonDocumentWriter, Document}
-import org.bson.codecs.{DecoderContext, EncoderContext}
+import org.bson.Document
 
 final class BsonDecoderSpec extends FunSuite {
   private val malformed = AnalyticsError.MalformedMarker
-
-  private def reportRecord(document: Document): MongoAnalyticsReportRecords.Record = {
-    val bsonDocument = new BsonDocument()
-    val documentCodec = MongoClientSettings.getDefaultCodecRegistry.get(classOf[Document])
-    documentCodec.encode(new BsonDocumentWriter(bsonDocument), document, EncoderContext.builder().build())
-    val codec = MongoPojoCodecs.registry.get(classOf[MongoPojoCodecs.ReportRecord])
-    codec.decode(
-      new BsonDocumentReader(bsonDocument),
-      DecoderContext.builder().build()
-    )
-  }
 
   test("required BSON fields decode only their declared BSON type") {
     import BsonValueDecoder.given
@@ -55,7 +41,7 @@ final class BsonDecoderSpec extends FunSuite {
       .append("state", "Hidden")
       .append("operatorExtension", "preserved")
 
-    val decoded = MongoAnalyticsReportRecords.decodeControl(reportRecord(document))
+    val decoded = MongoAnalyticsReportRecords.decodeControl(document)
     assertEquals(decoded.map(_.nextRevision), Right(None))
     assertEquals(
       decoded.map(_.extraFields.get("operatorExtension").map(_.asString().getValue)),
@@ -64,14 +50,23 @@ final class BsonDecoderSpec extends FunSuite {
     assertEquals(
       MongoAnalyticsReportRecords
         .decodeControl(
-          reportRecord(new Document(document).append("nextRevision", null))
+          new Document(document).append("nextRevision", null)
         )
         .map(_.nextRevision),
       Right(None)
     )
     assert(
       MongoAnalyticsReportRecords
-        .decodeControl(reportRecord(new Document(document).append("nextRevision", "bad")))
+        .decodeControl(new Document(document).append("nextRevision", "bad"))
+        .isLeft
+    )
+    assert(
+      MongoAnalyticsReportRecords
+        .decodeControl(
+          new Document("generation", 4)
+            .append("lastPublishedRevision", 8L)
+            .append("state", "Hidden")
+        )
         .isLeft
     )
   }
@@ -83,16 +78,48 @@ final class BsonDecoderSpec extends FunSuite {
       .append("revision", 2L)
       .append("state", "Reserved")
 
-    assert(MongoAnalyticsReportRecords.decodeRun(reportRecord(valid)).isRight)
+    assert(MongoAnalyticsReportRecords.decodeRun(valid).isRight)
     assert(
       MongoAnalyticsReportRecords
-        .decodeRun(reportRecord(new Document(valid).append("state", "Unexpected")))
+        .decodeRun(new Document(valid).append("state", "Unexpected"))
         .isLeft
     )
-    assert(MongoAnalyticsReportRecords.decodeRun(reportRecord(new Document(valid).append("_id", " "))).isLeft)
+    assert(MongoAnalyticsReportRecords.decodeRun(new Document(valid).append("_id", " ")).isLeft)
     assert(
       MongoAnalyticsReportRecords
-        .decodeRun(reportRecord(new Document(valid).append("rangeFingerprint", "bad")))
+        .decodeRun(new Document(valid).append("rangeFingerprint", "bad"))
+        .isLeft
+    )
+    assert(MongoAnalyticsReportRecords.decodeRun(new Document(valid).append("generation", 1)).isLeft)
+  }
+
+  test("report snapshot decoding preserves extension fields and validates BSON types") {
+    val snapshot = new Document("generation", 4L)
+      .append("revision", 8L)
+      .append("runId", "batch-1")
+      .append("expiresAt", new java.util.Date(1_798_000_000_000L))
+      .append("operatorExtension", "preserved")
+
+    val decoded = MongoAnalyticsReportRecords.decodeSnapshot(snapshot)
+    assertEquals(
+      decoded.map(_.extraFields.get("operatorExtension").map(_.asString().getValue)),
+      Right(Some("preserved"))
+    )
+
+    assertEquals(
+      MongoAnalyticsReportRecords
+        .decodeSnapshot(new Document(snapshot).append("expiresAt", null))
+        .map(_.expiresAt),
+      Right(None)
+    )
+    assert(
+      MongoAnalyticsReportRecords
+        .decodeSnapshot(new Document(snapshot).append("expiresAt", "not-a-date"))
+        .isLeft
+    )
+    assert(
+      MongoAnalyticsReportRecords
+        .decodeSnapshot(new Document(snapshot).append("revision", 8))
         .isLeft
     )
   }
