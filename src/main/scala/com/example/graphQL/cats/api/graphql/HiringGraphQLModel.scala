@@ -80,7 +80,7 @@ private[graphql] object HiringGraphQLModel {
   final case class RankedJobResults(results: List[RankedJobPayload])
   final case class RankedCandidateResults(results: List[RankedCandidatePayload])
   final case class AnalyticsReportPayload(
-      snapshot: com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot
+      snapshot: com.example.graphQL.cats.service.AnalyticsReportSnapshot
   )
 
   final case class SubmitApplicationGraphQLInput(jobId: JobId, idempotencyKey: UUID) derives Decoder, Encoder

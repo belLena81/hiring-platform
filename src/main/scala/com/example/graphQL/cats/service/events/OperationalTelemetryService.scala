@@ -1,11 +1,11 @@
 package com.example.graphQL.cats.service.events
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
-import com.example.graphQL.cats.shared.events.OperationalEvents
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.events.OperationalEvents
+import com.example.graphQL.cats.service.port.{
   JobRepository,
   SearchSessionLookup,
   SearchSessionRepository,
@@ -22,7 +22,6 @@ import com.example.graphQL.cats.service.protocol.{
   UseCaseIO,
   UseCaseIO as UseCase
 }
-import java.time.Instant
 import java.util.UUID
 
 final class OperationalTelemetryService(
@@ -30,8 +29,8 @@ final class OperationalTelemetryService(
     jobs: JobRepository,
     searchSessions: SearchSessionRepository,
     searchSessionWork: SearchSessionWorkRepository,
-    idempotent: Idempotent = Idempotent.noop,
-    currentTime: IO[Instant] = IO.realTimeInstant
+    idempotent: Idempotent,
+    clock: Clock[IO] = Clock[IO]
 ) extends InteractionUseCases {
   private val authorization = ActorAuthorization(users)
 
@@ -60,7 +59,7 @@ final class OperationalTelemetryService(
         rank <- searchId.fold(UseCase.pure(Option.empty[Int]))(id =>
           verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )
-        now <- UseCase.liftIO(currentTime)
+        now <- UseCase.liftIO(clock.realTimeInstant)
         event = OperationalEvents.jobViewed(eventId, jobId, actor.userId, searchId, rank, now)
         _ <- UseCase.repository(searchSessions.recordInteraction(event, context))
       } yield ()
@@ -82,7 +81,7 @@ final class OperationalTelemetryService(
     ) { context =>
       for {
         verified <- verifiedSearchResult(actor, searchId, resultId)
-        now <- UseCase.liftIO(currentTime)
+        now <- UseCase.liftIO(clock.realTimeInstant)
         event = OperationalEvents.searchResultClicked(
           eventId,
           searchId,
@@ -104,6 +103,7 @@ final class OperationalTelemetryService(
     UseCase.fromIO(
       searchSessions
         .find(searchId)
+        .value
         .flatMap(
           _.widenUseCase.fold(
             error => IO.pure(error.asLeft[(Int, String)]),
@@ -122,7 +122,7 @@ final class OperationalTelemetryService(
                 case Left(UseCaseError.Domain(DomainError.NotFound("search session"))) =>
                   searchSessionWork
                     .findForActor(actor.userId, searchId)
-                    .map(_.widenUseCase.flatMap {
+                    .value.map(_.widenUseCase.flatMap {
                       case Some(SearchSessionLookup.Pending) =>
                         UseCaseError.Domain(DomainError.SearchSessionPending).asLeft[(Int, String)]
                       case Some(SearchSessionLookup.Failed) =>
@@ -137,32 +137,17 @@ final class OperationalTelemetryService(
 
   private def interactionReference(
       eventId: UUID
-  ): com.example.graphQL.cats.repository.protocol.MutationEntityReference =
-    com.example.graphQL.cats.repository.protocol.MutationEntityReference("interaction", eventId.toString)
+  ): com.example.graphQL.cats.service.port.MutationEntityReference =
+    com.example.graphQL.cats.service.port.MutationEntityReference("interaction", eventId.toString)
 
   private def replayInteraction(actor: ActorContext, eventId: UUID)(
-      reference: com.example.graphQL.cats.repository.protocol.MutationEntityReference
+      reference: com.example.graphQL.cats.service.port.MutationEntityReference
   ): UseCaseIO[Unit] =
     if (reference == interactionReference(eventId)) authorization.resolve(actor).void
-    else UseCase.left(UseCaseError.Repository(com.example.graphQL.cats.repository.protocol.RepositoryError.Unavailable))
+    else UseCase.left(UseCaseError.Repository(com.example.graphQL.cats.service.RepositoryError.Unavailable))
 }
 
 object OperationalTelemetryService {
-  def apply(
-      users: UserRepository,
-      jobs: JobRepository,
-      searchSessions: SearchSessionRepository
-  ): OperationalTelemetryService =
-    new OperationalTelemetryService(users, jobs, searchSessions, SearchSessionWorkRepository.noop)
-
-  def apply(
-      users: UserRepository,
-      jobs: JobRepository,
-      searchSessions: SearchSessionRepository,
-      searchSessionWork: SearchSessionWorkRepository
-  ): OperationalTelemetryService =
-    new OperationalTelemetryService(users, jobs, searchSessions, searchSessionWork)
-
   def live(
       users: UserRepository,
       jobs: JobRepository,

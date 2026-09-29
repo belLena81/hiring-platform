@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.pagination
+package com.example.graphQL.cats.domain.pagination
 
 import cats.data.ValidatedNel
 import cats.syntax.all.*

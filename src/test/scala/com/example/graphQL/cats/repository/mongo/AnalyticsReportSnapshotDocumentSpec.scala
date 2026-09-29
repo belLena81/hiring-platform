@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.{
   AnalyticsFunnelDay,
   AnalyticsReportSnapshot,
   AnalyticsSkillPostingDay,

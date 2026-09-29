@@ -3,11 +3,9 @@ package com.example.graphQL.cats.service
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{
-  AnalyticsFunnelDay,
+import com.example.graphQL.cats.service.port.{
   AnalyticsReportRepository,
-  AnalyticsReportSnapshot,
-  AnalyticsSkillPostingDay,
+  RepositoryIO,
   RepositoryError
 }
 import munit.CatsEffectSuite
@@ -135,15 +133,15 @@ final class AnalyticsReportingServiceSpec extends CatsEffectSuite {
       value: Option[AnalyticsReportSnapshot],
       failure: Option[RepositoryError] = None
   ) extends AnalyticsReportRepository {
-    override def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]] =
-      IO.pure(failure.toLeft(value))
+    override def latest: RepositoryIO[Option[AnalyticsReportSnapshot]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(failure.toLeft(value)) )
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
-    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
-    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-      IO.pure(Right(ids.flatMap(values.get)))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Right(()))
+    override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(values.get(id))) )
+    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(ids.flatMap(values.get))) )
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(())) )
   }
 }

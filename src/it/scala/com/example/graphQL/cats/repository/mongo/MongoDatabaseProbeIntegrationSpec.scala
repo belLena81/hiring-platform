@@ -17,7 +17,7 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
 import com.github.dockerjava.api.model.ExposedPort
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
 import io.circe.Json
@@ -78,8 +78,7 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   private def requireResult[A](result: Either[RepositoryError, A]): IO[A] =
     result.fold(error => IO.raiseError(new AssertionError(s"Mongo repository failure: $error")), IO.pure)
 
-  private def requireIO[A](result: IO[Either[RepositoryError, A]]): IO[A] =
-    result.flatMap(requireResult)
+  private def requireIO[A](result: RepositoryIO[A]): IO[A] = result.value.flatMap(requireResult)
 
   private val fixtureTime = Instant.parse("2026-09-22T10:00:00Z")
 
@@ -110,29 +109,35 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   test("Mongo job replacement uses the observed snapshot as an atomic CAS guard") {
     container(auth = false).use { case (instance, _) =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        val jobs = MongoJobRepository.standalone(client.getDatabase(s"job_cas_${UUID.randomUUID()}"))
-        val recruiterId = UserId(UUID.randomUUID())
-        val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
-        for {
-          _ <- requireIO(jobs.create(job, fixtureTime))
-          observed <- jobs
-            .findVersioned(job.id)
-            .flatMap(requireResult)
-            .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
-          first = observed.value.copy(title = "First concurrent update", updatedAt = fixtureTime.plusSeconds(1))
-          second = observed.value.copy(title = "Second concurrent update", updatedAt = fixtureTime.plusSeconds(2))
-          outcomes <- IO.both(
-            jobs.update(observed, first, first.updatedAt),
-            jobs.update(observed, second, second.updatedAt)
+        client.getDatabase(s"job_cas_${UUID.randomUUID()}").flatMap { database =>
+          val jobs = new MongoJobRepository(
+            database,
+            MongoRepositoryTestSupport.noTransaction,
+            new MongoEmbeddingWorkRepository(database)
           )
-          current <- jobs
-            .find(job.id)
-            .flatMap(requireResult)
-            .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
-        } yield {
-          assertEquals(List(outcomes._1, outcomes._2).count(_.isRight), 1)
-          assertEquals(List(outcomes._1, outcomes._2).count(_.isLeft), 1)
-          assert(Set(first.title, second.title).contains(current.title))
+          val recruiterId = UserId(UUID.randomUUID())
+          val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
+          for {
+            _ <- requireIO(jobs.createWithEvents(job, fixtureTime, Nil, MutationWriteContext.directWrite))
+            observed <- jobs
+              .findVersioned(job.id)
+              .flatMap(requireResult)
+              .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
+            first = observed.value.copy(title = "First concurrent update", updatedAt = fixtureTime.plusSeconds(1))
+            second = observed.value.copy(title = "Second concurrent update", updatedAt = fixtureTime.plusSeconds(2))
+            outcomes <- IO.both(
+              jobs.updateWithEvents(observed, first, first.updatedAt, Nil, MutationWriteContext.directWrite),
+              jobs.updateWithEvents(observed, second, second.updatedAt, Nil, MutationWriteContext.directWrite)
+            )
+            current <- jobs
+              .find(job.id)
+              .flatMap(requireResult)
+              .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
+          } yield {
+            assertEquals(List(outcomes._1, outcomes._2).count(_.isRight), 1)
+            assertEquals(List(outcomes._1, outcomes._2).count(_.isLeft), 1)
+            assert(Set(first.title, second.title).contains(current.title))
+          }
         }
       }
     }
@@ -141,53 +146,62 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   test("Mongo rejects stale job and candidate embedding writes after source changes") {
     container(auth = false).use { case (instance, _) =>
       MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        val database = client.getDatabase(s"embedding_cas_${UUID.randomUUID()}")
-        val jobs = MongoJobRepository.standalone(database)
-        val users = MongoUserRepository.standalone(database)
-        val recruiterId = UserId(UUID.randomUUID())
-        val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
-        val candidate = fixtureCandidate(UserId(UUID.randomUUID()))
-        val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", "stale-source", fixtureTime))
-        for {
-          _ <- requireIO(jobs.create(job, fixtureTime))
-          observedJob <- jobs
-            .findVersioned(job.id)
-            .flatMap(requireResult)
-            .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
-          _ <- requireIO(
-            jobs.update(
-              observedJob,
-              observedJob.value.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)),
-              fixtureTime.plusSeconds(1)
+        client.getDatabase(s"embedding_cas_${UUID.randomUUID()}").flatMap { database =>
+          val embeddingWork = new MongoEmbeddingWorkRepository(database)
+          val jobs = new MongoJobRepository(database, MongoRepositoryTestSupport.noTransaction, embeddingWork)
+          val users = new MongoUserRepository(database, MongoRepositoryTestSupport.noTransaction, embeddingWork)
+          val recruiterId = UserId(UUID.randomUUID())
+          val job = fixtureJob(JobId(UUID.randomUUID()), recruiterId)
+          val candidate = fixtureCandidate(UserId(UUID.randomUUID()))
+          val embedding = EntityEmbedding(List(0.1f, 0.2f), EmbeddingMeta("voyage-4-lite", "stale-source", fixtureTime))
+          for {
+            _ <- requireIO(jobs.createWithEvents(job, fixtureTime, Nil, MutationWriteContext.directWrite))
+            observedJob <- jobs
+              .findVersioned(job.id)
+              .flatMap(requireResult)
+              .flatMap(IO.fromOption(_)(new AssertionError("job was not created")))
+            _ <- requireIO(
+              jobs.updateWithEvents(
+                observedJob,
+                observedJob.value.copy(title = "New job content", updatedAt = fixtureTime.plusSeconds(1)),
+                fixtureTime.plusSeconds(1),
+                Nil,
+                MutationWriteContext.directWrite
+              )
             )
-          )
-          staleJobWrite <- jobs.updateEmbedding(observedJob, embedding)
-          _ <- requireIO(users.insert(candidate))
-          observedCandidate <- users
-            .findVersioned(candidate.id)
-            .flatMap(requireResult)
-            .flatMap(IO.fromOption(_)(new AssertionError("candidate was not created")))
-          changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated backend engineer"), None)
-          _ <- requireIO(
-            users.updateProfile(candidate.id, UserProfile.Candidate(changedProfile), fixtureTime.plusSeconds(1))
-          )
-          staleCandidateWrite <- users.updateEmbedding(observedCandidate, embedding)
-          currentJob <- jobs
-            .findVersioned(job.id)
-            .flatMap(requireResult)
-            .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
-          currentCandidate <- users
-            .findVersioned(candidate.id)
-            .flatMap(requireResult)
-            .flatMap(IO.fromOption(_)(new AssertionError("candidate disappeared")))
-        } yield {
-          assertEquals(staleJobWrite, Left(RepositoryError.Conflict))
-          assertEquals(staleCandidateWrite, Left(RepositoryError.Conflict))
-          assertEquals(currentJob.value.embedding, None)
-          assertEquals(currentJob.version, 1L)
-          assertEquals(currentCandidate.value.candidateProfile, Some(changedProfile))
-          assertEquals(currentCandidate.value.embedding, None)
-          assertEquals(currentCandidate.version, 1L)
+            staleJobWrite <- jobs.updateEmbedding(observedJob, embedding)
+            _ <- requireIO(users.insert(candidate))
+            observedCandidate <- users
+              .findVersioned(candidate.id)
+              .flatMap(requireResult)
+              .flatMap(IO.fromOption(_)(new AssertionError("candidate was not created")))
+            changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated backend engineer"), None)
+            _ <- requireIO(
+              users.updateProfile(
+                candidate.id,
+                UserProfile.Candidate(changedProfile),
+                fixtureTime.plusSeconds(1),
+                MutationWriteContext.directWrite
+              )
+            )
+            staleCandidateWrite <- users.updateEmbedding(observedCandidate, embedding)
+            currentJob <- jobs
+              .findVersioned(job.id)
+              .flatMap(requireResult)
+              .flatMap(IO.fromOption(_)(new AssertionError("job disappeared")))
+            currentCandidate <- users
+              .findVersioned(candidate.id)
+              .flatMap(requireResult)
+              .flatMap(IO.fromOption(_)(new AssertionError("candidate disappeared")))
+          } yield {
+            assertEquals(staleJobWrite, Left(RepositoryError.Conflict))
+            assertEquals(staleCandidateWrite, Left(RepositoryError.Conflict))
+            assertEquals(currentJob.value.embedding, None)
+            assertEquals(currentJob.version, 1L)
+            assertEquals(currentCandidate.value.candidateProfile, Some(changedProfile))
+            assertEquals(currentCandidate.value.embedding, None)
+            assertEquals(currentCandidate.version, 1L)
+          }
         }
       }
     }
@@ -199,18 +213,17 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
         for {
           _ <- ready(probe)
           _ <- MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-            val database = client.getDatabase("foundation")
-            for {
-              hello <- PublisherBridge.first(database.runCommand(new Document("hello", 1)))
-              _ <- IO(assert(hello.exists(document => !document.containsKey("setName"))))
-              _ <- PublisherBridge.first(
-                database
-                  .getCollection("retention")
-                  .insertOne(
-                    new Document("_id", "foundation-fixture").append("value", "synthetic")
-                  )
-              )
-            } yield ()
+            client.getDatabase("foundation").flatMap { database =>
+              for {
+                hello <- database.runCommand(mongo4cats.bson.Document.fromJava(new Document("hello", 1)))
+                _ = assert(hello.get("setName").isEmpty)
+                _ <- MongoRepositoryTestSupport.insertOne(
+                  database,
+                  "retention",
+                  new Document("_id", "foundation-fixture").append("value", "synthetic")
+                )
+              } yield ()
+            }
           }
           _ <- Resource
             .make(
@@ -233,23 +246,17 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
           }
           _ <- MongoDatabaseProbe.resource(restartedUri, "foundation").use(restarted => ready(restarted))
           closedClient <- MongoDatabaseProbe.clientResource(restartedUri).use { client =>
-            PublisherBridge
-              .first(
-                client
-                  .getDatabase("foundation")
-                  .getCollection("retention")
-                  .find(new Document("_id", "foundation-fixture"))
-              )
-              .flatMap { fixture =>
-                IO(assert(fixture.exists(_.getString("value") == "synthetic"))).as(client)
-              }
+            client.getDatabase("foundation").flatMap { database =>
+              MongoRepositoryTestSupport
+                .findOne(database, "retention", new Document("_id", "foundation-fixture"))
+                .flatMap { fixture =>
+                  IO(assert(fixture.exists(_.getString("value") == "synthetic"))).as(client)
+                }
+            }
           }
-          afterClose <- PublisherBridge
-            .first(
-              closedClient
-                .getDatabase("foundation")
-                .runCommand(new Document("ping", 1))
-            )
+          afterClose <- closedClient
+            .getDatabase("foundation")
+            .flatMap(_.runCommand(mongo4cats.bson.Document.fromJava(new Document("ping", 1))))
             .attempt
           _ <- IO(assert(afterClose.isLeft))
         } yield ()

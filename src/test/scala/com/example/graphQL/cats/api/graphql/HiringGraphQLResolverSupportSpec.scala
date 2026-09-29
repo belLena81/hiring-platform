@@ -7,7 +7,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.error.{DomainError as DomainFailure, DomainValidationError}
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
-import com.example.graphQL.cats.repository.protocol.{MutationReceiptFingerprint, RepositoryError}
+import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryError}
 import com.example.graphQL.cats.service.{
   AccountError,
   AuthenticationError,
@@ -371,9 +371,9 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
 
   test("raises exceptional mutation failures as read failures") {
     val error = UseCaseError.Repository(RepositoryError.Unavailable)
-    HiringGraphQLResolverSupport.mutationResult(UseCaseIO.left[String](error)).attempt.map {
-      case Left(RequestContext.ReadFailure(actual)) => assertEquals(actual, error)
-      case result                                   => fail(s"Expected a read failure, received $result")
-    }
+    HiringGraphQLResolverSupport
+      .mutationResult(UseCaseIO.left[String](error))
+      .value
+      .map(result => assertEquals(result, Left(HiringGraphQLFailure.UseCase(error))))
   }
 }

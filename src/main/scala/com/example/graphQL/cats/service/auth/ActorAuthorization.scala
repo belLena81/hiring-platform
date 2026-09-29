@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.auth
 
 import cats.syntax.all.*
-import com.example.graphQL.cats.repository.protocol.UserRepository
+import com.example.graphQL.cats.service.port.UserRepository
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, AuthenticationError, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.domain.error.DomainError

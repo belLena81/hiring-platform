@@ -1,62 +1,89 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
-import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Updates}
-import com.mongodb.reactivestreams.client.{ClientSession, MongoDatabase}
+import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
+import mongo4cats.client.ClientSession
+import mongo4cats.database.MongoDatabase
 import org.bson.Document
 import java.time.Instant
 import java.util.Date
 
+trait MongoEmbeddingWorkEnqueuer {
+  def requiresTransaction: Boolean
+
+  def enqueue(
+      session: Option[ClientSession[IO]],
+      key: EmbeddingWorkKey,
+      now: Instant
+  ): IO[Either[RepositoryError, Unit]]
+}
+
+object MongoEmbeddingWorkEnqueuer {
+
+  /** The configured disabled mode deliberately creates no durable embedding work or backing adapter. */
+  val disabled: MongoEmbeddingWorkEnqueuer = new MongoEmbeddingWorkEnqueuer {
+    override val requiresTransaction: Boolean = false
+
+    override def enqueue(
+        _session: Option[ClientSession[IO]],
+        _key: EmbeddingWorkKey,
+        _now: Instant
+    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+  }
+}
+
 /** Durable, coalesced embedding work. A newer enqueue increments generation so an older lease cannot delete it. */
-final class MongoEmbeddingWorkRepository(database: MongoDatabase, diagnostics: Diagnostics = Diagnostics.noop)
-    extends EmbeddingWorkRepository {
+final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostics: Diagnostics = Diagnostics.noop)
+    extends EmbeddingWorkRepository
+    with MongoEmbeddingWorkEnqueuer {
+  override val requiresTransaction: Boolean = true
   private enum StoredWorkError {
     case InvalidDocument
   }
 
-  private val collection = database.getCollection("embedding_work")
+  private val collection = Mongo4catsCollections.documents(database, MongoCollections.EmbeddingWork)
 
-  override def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
-    enqueue(None, key, now)
+  override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] =
+    RepositoryIO.fromIOEither(enqueue(None, key, now))
 
   /** Persists work in the caller's Mongo transaction. This is deliberately a concrete Mongo capability: the generic
     * work port has no transaction/session concept.
     */
-  def enqueue(session: ClientSession, key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
+  def enqueue(session: ClientSession[IO], key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]] =
     enqueue(Some(session), key, now)
 
-  private[mongo] def enqueue(
-      session: Option[ClientSession],
+  override def enqueue(
+      session: Option[ClientSession[IO]],
       key: EmbeddingWorkKey,
       now: Instant
   ): IO[Either[RepositoryError, Unit]] = {
-    val readyUpdate = Updates.combine(
-      Updates.setOnInsert("kind", key.kind.toString),
-      Updates.setOnInsert("entityId", key.entityId),
-      Updates.setOnInsert("createdAt", Date.from(now)),
-      Updates.inc("generation", java.lang.Long.valueOf(1L)),
-      Updates.set("attempts", java.lang.Integer.valueOf(0)),
-      Updates.set("state", "Ready"),
-      Updates.set("availableAt", Date.from(now)),
-      Updates.set("updatedAt", Date.from(now)),
-      Updates.unset("leaseOwner"),
-      Updates.unset("leaseToken"),
-      Updates.unset("leaseUntil"),
-      Updates.unset("failure")
+    val readyUpdate = MongoUpdate.combine(
+      MongoUpdate.setOnInsert(MongoFields.Kind, key.kind.toString),
+      MongoUpdate.setOnInsert(MongoFields.WorkEntityId, key.entityId),
+      MongoUpdate.setOnInsert(MongoFields.CreatedAt, Date.from(now)),
+      MongoUpdate.inc(MongoFields.Generation, java.lang.Long.valueOf(1L)),
+      MongoUpdate.set(MongoFields.Attempts, java.lang.Integer.valueOf(0)),
+      MongoUpdate.set(MongoFields.State, "Ready"),
+      MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
+      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+      MongoUpdate.unset(MongoFields.LeaseOwner),
+      MongoUpdate.unset(MongoFields.LeaseToken),
+      MongoUpdate.unset(MongoFields.LeaseUntil),
+      MongoUpdate.unset(MongoFields.Failure)
     )
-    val refreshActiveLease = Updates.combine(
-      Updates.inc("generation", java.lang.Long.valueOf(1L)),
-      Updates.set("attempts", java.lang.Integer.valueOf(0)),
-      Updates.set("updatedAt", Date.from(now))
+    val refreshActiveLease = MongoUpdate.combine(
+      MongoUpdate.inc(MongoFields.Generation, java.lang.Long.valueOf(1L)),
+      MongoUpdate.set(MongoFields.Attempts, java.lang.Integer.valueOf(0)),
+      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.enqueue") {
         updateOne(
           session,
-          Filters.and(Filters.eq("_id", key.value), Filters.ne("state", "Processing")),
+          MongoFilter.and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.ne(MongoFields.State, "Processing")),
           readyUpdate,
           new UpdateOptions().upsert(true)
         ).flatMap {
@@ -65,7 +92,8 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase, diagnostics: D
           case Some(_) =>
             updateOne(
               session,
-              Filters.and(Filters.eq("_id", key.value), Filters.eq("state", "Processing")),
+              MongoFilter
+                .and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.eq(MongoFields.State, "Processing")),
               refreshActiveLease
             ).map {
               case Some(result) if result.getMatchedCount == 1L => Right(())
@@ -78,37 +106,41 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase, diagnostics: D
   }
 
   private def updateOne(
-      session: Option[ClientSession],
-      filter: org.bson.conversions.Bson,
-      update: org.bson.conversions.Bson,
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      update: MongoUpdate,
       options: UpdateOptions = new UpdateOptions()
   ) =
-    session.fold(PublisherBridge.first(collection.updateOne(filter, update, options))) { active =>
-      PublisherBridge.first(collection.updateOne(active, filter, update, options))
-    }
+    MongoSessionOperations.updateOne(collection, session, filter, update, options)
 
   override def claim(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): IO[Either[RepositoryError, Option[ClaimedEmbeddingWork]]] = {
-    IO.randomUUID.map(_.toString).flatMap { token =>
-      val available = Filters.and(Filters.in("state", "Ready", "Retry"), Filters.lte("availableAt", Date.from(now)))
-      val expiredLease = Filters.and(Filters.eq("state", "Processing"), Filters.lt("leaseUntil", Date.from(now)))
-      val update = Updates.combine(
-        Updates.set("state", "Processing"),
-        Updates.set("leaseOwner", workerId),
-        Updates.set("leaseToken", token),
-        Updates.set("leaseUntil", Date.from(leaseUntil)),
-        Updates.set("updatedAt", Date.from(now))
+  ): RepositoryIO[Option[ClaimedEmbeddingWork]] = {
+    RepositoryIO.lift(IO.randomUUID.map(_.toString)).flatMap { token =>
+      val available = MongoFilter.and(
+        MongoFilter.in(MongoFields.State, Seq("Ready", "Retry")),
+        MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
+      )
+      val expiredLease = MongoFilter.and(
+        MongoFilter.eq(MongoFields.State, "Processing"),
+        MongoFilter.lt(MongoFields.LeaseUntil, Date.from(now))
+      )
+      val update = MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, "Processing"),
+        MongoUpdate.set(MongoFields.LeaseOwner, workerId),
+        MongoUpdate.set(MongoFields.LeaseToken, token),
+        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
+        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
       val options = new FindOneAndUpdateOptions()
         .returnDocument(ReturnDocument.AFTER)
-        .sort(Sorts.ascending("availableAt", "_id"))
+        .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.Id))
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "embeddingWork.claim") {
-          PublisherBridge
-            .first(collection.findOneAndUpdate(Filters.or(available, expiredLease), update, options))
+          collection
+            .flatMap(_.findOneAndUpdate(MongoFilter.or(available, expiredLease).bson, update.bson, options))
             .map {
               case Some(document) =>
                 readClaim(document) match {
@@ -118,33 +150,27 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase, diagnostics: D
               case None => Right(None)
             }
         }(_ => Left(RepositoryError.Unavailable))
-        .value
     }
   }
 
-  override def complete(claim: ClaimedEmbeddingWork): IO[Either[RepositoryError, Unit]] =
+  override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.complete") {
-        PublisherBridge
-          .first(collection.deleteOne(leaseFilter(claim)))
-          .map {
-            case Some(result) if result.getDeletedCount == 1L => Right(())
-            case Some(_)                                      => Left(RepositoryError.Conflict)
-            case None                                         => Left(RepositoryError.MissingWriteResult)
-          }
+        collection
+          .flatMap(_.deleteOne(leaseFilter(claim).bson, new com.mongodb.client.model.DeleteOptions))
+          .map(result => if (result.getDeletedCount == 1L) Right(()) else Left(RepositoryError.Conflict))
       }(_ => Left(RepositoryError.Unavailable))
-      .value
 
-  override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): IO[Either[RepositoryError, Unit]] =
+  override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] =
     transition(
       claim,
-      Updates.combine(
-        Updates.set("state", "Retry"),
-        Updates.set("availableAt", Date.from(availableAt)),
-        Updates.inc("attempts", java.lang.Integer.valueOf(1)),
-        Updates.unset("leaseOwner"),
-        Updates.unset("leaseToken"),
-        Updates.unset("leaseUntil")
+      MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, "Retry"),
+        MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+        MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1)),
+        MongoUpdate.unset(MongoFields.LeaseOwner),
+        MongoUpdate.unset(MongoFields.LeaseToken),
+        MongoUpdate.unset(MongoFields.LeaseUntil)
       )
     )
 
@@ -152,52 +178,51 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase, diagnostics: D
       claim: ClaimedEmbeddingWork,
       failure: EmbeddingWorkFailure,
       now: Instant
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     transition(
       claim,
-      Updates.combine(
-        Updates.set("state", "Failed"),
-        Updates.set("failure", failure.toString),
-        Updates.set("finishedAt", Date.from(now)),
-        Updates.unset("leaseOwner"),
-        Updates.unset("leaseToken"),
-        Updates.unset("leaseUntil")
+      MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, "Failed"),
+        MongoUpdate.set(MongoFields.Failure, failure.toString),
+        MongoUpdate.set(MongoFields.FinishedAt, Date.from(now)),
+        MongoUpdate.unset(MongoFields.LeaseOwner),
+        MongoUpdate.unset(MongoFields.LeaseToken),
+        MongoUpdate.unset(MongoFields.LeaseUntil)
       )
     )
 
   private def transition(
       claim: ClaimedEmbeddingWork,
-      update: org.bson.conversions.Bson
-  ): IO[Either[RepositoryError, Unit]] =
+      update: MongoUpdate
+  ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.transition") {
-        PublisherBridge
-          .first(collection.updateOne(leaseFilter(claim), update))
+        MongoSessionOperations
+          .updateOne(collection, None, leaseFilter(claim), update)
           .map {
             case Some(result) if result.getMatchedCount == 1L => Right(())
             case Some(_)                                      => Left(RepositoryError.Conflict)
             case None                                         => Left(RepositoryError.MissingWriteResult)
           }
       }(_ => Left(RepositoryError.Unavailable))
-      .value
 
   private def leaseFilter(claim: ClaimedEmbeddingWork) =
-    Filters.and(
-      Filters.eq("_id", claim.key.value),
-      Filters.eq("generation", java.lang.Long.valueOf(claim.generation)),
-      Filters.eq("state", "Processing"),
-      Filters.eq("leaseToken", claim.leaseToken)
+    MongoFilter.and(
+      MongoFilter.eq(MongoFields.Id, claim.key.value),
+      MongoFilter.eq(MongoFields.Generation, java.lang.Long.valueOf(claim.generation)),
+      MongoFilter.eq(MongoFields.State, "Processing"),
+      MongoFilter.eq(MongoFields.LeaseToken, claim.leaseToken)
     )
 
   private def readClaim(document: Document): Either[StoredWorkError, ClaimedEmbeddingWork] =
     for {
-      kind <- requiredString(document, "kind").flatMap(value =>
+      kind <- requiredString(document, MongoFields.Kind).flatMap(value =>
         EmbeddingWorkKind.values.find(_.toString == value).toRight(StoredWorkError.InvalidDocument)
       )
-      entityId <- requiredString(document, "entityId")
-      generation <- requiredNumber(document, "generation").map(_.longValue)
-      attempts <- requiredNumber(document, "attempts").map(_.intValue)
-      leaseToken <- requiredString(document, "leaseToken")
+      entityId <- requiredString(document, MongoFields.WorkEntityId)
+      generation <- requiredNumber(document, MongoFields.Generation).map(_.longValue)
+      attempts <- requiredNumber(document, MongoFields.Attempts).map(_.intValue)
+      leaseToken <- requiredString(document, MongoFields.LeaseToken)
     } yield ClaimedEmbeddingWork(EmbeddingWorkKey(kind, entityId), generation, attempts, leaseToken)
 
   private def requiredString(document: Document, field: String): Either[StoredWorkError, String] =

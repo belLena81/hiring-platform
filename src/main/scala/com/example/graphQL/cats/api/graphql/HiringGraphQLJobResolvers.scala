@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
+import cats.data.EitherT
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
@@ -8,14 +9,14 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO}
-import com.example.graphQL.cats.shared.search.JobSearchFilter
-import com.example.graphQL.cats.shared.pagination.JobCursor
+import com.example.graphQL.cats.service.search.JobSearchFilter
+import com.example.graphQL.cats.domain.pagination.JobCursor
 import sangria.schema.Context
 
 import java.time.Instant
 
 private[graphql] object HiringGraphQLJobResolvers {
-  def jobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
+  def jobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Job]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val filter = JobSearchFilter(
@@ -24,7 +25,7 @@ private[graphql] object HiringGraphQLJobResolvers {
         context.arg(createdAfterArgument)
       )
       for {
-        now <- IO.realTimeInstant
+        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         (pageRequest, requested) <- inputResult(
           page(
             context.arg(firstArgument),
@@ -32,25 +33,29 @@ private[graphql] object HiringGraphQLJobResolvers {
             cursor => CursorCodec.decode[JobCursor](cursor, now)
           )
         )
-        searchId <- context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
+        searchId <- EitherT.liftF[IO, HiringGraphQLFailure, java.util.UUID](
+          context.arg(searchIdArgument).fold(IO.randomUUID)(IO.pure)
+        )
         values <- raiseOnUseCaseError(hiring.jobService.searchOpenJobs(actor, filter, pageRequest))
-        _ <- saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
-          _.id.value.toString,
-          _ => 0d
+        _ <- EitherT.liftF[IO, HiringGraphQLFailure, Unit](
+          saveSearchSession(hiring, actor.userId, "jobs", searchId, filterJson(filter))(values)(
+            _.id.value.toString,
+            _ => 0d
+          )
         )
       } yield jobConnection(values, requested, now).copy(searchId = Some(searchId.toString))
     }
 
-  def job(context: Context[RequestContext, Unit]): IO[Job] =
+  def job(context: Context[RequestContext, Unit]): HiringGraphQLResult[Job] =
     authenticated(context) { case (actor, hiring) =>
       raiseOnUseCaseError(hiring.jobService.viewJob(actor, context.arg(idArgument)))
     }
 
-  def myJobs(context: Context[RequestContext, Unit]): IO[Connection[Job]] =
+  def myJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Job]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       for {
-        now <- IO.realTimeInstant
+        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         (pageRequest, requested) <- inputResult(
           page(
             context.arg(firstArgument),
@@ -64,7 +69,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       } yield jobConnection(values, requested, now)
     }
 
-  def createJob(context: Context[RequestContext, Unit]): IO[MutationOutcome[Job]] =
+  def createJob(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val graphQLInput = context.arg(createJobInputArgument)
       mutationResult(
@@ -76,7 +81,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       )
     }
 
-  def updateJob(context: Context[RequestContext, Unit]): IO[MutationOutcome[Job]] =
+  def updateJob(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateJobInputArgument)
       val patch = updateInput(input.patch)
@@ -95,7 +100,7 @@ private[graphql] object HiringGraphQLJobResolvers {
       method: JobUseCases => (IdempotencyRequest, com.example.graphQL.cats.service.ActorContext, JobId) => UseCaseIO[
         Job
       ]
-  ): IO[MutationOutcome[Job]] =
+  ): HiringGraphQLResult[MutationOutcome[Job]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(jobActionInputArgument)
       mutationResult(

@@ -8,9 +8,9 @@ import _root_.pureconfig.*
 
 private[config] final case class RawKafkaConfig(
     enabled: Boolean,
-    bootstrapServers: String,
-    topic: NonBlankStr,
-    consumerGroup: NonBlankStr,
+    bootstrapServers: KafkaBootstrapServers,
+    topic: KafkaTopic,
+    consumerGroup: KafkaConsumerGroup,
     publisher: RawKafkaPublisherConfig,
     consumer: RawKafkaConsumerConfig,
     saslSecurityProtocol: Option[String] = None

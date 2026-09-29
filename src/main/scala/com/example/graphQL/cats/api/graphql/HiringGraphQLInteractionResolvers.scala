@@ -1,13 +1,12 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.IO
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLInteractionResolvers {
-  def recordJobView(context: Context[RequestContext, Unit]): IO[MutationOutcome[InteractionSuccess]] =
+  def recordJobView(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[InteractionSuccess]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(recordJobViewInputArgument)
       mutationResult(
@@ -23,7 +22,9 @@ private[graphql] object HiringGraphQLInteractionResolvers {
       )
     }
 
-  def recordSearchResultClick(context: Context[RequestContext, Unit]): IO[MutationOutcome[InteractionSuccess]] =
+  def recordSearchResultClick(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[MutationOutcome[InteractionSuccess]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(recordSearchResultClickInputArgument)
       mutationResult(

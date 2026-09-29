@@ -22,8 +22,6 @@ import com.example.graphQL.cats.service.{
   ProbeResult
 }
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
-import com.example.graphQL.cats.service.application.ApplicationService
-import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.ServiceFixtures
 import com.example.graphQL.cats.config.{AuthRateLimitConfig, JwtAuthConfig, TrustedProxyConfig}
 import com.comcast.ip4s.{Cidr, SocketAddress}
@@ -179,15 +177,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         com.example.graphQL.cats.domain.model.Application
       ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
-      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService(users, jobs),
-        ApplicationService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService
       )
@@ -250,15 +248,15 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         com.example.graphQL.cats.domain.model.Application
       ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
-      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
       jobs = ServiceFixtures.InMemoryJobs(jobsRef)
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService(users, jobs),
-        ApplicationService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService
       )
@@ -305,7 +303,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         com.example.graphQL.cats.domain.model.Application
       ]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
-      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+      createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       setupChecks <- Ref.of[IO, Int](0)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Unavailable) }
       users = ServiceFixtures.InMemoryUsers(usersRef)
@@ -313,8 +311,8 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService(users, jobs),
-        ApplicationService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService
       )

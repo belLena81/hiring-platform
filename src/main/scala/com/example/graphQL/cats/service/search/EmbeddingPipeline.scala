@@ -2,10 +2,10 @@ package com.example.graphQL.cats.service.search
 
 import cats.effect.std.Queue
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
-import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant
@@ -24,20 +24,13 @@ trait EmbeddingWorkPublisher {
   def wake: IO[Unit]
 }
 
-object EmbeddingWorkPublisher {
-  def noop: EmbeddingWorkPublisher =
-    new EmbeddingWorkPublisher {
-      override def wake: IO[Unit] = IO.unit
-    }
-}
-
 final class DurableEmbeddingWorkPublisher private[search] (
     repository: EmbeddingWorkRepository,
     wakeups: Queue[IO, Unit],
     now: IO[Instant]
 ) extends EmbeddingWorkPublisher {
   private[search] def offer(work: EmbeddingWork): IO[Unit] =
-    now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _)).flatMap {
+    now.flatMap(repository.enqueue(DurableEmbeddingWorkPublisher.keyFor(work), _).value).flatMap {
       case Right(())   => wake
       case Left(error) => IO.raiseError(new IllegalStateException(s"Embedding work enqueue failed: $error"))
     }
@@ -77,7 +70,7 @@ final class EmbeddingPipeline(
     claimNext.flatMap(_.fold(IO.unit)(claim => processClaim(claim) *> drain))
 
   private def claimNext: IO[Option[ClaimedEmbeddingWork]] =
-    now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis))).flatMap {
+    now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis)).value).flatMap {
       case Right(claim) => IO.pure(claim)
       case Left(_)      => IO.pure(None)
     }
@@ -107,28 +100,24 @@ final class EmbeddingPipeline(
     ).flatMap { result =>
       result.fold(identity, identity) match {
         case ProcessingOutcome.Retry =>
-          now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _)).void
+          now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _).value).void
         case ProcessingOutcome.Completed =>
-          work.complete(claim).void
+          work.complete(claim).value.void
         case ProcessingOutcome.Terminal(failure) =>
-          now.flatMap(work.fail(claim, failure, _)).void
+          now.flatMap(work.fail(claim, failure, _).value).void
       }
     }
 
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
     claim.key.kind match {
       case EmbeddingWorkKind.Job =>
-        com.example.graphQL.cats.shared.Parsing
-          .parseUuid(claim.key.entityId)
-          .map(JobId(_))
+        parseIdentifier(claim.key.entityId)(JobId.apply)
           .fold(
             _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
             processJob
           )
       case EmbeddingWorkKind.CandidateProfile =>
-        com.example.graphQL.cats.shared.Parsing
-          .parseUuid(claim.key.entityId)
-          .map(UserId(_))
+        parseIdentifier(claim.key.entityId)(UserId.apply)
           .fold(
             _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
             processCandidate
@@ -136,7 +125,7 @@ final class EmbeddingPipeline(
     }
 
   private def processJob(id: JobId): IO[ProcessingOutcome] =
-    jobs.findVersioned(id).flatMap {
+    jobs.findVersioned(id).value.flatMap {
       case Right(Some(observed)) =>
         val job = observed.value
         val text = SearchableText.job(job)
@@ -144,7 +133,7 @@ final class EmbeddingPipeline(
         if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
         else
           embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(observed, embedding).map(writeOutcome)
+            case EmbeddingOutcome.Embedded(embedding) => jobs.updateEmbedding(observed, embedding).value.map(writeOutcome)
             case EmbeddingOutcome.Retry               => IO.pure(ProcessingOutcome.Retry)
             case EmbeddingOutcome.Discarded           =>
               IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
@@ -154,7 +143,7 @@ final class EmbeddingPipeline(
     }
 
   private def processCandidate(id: UserId): IO[ProcessingOutcome] =
-    users.findVersioned(id).flatMap {
+    users.findVersioned(id).value.flatMap {
       case Right(Some(observed)) =>
         val user = observed.value
         user.candidateProfile match {
@@ -165,7 +154,7 @@ final class EmbeddingPipeline(
             else
               embedDocument(text).flatMap {
                 case EmbeddingOutcome.Embedded(embedding) =>
-                  users.updateEmbedding(observed, embedding).map(writeOutcome)
+                  users.updateEmbedding(observed, embedding).value.map(writeOutcome)
                 case EmbeddingOutcome.Retry     => IO.pure(ProcessingOutcome.Retry)
                 case EmbeddingOutcome.Discarded =>
                   IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
@@ -182,7 +171,8 @@ final class EmbeddingPipeline(
   private def writeOutcome(result: Either[RepositoryError, Unit]): ProcessingOutcome = result match {
     case Right(_) | Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
     case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) |
-        Left(RepositoryError.InvalidStoredData) | Left(RepositoryError.MissingWriteResult) =>
+        Left(RepositoryError.InvalidStoredData) | Left(RepositoryError.MissingWriteResult) |
+        Left(RepositoryError.MissingStoredResult) =>
       ProcessingOutcome.Retry
   }
 

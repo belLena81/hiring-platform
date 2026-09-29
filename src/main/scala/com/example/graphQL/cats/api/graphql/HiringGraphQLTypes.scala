@@ -7,7 +7,6 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.ProbeResult
 import sangria.schema.*
 import sangria.schema.Action.deferredAction
-import scala.concurrent.ExecutionContext
 
 private[graphql] object HiringGraphQLTypes {
   private def simple[T, V](name: String, tpe: OutputType[V])(get: T => V): Field[RequestContext, T] =
@@ -73,7 +72,8 @@ private[graphql] object HiringGraphQLTypes {
         "currentResidence",
         OptionType(candidateResidenceType),
         resolve = context =>
-          context.ctx.unsafeToFuture(
+          context.ctx.effectAdapter.resolverFuture(
+            context.ctx,
             context.ctx.authenticatedActor.map(actor =>
               Option.when(actor.userId == context.value.ownerId)(context.value.value.currentResidence).flatten
             )
@@ -83,7 +83,8 @@ private[graphql] object HiringGraphQLTypes {
         "availabilityStatus",
         OptionType(candidateAvailabilityStatus),
         resolve = context =>
-          context.ctx.unsafeToFuture(
+          context.ctx.effectAdapter.resolverFuture(
+            context.ctx,
             context.ctx.authenticatedActor.map(actor =>
               Option.when(actor.userId == context.value.ownerId)(context.value.value.availabilityStatus).flatten
             )
@@ -93,7 +94,8 @@ private[graphql] object HiringGraphQLTypes {
         "recruiterSearchOptIn",
         BooleanType,
         resolve = context =>
-          context.ctx.unsafeToFuture(
+          context.ctx.effectAdapter.resolverFuture(
+            context.ctx,
             context.ctx.authenticatedActor.map(actor =>
               actor.userId == context.value.ownerId && context.value.value.recruiterSearchOptIn
             )
@@ -146,8 +148,9 @@ private[graphql] object HiringGraphQLTypes {
         resolve = context =>
           emailVisibilityFetcher
             .deferOpt(context.value.id)
-            // Sangria's deferred Future projection requires an EC; parasitic avoids a thread hop.
-            .map(_.flatMap(_ => context.value.email.map(_.value)))(using ExecutionContext.parasitic)
+            .map(_.flatMap(_ => context.value.email.map(_.value)))(using
+              context.ctx.effectAdapter.deferredExecutionContext
+            )
       ),
       simple("name", StringType)(_.name),
       simple("role", userRole)(_.role),
@@ -291,11 +294,10 @@ private[graphql] object HiringGraphQLTypes {
         simple("results", ListType(rankedCandidateType))(_.results)
       )
     )
-  lazy val analyticsFunnelDayType
-      : ObjectType[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsFunnelDay] =
+  lazy val analyticsFunnelDayType: ObjectType[RequestContext, com.example.graphQL.cats.service.AnalyticsFunnelDay] =
     ObjectType(
       "AnalyticsFunnelDay",
-      fields[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsFunnelDay](
+      fields[RequestContext, com.example.graphQL.cats.service.AnalyticsFunnelDay](
         instantField("day", _.day),
         simple("created", LongType)(_.created),
         simple("accepted", LongType)(_.accepted),
@@ -305,11 +307,10 @@ private[graphql] object HiringGraphQLTypes {
         simple("rejected", LongType)(_.rejected)
       )
     )
-  lazy val analyticsTimeToHireType
-      : ObjectType[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsTimeToHire] =
+  lazy val analyticsTimeToHireType: ObjectType[RequestContext, com.example.graphQL.cats.service.AnalyticsTimeToHire] =
     ObjectType(
       "AnalyticsTimeToHire",
-      fields[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsTimeToHire](
+      fields[RequestContext, com.example.graphQL.cats.service.AnalyticsTimeToHire](
         simple("p50Hours", FloatType)(_.p50Hours),
         simple("p75Hours", FloatType)(_.p75Hours),
         simple("p90Hours", FloatType)(_.p90Hours),
@@ -319,10 +320,10 @@ private[graphql] object HiringGraphQLTypes {
       )
     )
   lazy val analyticsSkillPostingDayType
-      : ObjectType[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsSkillPostingDay] =
+      : ObjectType[RequestContext, com.example.graphQL.cats.service.AnalyticsSkillPostingDay] =
     ObjectType(
       "AnalyticsSkillPostingDay",
-      fields[RequestContext, com.example.graphQL.cats.repository.protocol.AnalyticsSkillPostingDay](
+      fields[RequestContext, com.example.graphQL.cats.service.AnalyticsSkillPostingDay](
         instantField("day", _.day),
         simple("skill", StringType)(_.skill),
         simple("postings", LongType)(_.postings)

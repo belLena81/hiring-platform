@@ -3,20 +3,142 @@ package com.example.graphQL.cats.repository.mongo
 import cats.data.ValidatedNel
 import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.{ApplicationEvent, Job, User}
-import com.example.graphQL.cats.repository.protocol.{RepositoryError, RepositoryIO, Versioned}
-import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
-import com.example.graphQL.cats.shared.pagination.PageSize
+import mongo4cats.collection.MongoCollection
+import mongo4cats.database.MongoDatabase
+import mongo4cats.operations.{Filter, Update}
+import mongo4cats.client.ClientSession
+import com.mongodb.client.model.{InsertOneOptions, ReplaceOptions, UpdateOptions, Updates}
+import com.mongodb.client.result.{InsertOneResult, UpdateResult}
+import com.example.graphQL.cats.domain.model.ApplicationEvent
+import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.events.OperationalEventEnvelope
+import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.mongodb.MongoWriteException
 import com.mongodb.client.model.{Filters, Sorts}
-import com.mongodb.client.result.InsertOneResult
-import com.mongodb.reactivestreams.client.{ClientSession, MongoCollection}
-import org.bson.Document
+import scala.jdk.CollectionConverters.*
+import java.time.Instant
 import org.bson.conversions.Bson
 
-import java.time.Instant
+/** Effectfully acquired document collections used by repository adapters. */
+private[mongo] object Mongo4catsCollections {
+  def documents(database: MongoDatabase[IO], name: String): IO[MongoCollection[IO, org.bson.Document]] =
+    database.getCollection(name).map(_.as[org.bson.Document])
+}
+
+/** Paired predicates keep the raw-BSON non-session overload and typed session overload in lockstep. */
+private[mongo] final case class MongoFilter(bson: Bson, sessionFilter: Filter)
+
+private[mongo] object MongoFilter {
+  def eq[A](field: String, value: A): MongoFilter = MongoFilter(Filters.eq(field, value), Filter.eq(field, value))
+  def ne[A](field: String, value: A): MongoFilter = MongoFilter(Filters.ne(field, value), Filter.ne(field, value))
+  def lt[A](field: String, value: A): MongoFilter = MongoFilter(Filters.lt(field, value), Filter.lt(field, value))
+  def gt[A](field: String, value: A): MongoFilter = MongoFilter(Filters.gt(field, value), Filter.gt(field, value))
+  def lte[A](field: String, value: A): MongoFilter = MongoFilter(Filters.lte(field, value), Filter.lte(field, value))
+  def gte[A](field: String, value: A): MongoFilter = MongoFilter(Filters.gte(field, value), Filter.gte(field, value))
+  def exists(field: String): MongoFilter = MongoFilter(Filters.exists(field), Filter.exists(field))
+  def exists(field: String, value: Boolean): MongoFilter =
+    MongoFilter(Filters.exists(field, value), if (value) Filter.exists(field) else Filter.exists(field).not)
+  def in[A](field: String, values: Seq[A]): MongoFilter =
+    MongoFilter(Filters.in(field, values.asJava), Filter.in(field, values))
+  def all[A](field: String, values: Seq[A]): MongoFilter =
+    MongoFilter(Filters.all(field, values.asJava), Filter.all(field, values))
+  def beforeCursor(timestampField: String, occurredAt: Instant, id: String): MongoFilter =
+    or(
+      lt(timestampField, java.util.Date.from(occurredAt)),
+      and(
+        eq(timestampField, java.util.Date.from(occurredAt)),
+        lt(MongoFields.Id, id)
+      )
+    )
+  def and(filters: MongoFilter*): MongoFilter =
+    MongoFilter(Filters.and(filters.map(_.bson).asJava), Filter.and(filters.map(_.sessionFilter)*))
+  def or(filters: MongoFilter*): MongoFilter =
+    MongoFilter(Filters.or(filters.map(_.bson).asJava), Filter.or(filters.map(_.sessionFilter)*))
+}
+
+/** Paired updates keep the raw-BSON non-session overload and typed session overload in lockstep. */
+private[mongo] final case class MongoUpdate(bson: Bson, sessionUpdate: Update)
+
+private[mongo] object MongoUpdate {
+  def set[A](field: String, value: A): MongoUpdate = MongoUpdate(Updates.set(field, value), Update.set(field, value))
+  def setOnInsert[A](field: String, value: A): MongoUpdate =
+    MongoUpdate(Updates.setOnInsert(field, value), Update.setOnInsert(field, value))
+  def inc(field: String, value: Number): MongoUpdate = MongoUpdate(Updates.inc(field, value), Update.inc(field, value))
+  def unset(field: String): MongoUpdate = MongoUpdate(Updates.unset(field), Update.unset(field))
+  def push[A](field: String, value: A): MongoUpdate = MongoUpdate(Updates.push(field, value), Update.push(field, value))
+  def addToSet[A](field: String, value: A): MongoUpdate =
+    MongoUpdate(Updates.addToSet(field, value), Update.addToSet(field, value))
+  def combine(updates: MongoUpdate*): MongoUpdate =
+    MongoUpdate(
+      Updates.combine(updates.map(_.bson).asJava),
+      updates.map(_.sessionUpdate).reduce(_.combinedWith(_))
+    )
+}
+
+private[mongo] object MongoSessionOperations {
+  type Documents = MongoCollection[IO, org.bson.Document]
+
+  def findOne(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter
+  ): IO[Option[org.bson.Document]] =
+    collection.flatMap(c =>
+      session.fold(c.find(filter.bson).first)(active => c.find(active, filter.sessionFilter).first)
+    )
+
+  def insertOne(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      document: org.bson.Document
+  ): IO[Option[InsertOneResult]] =
+    collection.flatMap(c =>
+      session.fold(c.insertOne(document, new InsertOneOptions).map(Some(_)))(active =>
+        c.insertOne(active, document, new InsertOneOptions).map(Some(_))
+      )
+    )
+
+  def updateOne(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      update: MongoUpdate,
+      options: UpdateOptions = new UpdateOptions
+  ): IO[Option[UpdateResult]] =
+    collection.flatMap(c =>
+      session.fold(c.updateOne(filter.bson, update.bson, options).map(Some(_)))(active =>
+        c.updateOne(active, filter.sessionFilter, update.sessionUpdate, options).map(Some(_))
+      )
+    )
+
+  def updateMany(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      update: MongoUpdate,
+      options: UpdateOptions = new UpdateOptions
+  ): IO[Option[UpdateResult]] =
+    collection.flatMap(c =>
+      session.fold(c.updateMany(filter.bson, update.bson, options).map(Some(_)))(active =>
+        c.updateMany(active, filter.sessionFilter, update.sessionUpdate, options).map(Some(_))
+      )
+    )
+
+  def replaceOne(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      document: org.bson.Document,
+      options: ReplaceOptions = new ReplaceOptions
+  ): IO[Option[UpdateResult]] =
+    collection.flatMap(c =>
+      session.fold(c.replaceOne(filter.bson, document, options).map(Some(_)))(active =>
+        c.replaceOne(active, filter.sessionFilter, document, options).map(Some(_))
+      )
+    )
+}
 
 private[mongo] object MongoRepositorySupport {
   def writeResult[A](result: Option[A]): Either[RepositoryError, A] =
@@ -50,21 +172,18 @@ private[mongo] trait MongoConflictWriteMapping {
 
 private[mongo] trait MongoApplicationEventInsertion {
   protected final def insertApplicationEvent(
-      events: MongoCollection[Document],
-      session: Option[ClientSession],
+      events: IO[MongoCollection[IO, org.bson.Document]],
+      session: Option[ClientSession[IO]],
       event: ApplicationEvent
   ): IO[Option[InsertOneResult]] =
-    session.fold(
-      PublisherBridge.first(events.insertOne(MongoHiringCodecs.event(event)))
-    ) { active =>
-      PublisherBridge.first(events.insertOne(active, MongoHiringCodecs.event(event)))
-    }
+    MongoSessionOperations.insertOne(events, session, MongoHiringCodecs.event(event))
+
 }
 
 private[mongo] trait MongoOperationalEventInsertion {
   protected final def insertOperationalEvents(
-      outbox: MongoCollection[Document],
-      session: Option[ClientSession],
+      outbox: IO[MongoCollection[IO, org.bson.Document]],
+      session: Option[ClientSession[IO]],
       events: List[OperationalEventEnvelope],
       now: Instant,
       diagnostics: Diagnostics = Diagnostics.noop
@@ -78,10 +197,8 @@ private[mongo] trait MongoOperationalEventInsertion {
               MongoHiringCodecs.outboxRecord(event, now) match {
                 case Left(_)         => IO.pure(Left(RepositoryError.InvalidStoredData))
                 case Right(document) =>
-                  session
-                    .fold(PublisherBridge.first(outbox.insertOne(document)))(active =>
-                      PublisherBridge.first(outbox.insertOne(active, document))
-                    )
+                  MongoSessionOperations
+                    .insertOne(outbox, session, document)
                     .map(MongoRepositorySupport.writeResult(_).void)
               }
           }
@@ -91,25 +208,7 @@ private[mongo] trait MongoOperationalEventInsertion {
         case _                                                             => Left(RepositoryError.Unavailable)
       }
       .value
-}
 
-private[mongo] object MongoObservedStateFilters {
-  def jobReplacement(job: Versioned[Job]): Bson =
-    Filters.and(Filters.eq("_id", job.value.id.value.toString), Filters.eq("version", job.version))
-
-  def jobEmbedding(job: Versioned[Job]): Bson =
-    Filters.and(
-      Filters.eq("_id", job.value.id.value.toString),
-      Filters.eq("version", job.version),
-      Filters.lt("version", Long.MaxValue)
-    )
-
-  def candidateEmbedding(user: Versioned[User]): Bson =
-    Filters.and(
-      Filters.eq("_id", user.value.id.value.toString),
-      Filters.eq("version", user.version),
-      Filters.lt("version", Long.MaxValue)
-    )
 }
 
 private[mongo] object MongoStoredDocumentDecoding {
@@ -128,42 +227,46 @@ private[mongo] object MongoStoredDocumentDecoding {
 }
 
 private[mongo] object MongoKeysetPaging {
-  def byId[A](collection: MongoCollection[Document], ids: List[String])(
-      read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
-  )(diagnostics: Diagnostics = Diagnostics.noop): IO[Either[RepositoryError, List[A]]] =
-    if (ids.isEmpty) IO.pure(Right(Nil))
+  def byId[A](collection: IO[MongoCollection[IO, org.bson.Document]], ids: List[String])(
+      read: org.bson.Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
+  )(diagnostics: Diagnostics): RepositoryIO[List[A]] =
+    if (ids.isEmpty) RepositoryIO.fromEither(Right(Nil))
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "repository.findMany")(
-          PublisherBridge
-            .collectWithin(collection.find(Filters.in("_id", ids.distinct*)), ids.distinct.size)
+          collection
+            .flatMap(
+              _.find(MongoFilter.in(MongoFields.Id, ids.distinct).bson)
+                .boundedStream(ids.distinct.size)
+                .compile
+                .toList
+            )
             .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
         )(_ => Left(RepositoryError.Unavailable))
-        .value
 
-  def page[A](collection: MongoCollection[Document], filter: Bson, timestampField: String, pageSize: PageSize)(
-      read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
-  )(diagnostics: Diagnostics = Diagnostics.noop): IO[Either[RepositoryError, List[A]]] =
+  def page[A](
+      collection: IO[MongoCollection[IO, org.bson.Document]],
+      filter: MongoFilter,
+      timestampField: String,
+      pageSize: PageSize
+  )(read: org.bson.Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A])(
+      diagnostics: Diagnostics
+  ): RepositoryIO[List[A]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "repository.page")(
-        PublisherBridge
-          .collectWithin(
-            collection
-              .find(filter)
-              .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending("_id")))
-              .limit(pageSize.value),
-            pageSize.value
+        collection
+          .flatMap(
+            _.find(filter.bson)
+              .sort(Sorts.orderBy(Sorts.descending(timestampField), Sorts.descending(MongoFields.Id)))
+              .limit(pageSize.value)
+              .boundedStream(pageSize.value)
+              .compile
+              .toList
           )
           .map(documents => MongoStoredDocumentDecoding.values(documents.map(read)))
       )(_ => Left(RepositoryError.Unavailable))
-      .value
 
   def filter(filters: List[Option[Bson]]): Bson =
     Filters.and(filters.flatten*)
 
-  def beforeCursor(timestampField: String, occurredAt: Instant, id: String): Bson =
-    Filters.or(
-      Filters.lt(timestampField, java.util.Date.from(occurredAt)),
-      Filters.and(Filters.eq(timestampField, java.util.Date.from(occurredAt)), Filters.lt("_id", id))
-    )
 }

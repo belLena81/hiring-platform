@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
+import cats.data.EitherT
 import cats.effect.{Deferred, IO, Ref}
 import com.example.graphQL.cats.service.ProbeResult
 import munit.CatsEffectSuite
@@ -7,6 +8,9 @@ import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 final class RequestContextSpec extends CatsEffectSuite {
+  private def result[A](action: IO[A]): HiringGraphQLResult[A] =
+    EitherT.liftF[IO, HiringGraphQLFailure, A](action)
+
   test("request release cancels in-flight resolver work and rejects late submissions") {
     for {
       entered <- Deferred[IO, Unit]
@@ -18,11 +22,11 @@ final class RequestContextSpec extends CatsEffectSuite {
         )
         .allocated
       (context, release) = allocated
-      _ <- IO(context.unsafeToFuture(context.readiness))
+      _ <- IO(context.effectAdapter.resolverFuture(context, result(context.readiness)))
       _ <- entered.get.timeout(2.seconds)
       _ <- release
       _ <- cancelled.get.timeout(2.seconds)
-      after <- IO(context.unsafeToFuture(context.readiness)).attempt
+      after <- IO(context.effectAdapter.resolverFuture(context, result(context.readiness))).attempt
     } yield assert(after.isLeft)
   }
 
@@ -44,14 +48,14 @@ final class RequestContextSpec extends CatsEffectSuite {
             .onCancel(IO.unit)
         )
         .allocated
-      _ <- IO(first._1.unsafeToFuture(first._1.readiness))
-      _ <- IO(second._1.unsafeToFuture(second._1.readiness))
+      _ <- IO(first._1.effectAdapter.resolverFuture(first._1, result(first._1.readiness)))
+      _ <- IO(second._1.effectAdapter.resolverFuture(second._1, result(second._1.readiness)))
       _ <- firstEntered.get.timeout(2.seconds)
       _ <- secondEntered.get.timeout(2.seconds)
       _ <- first._2
       _ <- firstCancelled.get.timeout(2.seconds)
       _ <- secondReady.complete(ProbeResult.Ready)
-      secondResult <- IO(second._1.unsafeToFuture(second._1.readiness))
+      secondResult <- IO(second._1.effectAdapter.resolverFuture(second._1, result(second._1.readiness)))
         .flatMap(future => IO.fromFuture(IO.pure(future)))
         .attempt
       _ <- second._2
@@ -63,8 +67,8 @@ final class RequestContextSpec extends CatsEffectSuite {
       count <- Ref.of[IO, Int](0)
       results <- TestGraphQLSupport.context(count.update(_ + 1).as(ProbeResult.Ready)).use { context =>
         for {
-          first <- IO(context.unsafeToFuture(context.readiness))
-          second <- IO(context.unsafeToFuture(context.readiness))
+          first <- IO(context.effectAdapter.resolverFuture(context, result(context.readiness)))
+          second <- IO(context.effectAdapter.resolverFuture(context, result(context.readiness)))
           firstResult <- IO.fromFuture(IO.pure(first))
           secondResult <- IO.fromFuture(IO.pure(second))
         } yield (firstResult, secondResult)
@@ -78,7 +82,7 @@ final class RequestContextSpec extends CatsEffectSuite {
 
   test("anonymous nested email visibility remains masked without resolving a viewer") {
     TestGraphQLSupport.context(IO.pure(ProbeResult.Ready)).use { context =>
-      context.visibleEmailUsers(Nil).map(result => assertEquals(result, Nil))
+      context.visibleEmailUsers(Nil).value.map(result => assertEquals(result, Right(Nil)))
     }
   }
 }

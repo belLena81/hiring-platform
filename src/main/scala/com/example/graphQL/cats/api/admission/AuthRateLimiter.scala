@@ -22,9 +22,11 @@ final class AuthRateLimiter private (
         .compute(
           normalized,
           (_, existing) =>
-            if (existing == null || existing.expiresAtNanos - now <= 0L)
-              Bucket(1, now + config.windowSeconds.toLong * NanosPerSecond)
-            else existing.copy(hits = existing.hits + 1)
+            Option(existing)
+              .filter(_.expiresAtNanos - now > 0L)
+              .fold(Bucket(1, now + config.windowSeconds.toLong * NanosPerSecond))(bucket =>
+                bucket.copy(hits = bucket.hits + 1)
+              )
         )
       if (bucket.hits <= config.attempts) Right(())
       else Left(RateLimited(config.windowSeconds.seconds))

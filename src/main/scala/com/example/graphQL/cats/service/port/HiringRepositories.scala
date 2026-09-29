@@ -1,6 +1,7 @@
-package com.example.graphQL.cats.repository.protocol
+package com.example.graphQL.cats.service.port
 
 import cats.effect.IO
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   AccountCredentials,
@@ -14,10 +15,11 @@ import com.example.graphQL.cats.domain.model.{
   UserPageRequest,
   UserProfile
 }
-import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, SearchSession}
+import com.example.graphQL.cats.service.AnalyticsReportSnapshot
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.shared.crypto.SourceHash
-import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
-import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
+import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
+import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
 import java.time.Instant
 import java.util.UUID
 
@@ -31,7 +33,7 @@ object MutationReceiptFingerprint {
   def fromCanonicalInput(input: String): MutationReceiptFingerprint =
     MutationReceiptFingerprint(SourceHash.sha256(input))
 
-  private[repository] def stored(value: String): MutationReceiptFingerprint = MutationReceiptFingerprint(value)
+  private[cats] def stored(value: String): MutationReceiptFingerprint = MutationReceiptFingerprint(value)
 }
 
 /** A non-sensitive reference from a completed receipt to its authoritative result. */
@@ -62,7 +64,9 @@ final case class MutationReceipt(
 trait MutationWriteContext
 
 object MutationWriteContext {
-  val noop: MutationWriteContext = new MutationWriteContext {}
+
+  /** Explicit direct-write context for operations outside an idempotent mutation. */
+  val directWrite: MutationWriteContext = new MutationWriteContext {}
 }
 
 final case class MutationReceiptWrite[+A](value: A, entity: MutationEntityReference)
@@ -90,64 +94,45 @@ trait MutationReceiptRepository {
       now: Instant,
       expiresAt: Instant
   )(
-      write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
-  ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]]
-}
-
-object MutationReceiptRepository {
-  val noop: MutationReceiptRepository = new MutationReceiptRepository {
-    override def execute[A, E](
-        key: MutationReceiptKey,
-        fingerprint: MutationReceiptFingerprint,
-        now: Instant,
-        expiresAt: Instant
-    )(
-        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
-    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] =
-      write(MutationWriteContext.noop).map(
-        _.map {
-          case MutationWriteOutcome.Rejected(error) => MutationReceiptExecution.Rejected(error)
-          case MutationWriteOutcome.Applied(value)  => MutationReceiptExecution.Applied(value.value, value.entity)
-        }
-      )
-  }
+      write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
+  ): RepositoryIO[MutationReceiptExecution[A, E]]
 }
 
 trait UserRepository {
-  def find(id: UserId): IO[Either[RepositoryError, Option[User]]]
-  def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]]
-  def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]]
-  def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
-  def updateEmbedding(observed: Versioned[User], embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
+  def find(id: UserId): RepositoryIO[Option[User]]
+  def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]]
+  def findMany(ids: List[UserId]): RepositoryIO[List[User]]
+  def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit]
+  def updateEmbedding(observed: Versioned[User], embedding: EntityEmbedding): RepositoryIO[Unit]
 }
 
 trait UserAccountRepository {
   def bootstrap(
       user: User,
       passwordHash: PasswordHash,
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Unit]]
-  def initialized: IO[Either[RepositoryError, Boolean]]
+      context: MutationWriteContext
+  ): RepositoryIO[Unit]
+  def initialized: RepositoryIO[Boolean]
   def createAccount(
       user: User,
       passwordHash: PasswordHash,
       now: Instant,
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Unit]]
-  def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]]
+      context: MutationWriteContext
+  ): RepositoryIO[Unit]
+  def findByCanonicalName(nameCanonical: String): RepositoryIO[Option[AccountCredentials]]
   def updateProfile(
       userId: UserId,
       profile: UserProfile,
       now: Instant,
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, User]]
-  def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]]
+      context: MutationWriteContext
+  ): RepositoryIO[User]
+  def listAccounts(page: UserPageRequest): RepositoryIO[List[User]]
   def deleteAccount(
       userId: UserId,
       now: Instant,
       tombstone: String,
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Unit]]
+      context: MutationWriteContext
+  ): RepositoryIO[Unit]
 }
 
 /** A durable request for removing a deleted subject from analytical projections. */
@@ -156,54 +141,54 @@ final case class AnalyticsErasureRequest(userId: UserId, requestedAt: Instant)
 trait AnalyticsErasureRequestRepository {
 
   /** Confirms an erasure worker is live before a new account deletion can mutate Mongo. */
-  def workerReady(now: Instant): IO[Either[RepositoryError, Unit]]
+  def workerReady(now: Instant): RepositoryIO[Unit]
 
   /** Records the request in the caller's mutation transaction. Repeating the same request is intentionally idempotent
     * so receipt replay cannot create work twice.
     */
-  def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): IO[Either[RepositoryError, String]]
+  def enqueue(userId: UserId, now: Instant, context: MutationWriteContext): RepositoryIO[String]
 
   /** Returns lifecycle state only when the receipt belongs to the supplied subject. */
   def statusForSubject(
       userId: UserId,
       receiptId: String
-  ): IO[Either[RepositoryError, AccountDeletionStatus]]
+  ): RepositoryIO[AccountDeletionStatus]
 
   /** Removes durable outbox rows attributed to the subject after producer drain has been proven. */
-  def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]]
+  def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit]
 
   /** Retains a completed tombstone through the replay horizon before TTL cleanup. */
-  def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]]
+  def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit]
 }
 
 object AnalyticsErasureRequestRepository {
   val unavailable: AnalyticsErasureRequestRepository = new AnalyticsErasureRequestRepository {
-    override def workerReady(now: Instant): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    override def workerReady(now: Instant): RepositoryIO[Unit] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
 
     override def enqueue(
         userId: UserId,
         now: Instant,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, String]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    ): RepositoryIO[String] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
 
     override def statusForSubject(
         userId: UserId,
         receiptId: String
-    ): IO[Either[RepositoryError, AccountDeletionStatus]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    ): RepositoryIO[AccountDeletionStatus] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
 
-    override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    override def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
 
-    override def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    override def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
   }
 }
 
 trait AnalyticsReportRepository {
-  def latest: IO[Either[RepositoryError, Option[AnalyticsReportSnapshot]]]
+  def latest: RepositoryIO[Option[AnalyticsReportSnapshot]]
 }
 
 /** Stable publication epoch and ordering token reserved before a batch starts doing expensive work. */
@@ -223,13 +208,13 @@ trait AnalyticsReportSnapshotPublisher {
       rangeFingerprint: String,
       now: Instant,
       reservationExpiresAt: Instant
-  ): IO[Either[RepositoryError, AnalyticsReportRunReservation]]
+  ): RepositoryIO[AnalyticsReportRunReservation]
 
   def publish(
       reservation: AnalyticsReportRunReservation,
       snapshot: AnalyticsReportSnapshot,
       expiresAt: Instant
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
 }
 
 object AnalyticsReportSnapshotPublisher {
@@ -239,68 +224,40 @@ object AnalyticsReportSnapshotPublisher {
         rangeFingerprint: String,
         now: Instant,
         reservationExpiresAt: Instant
-    ): IO[Either[RepositoryError, AnalyticsReportRunReservation]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    ): RepositoryIO[AnalyticsReportRunReservation] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
 
     override def publish(
         reservation: AnalyticsReportRunReservation,
         snapshot: AnalyticsReportSnapshot,
         expiresAt: Instant
-    ): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Left(RepositoryError.Unavailable))
+    ): RepositoryIO[Unit] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
   }
 }
 
-final case class AnalyticsReportSnapshot(
-    asOf: Instant,
-    funnel: List[AnalyticsFunnelDay],
-    timeToHire: Option[AnalyticsTimeToHire],
-    skillPostingActivity: List[AnalyticsSkillPostingDay]
-)
-
-final case class AnalyticsFunnelDay(
-    day: Instant,
-    created: Long,
-    accepted: Long,
-    declined: Long,
-    interview: Long,
-    hired: Long,
-    rejected: Long
-)
-final case class AnalyticsTimeToHire(
-    p50Hours: Double,
-    p75Hours: Double,
-    p90Hours: Double,
-    p95Hours: Double,
-    eligibleCount: Long,
-    excludedCount: Long
-)
-final case class AnalyticsSkillPostingDay(day: Instant, skill: String, postings: Long)
-
 trait JobRepository {
-  def find(id: JobId): IO[Either[RepositoryError, Option[Job]]]
-  def findVersioned(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]]
-  def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]]
-  def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
-  def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
-  def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]]
-  def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]]
+  def find(id: JobId): RepositoryIO[Option[Job]]
+  def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]]
+  def findMany(ids: List[JobId]): RepositoryIO[List[Job]]
+  def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]]
+  def findAll(page: JobPageRequest): RepositoryIO[List[Job]]
+  def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]]
   def createWithEvents(
       job: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Unit]]
-  def update(expected: Versioned[Job], replacement: Job, now: Instant): IO[Either[RepositoryError, Versioned[Job]]]
+      context: MutationWriteContext
+  ): RepositoryIO[Unit]
   def updateWithEvents(
       expected: Versioned[Job],
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Versioned[Job]]]
-  def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
-  def updateEmbedding(observed: Versioned[Job], embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]]
+      context: MutationWriteContext
+  ): RepositoryIO[Versioned[Job]]
+  def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit]
+  def updateEmbedding(observed: Versioned[Job], embedding: EntityEmbedding): RepositoryIO[Unit]
 }
 
 trait EmbeddingService {
@@ -327,15 +284,15 @@ enum EmbeddingWorkFailure {
 }
 
 trait EmbeddingWorkRepository {
-  def enqueue(key: EmbeddingWorkKey, now: Instant): IO[Either[RepositoryError, Unit]]
+  def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit]
   def claim(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): IO[Either[RepositoryError, Option[ClaimedEmbeddingWork]]]
-  def complete(claim: ClaimedEmbeddingWork): IO[Either[RepositoryError, Unit]]
-  def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): IO[Either[RepositoryError, Unit]]
-  def fail(claim: ClaimedEmbeddingWork, failure: EmbeddingWorkFailure, now: Instant): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Option[ClaimedEmbeddingWork]]
+  def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit]
+  def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit]
+  def fail(claim: ClaimedEmbeddingWork, failure: EmbeddingWorkFailure, now: Instant): RepositoryIO[Unit]
 }
 
 enum EmbeddingInputType {
@@ -351,18 +308,18 @@ enum EmbeddingError {
 }
 
 trait SemanticSearchRepository {
-  def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]]
-  def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]]
-  def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]]
+  def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
+  def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
+  def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]]
 }
 
 trait SearchSessionRepository {
-  def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]]
-  def find(id: java.util.UUID): IO[Either[RepositoryError, Option[SearchSession]]]
+  def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit]
+  def find(id: java.util.UUID): RepositoryIO[Option[SearchSession]]
   def recordInteraction(
       event: OperationalEventEnvelope,
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Boolean]]
+      context: MutationWriteContext
+  ): RepositoryIO[Boolean]
 }
 
 final case class ClaimedOperationalEvent(
@@ -385,41 +342,41 @@ trait OperationalEventOutboxRepository {
       now: Instant,
       leaseUntil: Instant,
       limit: Int
-  ): IO[Either[RepositoryError, List[ClaimedOperationalEvent]]]
+  ): RepositoryIO[List[ClaimedOperationalEvent]]
   def renewLease(
       eventId: java.util.UUID,
       leaseToken: String,
       subjectIds: List[String],
       leaseUntil: Instant
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
   def markPublished(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,
       retentionExpiresAt: Instant
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
   def releaseForRetry(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,
       availableAt: Instant
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
   def markFailed(
       eventId: java.util.UUID,
       leaseToken: String,
       now: Instant,
       reason: String
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
 }
 
 trait ConsumerReceiptRepository {
-  def exists(consumerGroup: String, eventId: java.util.UUID): IO[Either[RepositoryError, Boolean]]
+  def exists(consumerGroup: String, eventId: java.util.UUID): RepositoryIO[Boolean]
   def record(
       consumerGroup: String,
       event: OperationalEventEnvelope,
       now: Instant,
       expiresAt: Instant
-  ): IO[Either[RepositoryError, Boolean]]
+  ): RepositoryIO[Boolean]
 }
 
 final case class EventQuarantineRecord(
@@ -434,48 +391,48 @@ final case class EventQuarantineRecord(
 )
 
 trait EventQuarantineRepository {
-  def save(record: EventQuarantineRecord): IO[Either[RepositoryError, Unit]]
+  def save(record: EventQuarantineRecord): RepositoryIO[Unit]
 }
 
 object SearchSessionRepository {
   def noop: SearchSessionRepository = new SearchSessionRepository {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Right(()))
-    override def find(id: java.util.UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
-      IO.pure(Right(None))
+    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit] =
+      RepositoryIO.fromEither(Right(()))
+    override def find(id: java.util.UUID): RepositoryIO[Option[SearchSession]] =
+      RepositoryIO.fromEither(Right(None))
     override def recordInteraction(
         event: OperationalEventEnvelope,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Boolean]] =
-      IO.pure(Right(true))
+    ): RepositoryIO[Boolean] =
+      RepositoryIO.fromEither(Right(true))
   }
 }
 
 trait ApplicationRepository {
-  def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]]
-  def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]]
-  def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]]
+  def find(id: ApplicationId): RepositoryIO[Option[Application]]
+  def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): RepositoryIO[List[Application]]
+  def findByJob(jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]]
   def history(
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
-  ): IO[Either[RepositoryError, List[ApplicationEvent]]]
+  ): RepositoryIO[List[ApplicationEvent]]
   def createForOpenJob(
       observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent
-  ): IO[Either[RepositoryError, Unit]]
+  ): RepositoryIO[Unit]
   def createForOpenJobWithEvents(
       observedJob: Versioned[Job],
       application: Application,
       initialEvent: ApplicationEvent,
       events: List[OperationalEventEnvelope],
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Unit]]
-  def updateStatus(application: Application, event: ApplicationEvent): IO[Either[RepositoryError, Unit]]
+      context: MutationWriteContext
+  ): RepositoryIO[Unit]
+  def updateStatus(application: Application, event: ApplicationEvent): RepositoryIO[Unit]
   def updateStatusWithEvents(
       application: Application,
       event: ApplicationEvent,
       events: List[OperationalEventEnvelope],
-      context: MutationWriteContext = MutationWriteContext.noop
-  ): IO[Either[RepositoryError, Unit]]
+      context: MutationWriteContext
+  ): RepositoryIO[Unit]
 }

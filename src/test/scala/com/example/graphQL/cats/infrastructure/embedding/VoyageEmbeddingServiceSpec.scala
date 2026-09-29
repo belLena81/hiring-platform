@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.embedding
 
 import cats.effect.IO
 import cats.data.Kleisli
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   EmbeddingError,
   EmbeddingInput,
   EmbeddingInputType,

@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.pagination
+package com.example.graphQL.cats.domain.pagination
 
 import com.example.graphQL.cats.domain.error.DomainValidationError.InvalidNumber
 import munit.FunSuite

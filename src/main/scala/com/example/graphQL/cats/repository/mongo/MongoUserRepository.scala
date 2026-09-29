@@ -5,95 +5,102 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents}
+import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.events.{OperationalEventType, OperationalEvents}
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.client.model.{Filters, Sorts, UpdateOptions, Updates}
+import com.mongodb.client.model.{Filters, Sorts, UpdateOptions}
 import com.mongodb.client.result.UpdateResult
-import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
+import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.collection.MongoCollection
+import mongo4cats.database.MongoDatabase
 import org.bson.Document
-import org.bson.conversions.Bson
 
 import java.time.Instant
 import scala.util.chaining.*
 import java.util.Date
 
 final class MongoUserRepository(
-    database: MongoDatabase,
-    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
-    embeddingWork: Option[MongoEmbeddingWorkRepository] = None,
+    database: MongoDatabase[IO],
+    transactionRunner: MongoTransactionRunner,
+    embeddingWork: MongoEmbeddingWorkEnqueuer,
     diagnostics: Diagnostics = Diagnostics.noop
 ) extends UserRepository
     with UserAccountRepository
     with MongoConflictWriteMapping
     with MongoOperationalEventInsertion {
-  private val collection = database.getCollection("users")
-  private val registry = database.getCollection("account_registry")
-  private val outbox = database.getCollection("event_outbox")
-  private val subjectFences = database.getCollection("outbox_subject_fences")
+  private def collection = Mongo4catsCollections.documents(database, MongoCollections.Users)
+  private def registry = Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry)
+  private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
+  private def subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
   private val MaxJobsClosedByAccountDeletion = 1000
 
-  def insert(user: User): IO[Either[RepositoryError, Unit]] =
-    if (!user.roleProfileIsValid) IO.pure(Left(RepositoryError.Conflict))
+  def insert(user: User): RepositoryIO[Unit] =
+    if (!user.roleProfileIsValid) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
     else
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "MongoUserRepository.insert")(
-          PublisherBridge.first(collection.insertOne(MongoHiringCodecs.user(user))).as(Right(()))
+          MongoSessionOperations
+            .insertOne(collection, None, MongoHiringCodecs.user(user))
+            .map(MongoRepositorySupport.writeResult(_).void)
         )(mapWrite)
-        .value
 
-  override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
+  override def find(id: UserId): RepositoryIO[Option[User]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.find")(
-        PublisherBridge
-          .first(collection.find(Filters.eq("_id", id.value.toString)))
+        collection
+          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
           .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       )(_ => Left(RepositoryError.Unavailable))
-      .value
 
-  override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
+  override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.findVersioned")(
-        PublisherBridge
-          .first(collection.find(Filters.eq("_id", id.value.toString)))
+        collection
+          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
           .map(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser))
           )
       )(_ => Left(RepositoryError.Unavailable))
-      .value
 
-  private def findWithSession(id: UserId, session: Option[ClientSession]): IO[Either[RepositoryError, Option[User]]] =
+  private def findWithSession(
+      id: UserId,
+      session: Option[ClientSession[IO]]
+  ): IO[Either[RepositoryError, Option[User]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.findWithSession")(
-        findOne(session, collection, Filters.eq("_id", id.value.toString))
+        MongoSessionOperations
+          .findOne(collection, session, MongoFilter.eq(MongoFields.Id, id.value.toString))
           .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       )(_ => Left(RepositoryError.Unavailable))
       .value
 
-  override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
+  override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)(diagnostics)
 
-  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+  override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
     findVersioned(id).flatMap {
-      case Right(Some(user)) => updateEmbedding(user, embedding)
-      case Right(None)       => IO.pure(Left(RepositoryError.Conflict))
-      case Left(error)       => IO.pure(Left(error))
+      case Some(user) => updateEmbedding(user, embedding)
+      case None       => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     }
 
   override def updateEmbedding(
       observed: Versioned[User],
       embedding: EntityEmbedding
-  ): IO[Either[RepositoryError, Unit]] = {
+  ): RepositoryIO[Unit] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
-    PublisherBridge
-      .first(
-        collection.updateOne(
-          MongoObservedStateFilters.candidateEmbedding(observed),
-          Updates.combine(
-            Updates.set("embedding", encoded.get("embedding")),
-            Updates.set("embeddingMeta", encoded.get("embeddingMeta")),
-            Updates.inc("version", 1L)
-          )
+    MongoSessionOperations
+      .updateOne(
+        collection,
+        None,
+        MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
+          MongoFilter.eq(MongoFields.Version, observed.version),
+          MongoFilter.lt(MongoFields.Version, Long.MaxValue)
+        ),
+        MongoUpdate.combine(
+          MongoUpdate.set(MongoFields.Embedding, encoded.get(MongoFields.Embedding)),
+          MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta)),
+          MongoUpdate.inc(MongoFields.Version, 1L)
         )
       )
       .map {
@@ -104,62 +111,70 @@ final class MongoUserRepository(
       .pipe(effect =>
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "MongoUserRepository.updateEmbedding")(effect)(mapWrite)
-          .value
       )
   }
 
-  override def initialized: IO[Either[RepositoryError, Boolean]] =
+  override def initialized: RepositoryIO[Boolean] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.initialized")(
-        PublisherBridge
-          .first(registry.find(Filters.eq("_id", "user-account-registry")))
-          .map(document => Right(document.exists(_.getString("state", "") == "Initialized")))
+        registry
+          .flatMap(_.find(Filters.eq(MongoFields.Id, "user-account-registry")).first)
+          .map(document => Right(document.exists(_.getString(MongoFields.State, "") == "Initialized")))
       )(_ => Left(RepositoryError.Unavailable))
-      .value
 
   override def bootstrap(
       user: User,
       passwordHash: PasswordHash,
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     if (!user.roleProfileIsValid || user.role != UserRole.Admin || !user.adminSingleton)
-      IO.pure(Left(RepositoryError.Conflict))
+      EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     else
       MongoMutationWriteContext
         .run(context, transactionRunner, transactionRequired = true) { session =>
           bootstrapWithSession(user, passwordHash, session)
         }
         .pipe(effect =>
-          MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+          MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
         )
 
   private def bootstrapWithSession(
       user: User,
       passwordHash: PasswordHash,
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, Unit]] =
-    val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Uninitialized"))
-    val findRegistry = findOne(session, registry, stateFilter)
-    val findAnyUser = findOne(session, collection, new Document())
+    val stateFilter = MongoFilter.and(
+      MongoFilter.eq(MongoFields.Id, "user-account-registry"),
+      MongoFilter.eq(MongoFields.State, "Uninitialized")
+    )
+    val findRegistry = MongoSessionOperations.findOne(registry, session, stateFilter)
+    val findAnyUser = MongoSessionOperations.findOne(collection, session, MongoFilter.and())
     findRegistry.flatMap {
       case None    => IO.pure(Left(RepositoryError.Conflict))
       case Some(_) =>
         findAnyUser.flatMap {
           case Some(_) => IO.pure(Left(RepositoryError.Conflict))
           case None    =>
-            insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)).flatMap {
-              case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-              case Some(_) =>
-                updateOne(
-                  session,
-                  registry,
-                  stateFilter,
-                  Updates.combine(Updates.set("state", "Initialized"), Updates.set("adminId", user.id.value.toString))
-                ).map {
-                  case Some(_) => Right(())
-                  case None    => Left(RepositoryError.MissingWriteResult)
-                }
-            }
+            MongoSessionOperations
+              .insertOne(collection, session, MongoHiringCodecs.userWithPassword(user, passwordHash))
+              .flatMap {
+                case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+                case Some(_) =>
+                  MongoSessionOperations
+                    .updateOne(
+                      registry,
+                      session,
+                      stateFilter,
+                      MongoUpdate.combine(
+                        MongoUpdate.set(MongoFields.State, "Initialized"),
+                        MongoUpdate.set(MongoFields.AdminId, user.id.value.toString)
+                      )
+                    )
+                    .map {
+                      case Some(_) => Right(())
+                      case None    => Left(RepositoryError.MissingWriteResult)
+                    }
+              }
         }
     }
 
@@ -167,30 +182,31 @@ final class MongoUserRepository(
       user: User,
       passwordHash: PasswordHash,
       now: Instant,
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, Unit]] =
     if (!user.roleProfileIsValid || user.role == UserRole.Admin) IO.pure(Left(RepositoryError.Conflict))
     else
       {
-        val stateFilter = Filters.and(Filters.eq("_id", "user-account-registry"), Filters.eq("state", "Initialized"))
-        findOne(session, registry, stateFilter).flatMap {
+        val stateFilter = MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, "user-account-registry"),
+          MongoFilter.eq(MongoFields.State, "Initialized")
+        )
+        MongoSessionOperations.findOne(registry, session, stateFilter).flatMap {
           case None    => IO.pure(Left(RepositoryError.Conflict))
           case Some(_) =>
-            insertOne(session, collection, MongoHiringCodecs.userWithPassword(user, passwordHash)).flatMap {
-              case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-              case Some(_) =>
-                embeddingWork
-                  .filter(_ => user.role == UserRole.Candidate)
-                  .fold(
-                    IO.pure(Right(()): Either[RepositoryError, Unit])
-                  )(
-                    _.enqueue(
+            MongoSessionOperations
+              .insertOne(collection, session, MongoHiringCodecs.userWithPassword(user, passwordHash))
+              .flatMap {
+                case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+                case Some(_) =>
+                  if (user.role == UserRole.Candidate)
+                    embeddingWork.enqueue(
                       session,
                       EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, user.id.value.toString),
                       now
                     )
-                  )
-            }
+                  else IO.pure(Right(()))
+              }
         }
       }.pipe(effect =>
         MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
@@ -201,27 +217,26 @@ final class MongoUserRepository(
       passwordHash: PasswordHash,
       now: Instant,
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     MongoMutationWriteContext
       .run(
         context,
         transactionRunner,
-        transactionRequired = embeddingWork.nonEmpty && user.role == UserRole.Candidate
+        transactionRequired = user.role == UserRole.Candidate && embeddingWork.requiresTransaction
       )(session => writeAccountSession(user, passwordHash, now, session))
       .pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+          MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
       )
 
-  override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] =
-    PublisherBridge
-      .first(collection.find(Filters.eq("nameCanonical", nameCanonical)))
+  override def findByCanonicalName(nameCanonical: String): RepositoryIO[Option[AccountCredentials]] =
+    collection
+      .flatMap(_.find(Filters.eq(MongoFields.NameCanonical, nameCanonical)).first)
       .map { document =>
         MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readCredentials)).map(_.flatten)
       }
       .pipe(effect =>
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
-          .value
       )
 
   override def updateProfile(
@@ -229,18 +244,18 @@ final class MongoUserRepository(
       profile: UserProfile,
       now: Instant,
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, User]] =
+  ): RepositoryIO[User] =
     profile match {
-      case _: UserProfile.Candidate if embeddingWork.nonEmpty =>
+      case _: UserProfile.Candidate =>
         MongoMutationWriteContext
-          .run(context, transactionRunner, transactionRequired = true) { session =>
+          .run(context, transactionRunner, transactionRequired = embeddingWork.requiresTransaction) { session =>
             updateCandidateProfileWithEmbeddingWork(userId, profile, now, session).flatMap {
-              case Right(()) => findWithSession(userId, session).map(_.flatMap(_.toRight(RepositoryError.Unavailable)))
+              case Right(()) => findWithSession(userId, session).map(_.flatMap(_.toRight(RepositoryError.MissingStoredResult)))
               case Left(error) => IO.pure(Left(error))
             }
           }
           .pipe(effect =>
-            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
           )
       case _ =>
         MongoMutationWriteContext
@@ -248,7 +263,7 @@ final class MongoUserRepository(
             updateProfileDirect(userId, profile, now, session)
           }
           .pipe(effect =>
-            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
           )
     }
 
@@ -256,81 +271,78 @@ final class MongoUserRepository(
       userId: UserId,
       profile: UserProfile,
       now: Instant,
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, User]] =
-    updateOne(
-      session,
-      collection,
-      Filters.and(
-        Filters.eq("_id", userId.value.toString),
-        Filters.eq("accountStatus", AccountStatus.Active.toString),
-        Filters.lt("version", Long.MaxValue)
-      ),
-      Updates.combine(
-        Updates.set("profile", MongoHiringCodecs.profile(profile)),
-        Updates.set("updatedAt", Date.from(now)),
-        Updates.inc("version", 1L)
+    MongoSessionOperations
+      .updateOne(
+        collection,
+        session,
+        MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, userId.value.toString),
+          MongoFilter.eq(MongoFields.AccountStatus, AccountStatus.Active.toString),
+          MongoFilter.lt(MongoFields.Version, Long.MaxValue)
+        ),
+        MongoUpdate.combine(
+          MongoUpdate.set(MongoFields.Profile, MongoHiringCodecs.profile(profile)),
+          MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+          MongoUpdate.inc(MongoFields.Version, 1L)
+        )
       )
-    ).flatMap {
-      case Some(result) if result.getMatchedCount == 1L =>
-        findWithSession(userId, session).map(_.flatMap(_.toRight(RepositoryError.Unavailable)))
-      case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-      case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-    }.pipe(effect =>
-      MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
-    )
+      .flatMap {
+        case Some(result) if result.getMatchedCount == 1L =>
+          findWithSession(userId, session).map(_.flatMap(_.toRight(RepositoryError.MissingStoredResult)))
+        case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+        case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+      }
+      .pipe(effect =>
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+      )
 
   private def updateCandidateProfileWithEmbeddingWork(
       userId: UserId,
       profile: UserProfile,
       now: Instant,
-      session: Option[ClientSession]
-  ): IO[Either[RepositoryError, Unit]] =
-    embeddingWork.fold(IO.pure(Left(RepositoryError.Unavailable): Either[RepositoryError, Unit])) { work =>
-      {
-        val filter = Filters.and(
-          Filters.eq("_id", userId.value.toString),
-          Filters.eq("role", UserRole.Candidate.toString),
-          Filters.eq("accountStatus", AccountStatus.Active.toString),
-          Filters.lt("version", Long.MaxValue)
-        )
-        val update = Updates.combine(
-          Updates.set("profile", MongoHiringCodecs.profile(profile)),
-          Updates.set("updatedAt", Date.from(now)),
-          Updates.inc("version", 1L)
-        )
-        updateOne(session, collection, filter, update).flatMap {
-          case Some(result) if result.getMatchedCount == 1L =>
-            work.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, userId.value.toString), now)
-          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-          case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-        }
-      }.pipe(effect =>
+      session: Option[ClientSession[IO]]
+  ): IO[Either[RepositoryError, Unit]] = {
+    val filter = MongoFilter.and(
+      MongoFilter.eq(MongoFields.Id, userId.value.toString),
+      MongoFilter.eq(MongoFields.Role, UserRole.Candidate.toString),
+      MongoFilter.eq(MongoFields.AccountStatus, AccountStatus.Active.toString),
+      MongoFilter.lt(MongoFields.Version, Long.MaxValue)
+    )
+    val update = MongoUpdate.combine(
+      MongoUpdate.set(MongoFields.Profile, MongoHiringCodecs.profile(profile)),
+      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+      MongoUpdate.inc(MongoFields.Version, 1L)
+    )
+    MongoSessionOperations
+      .updateOne(collection, session, filter, update)
+      .flatMap {
+        case Some(result) if result.getMatchedCount == 1L =>
+          embeddingWork.enqueue(
+            session,
+            EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, userId.value.toString),
+            now
+          )
+        case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+        case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+      }
+      .pipe(effect =>
         MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
       )
-    }
+  }
 
-  override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = {
+  override def listAccounts(page: UserPageRequest): RepositoryIO[List[User]] = {
     val filters = List(
-      Some(Filters.eq("accountStatus", page.status.toString)),
-      page.role.map(role => Filters.eq("role", role.toString)),
-      page.cursor.map(cursor => MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString))
+      Some(MongoFilter.eq(MongoFields.AccountStatus, page.status.toString)),
+      page.role.map(role => MongoFilter.eq(MongoFields.Role, role.toString)),
+      page.cursor.map(cursor =>
+        MongoFilter.beforeCursor(MongoFields.CreatedAt, cursor.createdAt, cursor.id.value.toString)
+      )
     ).flatten
-    val filter = Filters.and(filters*)
-    PublisherBridge
-      .collectWithin(
-        collection
-          .find(filter)
-          .sort(Sorts.orderBy(Sorts.descending("createdAt"), Sorts.descending("_id")))
-          .limit(page.pageSize.value),
-        page.pageSize.value
-      )
-      .map(documents => MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readUser)))
-      .pipe(effect =>
-        MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoUserRepository.read")(effect)(_ => Left(RepositoryError.Unavailable))
-          .value
-      )
+    MongoKeysetPaging.page(collection, MongoFilter.and(filters*), MongoFields.CreatedAt, page.pageSize)(
+      MongoHiringCodecs.readUser
+    )(diagnostics)
   }
 
   override def deleteAccount(
@@ -338,40 +350,40 @@ final class MongoUserRepository(
       now: Instant,
       tombstone: String,
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     MongoMutationWriteContext
       .run(context, transactionRunner, transactionRequired = true) { session =>
         deleteAccountWithSession(userId, now, tombstone, session)
       }
       .pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite).value
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
       )
 
   private def deleteAccountWithSession(
       userId: UserId,
       now: Instant,
       tombstone: String,
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, Unit]] = {
     val userFilter =
-      Filters.and(
-        Filters.eq("_id", userId.value.toString),
-        Filters.eq("accountStatus", AccountStatus.Active.toString),
-        Filters.lt("version", Long.MaxValue)
+      MongoFilter.and(
+        MongoFilter.eq(MongoFields.Id, userId.value.toString),
+        MongoFilter.eq(MongoFields.AccountStatus, AccountStatus.Active.toString),
+        MongoFilter.lt(MongoFields.Version, Long.MaxValue)
       )
-    val userUpdate = Updates.combine(
-      Updates.set("accountStatus", AccountStatus.Deleted.toString),
-      Updates.set("deletedAt", Date.from(now)),
-      Updates.set("name", tombstone),
-      Updates.set("nameCanonical", AccountName.canonical(tombstone)),
-      Updates.unset("passwordHash"),
-      Updates.unset("profile"),
-      Updates.unset("recruiterProfile"),
-      Updates.unset("email"),
-      Updates.unset("emailCanonical"),
-      Updates.inc("version", 1L)
+    val userUpdate = MongoUpdate.combine(
+      MongoUpdate.set(MongoFields.AccountStatus, AccountStatus.Deleted.toString),
+      MongoUpdate.set(MongoFields.DeletedAt, Date.from(now)),
+      MongoUpdate.set(MongoFields.Name, tombstone),
+      MongoUpdate.set(MongoFields.NameCanonical, AccountName.canonical(tombstone)),
+      MongoUpdate.unset(MongoFields.PasswordHash),
+      MongoUpdate.unset(MongoFields.Profile),
+      MongoUpdate.unset(MongoFields.RecruiterProfile),
+      MongoUpdate.unset(MongoFields.Email),
+      MongoUpdate.unset(MongoFields.EmailCanonical),
+      MongoUpdate.inc(MongoFields.Version, 1L)
     )
-    val userWrite = updateOne(session, collection, userFilter, userUpdate)
+    val userWrite = MongoSessionOperations.updateOne(collection, session, userFilter, userUpdate)
     userWrite.flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
         markSubjectFenceDeleted(session, userId, now).flatMap {
@@ -384,21 +396,18 @@ final class MongoUserRepository(
   }
 
   private def markSubjectFenceDeleted(
-      session: Option[ClientSession],
+      session: Option[ClientSession[IO]],
       userId: UserId,
       now: Instant
   ): IO[Either[RepositoryError, Unit]] = {
-    val filter = Filters.eq("_id", userId.value.toString)
-    val update = Updates.combine(
-      Updates.setOnInsert("_id", userId.value.toString),
-      Updates.set("deleted", true),
-      Updates.set("deletedAt", Date.from(now))
+    val filter = MongoFilter.eq(MongoFields.Id, userId.value.toString)
+    val update = MongoUpdate.combine(
+      MongoUpdate.setOnInsert(MongoFields.Id, userId.value.toString),
+      MongoUpdate.set(MongoFields.Deleted, true),
+      MongoUpdate.set(MongoFields.DeletedAt, Date.from(now))
     )
-    val operation = session.fold(
-      PublisherBridge.first(subjectFences.updateOne(filter, update, new UpdateOptions().upsert(true)))
-    )(active =>
-      PublisherBridge.first(subjectFences.updateOne(active, filter, update, new UpdateOptions().upsert(true)))
-    )
+    val operation =
+      MongoSessionOperations.updateOne(subjectFences, session, filter, update, new UpdateOptions().upsert(true))
     operation
       .map {
         case Some(_) => Right(())
@@ -414,18 +423,16 @@ final class MongoUserRepository(
   private def closeRecruiterJobs(
       userId: UserId,
       now: Instant,
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, Unit]] = {
-    val jobFilter =
-      Filters.and(Filters.eq("recruiterId", userId.value.toString), Filters.eq("status", JobStatus.Open.toString))
-    val jobs = database.getCollection("jobs")
+    val jobFilter = MongoFilter.and(
+      MongoFilter.eq(MongoFields.RecruiterId, userId.value.toString),
+      MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
+    )
+    val jobs = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
     def closeJobs(afterId: Option[String]): IO[Either[RepositoryError, Unit]] = {
-      val batchFilter = Filters.and(
-        List(
-          Some(jobFilter),
-          afterId.map(id => Filters.gt("_id", id))
-        ).flatten*
-      )
+      val batchFilter =
+        MongoFilter.and(List(Some(jobFilter), afterId.map(id => MongoFilter.gt(MongoFields.Id, id))).flatten*)
       val findJobs = findManyById(session, jobs, batchFilter, MaxJobsClosedByAccountDeletion)
       findJobs.flatMap { documents =>
         MongoStoredDocumentDecoding.values(documents.map(MongoHiringCodecs.readVersionedJob)) match {
@@ -440,12 +447,17 @@ final class MongoUserRepository(
                 case None              => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
                 case Some(nextVersion) =>
                   EitherT(
-                    replaceOne(
-                      session,
-                      jobs,
-                      MongoObservedStateFilters.jobReplacement(observed),
-                      MongoHiringCodecs.job(closed, nextVersion)
-                    ).map(MongoUserRepository.classifyJobClose)
+                    MongoSessionOperations
+                      .replaceOne(
+                        jobs,
+                        session,
+                        MongoFilter.and(
+                          MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
+                          MongoFilter.eq(MongoFields.Version, observed.version)
+                        ),
+                        MongoHiringCodecs.job(closed, nextVersion)
+                      )
+                      .map(MongoUserRepository.classifyJobClose)
                   )
               }
             }
@@ -472,54 +484,30 @@ final class MongoUserRepository(
     closeJobs(None)
   }
 
-  private def findOne(
-      session: Option[ClientSession],
-      target: MongoCollection[Document],
-      filter: Bson
-  ): IO[Option[Document]] =
-    session.fold(PublisherBridge.first(target.find(filter)))(active =>
-      PublisherBridge.first(target.find(active, filter))
-    )
-
-  private def insertOne(
-      session: Option[ClientSession],
-      target: MongoCollection[Document],
-      document: Document
-  ) =
-    session.fold(PublisherBridge.first(target.insertOne(document)))(active =>
-      PublisherBridge.first(target.insertOne(active, document))
-    )
-
-  private def updateOne(
-      session: Option[ClientSession],
-      target: MongoCollection[Document],
-      filter: Bson,
-      update: Bson
-  ) =
-    session.fold(PublisherBridge.first(target.updateOne(filter, update)))(active =>
-      PublisherBridge.first(target.updateOne(active, filter, update))
-    )
-
-  private def replaceOne(
-      session: Option[ClientSession],
-      target: MongoCollection[Document],
-      filter: Bson,
-      document: Document
-  ) =
-    session.fold(PublisherBridge.first(target.replaceOne(filter, document)))(active =>
-      PublisherBridge.first(target.replaceOne(active, filter, document))
-    )
-
   private def findManyById(
-      session: Option[ClientSession],
-      target: MongoCollection[Document],
-      filter: Bson,
+      session: Option[ClientSession[IO]],
+      target: IO[MongoCollection[IO, Document]],
+      filter: MongoFilter,
       limit: Int
   ): IO[List[Document]] =
-    session.fold(
-      PublisherBridge.collectWithin(target.find(filter).sort(Sorts.ascending("_id")).limit(limit), limit)
-    )(active =>
-      PublisherBridge.collectWithin(target.find(active, filter).sort(Sorts.ascending("_id")).limit(limit), limit)
+    target.flatMap(collection =>
+      session.fold(
+        collection
+          .find(filter.bson)
+          .sort(Sorts.ascending(MongoFields.Id))
+          .limit(limit)
+          .boundedStream(limit)
+          .compile
+          .toList
+      )(active =>
+        collection
+          .find(active, filter.sessionFilter)
+          .sort(Sorts.ascending(MongoFields.Id))
+          .limit(limit)
+          .boundedStream(limit)
+          .compile
+          .toList
+      )
     )
 }
 
@@ -531,13 +519,10 @@ object MongoUserRepository {
       case None                                       => Left(RepositoryError.MissingWriteResult)
     }
 
-  def standalone(database: MongoDatabase, diagnostics: Diagnostics = Diagnostics.noop): MongoUserRepository =
-    new MongoUserRepository(database, diagnostics = diagnostics)
-
   def transactional(
-      database: MongoDatabase,
-      client: MongoClient,
-      embeddingWork: Option[MongoEmbeddingWorkRepository] = None,
+      database: MongoDatabase[IO],
+      client: MongoClient[IO],
+      embeddingWork: MongoEmbeddingWorkEnqueuer,
       diagnostics: Diagnostics = Diagnostics.noop
   ): MongoUserRepository =
     new MongoUserRepository(

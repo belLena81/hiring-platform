@@ -1,18 +1,19 @@
 package com.example.graphQL.cats.service.job
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
 import cats.effect.Ref
-import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, UseCaseError}
-import com.example.graphQL.cats.service.mutation.Idempotent
+import cats.effect.std.UUIDGen
+import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, TestHiringServices, UseCaseError}
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
-import com.example.graphQL.cats.shared.pagination.{JobPageRequest, PageSize}
+import com.example.graphQL.cats.domain.pagination.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
-import com.example.graphQL.cats.shared.events.OperationalEventType
+import com.example.graphQL.cats.service.events.OperationalEventType
 import java.util.UUID
+import scala.concurrent.duration.*
 import munit.CatsEffectSuite
 
 class JobServiceSpec extends CatsEffectSuite {
@@ -143,7 +144,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
-      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
+      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
       jobRepository = InMemoryJobs(jobs, Some(outbox))
       service <- deterministicService(InMemoryUsers(users), jobRepository, List(now), List(jobId.value))
       result <- service
@@ -199,7 +200,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
-      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
+      service = TestHiringServices.job(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(recruiterId, UserRole.Recruiter), page).value
     } yield assertEquals(result.map(_.map(_.id)), Right(List(jobId)))
   }
@@ -208,7 +209,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob))
-      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
+      service = TestHiringServices.job(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(recruiterId, UserRole.Candidate), page).value
     } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
@@ -220,7 +221,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(adminId -> admin))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob, otherJobId -> otherJob))
-      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
+      service = TestHiringServices.job(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.myJobs(ActorContext(adminId, UserRole.Admin), page).value
     } yield assertEquals(result.map(_.map(_.id).toSet), Right(Set(jobId, otherJobId)))
   }
@@ -245,7 +246,7 @@ class JobServiceSpec extends CatsEffectSuite {
     for {
       users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
       jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> openJob.copy(status = JobStatus.Draft)))
-      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
+      outbox <- Ref.of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
       jobRepository = InMemoryJobs(jobs, Some(outbox))
       service <- deterministicService(InMemoryUsers(users), jobRepository, List(later), Nil)
       result <- service.publishJob(request("publish"), ActorContext(recruiterId, UserRole.Recruiter), jobId).value
@@ -267,7 +268,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs <- Ref.of[IO, Map[JobId, Job]](
         Map(jobId -> openJob.copy(status = JobStatus.Closed))
       )
-      service = JobService(InMemoryUsers(users), InMemoryJobs(jobs))
+      service = TestHiringServices.job(InMemoryUsers(users), InMemoryJobs(jobs))
       result <- service.viewJob(ActorContext(candidateId, UserRole.Candidate), jobId).value
     } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
   }
@@ -277,7 +278,7 @@ class JobServiceSpec extends CatsEffectSuite {
       jobs: InMemoryJobs,
       times: List[java.time.Instant],
       ids: List[UUID],
-      embeddingWork: EmbeddingWorkPublisher = EmbeddingWorkPublisher.noop
+      embeddingWork: EmbeddingWorkPublisher = com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop
   ): IO[JobService] =
     for {
       timeValues <- Ref.of[IO, List[java.time.Instant]](times)
@@ -286,9 +287,15 @@ class JobServiceSpec extends CatsEffectSuite {
       users,
       jobs,
       embeddingWork,
-      Idempotent.noop,
-      nextValue(timeValues, "timestamp"),
-      nextValue(idValues, "UUID")
+      com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
+      clock = new Clock[IO] {
+        override val applicative: cats.Applicative[IO] = IO.asyncForIO
+        override def realTime: IO[FiniteDuration] = nextValue(timeValues, "timestamp").map(_.toEpochMilli.millis)
+        override def monotonic: IO[FiniteDuration] = IO.pure(Duration.Zero)
+      },
+      uuidGen = new UUIDGen[IO] {
+        override def randomUUID: IO[UUID] = nextValue(idValues, "UUID")
+      }
     )
 
   private def nextValue[A](values: Ref[IO, List[A]], label: String): IO[A] =

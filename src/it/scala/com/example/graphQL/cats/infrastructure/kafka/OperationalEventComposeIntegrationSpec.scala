@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
+import com.example.graphQL.cats.repository.mongo.MongoRepositoryTestSupport.*
 import com.example.graphQL.cats.config.{
   KafkaConfig,
   KafkaConsumerConfig,
@@ -12,7 +13,7 @@ import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
-import com.example.graphQL.cats.shared.events.{OperationalEventType, OperationalEvents}
+import com.example.graphQL.cats.service.events.{OperationalEventType, OperationalEvents}
 import munit.CatsEffectSuite
 import com.mongodb.client.model.Filters
 import org.apache.kafka.clients.consumer.KafkaConsumer
@@ -101,12 +102,12 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
   }
 
   private def waitForReceipts(
-      database: com.mongodb.reactivestreams.client.MongoDatabase,
+      database: mongo4cats.database.MongoDatabase[IO],
       eventIds: Set[String]
   ): IO[Unit] = {
-    val receipts = database.getCollection("consumer_receipts")
+    val receipts = database.getCollection(MongoCollections.ConsumerReceipts)
     def loop(deadline: Instant): IO[Unit] =
-      PublisherBridge
+      MongoRepositoryTestSupport
         .collectWithin(
           receipts
             .find(
@@ -138,107 +139,117 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
       )
     else {
       MongoDatabaseProbe.clientResource(mongoUri).use { client =>
-        val database = client.getDatabase(databaseName)
-        val jobs = MongoJobRepository.transactional(database, client)
-        val outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
-        val receipts = new MongoConsumerReceiptRepository(database)
-        val quarantine = new MongoEventQuarantineRepository(database)
-        val diagnosticEvents = Ref.of[IO, Vector[String]](Vector.empty)
-        val diagnosticsIO = diagnosticEvents.map { events =>
-          val diagnostics = new Diagnostics {
-            override def event(
-                event: LogEvent,
-                requestId: Option[String],
-                fields: => Map[LogField, String]
-            ): IO[Unit] = events.update(
-              _ :+ s"${event.category}:${fields.getOrElse(LogField.ErrorType, "unknown")}:${fields.getOrElse(LogField.ErrorLocation, "unavailable")}"
-            )
-          }
-          val evidence = OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine, diagnostics)
-          val work = (0 until 100).toList.traverse { index =>
-            IO.realTimeInstant.flatMap { createdAt =>
-              val owner = actors(index % actors.size)
-              val jobValue = job(JobId(UUID.randomUUID()), createdAt, owner)
-              val event = OperationalEvents.jobEvent(
-                OperationalEventType.JOB_CREATED,
-                UUID.randomUUID(),
-                jobValue,
-                owner,
-                jobValue.createdAt
+        client.getDatabase(databaseName).flatMap { database =>
+          val jobs = MongoJobRepository.transactional(database, client, new MongoEmbeddingWorkRepository(database))
+          val outbox = MongoOperationalEventOutboxRepository.transactional(database, client)
+          val receipts = new MongoConsumerReceiptRepository(database)
+          val quarantine = new MongoEventQuarantineRepository(database)
+          val diagnosticEvents = Ref.of[IO, Vector[String]](Vector.empty)
+          val diagnosticsIO = diagnosticEvents.map { events =>
+            val diagnostics = new Diagnostics {
+              override def event(
+                  event: LogEvent,
+                  requestId: Option[String],
+                  fields: => Map[LogField, String]
+              ): IO[Unit] = events.update(
+                _ :+ s"${event.category}:${fields.getOrElse(LogField.ErrorType, "unknown")}:${fields.getOrElse(LogField.ErrorLocation, "unavailable")}"
               )
-              jobs.createWithEvents(jobValue, jobValue.createdAt, List(event)).map(result => (event.eventId, result))
             }
-          }
-          (events, evidence, work)
-        }
-        MongoHiringSetup.initialize(database) *> diagnosticsIO.flatMap { case (observedEvents, evidence, work) =>
-          evidence.use { _ =>
-            for {
-              startOffset <- readCommittedEndOffset
-              writes <- work
-              _ = assert(writes.forall(_._2.isRight), clues(writes.count(_._2.isRight)))
-              eventIds = writes.map(_._1.toString).toSet
-              receiptResult <- waitForReceipts(database, eventIds).attempt
-              observedDiagnostics <- observedEvents.get
-              _ = assert(
-                receiptResult.isRight,
-                clues(
-                  s"${receiptResult.swap.toOption.map(_.getMessage)} diagnostics=${observedDiagnostics.mkString(",")}"
+            val evidence = OperationalEventKafkaRuntime.resource(kafka, outbox, receipts, quarantine, diagnostics)
+            val work = (0 until 100).toList.traverse { index =>
+              IO.realTimeInstant.flatMap { createdAt =>
+                val owner = actors(index % actors.size)
+                val jobValue = job(JobId(UUID.randomUUID()), createdAt, owner)
+                val event = OperationalEvents.jobEvent(
+                  OperationalEventType.JOB_CREATED,
+                  UUID.randomUUID(),
+                  jobValue,
+                  owner,
+                  jobValue.createdAt
                 )
-              )
-              _ <- IO.fromEither(receiptResult.leftMap(identity))
-              endOffset <- readCommittedEndOffset
-              _ = assert(endOffset > startOffset, clues(startOffset, endOffset))
-              subjectFence <- PublisherBridge.first(
-                database.getCollection("outbox_subject_fences").find(Filters.eq("_id", actors.head.value.toString))
-              )
-              transactionalIds = subjectFence.toList.flatMap(
-                _.getList("transactionalIds", classOf[String]).asScala.toList
-              )
-              _ = assert(transactionalIds.nonEmpty && transactionalIds.forall(_.startsWith("hiring-publisher-")))
-              outboxRows <- PublisherBridge.collectWithin(
-                database
-                  .getCollection("event_outbox")
-                  .find(
-                    Filters.and(
-                      Filters.eq("state", "Published"),
-                      Filters.in("_id", eventIds.toList.asJava)
-                    )
+                jobs
+                  .createWithEvents(
+                    jobValue,
+                    jobValue.createdAt,
+                    List(event),
+                    com.example.graphQL.cats.service.port.MutationWriteContext.directWrite
                   )
-                  .limit(100),
-                101
-              )
-              receiptRows <- PublisherBridge.collectWithin(
-                database
-                  .getCollection("consumer_receipts")
-                  .find(
-                    Filters.and(
-                      Filters.eq("consumerGroup", kafka.consumerGroup),
-                      Filters.in("eventId", eventIds.toList.asJava)
-                    )
-                  )
-                  .limit(100),
-                120
-              )
-              p95 <- IO {
-                val receiptById =
-                  receiptRows.map(row => row.get("eventId").toString -> row.getDate("createdAt").toInstant).toMap
-                val latencies = outboxRows.flatMap { row =>
-                  Option(row.getDate("createdAt")).flatMap(created =>
-                    receiptById
-                      .get(row.get("_id").toString)
-                      .map(received => Duration.between(created.toInstant, received).toMillis)
-                  )
-                }.sorted
-                assertEquals(latencies.size, 100)
-                latencies((latencies.size * 95 + 99) / 100 - 1)
+                  .map(result => (event.eventId, result))
               }
-            } yield {
-              assert(p95 < 30000L, clues(p95))
-              println(
-                s"analyticsRange database=$databaseName topic=${kafka.topic} partition=0 start=$startOffset end=$endOffset fixtureEvents=100"
-              )
-              println(s"Operational event evidence: consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95")
+            }
+            (events, evidence, work)
+          }
+          MongoHiringSetup.initialize(database) *> diagnosticsIO.flatMap { case (observedEvents, evidence, work) =>
+            evidence.use { _ =>
+              for {
+                startOffset <- readCommittedEndOffset
+                writes <- work
+                _ = assert(writes.forall(_._2.isRight), clues(writes.count(_._2.isRight)))
+                eventIds = writes.map(_._1.toString).toSet
+                receiptResult <- waitForReceipts(database, eventIds).attempt
+                observedDiagnostics <- observedEvents.get
+                _ = assert(
+                  receiptResult.isRight,
+                  clues(
+                    s"${receiptResult.swap.toOption.map(_.getMessage)} diagnostics=${observedDiagnostics.mkString(",")}"
+                  )
+                )
+                _ <- IO.fromEither(receiptResult.leftMap(identity))
+                endOffset <- readCommittedEndOffset
+                _ = assert(endOffset > startOffset, clues(startOffset, endOffset))
+                subjectFence <- MongoRepositoryTestSupport.first(
+                  database
+                    .getCollection(MongoCollections.OutboxSubjectFences)
+                    .find(Filters.eq("_id", actors.head.value.toString))
+                )
+                transactionalIds = subjectFence.toList.flatMap(
+                  _.getList("transactionalIds", classOf[String]).asScala.toList
+                )
+                _ = assert(transactionalIds.nonEmpty && transactionalIds.forall(_.startsWith("hiring-publisher-")))
+                outboxRows <- MongoRepositoryTestSupport.collectWithin(
+                  database
+                    .getCollection(MongoCollections.EventOutbox)
+                    .find(
+                      Filters.and(
+                        Filters.eq("state", "Published"),
+                        Filters.in("_id", eventIds.toList.asJava)
+                      )
+                    )
+                    .limit(100),
+                  101
+                )
+                receiptRows <- MongoRepositoryTestSupport.collectWithin(
+                  database
+                    .getCollection(MongoCollections.ConsumerReceipts)
+                    .find(
+                      Filters.and(
+                        Filters.eq("consumerGroup", kafka.consumerGroup),
+                        Filters.in("eventId", eventIds.toList.asJava)
+                      )
+                    )
+                    .limit(100),
+                  120
+                )
+                p95 <- IO {
+                  val receiptById =
+                    receiptRows.map(row => row.get("eventId").toString -> row.getDate("createdAt").toInstant).toMap
+                  val latencies = outboxRows.flatMap { row =>
+                    Option(row.getDate("createdAt")).flatMap(created =>
+                      receiptById
+                        .get(row.get("_id").toString)
+                        .map(received => Duration.between(created.toInstant, received).toMillis)
+                    )
+                  }.sorted
+                  assertEquals(latencies.size, 100)
+                  latencies((latencies.size * 95 + 99) / 100 - 1)
+                }
+              } yield {
+                assert(p95 < 30000L, clues(p95))
+                println(
+                  s"analyticsRange database=$databaseName topic=${kafka.topic} partition=0 start=$startOffset end=$endOffset fixtureEvents=100"
+                )
+                println(s"Operational event evidence: consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95")
+              }
             }
           }
         }

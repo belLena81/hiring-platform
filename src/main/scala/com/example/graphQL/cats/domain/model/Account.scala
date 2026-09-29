@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.domain.model
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.shared.pagination.PageSize
+import com.example.graphQL.cats.domain.pagination.PageSize
 import java.time.Instant
 import java.text.Normalizer
 import java.util.Locale

@@ -2,9 +2,11 @@ package com.example.graphQL.cats.service.auth
 
 import cats.effect.{IO, Ref}
 import cats.effect.std.Semaphore
+import cats.effect.std.UUIDGen
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   AnalyticsErasureRequestRepository,
   MutationEntityReference,
   MutationReceiptExecution,
@@ -13,10 +15,11 @@ import com.example.graphQL.cats.repository.protocol.{
   MutationReceiptRepository,
   MutationWriteOutcome,
   MutationWriteContext,
+  RepositoryIO,
   UserAccountRepository,
   UserRepository
 }
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{AccountError, ActorContext, AnalyticsError, ServiceFixtures, UseCaseError}
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.*
@@ -346,27 +349,27 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
 
   test("account deletion fails closed when the erasure worker is not ready") {
     val unavailableWorker = new AnalyticsErasureRequestRepository {
-      override def workerReady(now: Instant): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Left(RepositoryError.Unavailable))
+      override def workerReady(now: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Left(RepositoryError.Unavailable)) )
 
       override def enqueue(
           userId: UserId,
           now: Instant,
           context: MutationWriteContext
-      ): IO[Either[RepositoryError, String]] =
-        IO.raiseError(new AssertionError("deletion must not enqueue when worker preflight fails"))
+      ): RepositoryIO[String] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.raiseError(new AssertionError("deletion must not enqueue when worker preflight fails")) )
 
       override def statusForSubject(
           userId: UserId,
           receiptId: String
-      ): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
-        IO.pure(Left(RepositoryError.Unavailable))
+      ): RepositoryIO[com.example.graphQL.cats.domain.model.AccountDeletionStatus] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Left(RepositoryError.Unavailable)) )
 
-      override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Left(RepositoryError.Unavailable))
+      override def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Left(RepositoryError.Unavailable)) )
 
-      override def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Left(RepositoryError.Unavailable))
+      override def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Left(RepositoryError.Unavailable)) )
     }
     for {
       accounts <- TestAccounts.create(initialized = true)
@@ -386,7 +389,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       hasher: PasswordHasher = TestHasher,
       tokenIssuer: AccessTokenIssuer = TestTokenIssuer,
       erasureRequests: AnalyticsErasureRequestRepository = AnalyticsErasureRequestRepository.unavailable,
-      idempotent: Idempotent = Idempotent.noop
+      idempotent: Idempotent = com.example.graphQL.cats.service.mutation.TestIdempotency.noop
   ): UserAccountService =
     new UserAccountService(
       users,
@@ -394,9 +397,12 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       hasher,
       tokenIssuer,
       erasureRequests = erasureRequests,
+      embeddingWork = com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
       idempotent = idempotent,
-      currentTime = IO.pure(now),
-      randomId = IO.pure(userId.value)
+      clock = FixedTestClock.at(now),
+      uuidGen = new UUIDGen[IO] {
+        override def randomUUID: IO[UUID] = IO.pure(userId.value)
+      }
     )
 
   private object TestHasher extends PasswordHasher {
@@ -412,23 +418,23 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   }
 
   private object TestErasureRequests extends AnalyticsErasureRequestRepository {
-    override def workerReady(now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def workerReady(now: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(())) )
 
     override def enqueue(
         userId: UserId,
         now: Instant,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, String]] = IO.pure(Right("00000000-0000-0000-0000-000000000123"))
+    ): RepositoryIO[String] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right("00000000-0000-0000-0000-000000000123")) )
 
     override def statusForSubject(
         userId: UserId,
         receiptId: String
-    ): IO[Either[RepositoryError, com.example.graphQL.cats.domain.model.AccountDeletionStatus]] =
-      IO.pure(Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending))
+    ): RepositoryIO[com.example.graphQL.cats.domain.model.AccountDeletionStatus] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(com.example.graphQL.cats.domain.model.AccountDeletionStatus.Pending)) )
 
-    override def purgeSubjectOutbox(userId: UserId): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(())) )
 
-    override def markComplete(userId: UserId, now: Instant): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    override def markComplete(userId: UserId, now: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(())) )
   }
 
   private object TransactionalReceipts extends MutationReceiptRepository {
@@ -440,11 +446,11 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         now: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
-    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
+        write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
+    ): RepositoryIO[MutationReceiptExecution[A, E]] = {
       val _ = (key, fingerprint, now, expiresAt)
       write(context).map(
-        _.map {
+        {
           case MutationWriteOutcome.Rejected(error) => MutationReceiptExecution.Rejected(error)
           case MutationWriteOutcome.Applied(value)  => MutationReceiptExecution.Applied(value.value, value.entity)
         }
@@ -459,20 +465,19 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         now: Instant,
         expiresAt: Instant
     )(
-        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
-    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
-      val _ = (key, fingerprint, now, expiresAt, write)
-      IO.pure(Right(MutationReceiptExecution.Replay(reference)))
-    }
+        write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
+    ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
+      Right(MutationReceiptExecution.Replay(reference))
+    )
   }
 
   private final class TestUsers(values: Map[UserId, User]) extends ServiceFixtures.VersionedUserRepositoryTestAdapter {
     val ref: IO[Map[UserId, User]] = IO.pure(values)
-    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
-    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-      IO.pure(Right(ids.flatMap(values.get)))
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Right(()))
+    override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(values.get(id))) )
+    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(ids.flatMap(values.get))) )
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(())) )
   }
 
   private final class TestAccounts(
@@ -483,34 +488,34 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         user: User,
         passwordHash: PasswordHash,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] = IO.pure(Left(RepositoryError.Conflict))
-    override def initialized: IO[Either[RepositoryError, Boolean]] = IO.pure(Right(initializedState))
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Left(RepositoryError.Conflict)) )
+    override def initialized: RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(initializedState)) )
     override def createAccount(
         user: User,
         passwordHash: PasswordHash,
         now: Instant,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       values.modify { current =>
         val key = AccountName.canonical(user.name)
         if (current.contains(key)) current -> Left(RepositoryError.Conflict)
         else (current.updated(key, AccountCredentials(user, passwordHash)), Right(()))
-      }
-    override def findByCanonicalName(nameCanonical: String): IO[Either[RepositoryError, Option[AccountCredentials]]] =
-      values.get.map(values => Right(values.get(nameCanonical)))
+      } )
+    override def findByCanonicalName(nameCanonical: String): RepositoryIO[Option[AccountCredentials]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      values.get.map(values => Right(values.get(nameCanonical))) )
     override def updateProfile(
         userId: UserId,
         profile: UserProfile,
         now: Instant,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, User]] = IO.pure(Left(RepositoryError.Unavailable))
-    override def listAccounts(page: UserPageRequest): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
+    ): RepositoryIO[User] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Left(RepositoryError.Unavailable)) )
+    override def listAccounts(page: UserPageRequest): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(Nil)) )
     override def deleteAccount(
         userId: UserId,
         now: Instant,
         tombstone: String,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(())) )
   }
 
   private object TestAccounts {

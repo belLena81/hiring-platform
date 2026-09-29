@@ -1,16 +1,12 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields, ProbeResult}
+import com.example.graphQL.cats.service.port.DatabaseProbe
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.mongodb.{
-  ConnectionString,
-  MongoClientSettings,
-  MongoSecurityException,
-  MongoSocketException,
-  MongoTimeoutException
-}
-import com.mongodb.reactivestreams.client.{MongoClient, MongoClients, MongoDatabase}
+import com.mongodb.{MongoClientSettings, MongoSecurityException, MongoSocketException, MongoTimeoutException}
+import mongo4cats.client.{MongoClient => CatsMongoClient}
+import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.util.concurrent.TimeUnit
@@ -21,7 +17,7 @@ object MongoDatabaseProbe {
   def effectiveSettings(uri: String): MongoClientSettings =
     MongoClientSettings
       .builder()
-      .applyConnectionString(new ConnectionString(uri))
+      .applyConnectionString(new com.mongodb.ConnectionString(uri))
       .applyToConnectionPoolSettings { builder =>
         val _ = builder.minSize(0).maxSize(10).maxWaitTime(2, TimeUnit.SECONDS)
       }
@@ -33,12 +29,12 @@ object MongoDatabaseProbe {
       }
       .build()
 
-  def clientResource(uri: String): Resource[IO, MongoClient] =
-    Resource.make(IO.blocking(MongoClients.create(effectiveSettings(uri))))(client => IO.blocking(client.close()))
+  def clientResource(uri: String): Resource[IO, CatsMongoClient[IO]] =
+    CatsMongoClient.create[IO](effectiveSettings(uri))
 
   def connectionMetadata(uri: String, database: String): Map[LogField, String] =
     Map(
-      LogField.MongoHosts -> new ConnectionString(uri).getHosts.asScala.take(4).mkString(","),
+      LogField.MongoHosts -> new com.mongodb.ConnectionString(uri).getHosts.asScala.take(4).mkString(","),
       LogField.MongoDatabase -> database
     )
 
@@ -47,24 +43,21 @@ object MongoDatabaseProbe {
       database: String,
       diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, DatabaseProbe] =
-    clientResource(uri).map(client =>
-      fromDatabase(client.getDatabase(database), connectionMetadata(uri, database), diagnostics)
-    )
+    clientResource(uri)
+      .evalMap(_.getDatabase(database))
+      .map(db => fromDatabase(db, connectionMetadata(uri, database), diagnostics))
 
   def fromDatabase(
-      database: MongoDatabase,
+      database: MongoDatabase[IO],
       metadata: Map[LogField, String],
       diagnostics: Diagnostics = Diagnostics.noop
   ): DatabaseProbe = new DatabaseProbe {
     override def check: IO[ProbeResult] = check(None)
 
     override def check(requestId: Option[String]): IO[ProbeResult] =
-      PublisherBridge
-        .first(database.runCommand(new Document("ping", 1)))
-        .map {
-          case Some(_) => (ProbeResult.Ready, Map.empty[LogField, String])
-          case None    => (ProbeResult.Unavailable, Map(LogField.Reason -> "EMPTY_RESULT"))
-        }
+      database
+        .runCommand(new Document("ping", 1))
+        .as((ProbeResult.Ready, Map.empty[LogField, String]))
         .handleError { error =>
           val (result, reason) = error match {
             case _: MongoSecurityException => (ProbeResult.AuthenticationFailed, "AUTHENTICATION_FAILED")

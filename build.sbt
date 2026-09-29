@@ -18,6 +18,7 @@ lazy val caffeineVersion = "3.3.0"
 lazy val logbackVersion = "1.6.3"
 lazy val mongoVersion = "5.12.0"
 lazy val mongoScalaBsonVersion = "5.12.0"
+lazy val mongo4catsVersion = "0.7.18"
 lazy val munitVersion = "1.3.6"
 lazy val munitCatsEffectVersion = "2.2.1"
 lazy val pureConfigVersion = "0.17.10"
@@ -83,6 +84,8 @@ lazy val root = (project in file("."))
       "de.mkammerer" % "argon2-jvm" % argon2Version,
       "org.mongodb" % "mongodb-driver-reactivestreams" % mongoVersion,
       "org.mongodb.scala" %% "mongo-scala-bson" % mongoScalaBsonVersion,
+      "io.github.kirill5k" %% "mongo4cats-core" % mongo4catsVersion,
+      "io.github.kirill5k" %% "mongo4cats-circe" % mongo4catsVersion,
       "com.github.pureconfig" %% "pureconfig-core" % pureConfigVersion,
       "io.github.iltotore" %% "iron" % ironVersion,
       "io.github.iltotore" %% "iron-pureconfig" % ironVersion,

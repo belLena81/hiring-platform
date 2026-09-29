@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.search
+package com.example.graphQL.cats.service.search
 
 class SearchEvaluationMetricsSpec extends munit.FunSuite {
   test("Recall@K and NDCG@K compare a ranking with judged relevant results") {

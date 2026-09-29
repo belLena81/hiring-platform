@@ -1,8 +1,12 @@
 package com.example.graphQL.cats.domain.model
 
 import java.util.UUID
+import com.example.graphQL.cats.shared.Parsing
 
 object Identifiers {
+  def parse[A](value: String)(wrap: UUID => A): Either[Throwable, A] =
+    Parsing.parseUuid(value).map(wrap)
+
   sealed trait UserTag
   sealed trait JobTag
   sealed trait ApplicationTag

@@ -1,8 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.PendingSearchSessionWork
-import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
+import com.example.graphQL.cats.service.port.PendingSearchSessionWork
+import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
 import io.circe.Json
 import munit.FunSuite
 
@@ -39,6 +39,34 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     assertEquals(
       MongoSearchSessionWorkCodecs.readWork(stored).map(_.event.payload.hcursor.get[Option[String]]("query")),
       Right(Right(None))
+    )
+  }
+
+  test("work attempt counts require BSON int32 values") {
+    val session = SearchSession(
+      searchId,
+      actorId,
+      "semanticJobSearch",
+      None,
+      Json.obj(),
+      None,
+      Nil,
+      now,
+      now.plusSeconds(3600)
+    )
+    val stored = MongoSearchSessionWorkCodecs.work(
+      PendingSearchSessionWork(
+        session,
+        OperationalEvents.searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)
+      ),
+      now
+    )
+    stored.put(MongoFields.Attempts, Long.box(0L))
+    stored.put(MongoFields.LeaseToken, "lease-token")
+
+    assertEquals(
+      MongoSearchSessionWorkCodecs.readClaim(stored),
+      Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Attempts))
     )
   }
 }

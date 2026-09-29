@@ -2,8 +2,7 @@ package com.example.graphQL.cats.service.auth
 
 import cats.effect.IO
 import com.example.graphQL.cats.domain.model.{AccountStatus, EntityEmbedding, User, UserRole}
-import com.example.graphQL.cats.repository.protocol.UserRepository
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.port.{RepositoryIO, UserRepository}
 import com.example.graphQL.cats.service.{ActorContext, AuthenticationError, ServiceFixtures, UseCaseError}
 import munit.CatsEffectSuite
 
@@ -31,18 +30,18 @@ final class ActorAuthorizationSpec extends CatsEffectSuite {
     new ServiceFixtures.VersionedUserRepositoryTestAdapter {
       override def find(
           id: com.example.graphQL.cats.domain.model.Identifiers.UserId
-      ): IO[Either[RepositoryError, Option[User]]] =
-        IO.pure(Right(values.get(id)))
+      ): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Right(values.get(id))) )
 
       override def findMany(
           ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]
-      ): IO[Either[RepositoryError, List[User]]] =
-        IO.pure(Right(ids.flatMap(values.get)))
+      ): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Right(ids.flatMap(values.get))) )
 
       override def updateEmbedding(
           id: com.example.graphQL.cats.domain.model.Identifiers.UserId,
           embedding: EntityEmbedding
-      ): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Right(()))
+      ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Right(())) )
     }
 }

@@ -1,122 +1,108 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import cats.data.EitherT
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
-import com.example.graphQL.cats.shared.pagination.JobPageRequest
-import com.example.graphQL.cats.shared.search.JobSearchFilter
+import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.events.OperationalEventEnvelope
+import com.example.graphQL.cats.domain.pagination.JobPageRequest
+import com.example.graphQL.cats.service.search.JobSearchFilter
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.client.model.{Filters, Updates}
-import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoDatabase}
-import org.bson.Document
-import org.bson.conversions.Bson
+import com.mongodb.client.model.Filters
+import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.database.MongoDatabase
 
 import java.time.Instant
 import scala.util.chaining.*
 
 final class MongoJobRepository(
-    database: MongoDatabase,
-    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
-    embeddingWork: Option[MongoEmbeddingWorkRepository] = None,
+    database: MongoDatabase[IO],
+    transactionRunner: MongoTransactionRunner,
+    embeddingWork: MongoEmbeddingWorkEnqueuer,
     diagnostics: Diagnostics = Diagnostics.noop
 ) extends JobRepository
     with MongoConflictWriteMapping
     with MongoOperationalEventInsertion {
-  private val collection = database.getCollection("jobs")
-  private val outbox = database.getCollection("event_outbox")
+  private def collection = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
+  private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
-  override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
+  override def find(id: JobId): RepositoryIO[Option[Job]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.find")(
-        PublisherBridge
-          .first(collection.find(Filters.eq("_id", id.value.toString)))
+        collection
+          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
           .map(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       )(_ => Left(RepositoryError.Unavailable))
-      .value
 
-  override def findVersioned(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
+  override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.findVersioned")(
-        PublisherBridge
-          .first(collection.find(Filters.eq("_id", id.value.toString)))
+        collection
+          .flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first)
           .map(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedJob))
           )
       )(_ => Left(RepositoryError.Unavailable))
-      .value
 
-  override def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]] =
+  override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)(diagnostics)
 
   override def findOpen(
       filter: JobSearchFilter,
       page: JobPageRequest
-  ): IO[Either[RepositoryError, List[Job]]] =
+  ): RepositoryIO[List[Job]] =
     findMany(baseSearchFilter(filter, page), page)
 
-  override def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
-    findMany(baseJobFilter(List(page.status.map(status => Filters.eq("status", status.toString))), page), page)
+  override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] =
+    findMany(
+      baseJobFilter(List(page.status.map(status => MongoFilter.eq(MongoFields.Status, status.toString))), page),
+      page
+    )
 
   override def findByRecruiter(
       recruiterId: UserId,
       page: JobPageRequest
-  ): IO[Either[RepositoryError, List[Job]]] =
+  ): RepositoryIO[List[Job]] =
     findMany(
       baseJobFilter(
         List(
-          Some(Filters.eq("recruiterId", recruiterId.value.toString)),
-          page.status.map(status => Filters.eq("status", status.toString))
+          Some(MongoFilter.eq(MongoFields.RecruiterId, recruiterId.value.toString)),
+          page.status.map(status => MongoFilter.eq(MongoFields.Status, status.toString))
         ),
         page
       ),
       page
     )
 
-  override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
-    if (embeddingWork.nonEmpty)
-      MongoRepositorySupport
-        .repositoryGuard(diagnostics, "MongoJobRepository.create.transactional")(
-          transactionRunner.run(session => writeJobSession(job, now, Nil, session))
-        )(mapWrite)
-        .value
-    else
-      MongoRepositorySupport
-        .repositoryGuard(diagnostics, "MongoJobRepository.create")(writeJobSession(job, now, Nil, None))(mapWrite)
-        .value
-
   override def createWithEvents(
       job: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     MongoMutationWriteContext
       .run(
         context,
         transactionRunner,
-        transactionRequired = embeddingWork.nonEmpty || events.nonEmpty
+        transactionRequired = embeddingWork.requiresTransaction || events.nonEmpty
       )(session => writeJobSession(job, now, events, session))
       .pipe(effect =>
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "MongoJobRepository.createWithEvents")(effect)(mapWrite)
-          .value
       )
 
   private def writeJobSession(
       job: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, Unit]] =
-    insertOne(session, MongoHiringCodecs.job(job)).flatMap {
+    MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.job(job)).flatMap {
       case Some(_) =>
         embeddingWork
-          .fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
-            _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
-          )
+          .enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now)
           .flatMap {
             case Right(())   => insertOperationalEvents(outbox, session, events, now, diagnostics)
             case Left(error) => IO.pure(Left(error))
@@ -124,43 +110,22 @@ final class MongoJobRepository(
       case None => IO.pure(Left(RepositoryError.MissingWriteResult))
     }
 
-  override def update(
-      expected: Versioned[Job],
-      replacement: Job,
-      now: Instant
-  ): IO[Either[RepositoryError, Versioned[Job]]] =
-    if (embeddingWork.nonEmpty) {
-      transactionRunner
-        .run(session => writeJobUpdateSession(expected, replacement, now, Nil, session))
-        .pipe(effect =>
-          MongoRepositorySupport
-            .repositoryGuard(diagnostics, "MongoJobRepository.update.transactional")(effect)(mapWrite)
-            .value
-        )
-    } else
-      MongoRepositorySupport
-        .repositoryGuard(diagnostics, "MongoJobRepository.update")(
-          writeJobUpdateSession(expected, replacement, now, Nil, None)
-        )(mapWrite)
-        .value
-
   override def updateWithEvents(
       expected: Versioned[Job],
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
       context: MutationWriteContext
-  ): IO[Either[RepositoryError, Versioned[Job]]] =
+  ): RepositoryIO[Versioned[Job]] =
     MongoMutationWriteContext
       .run(
         context,
         transactionRunner,
-        transactionRequired = embeddingWork.nonEmpty || events.nonEmpty
+        transactionRequired = embeddingWork.requiresTransaction || events.nonEmpty
       )(session => writeJobUpdateSession(expected, replacement, now, events, session))
       .pipe(effect =>
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "MongoJobRepository.updateWithEvents")(effect)(mapWrite)
-          .value
       )
 
   private def writeJobUpdateSession(
@@ -168,54 +133,61 @@ final class MongoJobRepository(
       replacement: Job,
       now: Instant,
       events: List[OperationalEventEnvelope],
-      session: Option[ClientSession]
+      session: Option[ClientSession[IO]]
   ): IO[Either[RepositoryError, Versioned[Job]]] =
     Versioned.nextVersion(expected.version) match {
       case None              => IO.pure(Left(RepositoryError.Conflict))
       case Some(nextVersion) =>
-        replaceOne(
-          session,
-          MongoObservedStateFilters.jobReplacement(expected),
-          MongoHiringCodecs.job(replacement, nextVersion)
-        ).flatMap {
-          case Some(result) if result.getMatchedCount == 1L =>
-            embeddingWork
-              .fold(IO.pure(Right(()): Either[RepositoryError, Unit]))(
-                _.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
-              )
-              .flatMap {
-                case Right(()) =>
-                  insertOperationalEvents(outbox, session, events, now, diagnostics).map(
-                    _.as(Versioned(replacement, nextVersion))
-                  )
-                case Left(error) => IO.pure(Left(error))
-              }
-          case Some(_) => IO.pure(Left(RepositoryError.Conflict))
-          case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
-        }
+        MongoSessionOperations
+          .replaceOne(
+            collection,
+            session,
+            MongoFilter.and(
+              MongoFilter.eq(MongoFields.Id, expected.value.id.value.toString),
+              MongoFilter.eq(MongoFields.Version, expected.version)
+            ),
+            MongoHiringCodecs.job(replacement, nextVersion)
+          )
+          .flatMap {
+            case Some(result) if result.getMatchedCount == 1L =>
+              embeddingWork
+                .enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
+                .flatMap {
+                  case Right(()) =>
+                    insertOperationalEvents(outbox, session, events, now, diagnostics).map(
+                      _.as(Versioned(replacement, nextVersion))
+                    )
+                  case Left(error) => IO.pure(Left(error))
+                }
+            case Some(_) => IO.pure(Left(RepositoryError.Conflict))
+            case None    => IO.pure(Left(RepositoryError.MissingWriteResult))
+          }
     }
 
-  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+  override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit] =
     findVersioned(id).flatMap {
-      case Right(Some(job)) => updateEmbedding(job, embedding)
-      case Right(None)      => IO.pure(Left(RepositoryError.Conflict))
-      case Left(error)      => IO.pure(Left(error))
+      case Some(job) => updateEmbedding(job, embedding)
+      case None      => EitherT.leftT[IO, Unit](RepositoryError.Conflict)
     }
 
   override def updateEmbedding(
       observed: Versioned[Job],
       embedding: EntityEmbedding
-  ): IO[Either[RepositoryError, Unit]] = {
+  ): RepositoryIO[Unit] = {
     val encoded = MongoHiringCodecs.embeddingDocument(embedding)
-    PublisherBridge
-      .first(
-        collection.updateOne(
-          MongoObservedStateFilters.jobEmbedding(observed),
-          Updates.combine(
-            Updates.set("embedding", encoded.get("embedding")),
-            Updates.set("embeddingMeta", encoded.get("embeddingMeta")),
-            Updates.inc("version", 1L)
-          )
+    MongoSessionOperations
+      .updateOne(
+        collection,
+        None,
+        MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
+          MongoFilter.eq(MongoFields.Version, observed.version),
+          MongoFilter.lt(MongoFields.Version, Long.MaxValue)
+        ),
+        MongoUpdate.combine(
+          MongoUpdate.set(MongoFields.Embedding, encoded.get(MongoFields.Embedding)),
+          MongoUpdate.set(MongoFields.EmbeddingMeta, encoded.get(MongoFields.EmbeddingMeta)),
+          MongoUpdate.inc(MongoFields.Version, 1L)
         )
       )
       .map {
@@ -226,50 +198,42 @@ final class MongoJobRepository(
       .pipe(effect =>
         MongoRepositorySupport
           .repositoryGuard(diagnostics, "MongoJobRepository.updateEmbedding")(effect)(mapWrite)
-          .value
       )
   }
 
-  private def findMany(filter: Bson, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
-    MongoKeysetPaging.page(collection, filter, "createdAt", page.pageSize)(MongoHiringCodecs.readJob)(diagnostics)
+  private def findMany(filter: MongoFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
+    MongoKeysetPaging.page(collection, filter, MongoFields.CreatedAt, page.pageSize)(MongoHiringCodecs.readJob)(
+      diagnostics
+    )
 
-  private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): Bson =
+  private def baseSearchFilter(filter: JobSearchFilter, page: JobPageRequest): MongoFilter =
     baseJobFilter(
       List(
-        Some(Filters.eq("status", JobStatus.Open.toString)),
-        filter.city.map(city => Filters.eq("location.city", city)),
-        Option.when(filter.skills.nonEmpty)(Filters.all("skills", filter.skills.toList.sorted*)),
-        filter.createdAfter.map(createdAfter => Filters.gte("createdAt", java.util.Date.from(createdAfter)))
+        Some(MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)),
+        filter.city.map(city => MongoFilter.eq(s"${MongoFields.Location}.${MongoFields.City}", city)),
+        Option.when(filter.skills.nonEmpty)(MongoFilter.all(MongoFields.Skills, filter.skills.toList.sorted)),
+        filter.createdAfter.map(createdAfter =>
+          MongoFilter.gte(MongoFields.CreatedAt, java.util.Date.from(createdAfter))
+        )
       ),
       page
     )
 
-  private def baseJobFilter(filters: List[Option[Bson]], page: JobPageRequest): Bson = {
+  private def baseJobFilter(filters: List[Option[MongoFilter]], page: JobPageRequest): MongoFilter = {
     val cursorFilter =
-      page.cursor.map(cursor => MongoKeysetPaging.beforeCursor("createdAt", cursor.createdAt, cursor.id.value.toString))
+      page.cursor.map(cursor =>
+        MongoFilter.beforeCursor(MongoFields.CreatedAt, cursor.createdAt, cursor.id.value.toString)
+      )
     val activeFilters = (filters :+ cursorFilter).flatten
-    if (activeFilters.isEmpty) new Document() else Filters.and(activeFilters*)
+    if (activeFilters.isEmpty) MongoFilter.and() else MongoFilter.and(activeFilters*)
   }
-
-  private def insertOne(session: Option[ClientSession], document: Document) =
-    session.fold(PublisherBridge.first(collection.insertOne(document)))(active =>
-      PublisherBridge.first(collection.insertOne(active, document))
-    )
-
-  private def replaceOne(session: Option[ClientSession], filter: Bson, document: Document) =
-    session.fold(PublisherBridge.first(collection.replaceOne(filter, document)))(active =>
-      PublisherBridge.first(collection.replaceOne(active, filter, document))
-    )
 }
 
 object MongoJobRepository {
-  def standalone(database: MongoDatabase, diagnostics: Diagnostics = Diagnostics.noop): MongoJobRepository =
-    new MongoJobRepository(database, diagnostics = diagnostics)
-
   def transactional(
-      database: MongoDatabase,
-      client: MongoClient,
-      embeddingWork: Option[MongoEmbeddingWorkRepository] = None,
+      database: MongoDatabase[IO],
+      client: MongoClient[IO],
+      embeddingWork: MongoEmbeddingWorkEnqueuer,
       diagnostics: Diagnostics = Diagnostics.noop
   ): MongoJobRepository =
     new MongoJobRepository(

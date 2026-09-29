@@ -2,8 +2,7 @@ package com.example.graphQL.cats.service.protocol
 
 import cats.data.EitherT
 import cats.effect.IO
-import cats.syntax.all.*
-import com.example.graphQL.cats.repository.protocol.{MutationReceiptFingerprint, RepositoryError}
+import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryError, RepositoryIO}
 import com.example.graphQL.cats.service.UseCaseError
 
 import java.util.UUID
@@ -21,8 +20,11 @@ object UseCaseIO {
 
   def liftIO[A](value: IO[A]): UseCaseIO[A] = EitherT.liftF(value)
 
+  def repository[A](value: RepositoryIO[A]): UseCaseIO[A] =
+    value.leftMap(UseCaseError.Repository.apply)
+
   def repository[A](value: IO[Either[RepositoryError, A]]): UseCaseIO[A] =
-    EitherT(value.map(_.leftMap(UseCaseError.Repository.apply)))
+    repository(RepositoryIO.fromIOEither(value))
 }
 
 final case class IdempotencyRequest private[service] (

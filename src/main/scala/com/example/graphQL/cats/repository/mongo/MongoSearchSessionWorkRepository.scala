@@ -2,53 +2,58 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
+import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.database.MongoDatabase
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.*
+import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.client.model.{Filters, FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Updates}
-import com.mongodb.reactivestreams.client.{ClientSession, MongoClient, MongoCollection, MongoDatabase}
+import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
 import org.bson.Document
 
 import java.time.Instant
 import java.util.{Date, UUID}
+import scala.jdk.CollectionConverters.*
 
 /** Mongo implementation of leased search-session materialization work. */
 final class MongoSearchSessionWorkRepository(
-    database: MongoDatabase,
-    transactionRunner: MongoTransactionRunner = MongoTransactionRunner.noTransaction,
+    database: MongoDatabase[IO],
+    transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics = Diagnostics.noop
 ) extends SearchSessionWorkRepository
     with MongoOperationalEventInsertion
     with MongoConflictWriteMapping {
-  private val work = database.getCollection("search_session_work")
-  private val sessions = database.getCollection("search_sessions")
-  private val outbox = database.getCollection("event_outbox")
+  private val work = Mongo4catsCollections.documents(database, MongoCollections.SearchSessionWork)
+  private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
+  private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
-  override def enqueue(value: PendingSearchSessionWork, now: Instant): IO[Either[RepositoryError, Unit]] = {
+  override def enqueue(value: PendingSearchSessionWork, now: Instant): RepositoryIO[Unit] = {
     val sanitized = MongoSearchSessionWorkCodecs.work(value, now)
-    val filter = Filters.and(
-      Filters.eq("_id", value.session.id.toString),
-      Filters.eq("actorId", value.session.actorId.value.toString)
+    val filter = MongoFilter.and(
+      MongoFilter.eq(MongoFields.Id, value.session.id.toString),
+      MongoFilter.eq(MongoFields.ActorId, value.session.actorId.value.toString)
     )
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.enqueue") {
-        PublisherBridge
-          .first(work.updateOne(filter, new Document("$setOnInsert", sanitized), new UpdateOptions().upsert(true)))
+        MongoSessionOperations
+          .updateOne(work, None, filter, setOnInsertDocument(sanitized), new UpdateOptions().upsert(true))
           .map {
             case Some(_) => Right(())
             case None    => Left(RepositoryError.MissingWriteResult)
           }
       }(mapWrite)
-      .value
   }
 
-  override def findForActor(actorId: UserId, searchId: UUID): IO[Either[RepositoryError, Option[SearchSessionLookup]]] =
+  override def findForActor(actorId: UserId, searchId: UUID): RepositoryIO[Option[SearchSessionLookup]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.findForActor") {
-        PublisherBridge
-          .first(
-            sessions
-              .find(Filters.and(Filters.eq("_id", searchId.toString), Filters.eq("actorId", actorId.value.toString)))
+        MongoSessionOperations
+          .findOne(
+            sessions,
+            None,
+            MongoFilter.and(
+              MongoFilter.eq(MongoFields.Id, searchId.toString),
+              MongoFilter.eq(MongoFields.ActorId, actorId.value.toString)
+            )
           )
           .flatMap {
             case Some(document) =>
@@ -58,12 +63,14 @@ final class MongoSearchSessionWorkRepository(
                   .map(session => Some(SearchSessionLookup.Materialized(session)))
               )
             case None =>
-              PublisherBridge
-                .first(
-                  work
-                    .find(
-                      Filters.and(Filters.eq("_id", searchId.toString), Filters.eq("actorId", actorId.value.toString))
-                    )
+              MongoSessionOperations
+                .findOne(
+                  work,
+                  None,
+                  MongoFilter.and(
+                    MongoFilter.eq(MongoFields.Id, searchId.toString),
+                    MongoFilter.eq(MongoFields.ActorId, actorId.value.toString)
+                  )
                 )
                 .map {
                   case None           => Right(None)
@@ -78,36 +85,36 @@ final class MongoSearchSessionWorkRepository(
                 }
           }
       }(_ => Left(RepositoryError.Unavailable))
-      .value
 
   override def claim(
       workerId: String,
       now: Instant,
       leaseUntil: Instant
-  ): IO[Either[RepositoryError, Option[ClaimedSearchSessionWork]]] =
-    IO.randomUUID.map(_.toString).flatMap { token =>
-      val ready = Filters.and(
-        Filters.in("state", SearchSessionWorkState.Ready.toString, SearchSessionWorkState.Retry.toString),
-        Filters.lte("availableAt", Date.from(now))
+  ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
+    RepositoryIO.lift(IO.randomUUID.map(_.toString)).flatMap { token =>
+      val ready = MongoFilter.and(
+        MongoFilter
+          .in(MongoFields.State, List(SearchSessionWorkState.Ready.toString, SearchSessionWorkState.Retry.toString)),
+        MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
       )
-      val expired = Filters.and(
-        Filters.eq("state", SearchSessionWorkState.Processing.toString),
-        Filters.lt("leaseUntil", Date.from(now))
+      val expired = MongoFilter.and(
+        MongoFilter.eq(MongoFields.State, SearchSessionWorkState.Processing.toString),
+        MongoFilter.lt(MongoFields.LeaseUntil, Date.from(now))
       )
-      val update = Updates.combine(
-        Updates.set("state", SearchSessionWorkState.Processing.toString),
-        Updates.set("leaseOwner", workerId),
-        Updates.set("leaseToken", token),
-        Updates.set("leaseUntil", Date.from(leaseUntil)),
-        Updates.set("updatedAt", Date.from(now))
+      val update = MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Processing.toString),
+        MongoUpdate.set(MongoFields.LeaseOwner, workerId),
+        MongoUpdate.set(MongoFields.LeaseToken, token),
+        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
+        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
       val options = new FindOneAndUpdateOptions()
-        .sort(Sorts.ascending("availableAt", "createdAt", "_id"))
+        .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.CreatedAt, MongoFields.Id))
         .returnDocument(ReturnDocument.AFTER)
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "searchSessionWork.claim") {
-          PublisherBridge
-            .first(work.findOneAndUpdate(Filters.or(ready, expired), update, options))
+          work
+            .flatMap(_.findOneAndUpdate(MongoFilter.or(ready, expired).bson, update.bson, options))
             .map {
               case None           => Right(None)
               case Some(document) =>
@@ -117,10 +124,9 @@ final class MongoSearchSessionWorkRepository(
                   .map(Some(_))
             }
         }(_ => Left(RepositoryError.Unavailable))
-        .value
     }
 
-  override def complete(claim: ClaimedSearchSessionWork, now: Instant): IO[Either[RepositoryError, Unit]] =
+  override def complete(claim: ClaimedSearchSessionWork, now: Instant): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.complete") {
         transactionRunner
@@ -131,11 +137,11 @@ final class MongoSearchSessionWorkRepository(
             val saveSession = updateOne(
               sessions,
               active,
-              Filters.and(
-                Filters.eq("_id", claim.work.session.id.toString),
-                Filters.eq("actorId", claim.work.session.actorId.value.toString)
+              MongoFilter.and(
+                MongoFilter.eq(MongoFields.Id, claim.work.session.id.toString),
+                MongoFilter.eq(MongoFields.ActorId, claim.work.session.actorId.value.toString)
               ),
-              new Document("$setOnInsert", sessionDocument),
+              setOnInsertDocument(sessionDocument),
               new UpdateOptions().upsert(true)
             )
             saveSession.flatMap {
@@ -145,27 +151,25 @@ final class MongoSearchSessionWorkRepository(
                   case Left(error) => IO.pure(Left(error))
                   case Right(())   =>
                     deleteOne(active, lease).map {
-                      case Some(result) if result.getDeletedCount == 1L => Right(())
-                      case Some(_)                                      => Left(RepositoryError.Conflict)
-                      case None                                         => Left(RepositoryError.MissingWriteResult)
+                      case result if result.getDeletedCount == 1L => Right(())
+                      case _                                      => Left(RepositoryError.Conflict)
                     }
                 }
             }
           }
       }(mapWrite)
-      .value
 
-  override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): IO[Either[RepositoryError, Unit]] =
+  override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
     transition(
       claim,
-      Updates.combine(
-        Updates.set("state", SearchSessionWorkState.Retry.toString),
-        Updates.set("availableAt", Date.from(availableAt)),
-        Updates.inc("attempts", java.lang.Integer.valueOf(1)),
-        Updates.unset("leaseOwner"),
-        Updates.unset("leaseToken"),
-        Updates.unset("leaseUntil"),
-        Updates.set("updatedAt", Date.from(availableAt))
+      MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Retry.toString),
+        MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+        MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1)),
+        MongoUpdate.unset(MongoFields.LeaseOwner),
+        MongoUpdate.unset(MongoFields.LeaseToken),
+        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(availableAt))
       )
     )
 
@@ -173,25 +177,25 @@ final class MongoSearchSessionWorkRepository(
       claim: ClaimedSearchSessionWork,
       failure: SearchSessionWorkFailure,
       now: Instant
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     transition(
       claim,
-      Updates.combine(
-        Updates.set("state", SearchSessionWorkState.Failed.toString),
-        Updates.set("failure", failure.toString),
-        Updates.set("finishedAt", Date.from(now)),
-        Updates.set("retentionExpiresAt", Date.from(now.plusSeconds(7L * 24L * 60L * 60L))),
-        Updates.unset("leaseOwner"),
-        Updates.unset("leaseToken"),
-        Updates.unset("leaseUntil"),
-        Updates.set("updatedAt", Date.from(now))
+      MongoUpdate.combine(
+        MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Failed.toString),
+        MongoUpdate.set(MongoFields.Failure, failure.toString),
+        MongoUpdate.set(MongoFields.FinishedAt, Date.from(now)),
+        MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(now.plusSeconds(7L * 24L * 60L * 60L))),
+        MongoUpdate.unset(MongoFields.LeaseOwner),
+        MongoUpdate.unset(MongoFields.LeaseToken),
+        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
     )
 
   private def transition(
       claim: ClaimedSearchSessionWork,
-      update: org.bson.conversions.Bson
-  ): IO[Either[RepositoryError, Unit]] =
+      update: MongoUpdate
+  ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "searchSessionWork.transition") {
         updateOne(work, None, leaseFilter(claim), update)
@@ -201,41 +205,39 @@ final class MongoSearchSessionWorkRepository(
             case None                                         => Left(RepositoryError.MissingWriteResult)
           }
       }(_ => Left(RepositoryError.Unavailable))
-      .value
 
-  private def leaseFilter(claim: ClaimedSearchSessionWork) = Filters.and(
-    Filters.eq("_id", claim.work.session.id.toString),
-    Filters.eq("state", SearchSessionWorkState.Processing.toString),
-    Filters.eq("leaseToken", claim.leaseToken)
+  private def leaseFilter(claim: ClaimedSearchSessionWork): MongoFilter = MongoFilter.and(
+    MongoFilter.eq(MongoFields.Id, claim.work.session.id.toString),
+    MongoFilter.eq(MongoFields.State, SearchSessionWorkState.Processing.toString),
+    MongoFilter.eq(MongoFields.LeaseToken, claim.leaseToken)
   )
 
-  private def updateOne(
-      collection: MongoCollection[Document],
-      session: Option[ClientSession],
-      filter: org.bson.conversions.Bson,
-      update: org.bson.conversions.Bson,
-      options: UpdateOptions = new UpdateOptions()
-  ) =
-    session.fold(PublisherBridge.first(collection.updateOne(filter, update, options)))(active =>
-      PublisherBridge.first(collection.updateOne(active, filter, update, options))
+  private def setOnInsertDocument(document: Document): MongoUpdate =
+    MongoUpdate.combine(
+      document.entrySet().asScala.toList.map(field => MongoUpdate.setOnInsert(field.getKey, field.getValue))*
     )
 
-  private def deleteOne(session: Option[ClientSession], filter: org.bson.conversions.Bson) =
-    session.fold(PublisherBridge.first(work.deleteOne(filter)))(active =>
-      PublisherBridge.first(work.deleteOne(active, filter))
+  private def updateOne(
+      collection: IO[MongoSessionOperations.Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      update: MongoUpdate,
+      options: UpdateOptions = new UpdateOptions()
+  ) =
+    MongoSessionOperations.updateOne(collection, session, filter, update, options)
+
+  private def deleteOne(session: Option[ClientSession[IO]], filter: MongoFilter) =
+    work.flatMap(collection =>
+      session.fold(
+        collection.deleteOne(filter.bson, new com.mongodb.client.model.DeleteOptions)
+      )(active => collection.deleteOne(active, filter.sessionFilter, new com.mongodb.client.model.DeleteOptions))
     )
 }
 
 object MongoSearchSessionWorkRepository {
-  def standalone(
-      database: MongoDatabase,
-      diagnostics: Diagnostics = Diagnostics.noop
-  ): MongoSearchSessionWorkRepository =
-    new MongoSearchSessionWorkRepository(database, diagnostics = diagnostics)
-
   def transactional(
-      database: MongoDatabase,
-      client: MongoClient,
+      database: MongoDatabase[IO],
+      client: MongoClient[IO],
       diagnostics: Diagnostics = Diagnostics.noop
   ): MongoSearchSessionWorkRepository =
     new MongoSearchSessionWorkRepository(

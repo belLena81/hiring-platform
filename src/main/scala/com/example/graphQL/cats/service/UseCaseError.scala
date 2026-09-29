@@ -3,7 +3,7 @@ package com.example.graphQL.cats.service
 import cats.data.NonEmptyList
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 
 enum AuthenticationError {
   case Unauthorized

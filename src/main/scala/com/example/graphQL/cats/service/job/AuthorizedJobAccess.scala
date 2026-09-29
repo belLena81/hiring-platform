@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.service.job
 
-import com.example.graphQL.cats.repository.protocol.{JobRepository, Versioned}
+import com.example.graphQL.cats.service.port.{JobRepository, Versioned}
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.protocol.{UseCaseIO, UseCaseIO as UseCase}

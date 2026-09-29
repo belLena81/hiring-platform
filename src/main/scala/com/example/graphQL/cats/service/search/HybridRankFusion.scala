@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.search
+package com.example.graphQL.cats.service.search
 
 /** Deterministic reciprocal-rank fusion for the two retrieval views used by job search. */
 object HybridRankFusion {

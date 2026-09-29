@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
-import com.example.graphQL.cats.shared.pagination.PageSize
-import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, VectorSearchQuery}
+import com.example.graphQL.cats.domain.pagination.PageSize
+import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, VectorSearchQuery}
 import com.example.graphQL.cats.service.ServiceFixtures;
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.model.{
@@ -48,7 +48,7 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
     assertEquals(
       MongoSemanticSearchResult.rankedJobs(List(malformed), query),
-      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.InvalidStoredData)
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
   }
 
@@ -61,6 +61,20 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     )
 
     assertEquals(MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(stale)), query), Right(None))
+  }
+
+  test("fresh job vector hits with missing or nonnumeric scores are invalid stored data") {
+    val job = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite")))
+    val document = MongoHiringCodecs.job(job)
+
+    assertEquals(
+      MongoSemanticSearchResult.rankedJob(document, query),
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+    )
+    assertEquals(
+      MongoSemanticSearchResult.rankedJob(document.append("score", "invalid"), query),
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+    )
   }
 
   test("fresh candidate vector hit is returned and stale candidate hit is omitted") {
@@ -89,13 +103,24 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
           case _ => false
         })
     )
+    assertEquals(
+      MongoSemanticSearchResult.rankedCandidate(
+        MongoHiringCodecs.user(fresh).append("score", "invalid"),
+        query
+      ),
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+    )
+    assertEquals(
+      MongoSemanticSearchResult.rankedCandidate(MongoHiringCodecs.user(fresh), query),
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+    )
     assertEquals(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(stale)), query), Right(None))
   }
 
   test("malformed native-fusion candidate results are classified as invalid stored data") {
     assertEquals(
       MongoSemanticSearchResult.rankedCandidates(List(new Document("_id", "invalid")), query),
-      Left(com.example.graphQL.cats.repository.protocol.RepositoryError.InvalidStoredData)
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
   }
 

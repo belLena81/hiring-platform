@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.events
+package com.example.graphQL.cats.service.events
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import io.circe.Json

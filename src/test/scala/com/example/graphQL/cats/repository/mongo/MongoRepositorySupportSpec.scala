@@ -2,7 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.repository.protocol.{RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import munit.CatsEffectSuite
 

@@ -5,11 +5,11 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.auth.JwtActorAuthenticator
 import com.example.graphQL.cats.FixedTestClock
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.service.auth.UserAuthenticationService
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import com.example.graphQL.cats.repository.protocol.UserRepository
+import com.example.graphQL.cats.service.port.{RepositoryIO, UserRepository}
 import com.example.graphQL.cats.config.JwtAuthConfig
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{
@@ -123,11 +123,11 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
 
   test("repository failures remain unavailable rather than becoming an unknown actor") {
     val unavailableUsers = new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
-      override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
-        IO.pure(Left(RepositoryError.Unavailable))
-      override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] = IO.pure(Right(Nil))
-      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Right(()))
+      override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Left(RepositoryError.Unavailable)) )
+      override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(Nil)) )
+      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Right(())) )
     }
     val authenticator = new JwtActorAuthenticator(
       JwtAuthConfig(secret, issuer, audience),
@@ -174,10 +174,10 @@ final class JwtActorAuthenticatorSpec extends CatsEffectSuite {
 
   private def userRepository(values: Map[UserId, User]): UserRepository =
     new com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
-      override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] = IO.pure(Right(values.get(id)))
-      override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-        IO.pure(Right(ids.flatMap(values.get)))
-      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Right(()))
+      override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither( IO.pure(Right(values.get(id))) )
+      override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Right(ids.flatMap(values.get))) )
+      override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Right(())) )
     }
 }

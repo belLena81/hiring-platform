@@ -1,10 +1,11 @@
 package com.example.graphQL.cats.service.job
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   JobRepository,
   MutationEntityReference,
   MutationWriteContext,
@@ -13,17 +14,17 @@ import com.example.graphQL.cats.repository.protocol.{
   Versioned
 }
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, UserRole}
-import com.example.graphQL.cats.shared.events.OperationalEvents
-import com.example.graphQL.cats.shared.events.OperationalEventType
+import com.example.graphQL.cats.service.events.OperationalEvents
+import com.example.graphQL.cats.service.events.OperationalEventType
 import com.example.graphQL.cats.domain.policy.JobLifecycle
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCases, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
-import com.example.graphQL.cats.shared.pagination.JobPageRequest
-import com.example.graphQL.cats.shared.search.JobSearchFilter
+import com.example.graphQL.cats.domain.pagination.JobPageRequest
+import com.example.graphQL.cats.service.search.JobSearchFilter
 import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -49,9 +50,9 @@ final class JobService(
     users: UserRepository,
     jobs: JobRepository,
     embeddingWork: EmbeddingWorkPublisher,
-    idempotent: Idempotent = Idempotent.noop,
-    currentTime: IO[Instant] = IO.realTimeInstant,
-    randomId: IO[UUID] = IO.randomUUID
+    idempotent: Idempotent,
+    clock: Clock[IO] = Clock[IO],
+    uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends JobUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
@@ -67,8 +68,8 @@ final class JobService(
         _ <- UseCase.fromEither(
           Either.cond(authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
         )
-        now <- UseCase.liftIO(currentTime)
-        jobId <- UseCase.liftIO(randomId.map(JobId.apply))
+        now <- UseCase.liftIO(clock.realTimeInstant)
+        jobId <- UseCase.liftIO(uuidGen.randomUUID.map(JobId.apply))
         job <- UseCase.fromEither(validateNewJob(user.id, input, now, jobId))
         created <- UseCase.fromIO(persistCreatedJob(JobLifecycle.create(job).widenUseCase, user.id, context))
       } yield created
@@ -84,7 +85,7 @@ final class JobService(
       authorizedJobs.manageVersioned(actor, jobId) { observed =>
         val job = observed.value
         for {
-          now <- UseCase.liftIO(currentTime)
+          now <- UseCase.liftIO(clock.realTimeInstant)
           update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
           replacement <- UseCase.fromEither(JobLifecycle.update(update).run(job).map(_._1).widenUseCase)
           updated <- UseCase.fromIO(
@@ -99,7 +100,7 @@ final class JobService(
       authorizedJobs.manageVersioned(actor, jobId) { observed =>
         val job = observed.value
         UseCase
-          .liftIO(currentTime)
+          .liftIO(clock.realTimeInstant)
           .flatMap(now =>
             UseCase.fromIO(
               persistJob(
@@ -119,7 +120,7 @@ final class JobService(
       authorizedJobs.manageVersioned(actor, jobId) { observed =>
         val job = observed.value
         UseCase
-          .liftIO(currentTime)
+          .liftIO(clock.realTimeInstant)
           .flatMap(now =>
             UseCase.fromIO(
               persistJob(
@@ -163,9 +164,7 @@ final class JobService(
   private def replayJob(
       actor: ActorContext
   )(reference: MutationEntityReference): UseCaseIO[Job] =
-    scala.util
-      .Try(JobId(UUID.fromString(reference.entityId)))
-      .toEither
+    parseIdentifier(reference.entityId)(JobId.apply)
       .fold(
         _ =>
           UseCase
@@ -245,7 +244,9 @@ final class JobService(
           actorId,
           job.createdAt
         )
-        notifyAfterCommit(jobs.createWithEvents(job, job.createdAt, List(event), context).map(_.widenUseCase.as(job)))
+        notifyAfterCommit(
+          jobs.createWithEvents(job, job.createdAt, List(event), context).value.map(_.widenUseCase.as(job))
+        )
       }
     )
 
@@ -270,7 +271,9 @@ final class JobService(
         val event =
           OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
         notifyAfterCommit(
-          jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).map(_.map(_.value).widenUseCase)
+          jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context).value.map(
+            _.map(_.value).widenUseCase
+          )
         )
       }
     )
@@ -283,9 +286,6 @@ final class JobService(
 }
 
 object JobService {
-  def apply(users: UserRepository, jobs: JobRepository): JobService =
-    new JobService(users, jobs, EmbeddingWorkPublisher.noop)
-
   def live(
       users: UserRepository,
       jobs: JobRepository,

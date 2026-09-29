@@ -1,8 +1,7 @@
 package com.example.graphQL.cats.service.search
 
-import cats.effect.IO
 import cats.syntax.all.*
-import com.example.graphQL.cats.repository.protocol.*
+import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
@@ -10,8 +9,8 @@ import com.example.graphQL.cats.domain.model.{JobStatus, SearchMode, SearchableT
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.shared.crypto.SourceHash
-import com.example.graphQL.cats.shared.pagination.PageSize
-import com.example.graphQL.cats.shared.search.{
+import com.example.graphQL.cats.domain.pagination.PageSize
+import com.example.graphQL.cats.service.search.{
   CandidateMatchFilters,
   JobSearchFilter,
   RankedCandidate,
@@ -205,7 +204,7 @@ final class SemanticSearchService(
       .liftIO(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Query)))
       .subflatMap(_.leftMap(_ => UseCaseError.Search(SearchError.ProviderUnavailable)))
 
-  private def vectorSearch[A](result: IO[Either[RepositoryError, A]]): UseCaseIO[A] =
+  private def vectorSearch[A](result: RepositoryIO[A]): UseCaseIO[A] =
     UseCase.repository(result).leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable))
 }
 

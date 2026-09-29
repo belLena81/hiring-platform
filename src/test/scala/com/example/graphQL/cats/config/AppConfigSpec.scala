@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.config
 
-import com.example.graphQL.cats.shared.pagination.PageSize
+import com.example.graphQL.cats.domain.pagination.PageSize
 import com.comcast.ip4s.{Host, Port as Ip4sPort}
 import munit.FunSuite
 import cats.data.NonEmptyList
@@ -117,7 +117,7 @@ class AppConfigSpec extends FunSuite {
       candidateVectorIndex = "candidates_embedding_vector_match_v1",
       jobLexicalIndex = "jobs_text_search",
       candidateLexicalIndex = "candidates_text_search",
-      fusionStrategy = com.example.graphQL.cats.shared.search.SearchFusionStrategy.ApplicationRrf,
+      fusionStrategy = com.example.graphQL.cats.service.search.SearchFusionStrategy.ApplicationRrf,
       rerankEnabled = false,
       rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 120000,
@@ -348,6 +348,23 @@ class AppConfigSpec extends FunSuite {
       result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("127.0.0.1", 8080, 16, "mongodb://127.0.0.1:27017"))
     )
+  }
+
+  test("Kafka scalar string limits accept their boundary and classify invalid values") {
+    val atLimits = defaultConfig
+      .replace("127.0.0.1:9092", "b" * 512)
+      .replace("hiring.operational-events.v1", "t" * 249)
+      .replace("hiring-phase5-consumer", "g" * 249)
+    assert(AppConfig.fromConfig(atLimits, Map.empty).isRight)
+
+    val invalidValues = List(
+      ("127.0.0.1:9092", "b" * 513, ConfigError.InvalidKafkaBootstrapServers),
+      ("hiring.operational-events.v1", "t" * 250, ConfigError.InvalidKafkaTopic),
+      ("hiring-phase5-consumer", " ", ConfigError.InvalidKafkaConsumerGroup)
+    )
+    invalidValues.foreach { case (existing, invalid, expected) =>
+      assertContainsError(AppConfig.fromConfig(defaultConfig.replace(existing, invalid), Map.empty), expected)
+    }
   }
 
   test("VHS-AC08 packaged application config resolves cloud environment values at startup") {

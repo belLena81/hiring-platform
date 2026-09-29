@@ -2,17 +2,43 @@ package com.example.graphQL.cats.service
 
 import com.example.graphQL.cats.service.protocol.{UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.domain.model.UserRole
-import com.example.graphQL.cats.repository.protocol.{AnalyticsReportRepository, UserRepository}
+import com.example.graphQL.cats.service.port.{AnalyticsReportRepository, UserRepository}
 
 import java.time.{Duration, Instant}
 
 final case class AnalyticsPeriod(from: Instant, to: Instant)
 
+final case class AnalyticsReportSnapshot(
+    asOf: Instant,
+    funnel: List[AnalyticsFunnelDay],
+    timeToHire: Option[AnalyticsTimeToHire],
+    skillPostingActivity: List[AnalyticsSkillPostingDay]
+)
+
+final case class AnalyticsFunnelDay(
+    day: Instant,
+    created: Long,
+    accepted: Long,
+    declined: Long,
+    interview: Long,
+    hired: Long,
+    rejected: Long
+)
+final case class AnalyticsTimeToHire(
+    p50Hours: Double,
+    p75Hours: Double,
+    p90Hours: Double,
+    p95Hours: Double,
+    eligibleCount: Long,
+    excludedCount: Long
+)
+final case class AnalyticsSkillPostingDay(day: Instant, skill: String, postings: Long)
+
 trait AnalyticsReportingUseCases {
   def report(
       actor: ActorContext,
       period: AnalyticsPeriod
-  ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot]
+  ): UseCaseIO[AnalyticsReportSnapshot]
 }
 
 object AnalyticsReportingUseCases {
@@ -20,7 +46,7 @@ object AnalyticsReportingUseCases {
     override def report(
         actor: ActorContext,
         period: AnalyticsPeriod
-    ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
+    ): UseCaseIO[AnalyticsReportSnapshot] =
       UseCase.left(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
   }
 }
@@ -35,7 +61,7 @@ final class AnalyticsReportingService(
   override def report(
       actor: ActorContext,
       period: AnalyticsPeriod
-  ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
+  ): UseCaseIO[AnalyticsReportSnapshot] =
     for {
       _ <- UseCase.fromEither(validate(period))
       _ <- UseCase.repository(users.find(actor.userId)).subflatMap {
@@ -59,9 +85,9 @@ final class AnalyticsReportingService(
     )
 
   private def filter(
-      snapshot: com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot,
+      snapshot: AnalyticsReportSnapshot,
       period: AnalyticsPeriod
-  ): com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot =
+  ): AnalyticsReportSnapshot =
     snapshot.copy(
       funnel = snapshot.funnel.filter(row => !row.day.isBefore(period.from) && !row.day.isAfter(period.to)),
       skillPostingActivity =

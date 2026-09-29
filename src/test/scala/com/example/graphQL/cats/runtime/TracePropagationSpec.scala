@@ -16,8 +16,6 @@ import com.example.graphQL.cats.service.{
   ProbeResult,
   ServiceFixtures
 }
-import com.example.graphQL.cats.service.application.ApplicationService
-import com.example.graphQL.cats.service.job.JobService
 import io.circe.Json
 import munit.CatsEffectSuite
 import org.http4s.{Method, Request, Status, Uri}
@@ -62,15 +60,15 @@ final class TracePropagationSpec extends CatsEffectSuite {
           jobsRef <- Ref.of[IO, Map[JobId, Job]](Map(ServiceFixtures.jobId -> ServiceFixtures.openJob))
           applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map.empty)
           eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
-          createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+          createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
           users = ServiceFixtures.InMemoryUsers(usersRef)
           jobs = ServiceFixtures.InMemoryJobs(jobsRef)
           applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
           diagnostics = capture(records)
           services = HiringGraphQLServices(
             HiringReadService(users, jobs, applications),
-            JobService(users, jobs),
-            ApplicationService(users, jobs, applications),
+            com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+            com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
             TestGraphQLSupport.cursorKey,
             TestGraphQLSupport.accountService
           )

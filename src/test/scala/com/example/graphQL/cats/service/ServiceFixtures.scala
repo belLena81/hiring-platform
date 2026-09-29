@@ -3,14 +3,15 @@ package com.example.graphQL.cats.service
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
   JobRepository,
   MutationWriteContext,
+  RepositoryIO,
   UserRepository,
   Versioned
 }
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   Application,
@@ -25,9 +26,9 @@ import com.example.graphQL.cats.domain.model.{
   UserProfile,
   UserRole
 }
-import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
-import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
-import com.example.graphQL.cats.shared.search.JobSearchFilter
+import com.example.graphQL.cats.service.events.OperationalEventEnvelope
+import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
+import com.example.graphQL.cats.service.search.JobSearchFilter
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.model.SearchableText
 import java.time.Instant
@@ -76,15 +77,17 @@ private[cats] object ServiceFixtures {
   val createdApplication: Application = Application.create(applicationId, candidateId, jobId, now)
 
   private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository {
-    override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
-      find(id).map(_.map(_.map(Versioned(_, 0L))))
+    override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      find(id).value.map(_.map(_.map(Versioned(_, 0L))))
+    )
 
     override def updateEmbedding(
         observed: Versioned[User],
         embedding: EntityEmbedding
-    ): IO[Either[RepositoryError, Unit]] =
-      if (observed.version == 0L) updateEmbedding(observed.value.id, embedding)
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      if (observed.version == 0L) updateEmbedding(observed.value.id, embedding).value
       else IO.pure(Left(RepositoryError.Conflict))
+    )
   }
 
   private[cats] trait RefBackedLookup[Id, Value] {
@@ -100,27 +103,27 @@ private[cats] object ServiceFixtures {
   final class InMemoryUsers(protected val ref: Ref[IO, Map[UserId, User]])
       extends UserRepository
       with RefBackedLookup[UserId, User] {
-    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
-      findOne(id).map(Right(_))
+    override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      findOne(id).map(Right(_)) )
 
-    override def findVersioned(id: UserId): IO[Either[RepositoryError, Option[Versioned[User]]]] =
-      findOne(id).map(value => Right(value.map(Versioned(_, 0L))))
+    override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      findOne(id).map(value => Right(value.map(Versioned(_, 0L)))) )
 
-    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-      findAll(ids).map(Right(_))
+    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      findAll(ids).map(Right(_)) )
 
-    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.modify { users =>
         users.get(id) match {
           case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
           case None       => (users, Left(RepositoryError.Conflict))
         }
-      }
+      } )
 
     override def updateEmbedding(
         observed: Versioned[User],
         embedding: EntityEmbedding
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.modify { users =>
         users.get(observed.value.id) match {
           case Some(current)
@@ -129,7 +132,7 @@ private[cats] object ServiceFixtures {
             (users.updated(observed.value.id, current.copy(embedding = Some(embedding))), Right(()))
           case _ => (users, Left(RepositoryError.Conflict))
         }
-      }
+      } )
 
   }
 
@@ -138,16 +141,16 @@ private[cats] object ServiceFixtures {
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None
   ) extends JobRepository
       with RefBackedLookup[JobId, Job] {
-    override def find(id: JobId): IO[Either[RepositoryError, Option[Job]]] =
-      findOne(id).map(Right(_))
+    override def find(id: JobId): RepositoryIO[Option[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      findOne(id).map(Right(_)) )
 
-    override def findVersioned(id: JobId): IO[Either[RepositoryError, Option[Versioned[Job]]]] =
-      findOne(id).map(value => Right(value.map(Versioned(_, 0L))))
+    override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      findOne(id).map(value => Right(value.map(Versioned(_, 0L)))) )
 
-    override def findMany(ids: List[JobId]): IO[Either[RepositoryError, List[Job]]] =
-      findAll(ids).map(Right(_))
+    override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      findAll(ids).map(Right(_)) )
 
-    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
+    override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.get
         .map(
           _.values
@@ -165,9 +168,9 @@ private[cats] object ServiceFixtures {
             .toList
         )
         .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-        .map(Right(_))
+        .map(Right(_)) )
 
-    override def findAll(page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
+    override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.get
         .map(
           _.values
@@ -181,9 +184,9 @@ private[cats] object ServiceFixtures {
             .toList
         )
         .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-        .map(Right(_))
+        .map(Right(_)) )
 
-    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): IO[Either[RepositoryError, List[Job]]] =
+    override def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.get
         .map(
           _.values
@@ -198,34 +201,18 @@ private[cats] object ServiceFixtures {
             .toList
         )
         .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-        .map(Right(_))
-
-    override def create(job: Job, now: Instant): IO[Either[RepositoryError, Unit]] =
-      ref.update(_ + (job.id -> job)).as(Right(()))
+        .map(Right(_)) )
 
     override def createWithEvents(
         job: Job,
         now: Instant,
         events: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] =
-      create(job, now).flatTap {
-        case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
-        case Left(_)   => IO.unit
-      }
-
-    override def update(
-        expected: Versioned[Job],
-        replacement: Job,
-        now: Instant
-    ): IO[Either[RepositoryError, Versioned[Job]]] =
-      ref.modify { jobs =>
-        jobs.get(expected.value.id) match {
-          case Some(current) if expected.version == 0L && current == expected.value =>
-            (jobs.updated(replacement.id, replacement), Right(Versioned(replacement, expected.version + 1L)))
-          case _ => (jobs, Left(RepositoryError.Conflict))
-        }
-      }
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      ref.update(_ + (job.id -> job)).as(Right(())).flatTap(_ =>
+        operationalEvents.fold(IO.unit)(_.update(_ ++ events))
+      )
+    )
 
     override def updateWithEvents(
         expected: Versioned[Job],
@@ -233,28 +220,34 @@ private[cats] object ServiceFixtures {
         now: Instant,
         events: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Versioned[Job]]] =
-      update(expected, replacement, now).flatTap {
+    ): RepositoryIO[Versioned[Job]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      ref.modify { jobs =>
+        jobs.get(expected.value.id) match {
+          case Some(current) if expected.version == 0L && current == expected.value =>
+            (jobs.updated(replacement.id, replacement), Right(Versioned(replacement, expected.version + 1L)))
+          case _ => (jobs, Left(RepositoryError.Conflict))
+        }
+      }.flatTap {
         case Right(_) => operationalEvents.fold(IO.unit)(_.update(_ ++ events))
         case Left(_)  => IO.unit
-      }
+      } )
 
     def allOperationalEvents: IO[Vector[OperationalEventEnvelope]] =
       operationalEvents.fold(IO.pure(Vector.empty[OperationalEventEnvelope]))(_.get)
 
-    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): IO[Either[RepositoryError, Unit]] =
+    override def updateEmbedding(id: JobId, embedding: EntityEmbedding): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.modify { jobs =>
         jobs.get(id) match {
           case Some(job) if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job)) =>
             (jobs + (id -> job.copy(embedding = Some(embedding))), Right(()))
           case _ => (jobs, Left(RepositoryError.Conflict))
         }
-      }
+      } )
 
     override def updateEmbedding(
         observed: Versioned[Job],
         embedding: EntityEmbedding
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.modify { jobs =>
         jobs.get(observed.value.id) match {
           case Some(current)
@@ -262,7 +255,7 @@ private[cats] object ServiceFixtures {
             (jobs.updated(observed.value.id, current.copy(embedding = Some(embedding))), Right(()))
           case _ => (jobs, Left(RepositoryError.Conflict))
         }
-      }
+      } )
 
     private def matches(page: JobPageRequest)(job: Job): Boolean =
       page.status.forall(_ == job.status)
@@ -276,13 +269,13 @@ private[cats] object ServiceFixtures {
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
       nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None
   ) extends ApplicationRepository {
-    override def find(id: ApplicationId): IO[Either[RepositoryError, Option[Application]]] =
-      applications.get.map(_.get(id)).map(Right(_))
+    override def find(id: ApplicationId): RepositoryIO[Option[Application]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      applications.get.map(_.get(id)).map(Right(_)) )
 
     override def findByCandidate(
         candidateId: UserId,
         page: ApplicationPageRequest
-    ): IO[Either[RepositoryError, List[Application]]] =
+    ): RepositoryIO[List[Application]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       applications.get
         .map(
           _.values
@@ -297,9 +290,9 @@ private[cats] object ServiceFixtures {
             .toList
         )
         .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-        .map(Right(_))
+        .map(Right(_)) )
 
-    override def findByJob(jobId: JobId, page: ApplicationPageRequest): IO[Either[RepositoryError, List[Application]]] =
+    override def findByJob(jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       applications.get
         .map(
           _.values
@@ -314,12 +307,12 @@ private[cats] object ServiceFixtures {
             .toList
         )
         .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-        .map(Right(_))
+        .map(Right(_)) )
 
     override def history(
         applicationId: ApplicationId,
         page: ApplicationEventPageRequest
-    ): IO[Either[RepositoryError, List[ApplicationEvent]]] =
+    ): RepositoryIO[List[ApplicationEvent]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       events.get
         .map(
           _.filter(event =>
@@ -331,9 +324,9 @@ private[cats] object ServiceFixtures {
           ).toList
         )
         .map(keysetPage(_, page.pageSize.value)(_.occurredAt, _.id.value.toString))
-        .map(Right(_))
+        .map(Right(_)) )
 
-    private def create(application: Application, initialEvent: ApplicationEvent): IO[Either[RepositoryError, Unit]] =
+    private def create(application: Application, initialEvent: ApplicationEvent): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       applications
         .modify { current =>
           if (
@@ -349,21 +342,21 @@ private[cats] object ServiceFixtures {
         .flatTap {
           case Right(()) => events.update(_ :+ initialEvent)
           case Left(_)   => IO.unit
-        }
+        } )
 
     override def createForOpenJob(
         observedJob: Versioned[Job],
         application: Application,
         initialEvent: ApplicationEvent
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       nextCreateError.modify(error => (None, error)) flatMap {
         case Some(error) => IO.pure(Left(error))
         case None
             if observedJob.value.status == JobStatus.Open && observedJob.value.id == application.jobId &&
               initialEvent.applicationId == application.id =>
-          create(application, initialEvent)
+          create(application, initialEvent).value
         case None => IO.pure(Left(RepositoryError.Conflict))
-      }
+      } )
 
     override def createForOpenJobWithEvents(
         observedJob: Versioned[Job],
@@ -371,20 +364,20 @@ private[cats] object ServiceFixtures {
         initialEvent: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       rejectNextOperationalEvent.flatMap {
         case Some(error) => IO.pure(Left(error))
         case None        =>
-          createForOpenJob(observedJob, application, initialEvent).flatTap {
+          createForOpenJob(observedJob, application, initialEvent).value.flatTap {
             case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
             case Left(_)   => IO.unit
           }
-      }
+      } )
 
     override def updateStatus(
         application: Application,
         event: ApplicationEvent
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       applications
         .modify { current =>
           current.get(application.id) match {
@@ -397,22 +390,22 @@ private[cats] object ServiceFixtures {
         .flatTap {
           case Right(()) => events.update(_ :+ event)
           case Left(_)   => IO.unit
-        }
+        } )
 
     override def updateStatusWithEvents(
         application: Application,
         event: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       rejectNextOperationalEvent.flatMap {
         case Some(error) => IO.pure(Left(error))
         case None        =>
-          updateStatus(application, event).flatTap {
+          updateStatus(application, event).value.flatTap {
             case Right(()) => operationalEvents.fold(IO.unit)(_.update(_ ++ outboxEvents))
             case Left(_)   => IO.unit
           }
-      }
+      } )
 
     def allEvents: IO[Vector[ApplicationEvent]] =
       events.get

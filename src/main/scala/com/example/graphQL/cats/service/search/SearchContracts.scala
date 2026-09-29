@@ -1,7 +1,7 @@
-package com.example.graphQL.cats.shared.search
+package com.example.graphQL.cats.service.search
 
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, Job, SearchMode}
-import com.example.graphQL.cats.shared.pagination.PageSize
+import com.example.graphQL.cats.domain.pagination.PageSize
 import java.time.Instant
 import java.util.UUID
 

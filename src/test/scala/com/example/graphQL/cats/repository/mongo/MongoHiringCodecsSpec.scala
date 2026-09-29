@@ -21,8 +21,8 @@ import com.example.graphQL.cats.domain.model.{
   UserProfile,
   UserRole
 }
-import com.example.graphQL.cats.repository.protocol.{RepositoryError, Versioned}
-import com.example.graphQL.cats.shared.events.{
+import com.example.graphQL.cats.service.port.{RepositoryError, Versioned}
+import com.example.graphQL.cats.service.events.{
   OperationalAggregateType,
   OperationalEventEnvelope,
   OperationalEventType,

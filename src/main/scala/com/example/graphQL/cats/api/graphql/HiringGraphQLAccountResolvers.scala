@@ -19,10 +19,10 @@ import sangria.schema.Context
 import java.time.Instant
 
 private[graphql] object HiringGraphQLAccountResolvers {
-  def accountMe(context: Context[RequestContext, Unit]): IO[User] =
+  def accountMe(context: Context[RequestContext, Unit]): HiringGraphQLResult[User] =
     authenticated(context) { case (actor, hiring) => raiseOnUseCaseError(hiring.accountService.me(actor)) }
 
-  def signUp(context: Context[RequestContext, Unit]): IO[MutationOutcome[AuthSuccess]] =
+  def signUp(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.SignUp).flatMap { _ =>
       val input = context.arg(signUpInputArgument)
       publicMutation(context) { hiring =>
@@ -41,7 +41,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       }
     }
 
-  def bootstrapAdmin(context: Context[RequestContext, Unit]): IO[MutationOutcome[AuthSuccess]] =
+  def bootstrapAdmin(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.BootstrapAdmin).flatMap { _ =>
       val input = context.arg(bootstrapAdminInputArgument)
       publicMutation(context) { hiring =>
@@ -56,7 +56,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       }
     }
 
-  def login(context: Context[RequestContext, Unit]): IO[MutationOutcome[AuthSuccess]] =
+  def login(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
     rateLimited(context, Operation.Login).flatMap { _ =>
       val input = context.arg(loginInputArgument)
       publicMutation(context) { hiring =>
@@ -71,7 +71,7 @@ private[graphql] object HiringGraphQLAccountResolvers {
       }
     }
 
-  def updateMyProfile(context: Context[RequestContext, Unit]): IO[MutationOutcome[User]] =
+  def updateMyProfile(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[User]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(updateProfileInputArgument)
       updateProfileInput(actor.role, input).fold(
@@ -87,50 +87,63 @@ private[graphql] object HiringGraphQLAccountResolvers {
       )
     }
 
-  def deleteMyAccount(context: Context[RequestContext, Unit]): IO[MutationOutcome[DeletionReceipt]] =
-    context.ctx.hiringAvailable.flatMap {
-      case com.example.graphQL.cats.service.ProbeResult.Ready =>
-        context.ctx.deletionActor.flatMap { actor =>
-          val input = context.arg(deleteMyAccountInputArgument)
-          mutationResult(
-            context.ctx.hiring.accountService
-              .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
-              .semiflatTap(_ => context.ctx.invalidateViewer)
-              .map(receiptId => DeletionReceipt(receiptId, AccountDeletionStatus.Pending))
+  def deleteMyAccount(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[DeletionReceipt]] =
+    cats.data.EitherT
+      .liftF[IO, HiringGraphQLFailure, com.example.graphQL.cats.service.ProbeResult](
+        context.ctx.hiringAvailable
+      )
+      .flatMap {
+        case com.example.graphQL.cats.service.ProbeResult.Ready =>
+          context.ctx.deletionActor.flatMap { actor =>
+            val input = context.arg(deleteMyAccountInputArgument)
+            mutationResult(
+              context.ctx.hiring.accountService
+                .deleteMyAccount(idempotencyRequest(input.idempotencyKey, input.idempotencyPayload), actor)
+                .semiflatTap(_ => context.ctx.invalidateViewer)
+                .map(receiptId => DeletionReceipt(receiptId, AccountDeletionStatus.Pending))
+            )
+          }
+        case _ =>
+          cats.data.EitherT.leftT(
+            HiringGraphQLFailure.UseCase(
+              UseCaseError.Availability(
+                com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady
+              )
+            )
           )
-        }
-      case _ =>
-        IO.raiseError(
-          RequestContext.ReadFailure(
-            UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)
-          )
-        )
-    }
+      }
 
-  def accountDeletionStatus(context: Context[RequestContext, Unit]): IO[AccountDeletionStatus] =
-    context.ctx.hiringAvailable.flatMap {
-      case com.example.graphQL.cats.service.ProbeResult.Ready =>
-        context.ctx.deletionActor.flatMap { actor =>
-          raiseOnUseCaseError(
-            context.ctx.hiring.accountService.accountDeletionStatus(actor, context.arg(deletionReceiptIdArgument))
+  def accountDeletionStatus(context: Context[RequestContext, Unit]): HiringGraphQLResult[AccountDeletionStatus] =
+    cats.data.EitherT
+      .liftF[IO, HiringGraphQLFailure, com.example.graphQL.cats.service.ProbeResult](
+        context.ctx.hiringAvailable
+      )
+      .flatMap {
+        case com.example.graphQL.cats.service.ProbeResult.Ready =>
+          context.ctx.deletionActor.flatMap { actor =>
+            raiseOnUseCaseError(
+              context.ctx.hiring.accountService.accountDeletionStatus(actor, context.arg(deletionReceiptIdArgument))
+            )
+          }
+        case _ =>
+          cats.data.EitherT.leftT(
+            HiringGraphQLFailure.UseCase(
+              UseCaseError.Availability(
+                com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady
+              )
+            )
           )
-        }
-      case _ =>
-        IO.raiseError(
-          RequestContext.ReadFailure(
-            UseCaseError.Availability(com.example.graphQL.cats.service.AvailabilityError.ServiceNotReady)
-          )
-        )
-    }
+      }
 
-  def users(context: Context[RequestContext, Unit]): IO[Connection[User]] =
+  def users(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[User]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val requested = context.arg(firstArgument)
       val status = context.arg(userStatusArgument).getOrElse(AccountStatus.Active)
       val role = context.arg(userRoleArgument)
-      IO.realTimeInstant.flatMap { now =>
-        inputResult(
+      for {
+        now <- cats.data.EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
+        (request, pageSize) <- inputResult(
           userPage(
             requested,
             context.arg(afterArgument),
@@ -138,11 +151,9 @@ private[graphql] object HiringGraphQLAccountResolvers {
             role,
             cursor => CursorCodec.decode[UserCursor](cursor, now)
           )
-        ).flatMap { case (request, pageSize) =>
-          raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
-            .map(values => userConnection(values, pageSize, now))
-        }
-      }
+        )
+        values <- raiseOnUseCaseError(hiring.accountService.listUsers(actor, request))
+      } yield userConnection(values, pageSize, now)
     }
 
   private def updateProfileInput(

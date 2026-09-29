@@ -5,9 +5,8 @@ import cats.data.EitherT
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.ActorContext
 import com.example.graphQL.cats.config.JwtAuthConfig
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.service.protocol.UserAuthenticator
-import com.example.graphQL.cats.shared.Parsing.parseUuid
 import java.time.{Clock as JavaClock, Instant, ZoneOffset}
 import org.http4s.Request
 import org.http4s.{AuthScheme, Credentials}
@@ -79,5 +78,5 @@ object JwtActorAuthenticator {
       .toOption
       .filter(_.isValid(issuer, audience))
       .flatMap(_.subject)
-      .flatMap(subject => parseUuid(subject).toOption.map(UserId(_)))
+      .flatMap(subject => parseIdentifier(subject)(UserId.apply).toOption)
 }

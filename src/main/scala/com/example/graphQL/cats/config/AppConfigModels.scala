@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.config
 
 import com.comcast.ip4s.{Cidr, IpAddress}
-import com.example.graphQL.cats.shared.search.SearchFusionStrategy
+import com.example.graphQL.cats.service.search.SearchFusionStrategy
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.collection.MaxLength
 import io.github.iltotore.iron.constraint.numeric.*
@@ -200,6 +200,9 @@ type EmbeddingRetryAttempts = Int :| Interval.Closed[1, 10]
 type EmbeddingRetryDelayMs = Int :| Interval.Closed[100, 60000]
 type SearchIndexReadyTimeoutMs = Int :| Interval.Closed[1000, 600000]
 type SearchIndexPollIntervalMs = Int :| Interval.Closed[100, 10000]
+type KafkaBootstrapServers = String :| (Not[Blank] & MaxLength[512])
+type KafkaTopic = String :| (Not[Blank] & MaxLength[249])
+type KafkaConsumerGroup = String :| (Not[Blank] & MaxLength[249])
 type KafkaBatchSize = Int :| Interval.Closed[1, 500]
 type KafkaLeaseSeconds = Int :| Interval.Closed[1, 3600]
 type KafkaRetryDelaySeconds = Int :| Interval.Closed[1, 3600]

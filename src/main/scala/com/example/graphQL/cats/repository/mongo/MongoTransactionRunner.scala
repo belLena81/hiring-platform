@@ -1,17 +1,18 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Resource}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
-import com.mongodb.reactivestreams.client.{ClientSession, MongoClient}
+import mongo4cats.client.{ClientSession, MongoClient}
+import mongo4cats.models.client.ClientSessionOptions
 import retry.*
 import retry.RetryPolicies.*
 
 import scala.concurrent.duration.*
 
 private[mongo] trait MongoTransactionRunner {
-  def run[A](operation: Option[ClientSession] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]]
+  def run[A](operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]): IO[Either[RepositoryError, A]]
 }
 
 private[mongo] object MongoTransactionRunner {
@@ -49,35 +50,22 @@ private[mongo] object MongoTransactionRunner {
     case RetryCommit(error: Throwable)
   }
 
-  val noTransaction: MongoTransactionRunner =
-    new MongoTransactionRunner {
-      override def run[A](
-          operation: Option[ClientSession] => IO[Either[RepositoryError, A]]
-      ): IO[Either[RepositoryError, A]] =
-        operation(None)
-    }
-
   def sessions(
-      client: MongoClient,
+      client: MongoClient[IO],
       duplicateKeyError: RepositoryError,
       retryPolicy: RetryPolicy = RetryPolicy(),
       diagnostics: Diagnostics = Diagnostics.noop
   ): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
-          operation: Option[ClientSession] => IO[Either[RepositoryError, A]]
+          operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]
       ): IO[Either[RepositoryError, A]] = {
-        def withSession[A](use: ClientSession => IO[A]): IO[A] =
-          Resource
-            .make(PublisherBridge.first(client.startSession()).flatMap {
-              case Some(session) => IO.pure(session)
-              case None          => IO.raiseError(new IllegalStateException("Mongo startSession returned no session"))
-            })(session => IO.blocking(session.close()))
-            .use(use)
+        def withSession[A](use: ClientSession[IO] => IO[A]): IO[A] =
+          client.startSession(ClientSessionOptions()).use(use)
 
-        def abort(session: ClientSession): IO[Unit] =
+        def abort(session: ClientSession[IO]): IO[Unit] =
           MongoRepositorySupport.guard(diagnostics, "transaction.abort")(
-            PublisherBridge.first(session.abortTransaction()).map(_ => ())
+            session.abortTransaction
           )(_ => ())
 
         val transactionBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxTransactionAttempts)
@@ -86,10 +74,9 @@ private[mongo] object MongoTransactionRunner {
         def labels(error: MongoException): Set[String] =
           Set("TransientTransactionError", "UnknownTransactionCommitResult").filter(error.hasErrorLabel)
 
-        def commit(session: ClientSession, result: A): IO[CommitOutcome[A]] = {
+        def commit(session: ClientSession[IO], result: A): IO[CommitOutcome[A]] = {
           val commitAttempt =
-            PublisherBridge
-              .first(session.commitTransaction())
+            session.commitTransaction
               .as(CommitOutcome.Completed(Right(result)))
               .handleErrorWith {
                 case error: MongoException =>
@@ -117,27 +104,44 @@ private[mongo] object MongoTransactionRunner {
         }
 
         def attemptOnce: IO[CommitOutcome[A]] = withSession { session =>
-          IO.delay(session.startTransaction()) *> operation(Some(session)).attempt.flatMap {
-            case Left(error) =>
-              error match {
-                case mongo: MongoException
-                    if RetryDecision.decide(RetryStage.Operation, labels(mongo)) == RetryDecision.RetryTransaction =>
-                  (abort(session) *> MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error))
-                    .as(CommitOutcome.RetryTransaction(mongo))
-                case _ =>
-                  (abort(session) *> MongoRepositorySupport.reportFailure(diagnostics, "transaction.operation", error))
-                    .as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+          Resource
+            .make(session.startTransaction.as(session)) { active =>
+              if (active.hasActiveTransaction) abort(active) else IO.unit
+            }
+            .use { active =>
+              operation(Some(active)).attempt.flatMap {
+                case Left(error) =>
+                  error match {
+                    case mongo: MongoException
+                        if RetryDecision.decide(
+                          RetryStage.Operation,
+                          labels(mongo)
+                        ) == RetryDecision.RetryTransaction =>
+                      (abort(active) *> MongoRepositorySupport.reportFailure(
+                        diagnostics,
+                        "transaction.operation",
+                        error
+                      ))
+                        .as(CommitOutcome.RetryTransaction(mongo))
+                    case _ =>
+                      (abort(active) *> MongoRepositorySupport.reportFailure(
+                        diagnostics,
+                        "transaction.operation",
+                        error
+                      ))
+                        .as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+                  }
+                case Right(Left(error)) =>
+                  abort(active).as(CommitOutcome.Completed(Left(error)))
+                case Right(Right(result)) =>
+                  commit(active, result).flatMap {
+                    case retry @ CommitOutcome.RetryTransaction(_) => abort(active).as(retry)
+                    case CommitOutcome.RetryCommit(error)          =>
+                      abort(active).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
+                    case completed @ CommitOutcome.Completed(_) => IO.pure(completed)
+                  }
               }
-            case Right(Left(error)) =>
-              abort(session).as(CommitOutcome.Completed(Left(error)))
-            case Right(Right(result)) =>
-              commit(session, result).flatMap {
-                case retry @ CommitOutcome.RetryTransaction(_) => abort(session).as(retry)
-                case CommitOutcome.RetryCommit(error)          =>
-                  abort(session).as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError)))
-                case completed @ CommitOutcome.Completed(_) => IO.pure(completed)
-              }
-          }
+            }
         }
 
         retryingOnFailures(attemptOnce)(

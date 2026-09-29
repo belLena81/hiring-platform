@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.search
+package com.example.graphQL.cats.service.search
 
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, SearchMode}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}

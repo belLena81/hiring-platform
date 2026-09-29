@@ -1,9 +1,10 @@
 package com.example.graphQL.cats.service.events
 
 import cats.effect.{IO, Ref}
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{AccountStatus, UserRole}
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   MutationEntityReference,
   MutationReceiptExecution,
   MutationReceiptFingerprint,
@@ -11,15 +12,15 @@ import com.example.graphQL.cats.repository.protocol.{
   MutationReceiptRepository,
   MutationWriteOutcome,
   MutationWriteContext,
+  RepositoryIO,
   SearchSessionRepository,
-  SearchSessionWorkRepository
 }
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
-import com.example.graphQL.cats.shared.events.{
+import com.example.graphQL.cats.service.events.{
   OperationalEventEnvelope,
   OperationalEventType,
   SearchSession,
@@ -126,7 +127,7 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         com.example.graphQL.cats.domain.model.Identifiers.UserId,
         com.example.graphQL.cats.domain.model.User
       ] = Map(candidateId -> candidate, recruiterId -> recruiter),
-      idempotent: Idempotent = Idempotent.noop
+      idempotent: Idempotent = com.example.graphQL.cats.service.mutation.TestIdempotency.noop
   ) =
     for {
       usersRef <- Ref.of[IO, Map[
@@ -150,9 +151,9 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       users,
       jobs,
       sessions,
-      SearchSessionWorkRepository.noop,
+      com.example.graphQL.cats.service.port.TestSearchSessionWorkRepository,
       idempotent = idempotent,
-      currentTime = IO.pure(now)
+      clock = FixedTestClock.at(now)
     )
 
   private def request(id: UUID): IdempotencyRequest =
@@ -181,36 +182,37 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
         now: java.time.Instant,
         expiresAt: java.time.Instant
     )(
-        write: MutationWriteContext => IO[Either[RepositoryError, MutationWriteOutcome[A, E]]]
-    ): IO[Either[RepositoryError, MutationReceiptExecution[A, E]]] = {
-      val _ = (key, fingerprint, now, expiresAt, write)
-      IO.pure(Right(MutationReceiptExecution.Replay(reference)))
-    }
+        write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
+    ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
+      Right(MutationReceiptExecution.Replay(reference))
+    )
   }
 
   private final class InMemorySearchSessions(
       sessions: Ref[IO, Map[UUID, SearchSession]],
       storedEvents: Ref[IO, Vector[OperationalEventEnvelope]]
   ) extends SearchSessionRepository {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): IO[Either[RepositoryError, Unit]] = {
+    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.defer {
       val _ = event
       sessions.update(_ + (session.id -> session)).as(Right(()))
-    }
+      }
+    )
 
-    override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
-      sessions.get.map(values => Right(values.get(id)))
+    override def find(id: UUID): RepositoryIO[Option[SearchSession]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      sessions.get.map(values => Right(values.get(id))) )
 
     override def recordInteraction(
         event: OperationalEventEnvelope,
         context: MutationWriteContext
-    ): IO[Either[RepositoryError, Boolean]] =
+    ): RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       storedEvents.modify { events =>
         events.find(_.eventId == event.eventId) match {
           case Some(existing) if sameLogicalEvent(existing, event) => events -> Right(false)
           case Some(_)                                             => events -> Left(RepositoryError.Conflict)
           case None                                                => (events :+ event) -> Right(true)
         }
-      }
+      } )
 
     def events: IO[Vector[OperationalEventEnvelope]] =
       storedEvents.get

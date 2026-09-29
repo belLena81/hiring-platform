@@ -8,25 +8,22 @@ import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema
 import com.example.graphQL.cats.service.{
   ActorContext,
   AnalyticsError,
+  AnalyticsReportSnapshot,
   AnalyticsReportingUseCases,
   HiringReadService,
   ProbeResult,
+  RepositoryError,
   UseCaseError
 }
-import com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   EmbeddingError,
   EmbeddingInput,
   EmbeddingService,
   EmbeddingVector,
-  MutationWriteContext,
-  SearchSessionRepository,
+  RepositoryIO,
   SemanticSearchRepository
 }
-import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, InMemoryJobs, InMemoryUsers}
-import com.example.graphQL.cats.service.application.ApplicationService
-import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.protocol.{
   AccountProfileInput,
   AccountUseCases,
@@ -39,8 +36,7 @@ import com.example.graphQL.cats.service.protocol.{
 import com.example.graphQL.cats.service.search.SemanticSearchService
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.shared.search.{RankedCandidate, RankedJob, VectorSearchQuery}
-import com.example.graphQL.cats.shared.events.SearchSession
+import com.example.graphQL.cats.service.search.{RankedCandidate, RankedJob, VectorSearchQuery}
 import io.circe.Json
 import munit.CatsEffectSuite
 
@@ -153,7 +149,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       override def report(
           actor: ActorContext,
           period: com.example.graphQL.cats.service.AnalyticsPeriod
-      ): UseCaseIO[com.example.graphQL.cats.repository.protocol.AnalyticsReportSnapshot] =
+      ): UseCaseIO[com.example.graphQL.cats.service.AnalyticsReportSnapshot] =
         UseCaseIO.left(UseCaseError.Analytics(AnalyticsError.ReportsUnavailable))
     }
     val query =
@@ -221,7 +217,8 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   test("application connection rejects a job cursor") {
     given CursorCodec.CursorKey = TestGraphQLSupport.cursorKey
     IO.realTimeInstant.flatMap { cursorNow =>
-      val cursor = CursorCodec.encode(com.example.graphQL.cats.shared.pagination.JobCursor(cursorNow, jobId), cursorNow)
+      val cursor =
+        CursorCodec.encode(com.example.graphQL.cats.domain.pagination.JobCursor(cursorNow, jobId), cursorNow)
       val query =
         s"""query {
            |  myApplications(first: 10, after: "$cursor") {
@@ -240,7 +237,7 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     given CursorCodec.CursorKey = TestGraphQLSupport.cursorKey
     IO.realTimeInstant.flatMap { current =>
       val issuedAt = current.minusSeconds(TestGraphQLSupport.cursorKey.ttlSeconds + 1)
-      val cursor = CursorCodec.encode(com.example.graphQL.cats.shared.pagination.JobCursor(current, jobId), issuedAt)
+      val cursor = CursorCodec.encode(com.example.graphQL.cats.domain.pagination.JobCursor(current, jobId), issuedAt)
       val query =
         s"""query {
            |  myApplications(first: 10, after: "$cursor") {
@@ -643,14 +640,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         List(application, secondApplication).map(application => application.id -> application).toMap
       )
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
-      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       users = RecordingUsers(usersRef, userBatches)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService(users, jobs),
-        ApplicationService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService
       )
@@ -847,49 +844,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     }
   }
 
-  test("search results survive best-effort search-session persistence failures") {
-    val semanticQuery =
-      """query { semanticJobSearch(query: "scala", first: 5) { results { job { id } } __typename } }"""
-    val jobsQuery =
-      """query { jobs(first: 5) { edges { node { id } } __typename } }"""
-    for {
-      semantic <- executeWithSemanticSearch(
-        semanticQuery,
-        Some(ActorContext(candidateId, UserRole.Candidate)),
-        FailingSearchSessions
-      )
-      jobs <- executeWithUsers(
-        jobsQuery,
-        Some(ActorContext(candidateId, UserRole.Candidate)),
-        List(candidate, recruiter),
-        searchSessions = FailingSearchSessions
-      )
-    } yield {
-      assertEquals(
-        semantic.hcursor
-          .downField("data")
-          .downField("semanticJobSearch")
-          .downField("results")
-          .downArray
-          .downField("job")
-          .get[String]("id"),
-        Right(jobId.value.toString)
-      )
-      assert(!semantic.hcursor.downField("errors").succeeded)
-      assertEquals(
-        jobs.hcursor
-          .downField("data")
-          .downField("jobs")
-          .downField("edges")
-          .downArray
-          .downField("node")
-          .get[String]("id"),
-        Right(jobId.value.toString)
-      )
-      assert(!jobs.hcursor.downField("errors").succeeded)
-    }
-  }
-
   test("VHS-AC04 candidateMatches projection does not expose email or resumeRef") {
     val query =
       s"""query {
@@ -1054,14 +1008,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     )
 
   private def executeWithSemanticSearch(query: String, actor: Option[ActorContext]): IO[Json] = {
-    executeWithSemanticSearch(query, actor, SearchSessionRepository.noop)
-  }
-
-  private def executeWithSemanticSearch(
-      query: String,
-      actor: Option[ActorContext],
-      searchSessions: SearchSessionRepository
-  ): IO[Json] = {
     val meta = EmbeddingMeta("voyage-4-lite", "hash", now)
     val embeddedJob = openJob.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), meta)))
     for {
@@ -1092,12 +1038,11 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService(users, jobs),
-        ApplicationService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         TestGraphQLSupport.accountService,
-        Some(searchService),
-        searchSessions = searchSessions
+        Some(searchService)
       )
       request <- parseRequest(query)
       result <- TestGraphQLSupport
@@ -1113,7 +1058,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService: AccountUseCases = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
       analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
   ): IO[Json] = {
     for {
@@ -1121,17 +1065,16 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       jobsRef <- Ref.of[IO, Map[JobId, Job]](List(openJob, closedJob).map(job => job.id -> job).toMap)
       applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map(application.id -> application))
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
-      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       users = InMemoryUsers(usersRef)
       jobs = InMemoryJobs(jobsRef)
       applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
-        JobService(users, jobs),
-        ApplicationService(users, jobs, applications),
+        com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
+        com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         accountService = accountService,
-        searchSessions = searchSessions,
         analyticsReporting = analyticsReporting
       )
       request <- parseRequest(query, variables)
@@ -1148,22 +1091,22 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       ref: Ref[IO, Map[UserId, User]],
       batches: Ref[IO, Vector[List[UserId]]]
   ) extends com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
-    override def find(id: UserId): IO[Either[RepositoryError, Option[User]]] =
-      ref.get.map(_.get(id)).map(Right(_))
+    override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      ref.get.map(_.get(id)).map(Right(_)) )
 
-    override def findMany(ids: List[UserId]): IO[Either[RepositoryError, List[User]]] =
-      batches.update(_ :+ ids) *> ref.get.map(users => Right(ids.distinct.flatMap(users.get)))
+    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      batches.update(_ :+ ids) *> ref.get.map(users => Right(ids.distinct.flatMap(users.get))) )
 
     override def updateEmbedding(
         id: UserId,
         embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
-    ): IO[Either[RepositoryError, Unit]] =
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       ref.modify { users =>
         users.get(id) match {
           case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
           case None       => (users, Left(RepositoryError.Conflict))
         }
-      }
+      } )
   }
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])
@@ -1173,29 +1116,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository {
-    override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-      IO.pure(Right(jobs))
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(jobs)) )
 
-    override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-      IO.pure(Right(jobs))
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(jobs)) )
 
-    override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
-      IO.pure(Right(Nil))
-  }
-
-  private object FailingSearchSessions extends SearchSessionRepository {
-    override def save(
-        session: SearchSession,
-        event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope
-    ): IO[Either[RepositoryError, Unit]] =
-      IO.pure(Left(RepositoryError.Unavailable))
-    override def find(id: UUID): IO[Either[RepositoryError, Option[SearchSession]]] =
-      IO.pure(Right(None))
-    override def recordInteraction(
-        event: com.example.graphQL.cats.shared.events.OperationalEventEnvelope,
-        context: MutationWriteContext
-    ): IO[Either[RepositoryError, Boolean]] =
-      IO.pure(Right(true))
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(Nil)) )
   }
 
   private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases {

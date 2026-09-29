@@ -1,7 +1,7 @@
-package com.example.graphQL.cats.shared.events
+package com.example.graphQL.cats.service.events
 
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
 import io.circe.{Decoder, Encoder, Json}
 import io.circe.generic.semiauto.*
@@ -74,7 +74,7 @@ object OperationalEventJson {
   private given Encoder[UserId] = Encoder.encodeString.contramap(_.value.toString)
 
   private given Decoder[UserId] = Decoder.decodeString.emap { raw =>
-    parseUuid(raw).left.map(_ => "invalid actorId").map(UserId(_))
+    parseIdentifier(raw)(UserId.apply).left.map(_ => "invalid actorId")
   }
 
   private given Encoder[OperationalEventEnvelope] = deriveEncoder

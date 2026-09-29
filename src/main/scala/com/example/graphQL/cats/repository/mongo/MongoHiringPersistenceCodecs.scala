@@ -5,7 +5,7 @@ import org.bson.codecs.{Codec, DecoderContext, DocumentCodec, EncoderContext}
 import org.bson.codecs.configuration.{CodecRegistries, CodecRegistry}
 import org.mongodb.scala.bson.codecs.Macros as ScalaMacros
 import org.mongodb.scala.bson.codecs.IterableCodecProvider
-import com.mongodb.MongoClientSettings
+import mongo4cats.codecs.CodecRegistry as Mongo4catsCodecRegistry
 
 import java.util.Date
 import scala.util.control.NonFatal
@@ -154,10 +154,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
     ScalaMacros.createCodecProvider[StoredSearchSession]()
   )
 
-  private val registry: CodecRegistry = CodecRegistries.fromRegistries(
-    providers,
-    MongoClientSettings.getDefaultCodecRegistry
-  )
+  private val registry: CodecRegistry = Mongo4catsCodecRegistry.mergeWithDefault(providers)
 
   private val documentCodec = new DocumentCodec(registry)
   private val locationCodec = ScalaMacros.createCodecIgnoreNone[StoredLocation](registry)

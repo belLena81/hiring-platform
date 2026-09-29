@@ -3,7 +3,7 @@ package com.example.graphQL.cats.runtime
 import cats.effect.{Deferred, IO, Ref, Resource}
 import scala.concurrent.duration.*
 import com.example.graphQL.cats.config.VectorSearchConfig
-import com.example.graphQL.cats.repository.protocol.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector}
+import com.example.graphQL.cats.service.port.{EmbeddingError, EmbeddingInput, EmbeddingService, EmbeddingVector}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import munit.CatsEffectSuite
@@ -35,7 +35,7 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       candidateVectorIndex = "candidate-vector",
       jobLexicalIndex = "job-lexical",
       candidateLexicalIndex = "candidate-lexical",
-      fusionStrategy = com.example.graphQL.cats.shared.search.SearchFusionStrategy.ApplicationRrf,
+      fusionStrategy = com.example.graphQL.cats.service.search.SearchFusionStrategy.ApplicationRrf,
       rerankEnabled = false,
       rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 1000,
@@ -54,7 +54,12 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
           work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
           events.update(_ :+ "search") *> IO(new Search),
           (_, _) => Resource.eval(events.update(_ :+ "provider") *> IO.pure(embeddings)),
-          (_, _, _, _) => Resource.eval(events.update(_ :+ "pipeline") *> IO.pure(EmbeddingWorkPublisher.noop))
+          (_, _, _, _) =>
+            Resource.eval(
+              events.update(_ :+ "pipeline") *> IO.pure(
+                com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop
+              )
+            )
         )
         .use(IO.pure)
       recorded <- events.get
@@ -80,7 +85,12 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
           work => events.update(_ :+ "jobs") *> IO(Jobs(work)),
           events.update(_ :+ "search") *> IO(new Search),
           (_, _) => Resource.eval(events.update(_ :+ "provider") *> IO.pure(embeddings)),
-          (_, _, _, _) => Resource.eval(events.update(_ :+ "pipeline") *> IO.pure(EmbeddingWorkPublisher.noop))
+          (_, _, _, _) =>
+            Resource.eval(
+              events.update(_ :+ "pipeline") *> IO.pure(
+                com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop
+              )
+            )
         )
         .use(_ => IO.unit)
         .attempt
@@ -108,7 +118,9 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
           (work, users, jobs, _) =>
             Resource
               .make(
-                events.update(_ :+ "pipeline-acquire").as((work, users, jobs, EmbeddingWorkPublisher.noop))
+                events
+                  .update(_ :+ "pipeline-acquire")
+                  .as((work, users, jobs, com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop))
               )(_ => events.update(_ :+ "pipeline-release"))
               .map(_._4)
         )
@@ -181,9 +193,11 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
             events.update(_ :+ "provider-release")
           ),
         (_, _, _, _) =>
-          Resource.make(events.update(_ :+ "pipeline-acquire").as(EmbeddingWorkPublisher.noop))(_ =>
-            events.update(_ :+ "pipeline-release")
-          )
+          Resource.make(
+            events
+              .update(_ :+ "pipeline-acquire")
+              .as(com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop)
+          )(_ => events.update(_ :+ "pipeline-release"))
       )
       result <- capability
         .flatMap(_ =>
@@ -227,7 +241,9 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
             ),
           (_, _, _, _) =>
             Resource.make(
-              events.update(_ :+ "pipeline-acquire") *> acquired.complete(()).as(EmbeddingWorkPublisher.noop)
+              events.update(_ :+ "pipeline-acquire") *> acquired
+                .complete(())
+                .as(com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop)
             )(_ => events.update(_ :+ "pipeline-release"))
         )
         .use(_ => IO.never)

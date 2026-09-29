@@ -3,10 +3,10 @@ package com.example.graphQL.cats.service
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, Job, User, UserRole}
-import com.example.graphQL.cats.repository.protocol.{ApplicationRepository, JobRepository, UserRepository}
+import com.example.graphQL.cats.service.port.{ApplicationRepository, JobRepository, RepositoryIO, UserRepository}
 import com.example.graphQL.cats.service.protocol.{HiringReadModel, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
-import com.example.graphQL.cats.shared.pagination.ApplicationEventPageRequest
+import com.example.graphQL.cats.domain.pagination.ApplicationEventPageRequest
 
 final class HiringReadService(
     users: UserRepository,
@@ -65,9 +65,7 @@ final class HiringReadService(
   ): UseCaseIO[List[ApplicationEvent]] =
     read(applications.history(applicationId, page))
 
-  private def read[A](
-      value: cats.effect.IO[Either[com.example.graphQL.cats.repository.protocol.RepositoryError, A]]
-  ): UseCaseIO[A] =
+  private def read[A](value: RepositoryIO[A]): UseCaseIO[A] =
     UseCase.repository(value)
 }
 

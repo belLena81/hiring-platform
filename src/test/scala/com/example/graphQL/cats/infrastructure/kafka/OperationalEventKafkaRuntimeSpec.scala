@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.std.UUIDGen
 import com.example.graphQL.cats.config.{
   KafkaConfig,
   KafkaConsumerConfig,
@@ -8,10 +9,10 @@ import com.example.graphQL.cats.config.{
   KafkaSaslSecurityProtocol
 }
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.repository.protocol.*
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
-import com.example.graphQL.cats.shared.events.*
+import com.example.graphQL.cats.service.events.*
 import io.circe.Json
 import fs2.Stream
 import munit.CatsEffectSuite
@@ -87,23 +88,23 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       quarantineState <- Ref.of[IO, Vector[EventQuarantineRecord]](Vector.empty)
     } yield {
       val receipts = new ConsumerReceiptRepository {
-        override def exists(group: String, id: UUID): IO[Either[RepositoryError, Boolean]] =
-          receiptState.get.map(values => Right(values.contains(group -> id)))
+        override def exists(group: String, id: UUID): RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+          receiptState.get.map(values => Right(values.contains(group -> id))) )
         override def record(
             group: String,
             value: OperationalEventEnvelope,
             createdAt: Instant,
             expiresAt: Instant
-        ): IO[Either[RepositoryError, Boolean]] =
+        ): RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
           receiptState.modify { values =>
             val key = group -> value.eventId
             if (values.contains(key)) (values, Right(false))
             else (values.updated(key, value), Right(true))
-          }
+          } )
       }
       val quarantines = new EventQuarantineRepository {
-        override def save(record: EventQuarantineRecord): IO[Either[RepositoryError, Unit]] =
-          quarantineState.update(_ :+ record).as(Right(()))
+        override def save(record: EventQuarantineRecord): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+          quarantineState.update(_ :+ record).as(Right(())) )
       }
       Fakes(receipts, quarantines, quarantineState)
     }
@@ -130,8 +131,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
 
   test("malformed records remain uncommitted when quarantine persistence fails") {
     val failedQuarantine = new EventQuarantineRepository {
-      override def save(record: EventQuarantineRecord): IO[Either[RepositoryError, Unit]] =
-        IO.pure(Left(RepositoryError.Unavailable))
+      override def save(record: EventQuarantineRecord): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.pure(Left(RepositoryError.Unavailable)) )
     }
     fakes.flatMap { values =>
       OperationalEventKafkaRuntime
@@ -251,7 +252,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       transactionalIds <- Ref.of[IO, Vector[String]](Vector.empty)
       secondGeneration <- Deferred[IO, Unit]
       generation = Stream.suspend {
-        Stream.eval(IO.delay(s"hiring-publisher-${UUID.randomUUID()}")).flatMap { transactionalId =>
+        Stream.eval(UUIDGen[IO].randomUUID.map(id => s"hiring-publisher-$id")).flatMap { transactionalId =>
           Stream.eval(transactionalIds.update(_ :+ transactionalId)) >>
             Stream
               .resource(Resource.make(acquired.update(_ + 1))(_ => released.update(_ + 1)))

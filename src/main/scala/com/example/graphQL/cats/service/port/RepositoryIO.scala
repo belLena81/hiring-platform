@@ -1,18 +1,10 @@
-package com.example.graphQL.cats.repository.protocol
+package com.example.graphQL.cats.service.port
 
 import cats.data.EitherT
 import cats.effect.IO
+import com.example.graphQL.cats.service.RepositoryError
 
-/** Failures an operational repository can report without exposing driver details. */
-enum RepositoryError {
-  case DuplicateApplication
-  case Conflict
-  case InvalidStoredData
-  case MissingWriteResult
-  case Unavailable
-}
-
-/** An effectful repository result with its expected failure channel made explicit. */
+/** An effectful port result with its expected failure channel made explicit. */
 type RepositoryIO[A] = EitherT[IO, RepositoryError, A]
 
 object RepositoryIO {

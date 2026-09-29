@@ -3,7 +3,7 @@ package com.example.graphQL.cats.api.graphql
 import cats.data.NonEmptyList
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.GraphQLFailure
 import com.example.graphQL.cats.domain.error.{DomainError, DomainValidationError}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{
   AccountError,
   AnalyticsError,
@@ -143,7 +143,7 @@ private[graphql] object GraphQLFailureCatalog {
       case RepositoryError.DuplicateApplication =>
         failure(FailureMetadata.DuplicateApplication, "Application already exists")
       case RepositoryError.Conflict => failure(FailureMetadata.Conflict, "Conflict")
-      case RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult =>
+      case RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult | RepositoryError.MissingStoredResult =>
         failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
       case RepositoryError.Unavailable => failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
     }

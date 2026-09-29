@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.data.NonEmptyList
+import cats.data.{EitherT, NonEmptyList}
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.admission.AuthRateLimiter
@@ -9,11 +9,12 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.given
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
-import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, ProbeResult, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.{ActorContext, AvailabilityError, SearchError, UseCaseError}
+import com.example.graphQL.cats.service.ProbeResult
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
-import com.example.graphQL.cats.shared.events.{OperationalEvents, SearchSession, SearchSessionResult}
-import com.example.graphQL.cats.shared.pagination.*
-import com.example.graphQL.cats.shared.search.JobSearchFilter
+import com.example.graphQL.cats.service.events.{OperationalEvents, SearchSession, SearchSessionResult}
+import com.example.graphQL.cats.domain.pagination.*
+import com.example.graphQL.cats.service.search.JobSearchFilter
 import io.circe.{Json, Printer}
 import io.circe.syntax.*
 import sangria.schema.Context
@@ -25,21 +26,21 @@ import scala.concurrent.duration.*
 private[graphql] object HiringGraphQLResolverSupport {
   private val CanonicalJsonPrinter = Printer.noSpaces.copy(sortKeys = true)
 
-  def raiseOnUseCaseError[A](value: UseCaseIO[A]): IO[A] =
-    value.value.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
+  def raiseOnUseCaseError[A](value: UseCaseIO[A]): HiringGraphQLResult[A] =
+    EitherT(value.value.map(_.leftMap(HiringGraphQLFailure.UseCase(_))))
 
-  def inputResult[A](value: Either[GraphQLFailure, A]): IO[A] =
-    IO.fromEither(value.leftMap(error => RequestContext.FieldFailure(error.code, error.message)))
+  def inputResult[A](value: Either[GraphQLFailure, A]): HiringGraphQLResult[A] =
+    EitherT.fromEither[IO](value.leftMap(HiringGraphQLFailure.Input(_)))
 
-  def mutationResult[A](value: UseCaseIO[A]): IO[MutationOutcome[A]] =
-    value.value.flatMap {
-      case Right(result)                               => IO.pure(result)
-      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(validationError(errors))
+  def mutationResult[A](value: UseCaseIO[A]): HiringGraphQLResult[MutationOutcome[A]] =
+    EitherT(value.value.flatMap {
+      case Right(result)                               => IO.pure(Right(result))
+      case Left(UseCaseError.ValidationFailed(errors)) => IO.pure(Right(validationError(errors)))
       case Left(error)                                 =>
         val failure = toGraphQLFailure(error)
-        if (failure.exceptional) liftUseCase(error)
-        else IO.pure(DomainError(failure.code, failure.message))
-    }
+        if (failure.exceptional) IO.pure(Left(HiringGraphQLFailure.UseCase(error)))
+        else IO.pure(Right(DomainError(failure.code, failure.message)))
+    })
 
   def idempotencyRequest(idempotencyKey: UUID, payload: Json): IdempotencyRequest =
     IdempotencyRequest.fromCanonicalInput(idempotencyKey, payload.printWith(CanonicalJsonPrinter))
@@ -100,27 +101,33 @@ private[graphql] object HiringGraphQLResolverSupport {
     }
 
   def authenticated[A](context: Context[RequestContext, Unit])(
-      action: (ActorContext, HiringGraphQLServices) => IO[A]
-  ): IO[A] = authenticated(context).flatMap(action.tupled)
+      action: (ActorContext, HiringGraphQLServices) => HiringGraphQLResult[A]
+  ): HiringGraphQLResult[A] = authenticated(context).flatMap(action.tupled)
 
   def publicMutation[A](context: Context[RequestContext, Unit])(
-      action: HiringGraphQLServices => IO[A]
-  ): IO[A] =
-    context.ctx.hiringAvailable.flatMap {
+      action: HiringGraphQLServices => HiringGraphQLResult[A]
+  ): HiringGraphQLResult[A] =
+    EitherT.liftF[IO, HiringGraphQLFailure, ProbeResult](context.ctx.hiringAvailable).flatMap {
       case ProbeResult.Ready => action(context.ctx.hiring)
-      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(AvailabilityError.ServiceNotReady)))
+      case _                 => EitherT.leftT(availabilityFailure)
     }
 
-  def rateLimited(context: Context[RequestContext, Unit], operation: AuthRateLimiter.Operation): IO[Unit] =
+  def rateLimited(
+      context: Context[RequestContext, Unit],
+      operation: AuthRateLimiter.Operation
+  ): HiringGraphQLResult[Unit] =
     context.ctx.rateLimited(operation)
 
   def authenticatedSearch(
       context: Context[RequestContext, Unit]
-  ): IO[(ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases)] =
+  ): HiringGraphQLResult[
+    (ActorContext, HiringGraphQLServices, com.example.graphQL.cats.service.protocol.SearchUseCases)
+  ] =
     authenticated(context).flatMap { case (actor, hiring) =>
       hiring.semanticSearchService match {
-        case Some(service) => IO.pure((actor, hiring, service))
-        case None => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
+        case Some(service) => EitherT.pure((actor, hiring, service))
+        case None          =>
+          EitherT.leftT(HiringGraphQLFailure.UseCase(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
       }
     }
 
@@ -169,14 +176,16 @@ private[graphql] object HiringGraphQLResolverSupport {
     ValidationError(failure.code, failure.message)
   }
 
-  private def liftUseCase[A](error: UseCaseError): IO[A] =
-    IO.raiseError(RequestContext.ReadFailure(error))
-
-  private def authenticated(context: Context[RequestContext, Unit]): IO[(ActorContext, HiringGraphQLServices)] =
-    context.ctx.hiringAvailable.flatMap {
+  private def authenticated(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[(ActorContext, HiringGraphQLServices)] =
+    EitherT.liftF[IO, HiringGraphQLFailure, ProbeResult](context.ctx.hiringAvailable).flatMap {
       case ProbeResult.Ready => context.ctx.authenticatedActor.map(_ -> context.ctx.hiring)
-      case _ => IO.raiseError(RequestContext.ReadFailure(UseCaseError.Availability(AvailabilityError.ServiceNotReady)))
+      case _                 => EitherT.leftT(availabilityFailure)
     }
+
+  private def availabilityFailure: HiringGraphQLFailure =
+    HiringGraphQLFailure.UseCase(UseCaseError.Availability(AvailabilityError.ServiceNotReady))
 
   private def cursorPage[A, B](
       first: Int,

@@ -17,7 +17,6 @@ import com.example.graphQL.cats.service.AnalyticsReportingUseCases
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
-import com.example.graphQL.cats.repository.protocol.SearchSessionRepository
 import com.example.graphQL.cats.service.protocol.{
   AccountUseCases,
   ApplicationUseCases,
@@ -30,8 +29,6 @@ import com.example.graphQL.cats.service.protocol.{
 import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.service.events.SearchSessionHandoff
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
-import scala.util.Try
-import scala.util.control.NoStackTrace
 
 final case class HiringGraphQLServices(
     readModel: HiringReadModel,
@@ -41,7 +38,6 @@ final case class HiringGraphQLServices(
     accountService: AccountUseCases,
     semanticSearchService: Option[SearchUseCases] = None,
     interactionService: InteractionUseCases = InteractionUseCases.noop,
-    searchSessions: SearchSessionRepository = SearchSessionRepository.noop,
     searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
     analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
 )
@@ -62,7 +58,7 @@ final case class RequestContextParameters(
 
 final class RequestContext private (
     parameters: RequestContextParameters,
-    dispatcher: Dispatcher[IO],
+    sangriaAdapter: HiringGraphQLSangriaAdapter,
     closed: Deferred[IO, Unit],
     spanContext: Option[SpanContext],
     readinessProbe: IO[ProbeResult],
@@ -70,78 +66,60 @@ final class RequestContext private (
     viewer: Option[UseCaseIO[AuthenticatedActor]],
     viewerInvalidated: Ref[IO, Boolean]
 ) {
+  private[graphql] def effectAdapter: HiringGraphQLSangriaAdapter = sangriaAdapter
+
   def hiring: HiringGraphQLServices = parameters.hiring
 
   def readiness: IO[ProbeResult] = readinessProbe
 
   def hiringAvailable: IO[ProbeResult] = hiringReadinessProbe
 
-  private[graphql] def authenticatedActor: IO[AuthenticatedActor] =
-    (parameters.actor, viewer) match {
+  private[graphql] def authenticatedActor: HiringGraphQLResult[AuthenticatedActor] =
+    cats.data.EitherT((parameters.actor, viewer) match {
       case (Some(_), Some(resolveViewer)) =>
         viewerInvalidated.get.flatMap {
-          case true =>
-            IO.raiseError(
-              RequestContext.ReadFailure(
-                UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)
-              )
-            )
-          case false => read(resolveViewer)
+          case true  => IO.pure(Left(unauthorizedFailure))
+          case false => read(resolveViewer).value
         }
-      case _ =>
-        IO.raiseError(
-          RequestContext.ReadFailure(
-            UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)
-          )
-        )
-    }
+      case _ => IO.pure(Left(unauthorizedFailure))
+    })
 
   /** Deletion replay and status access use verified bearer claims without requiring an active viewer. */
-  private[graphql] def deletionActor: IO[ActorContext] =
-    parameters.actor.fold[IO[ActorContext]](
-      IO.raiseError(
-        RequestContext.ReadFailure(
-          UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)
-        )
-      )
-    )(IO.pure)
+  private[graphql] def deletionActor: HiringGraphQLResult[ActorContext] =
+    cats.data.EitherT.fromEither[IO](parameters.actor.toRight(unauthorizedFailure))
 
   private[graphql] def invalidateViewer: IO[Unit] = viewerInvalidated.set(true)
 
-  private[graphql] def rateLimited(operation: AuthRateLimiter.Operation): IO[Unit] =
-    parameters.rateLimit(AuthRateLimiter.Key(parameters.clientAddress, operation)).flatMap {
-      case Right(())       => IO.unit
-      case Left(rejection) => IO.raiseError(RequestContext.RateLimited(rejection.retryAfterSeconds))
-    }
+  private[graphql] def rateLimited(operation: AuthRateLimiter.Operation): HiringGraphQLResult[Unit] =
+    cats.data.EitherT(
+      parameters
+        .rateLimit(AuthRateLimiter.Key(parameters.clientAddress, operation))
+        .map(_.leftMap(rejection => HiringGraphQLFailure.RateLimited(rejection.retryAfterSeconds)))
+    )
 
-  private[graphql] def unsafeToFuture[A](action: IO[A]) =
-    dispatcher.unsafeToFuture(requestScoped(action))
+  private[graphql] def requestScoped[A](action: HiringGraphQLResult[A]): HiringGraphQLResult[A] =
+    cats.data.EitherT(
+      IO.race(closed.get, spanContext.fold(action.value)(parameters.tracer.childScope(_)(action.value))).map {
+        case Left(_)        => Left(HiringGraphQLFailure.RequestClosed)
+        case Right(outcome) => outcome
+      }
+    )
 
-  private[graphql] def unsafeFieldToFuture[A](name: String, action: IO[A]) =
-    dispatcher.unsafeToFuture(requestScoped(parameters.tracer.span(s"graphql.field.$name").surround(action)))
+  private[graphql] def traceField[A](name: String, action: HiringGraphQLResult[A]): HiringGraphQLResult[A] =
+    cats.data.EitherT(parameters.tracer.span(s"graphql.field.$name").surround(action.value))
 
-  private def requestScoped[A](action: IO[A]): IO[A] =
-    IO.race(closed.get, spanContext.fold(action)(parameters.tracer.childScope(_)(action))).flatMap {
-      case Left(_)      => IO.raiseError(RequestContext.RequestClosed)
-      case Right(value) => IO.pure(value)
-    }
+  private[graphql] def reportExecutionFailure(error: Throwable): IO[Unit] =
+    parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error))
 
-  private[graphql] def reportExecutionFailure(error: Throwable): Unit =
-    Try(
-      dispatcher.unsafeRunAndForget(
-        parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error))
-      )
-    ).toEither.fold(_ => (), identity)
-
-  def users(ids: List[UserId]): IO[List[User]] =
+  def users(ids: List[UserId]): HiringGraphQLResult[List[User]] =
     read(parameters.hiring.readModel.users(ids.distinct))
 
-  def jobs(ids: List[JobId]): IO[List[Job]] =
+  def jobs(ids: List[JobId]): HiringGraphQLResult[List[Job]] =
     read(parameters.hiring.readModel.jobs(ids.distinct))
 
-  def visibleEmailUsers(ids: List[UserId]): IO[List[EmailVisibility]] =
+  def visibleEmailUsers(ids: List[UserId]): HiringGraphQLResult[List[EmailVisibility]] =
     parameters.actor match {
-      case None    => IO.pure(Nil)
+      case None    => cats.data.EitherT.pure[IO, HiringGraphQLFailure](Nil)
       case Some(_) =>
         authenticatedActor.flatMap(current =>
           read(parameters.hiring.readModel.canViewUserEmails(current, ids.distinct))
@@ -149,15 +127,20 @@ final class RequestContext private (
         )
     }
 
-  private def read[A](result: UseCaseIO[A]): IO[A] =
-    result.value.map(_.leftMap(RequestContext.ReadFailure(_))).rethrow
+  private def read[A](result: UseCaseIO[A]): HiringGraphQLResult[A] =
+    cats.data.EitherT(result.value.map(_.leftMap(HiringGraphQLFailure.UseCase(_))))
+
+  private def unauthorizedFailure: HiringGraphQLFailure =
+    HiringGraphQLFailure.UseCase(
+      UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized)
+    )
 
 }
 
 final class RequestContextFactory private (dispatcher: Dispatcher[IO]) {
   def resource(parameters: RequestContextParameters): Resource[IO, RequestContext] =
     Resource.eval(parameters.tracer.currentSpanContext).flatMap { spanContext =>
-      RequestContext.withDispatcher(dispatcher, parameters, spanContext)
+      RequestContext.withAdapter(new HiringGraphQLSangriaAdapter(dispatcher), parameters, spanContext)
     }
 }
 
@@ -167,13 +150,8 @@ object RequestContextFactory {
 }
 
 object RequestContext {
-  final case class ReadFailure(error: UseCaseError) extends RuntimeException with NoStackTrace
-  final case class FieldFailure(code: String, message: String) extends RuntimeException with NoStackTrace
-  final case class RateLimited(retryAfterSeconds: Long) extends RuntimeException with NoStackTrace
-  case object RequestClosed extends RuntimeException with NoStackTrace
-
-  private[graphql] def withDispatcher(
-      dispatcher: Dispatcher[IO],
+  private[graphql] def withAdapter(
+      sangriaAdapter: HiringGraphQLSangriaAdapter,
       parameters: RequestContextParameters,
       spanContext: Option[SpanContext]
   ): Resource[IO, RequestContext] =
@@ -189,7 +167,7 @@ object RequestContext {
       viewerInvalidated <- Resource.eval(Ref.of[IO, Boolean](false))
       context = new RequestContext(
         parameters,
-        dispatcher,
+        sangriaAdapter,
         closed,
         spanContext,
         memoized,

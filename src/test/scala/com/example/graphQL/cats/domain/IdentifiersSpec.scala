@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.domain
 
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId, UserId, parse}
 import java.util.UUID
 import munit.FunSuite
 import scala.compiletime.testing.typeCheckErrors
@@ -13,6 +13,17 @@ final class IdentifiersSpec extends FunSuite {
     assertEquals(JobId(uuid).value, uuid)
     assertEquals(ApplicationId(uuid).value, uuid)
     assertEquals(ApplicationEventId(uuid).value, uuid)
+  }
+
+  test("parse constructs typed identifiers from UUID strings") {
+    assertEquals(parse(uuid.toString)(UserId.apply), Right(UserId(uuid)))
+    assertEquals(parse(uuid.toString)(JobId.apply), Right(JobId(uuid)))
+    assertEquals(parse(uuid.toString)(ApplicationId.apply), Right(ApplicationId(uuid)))
+    assertEquals(parse(uuid.toString)(ApplicationEventId.apply), Right(ApplicationEventId(uuid)))
+  }
+
+  test("parse returns a failure for malformed identifier strings") {
+    assert(parse("not-a-uuid")(UserId.apply).isLeft)
   }
 
   test("identifier aliases remain type-safe despite sharing a UUID representation") {

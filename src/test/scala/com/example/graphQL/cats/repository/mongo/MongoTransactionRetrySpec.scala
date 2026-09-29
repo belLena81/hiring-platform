@@ -1,8 +1,9 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
-import com.example.graphQL.cats.repository.protocol.{MutationWriteContext, RepositoryError}
+import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError}
 import com.mongodb.client.result.UpdateResult
+import mongo4cats.client.ClientSession
 import munit.CatsEffectSuite
 import retry.*
 
@@ -71,11 +72,13 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
       runs <- Ref.of[IO, Int](0)
       operations <- Ref.of[IO, Int](0)
       runner = recordingRunner(runs)
-      atomic <- MongoMutationWriteContext.run(MutationWriteContext.noop, runner, transactionRequired = true) { _ =>
-        operations.update(_ + 1).as(Right("atomic"))
+      atomic <- MongoMutationWriteContext.run(MutationWriteContext.directWrite, runner, transactionRequired = true) {
+        _ =>
+          operations.update(_ + 1).as(Right("atomic"))
       }
-      direct <- MongoMutationWriteContext.run(MutationWriteContext.noop, runner, transactionRequired = false) { _ =>
-        operations.update(_ + 1).as(Right("direct"))
+      direct <- MongoMutationWriteContext.run(MutationWriteContext.directWrite, runner, transactionRequired = false) {
+        _ =>
+          operations.update(_ + 1).as(Right("direct"))
       }
       runCount <- runs.get
       operationCount <- operations.get
@@ -132,8 +135,7 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
   private def recordingRunner(runs: Ref[IO, Int]): MongoTransactionRunner =
     new MongoTransactionRunner {
       override def run[A](
-          operation: Option[com.mongodb.reactivestreams.client.ClientSession] => IO[Either[RepositoryError, A]]
-      ): IO[Either[RepositoryError, A]] =
-        runs.update(_ + 1) *> operation(None)
+          operation: Option[ClientSession[IO]] => IO[Either[RepositoryError, A]]
+      ): IO[Either[RepositoryError, A]] = runs.update(_ + 1) *> operation(None)
     }
 }

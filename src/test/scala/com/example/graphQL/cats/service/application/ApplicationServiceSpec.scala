@@ -2,16 +2,17 @@ package com.example.graphQL.cats.service.application
 
 import cats.effect.IO
 import cats.effect.Ref
+import cats.effect.std.UUIDGen
+import com.example.graphQL.cats.FixedTestClock
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
-import com.example.graphQL.cats.shared.pagination.{ApplicationPageRequest, PageSize}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.domain.pagination.{ApplicationPageRequest, PageSize}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.ServiceFixtures.*
-import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, JobStatus, UserRole}
-import com.example.graphQL.cats.shared.events.OperationalEventType
+import com.example.graphQL.cats.service.events.OperationalEventType
 import java.util.UUID
 import munit.CatsEffectSuite
 
@@ -232,10 +233,10 @@ class ApplicationServiceSpec extends CatsEffectSuite {
       ]](applications)
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       operationalEvents <- Ref
-        .of[IO, Vector[com.example.graphQL.cats.shared.events.OperationalEventEnvelope]](Vector.empty)
-      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+        .of[IO, Vector[com.example.graphQL.cats.service.events.OperationalEventEnvelope]](Vector.empty)
+      nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       nextOperationalEventError <- Ref
-        .of[IO, Option[com.example.graphQL.cats.repository.protocol.RepositoryError]](None)
+        .of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       idValues <- Ref.of[IO, List[UUID]](randomIds)
       jobRepository = InMemoryJobs(jobsRef)
       applicationRepository = InMemoryApplications(
@@ -249,9 +250,11 @@ class ApplicationServiceSpec extends CatsEffectSuite {
         InMemoryUsers(usersRef),
         jobRepository,
         applicationRepository,
-        Idempotent.noop,
-        IO.pure(currentTime),
-        nextId(idValues)
+        com.example.graphQL.cats.service.mutation.TestIdempotency.noop,
+        clock = FixedTestClock.at(currentTime),
+        uuidGen = new UUIDGen[IO] {
+          override def randomUUID: IO[UUID] = nextId(idValues)
+        }
       )
     } yield (jobRepository, applicationRepository, service)
 

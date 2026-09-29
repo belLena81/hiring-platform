@@ -2,10 +2,13 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.shared.search.{SearchEvaluationHarness, SearchEvaluationQuery, SearchEvaluationRun}
-import com.example.graphQL.cats.shared.pagination.PageSize
-import com.mongodb.client.model.{SearchIndexModel, SearchIndexType}
-import com.mongodb.reactivestreams.client.{MongoClient, MongoCollection}
+import com.example.graphQL.cats.service.search.{SearchEvaluationHarness, SearchEvaluationQuery, SearchEvaluationRun}
+import com.example.graphQL.cats.domain.pagination.PageSize
+import mongo4cats.client.MongoClient
+import mongo4cats.collection.MongoCollection
+import mongo4cats.database.MongoDatabase
+import mongo4cats.codecs.CodecRegistry
+import mongo4cats.bson.Document as CatsDocument
 import io.circe.Json
 import org.bson.Document
 
@@ -102,72 +105,88 @@ object SearchEvaluationAtlasRunner extends IOApp {
     )
   }
 
-  private def runEvaluation(client: MongoClient, settings: Settings): IO[Unit] = {
-    val database = client.getDatabase(settings.database)
-    val collectionName = s"search_evaluation_${UUID.randomUUID().toString.replace("-", "")}"
-    val collection = database.getCollection(collectionName)
-    val indexName = "synthetic_vector"
-    val index = new SearchIndexModel(
-      indexName,
-      new Document(
-        "fields",
-        List(
-          new Document("type", "vector")
-            .append("path", "embedding")
-            .append("numDimensions", Int.box(settings.dimensions))
-            .append("similarity", "cosine"),
-          new Document("type", "filter").append("path", "category")
-        ).asJava
-      ),
-      SearchIndexType.vectorSearch()
-    )
+  private def runEvaluation(client: MongoClient[IO], settings: Settings): IO[Unit] =
+    client.getDatabase(settings.database).flatMap { database =>
+      val collectionName = s"search_evaluation_${UUID.randomUUID().toString.replace("-", "")}"
+      database.getCollection[CatsDocument](collectionName, CodecRegistry.Default).map(_.as[Document]).flatMap {
+        collection =>
+          val indexName = "synthetic_vector"
+          val indexDefinition = new Document(
+            "fields",
+            List(
+              new Document("type", "vector")
+                .append("path", "embedding")
+                .append("numDimensions", Int.box(settings.dimensions))
+                .append("similarity", "cosine"),
+              new Document("type", "filter").append("path", "category")
+            ).asJava
+          )
 
-    Resource
-      .make(
-        PublisherBridge.first(database.createCollection(collectionName)).as(collection)
-      )(ownedCollection => PublisherBridge.first(ownedCollection.drop()).void)
-      .use { _ =>
-        for {
-          _ <- seedCollection(collection, settings)
-          _ <- PublisherBridge.first(collection.createSearchIndexes(List(index).asJava)).void
-          _ <- awaitIndex(collection, indexName, 120.seconds)
-          version <- PublisherBridge
-            .first(database.runCommand(new Document("buildInfo", 1)))
-            .map(_.flatMap(document => Option(document.getString("version"))).getOrElse("unknown"))
-          _ <- Option
-            .when(settings.temperature == "warm")(
-              (1 to settings.queryCount).toList.traverse_(query =>
-                retrieve(
-                  collection,
-                  settings,
-                  syntheticVector(settings.seed ^ query.toLong, settings.dimensions, query % 10, query % 7),
-                  query % 10,
-                  exact = false
-                ).void
-              )
-            )
-            .getOrElse(IO.unit)
-          started <- IO.monotonic
-          queryResults <- (1 to settings.queryCount).toList
-            .grouped(settings.concurrency)
-            .toList
-            .traverse(batch => batch.parTraverse(query => evaluateQuery(collection, settings, query)))
-            .map(_.flatten)
-          ended <- IO.monotonic
-          indexBytes <- PublisherBridge
-            .first(database.runCommand(new Document("collStats", collectionName)))
-            .map(
-              _.flatMap(document =>
-                Option(document.get("totalIndexSize")).collect { case value: Number => value.longValue() }
-              )
-            )
-            .handleError(_ => None)
-          _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
-        } yield ()
+          Resource
+            .make(
+              database.createCollection(collectionName).as(collection)
+            )(ownedCollection => ownedCollection.drop())
+            .use { _ =>
+              for {
+                _ <- seedCollection(collection, settings)
+                _ <- createSearchIndex(database, collectionName, indexName, indexDefinition)
+                _ <- awaitIndex(collection, indexName, 120.seconds)
+                version <- database
+                  .runCommand(CatsDocument.fromJava(new Document("buildInfo", 1)))
+                  .map(_.getString("version").getOrElse("unknown"))
+                _ <- Option
+                  .when(settings.temperature == "warm")(
+                    (1 to settings.queryCount).toList.traverse_(query =>
+                      retrieve(
+                        collection,
+                        settings,
+                        syntheticVector(settings.seed ^ query.toLong, settings.dimensions, query % 10, query % 7),
+                        query % 10,
+                        exact = false
+                      ).void
+                    )
+                  )
+                  .getOrElse(IO.unit)
+                started <- IO.monotonic
+                queryResults <- (1 to settings.queryCount).toList
+                  .grouped(settings.concurrency)
+                  .toList
+                  .traverse(batch => batch.parTraverse(query => evaluateQuery(collection, settings, query)))
+                  .map(_.flatten)
+                ended <- IO.monotonic
+                indexBytes <- database
+                  .runCommand(CatsDocument.fromJava(new Document("collStats", collectionName)))
+                  .map(_.getAs[Long]("totalIndexSize"))
+                  .handleError(_ => None)
+                _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
+              } yield ()
+            }
       }
-  }
+    }
 
-  private def seedCollection(collection: MongoCollection[Document], settings: Settings): IO[Unit] = {
+  private def createSearchIndex(
+      database: MongoDatabase[IO],
+      collectionName: String,
+      indexName: String,
+      definition: Document
+  ): IO[Unit] =
+    database
+      .runCommand(
+        CatsDocument.fromJava(
+          new Document("createSearchIndexes", collectionName)
+            .append(
+              "indexes",
+              List(
+                new Document("name", indexName)
+                  .append("type", "vectorSearch")
+                  .append("definition", definition)
+              ).asJava
+            )
+        )
+      )
+      .void
+
+  private def seedCollection(collection: MongoCollection[IO, Document], settings: Settings): IO[Unit] = {
     (0 until settings.datasetDocuments).grouped(500).toList.traverse_ { ids =>
       val documents = ids.map { id =>
         val vector = syntheticVector(settings.seed + id.toLong, settings.dimensions, id % 10, id % 7)
@@ -176,12 +195,12 @@ object SearchEvaluationAtlasRunner extends IOApp {
           .append("judgedTopic", Int.box(id % 7))
           .append("embedding", vector.map(java.lang.Double.valueOf).asJava)
       }.toList
-      PublisherBridge.first(collection.insertMany(documents.asJava)).void
+      collection.insertMany(documents)
     }
   }
 
   private def evaluateQuery(
-      collection: MongoCollection[Document],
+      collection: MongoCollection[IO, Document],
       settings: Settings,
       queryNumber: Int
   ): IO[PairedRanking] = {
@@ -198,7 +217,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
   }
 
   private def timedRanking(
-      collection: MongoCollection[Document],
+      collection: MongoCollection[IO, Document],
       settings: Settings,
       vector: List[Double],
       category: Int,
@@ -214,7 +233,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
     )
 
   private def retrieve(
-      collection: MongoCollection[Document],
+      collection: MongoCollection[IO, Document],
       settings: Settings,
       vector: List[Double],
       category: Int,
@@ -230,8 +249,13 @@ object SearchEvaluationAtlasRunner extends IOApp {
     val pipeline = List(
       new Document("$vectorSearch", vectorSearch),
       new Document("$project", new Document("_id", 1))
-    ).asJava
-    PublisherBridge.collectWithin(collection.aggregate(pipeline), settings.pageSize).map(_.map(_.getString("_id")))
+    )
+    collection.aggregate[Document](pipeline).stream.take(settings.pageSize.toLong + 1L).compile.toList.flatMap {
+      results =>
+        if (results.size > settings.pageSize)
+          IO.raiseError(new IllegalStateException(s"Atlas search result exceeded page size ${settings.pageSize}"))
+        else IO.pure(results.map(_.getString("_id")))
+    }
   }
 
   private def writeReports(
@@ -297,14 +321,15 @@ object SearchEvaluationAtlasRunner extends IOApp {
       .toSet
   }
 
-  private def awaitIndex(collection: MongoCollection[Document], name: String, timeout: FiniteDuration): IO[Unit] = {
+  private def awaitIndex(collection: MongoCollection[IO, Document], name: String, timeout: FiniteDuration): IO[Unit] = {
     val deadline = IO.monotonic.map(_ + timeout)
     def poll(until: FiniteDuration): IO[Unit] =
-      PublisherBridge
-        .collectWithin(
-          collection.aggregate(List(new Document("$listSearchIndexes", new Document())).asJava),
-          100
-        )
+      collection
+        .aggregate[Document](List(new Document("$listSearchIndexes", new Document())))
+        .stream
+        .take(101L)
+        .compile
+        .toList
         .flatMap { indexes =>
           indexes.find(_.getString("name") == name) match {
             case Some(index) if index.getBoolean("queryable", java.lang.Boolean.FALSE).booleanValue() => IO.unit

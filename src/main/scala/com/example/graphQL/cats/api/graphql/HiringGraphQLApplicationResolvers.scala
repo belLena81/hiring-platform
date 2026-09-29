@@ -1,21 +1,22 @@
 package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
+import cats.data.EitherT
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
-import com.example.graphQL.cats.shared.pagination.{ApplicationCursor, ApplicationEventCursor}
+import com.example.graphQL.cats.domain.pagination.{ApplicationCursor, ApplicationEventCursor}
 import sangria.schema.Context
 import java.time.Instant
 
 private[graphql] object HiringGraphQLApplicationResolvers {
-  def myApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
+  def myApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       for {
-        now <- IO.realTimeInstant
+        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         (pageRequest, requested) <- inputResult(
           applicationPage(
             context.arg(firstArgument),
@@ -28,12 +29,12 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       } yield applicationConnection(values, requested, now)
     }
 
-  def jobApplications(context: Context[RequestContext, Unit]): IO[Connection[Application]] =
+  def jobApplications(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[Application]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val jobId = context.arg(jobIdArgument)
       for {
-        now <- IO.realTimeInstant
+        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         (pageRequest, requested) <- inputResult(
           applicationPage(
             context.arg(firstArgument),
@@ -46,12 +47,12 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       } yield applicationConnection(values, requested, now)
     }
 
-  def applicationHistory(context: Context[RequestContext, Unit]): IO[Connection[ApplicationEvent]] =
+  def applicationHistory(context: Context[RequestContext, Unit]): HiringGraphQLResult[Connection[ApplicationEvent]] =
     authenticated(context) { case (actor, hiring) =>
       given CursorCodec.CursorKey = hiring.cursorKey
       val applicationId = context.arg(applicationIdArgument)
       for {
-        now <- IO.realTimeInstant
+        now <- EitherT.liftF[IO, HiringGraphQLFailure, Instant](IO.realTimeInstant)
         (pageRequest, requested) <- inputResult(
           pageEvent(
             context.arg(firstArgument),
@@ -64,7 +65,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       } yield eventConnection(values, requested, now)
     }
 
-  def submitApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] =
+  def submitApplication(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Application]] =
     authenticated(context) { case (actor, hiring) =>
       val input = context.arg(submitApplicationInputArgument)
       mutationResult(
@@ -79,12 +80,12 @@ private[graphql] object HiringGraphQLApplicationResolvers {
   def applicationStatusAction(
       context: Context[RequestContext, Unit],
       status: ApplicationStatus
-  ): IO[MutationOutcome[Application]] = {
+  ): HiringGraphQLResult[MutationOutcome[Application]] = {
     val input = context.arg(applicationActionInputArgument)
     changeApplicationStatus(context, input.idempotencyKey, input.applicationId, status, None, None)
   }
 
-  def rejectApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] = {
+  def rejectApplication(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Application]] = {
     val input = context.arg(rejectApplicationInputArgument)
     changeApplicationStatus(
       context,
@@ -96,7 +97,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
     )
   }
 
-  def declineApplication(context: Context[RequestContext, Unit]): IO[MutationOutcome[Application]] = {
+  def declineApplication(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[Application]] = {
     val input = context.arg(declineApplicationInputArgument)
     changeApplicationStatus(
       context,
@@ -115,7 +116,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
       status: ApplicationStatus,
       feedback: Option[String],
       reason: Option[String]
-  ): IO[MutationOutcome[Application]] =
+  ): HiringGraphQLResult[MutationOutcome[Application]] =
     authenticated(context) { case (actor, hiring) =>
       mutationResult(
         hiring.applicationService.changeStatus(

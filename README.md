@@ -168,7 +168,7 @@ Collections modeled around GraphQL access patterns, not relational normalization
 
 Dependencies point inward (`transport → service → domain`); the domain layer stays free of Sangria, MongoDB, http4s, Circe, JWT, and AI-SDK dependencies.
 
-Current module layout: `api/` (GraphQL, HTTP, auth adapters) → `service/` (protocols and job/application/search use cases) → `repository/` (protocols and Mongo implementation) → `domain/` (model, error, pure policy) plus `shared/` utilities and DTOs.
+Current package layout: `api/` (GraphQL, HTTP, auth adapters) → `service/` (use-case protocols, outbound ports, and job/application/search use cases) → `domain/` (model, pagination, error, pure policy). `repository.mongo/` and `infrastructure/` contain adapters that implement service ports. Event and search contracts live with their service capabilities; pagination contracts live in the domain because domain page requests use the validated page size. `shared/` contains only neutral utilities.
 
 ## MVP Use Cases (13)
 

@@ -2,7 +2,7 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.syntax.either.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.*
 import sangria.macros.derive.*
 import sangria.marshalling.circe.*
@@ -11,6 +11,7 @@ import sangria.validation.{ValueCoercionViolation, Violation}
 
 import java.time.Instant
 import java.util.{Locale, UUID}
+import com.example.graphQL.cats.shared.Parsing
 
 private[graphql] object HiringGraphQLInputs {
   private final case class IdCoercionViolation(typeName: String)
@@ -43,10 +44,14 @@ private[graphql] object HiringGraphQLInputs {
       }
     )
 
-  private def uuidScalar[A](name: String, wrap: UUID => A, unwrap: A => UUID): ScalarType[A] =
+  private def uuidScalar[A](
+      name: String,
+      parse: String => Either[Throwable, A],
+      unwrap: A => UUID
+  ): ScalarType[A] =
     stringScalar(
       name,
-      value => Either.catchNonFatal(UUID.fromString(value)).left.map(_ => IdCoercionViolation(name)).map(wrap),
+      value => parse(value).left.map(_ => IdCoercionViolation(name)),
       value => unwrap(value).toString
     )
 
@@ -60,10 +65,13 @@ private[graphql] object HiringGraphQLInputs {
   def instantField[A](name: String, resolve: A => Instant): Field[RequestContext, A] =
     Field(name, instantType, resolve = context => resolve(context.value))
 
-  lazy val uuidType: ScalarType[UUID] = uuidScalar[UUID]("UUID", value => value, value => value)
-  lazy val userIdType: ScalarType[UserId] = uuidScalar("UserID", UserId.apply, _.value)
-  lazy val jobIdType: ScalarType[JobId] = uuidScalar("JobID", JobId.apply, _.value)
-  lazy val applicationIdType: ScalarType[ApplicationId] = uuidScalar("ApplicationID", ApplicationId.apply, _.value)
+  lazy val uuidType: ScalarType[UUID] = uuidScalar[UUID]("UUID", Parsing.parseUuid, value => value)
+  lazy val userIdType: ScalarType[UserId] =
+    uuidScalar("UserID", value => parseIdentifier(value)(UserId.apply), _.value)
+  lazy val jobIdType: ScalarType[JobId] =
+    uuidScalar("JobID", value => parseIdentifier(value)(JobId.apply), _.value)
+  lazy val applicationIdType: ScalarType[ApplicationId] =
+    uuidScalar("ApplicationID", value => parseIdentifier(value)(ApplicationId.apply), _.value)
 
   given ScalarType[Instant] = instantType
   given ScalarType[UUID] = uuidType

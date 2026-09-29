@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.api.graphql
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, HiringGraphQLSchema}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, ProbeResult}
@@ -59,6 +59,27 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     }
   }
 
+  test("unexpected resolver failures are sanitized and reported after Sangria handles them") {
+    for {
+      reportCount <- Ref.of[IO, Int](0)
+      diagnostics = new Diagnostics {
+        def event(event: com.example.graphQL.cats.service.LogEvent, requestId: Option[String],
+            fields: => Map[com.example.graphQL.cats.service.LogField, String]) = reportCount.update(_ + 1)
+      }
+      request <- parseRequest("{ readiness { status } }")
+      result <- TestGraphQLSupport.context(
+        IO.raiseError[ProbeResult](new IllegalStateException("private resolver detail")),
+        diagnostics = diagnostics
+      ).use(context => TestGraphQLSupport.parseAndExecute(request, context))
+      reports <- reportCount.get
+    } yield {
+      val body = result.fold(failure => fail(failure.toString), identity)
+      assertEquals(body.hcursor.downField("errors").downArray.get[String]("message"), Right("Execution failed"))
+      assert(!body.noSpaces.contains("private resolver detail"))
+      assertEquals(reports, 1)
+    }
+  }
+
   test("malformed typed identifiers fail GraphQL coercion before resolver execution") {
     for {
       parsed <- parseRequest("{ job(id: \"not-a-uuid\") { id } }")
@@ -79,6 +100,27 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
             )
           )
         )
+    } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+  }
+
+  test("query complexity rejection returns the typed invalid-query failure") {
+    val fields = (1 to 510).map(index => s"health$index: health { status }").mkString(" ")
+    for {
+      request <- parseRequest(s"{ $fields }")
+      result <- TestGraphQLSupport.dependencies().use { dependencies =>
+        executeRequest(
+          request,
+          dependencies.documentCache,
+          dependencies.contextFactory.resource(
+            RequestContextParameters(
+              service.readiness(Some("00000000-0000-0000-0000-000000000001")),
+              None,
+              dependencies.hiring,
+              dependencies.ensureHiringReady
+            )
+          )
+        )
+      }
     } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
   }
 

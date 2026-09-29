@@ -1,20 +1,22 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaSaslSecurityProtocol}
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
   EventQuarantineRecord,
   EventQuarantineRepository,
   OperationalEventFailureCategory,
-  OperationalEventOutboxRepository
+  OperationalEventOutboxRepository,
+  RepositoryIO
 }
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.example.graphQL.cats.shared.events.OperationalEventJson
+import com.example.graphQL.cats.service.events.OperationalEventJson
 import fs2.Stream
 import fs2.kafka.*
 import fs2.kafka.producer.MkProducer
@@ -66,27 +68,28 @@ object OperationalEventKafkaRuntime {
     )
       .foldLeft(baseSettings) { case (current, (key, value)) => current.withProperty(key, value) }
 
-    def generation: Stream[IO, Unit] = {
-      val transactionalId = "hiring-publisher-" + java.util.UUID.randomUUID().toString
-      Stream
-        .resource(TransactionalKafkaProducer.resource(TransactionalProducerSettings(transactionalId, settings)))
-        .flatMap { producer =>
-          resilientStream(
-            diagnostics,
-            Stream
-              .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
-              .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer)),
-            config.publisher.retryDelaySeconds.seconds,
-            stopRetrying = isProducerFenced
-          )
-        }
-        .handleErrorWith {
-          case _: ProducerGenerationFenced => Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed))
-          case error                       =>
-            Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))) ++
-              Stream.sleep_[IO](config.publisher.retryDelaySeconds.seconds)
-        }
-    }
+    def generation: Stream[IO, Unit] =
+      Stream.eval(UUIDGen[IO].randomUUID).flatMap { id =>
+        val transactionalId = "hiring-publisher-" + id.toString
+        Stream
+          .resource(TransactionalKafkaProducer.resource(TransactionalProducerSettings(transactionalId, settings)))
+          .flatMap { producer =>
+            resilientStream(
+              diagnostics,
+              Stream
+                .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
+                .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer)),
+              config.publisher.retryDelaySeconds.seconds,
+              stopRetrying = isProducerFenced
+            )
+          }
+          .handleErrorWith {
+            case _: ProducerGenerationFenced => Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed))
+            case error                       =>
+              Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))) ++
+                Stream.sleep_[IO](config.publisher.retryDelaySeconds.seconds)
+          }
+      }
 
     background(Stream.suspend(generation).repeat)
   }
@@ -100,7 +103,7 @@ object OperationalEventKafkaRuntime {
   ): IO[Unit] =
     IO.realTimeInstant.flatMap { now =>
       val leaseUntil = now.plusSeconds(config.publisher.leaseSeconds.toLong)
-      outbox.claim(config.publisher.workerId, transactionalId, now, leaseUntil, config.publisher.batchSize).flatMap {
+      outbox.claim(config.publisher.workerId, transactionalId, now, leaseUntil, config.publisher.batchSize).value.flatMap {
         case Left(error) =>
           IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
         case Right(claims) =>
@@ -168,8 +171,8 @@ object OperationalEventKafkaRuntime {
       }
     }
 
-  private def requireOutboxSuccess(result: IO[Either[RepositoryError, Unit]]): IO[Unit] =
-    result.flatMap {
+  private def requireOutboxSuccess(result: RepositoryIO[Unit]): IO[Unit] =
+    result.value.flatMap {
       case Right(())   => IO.unit
       case Left(error) => IO.raiseError(new IllegalStateException(s"outbox operation failed: $error"))
     }
@@ -260,9 +263,9 @@ object OperationalEventKafkaRuntime {
             "malformed event envelope",
             bytes,
             now
-          ).map(_.isRight)
+          ).value.map(_.isRight)
         case Right(event) =>
-          receipts.exists(config.consumerGroup, event.eventId).flatMap {
+          receipts.exists(config.consumerGroup, event.eventId).value.flatMap {
             case Right(true)  => IO.pure(true)
             case Right(false) =>
               receipts
@@ -272,7 +275,7 @@ object OperationalEventKafkaRuntime {
                   now,
                   now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)
                 )
-                .map {
+                .value.map {
                   case Right(_)                       => true
                   case Left(RepositoryError.Conflict) => true
                   case Left(_)                        => false
@@ -292,7 +295,7 @@ object OperationalEventKafkaRuntime {
       reason: String,
       bytes: Array[Byte],
       now: Instant
-  ): IO[Either[RepositoryError, Unit]] =
+  ): RepositoryIO[Unit] =
     quarantine.save(
       EventQuarantineRecord(
         topic,

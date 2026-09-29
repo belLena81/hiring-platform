@@ -56,9 +56,10 @@ The project follows **Clean Architecture / Ports and Adapters**.
 Dependencies always point inward.
 
 ```text
-Transport ───────► Service ───────► Domain
-
-Repository adapters ─────────────► Repository protocols
+API ──────────────► Service ───────► Domain
+                         ▲
+                         │ ports
+Repository / infrastructure adapters
 ```
 
 The domain must not depend on:
@@ -77,31 +78,33 @@ The domain must not depend on:
 ```text
 src/main/scala/
 │
-├── transport/
+├── api/
 │   ├── graphql/
 │   ├── http/
 │   └── auth/
 │
 ├── service/
 │   ├── protocol/
+│   ├── port/
 │   ├── job/
 │   ├── application/
+│   ├── events/
 │   ├── search/
 │   └── auth/
 │
 ├── repository/
-│   ├── protocol/
 │   └── mongo/
 │
 ├── domain/
+│   ├── pagination/
 │   ├── model/
 │   ├── error/
 │   └── policy/
 │
 ├── shared/
-│   ├── pagination/
-│   ├── search/
-│   └── crypto/
+│   ├── crypto/
+│   ├── HiringHttpPaths.scala
+│   └── Parsing.scala
 │
 ├── infrastructure/
 │   ├── embedding/
@@ -112,7 +115,7 @@ src/main/scala/
 └── Main.scala
 ```
 
-Transport owns protocol adapters such as GraphQL, HTTP, and JWT parsing. It talks to service protocols and shared DTOs, not Mongo repositories. Service implementations own hiring use cases, authorization, and effect sequencing. Repository protocols describe storage/search boundaries, and `repository.mongo` contains the current MongoDB implementation. Domain policies remain pure and infrastructure-free.
+The API owns GraphQL, HTTP, and authentication adapters. It talks to service use-case protocols and service-owned request/result contracts. Service implementations own hiring use cases, authorization, effect sequencing, and the `service.port` interfaces used for persistence and external capabilities. Mongo and other infrastructure adapters implement those inward-facing ports; `repository.mongo` contains the MongoDB adapters. Domain policies remain pure and infrastructure-free. `shared` is reserved for neutral utilities with no dependency on domain or service contracts.
 
 ---
 
@@ -167,63 +170,32 @@ Job transitions over an existing aggregate (publish/update/close and later lifec
 
 # 5. Ports
 
-Infrastructure dependencies are represented through interfaces.
+Infrastructure dependencies are represented through interfaces in `service.port`. The active application specializes those ports to Cats Effect `IO`: use cases use `UseCaseIO[A] = EitherT[IO, UseCaseError, A]`, while operational ports return `IO[Either[RepositoryError, A]]`. This is a deliberate single-runtime choice; typed ports and fake adapters provide service-test seams, while a second effect runtime would require a broader contract change.
 
 ```scala
-trait JobRepository[F[_]]:
-  def find(id: JobId): F[Option[Job]]
+trait JobRepository:
+  def find(id: JobId): IO[Either[RepositoryError, Option[Job]]]
 
-  def search(
-    filter: JobFilter,
-    cursor: Option[JobCursor],
-    limit: Int
-  ): F[List[Job]]
-
-  def create(job: Job): F[Unit]
-
-  def update(job: Job): F[Unit]
-```
-
-Application repository:
-
-```scala
-trait ApplicationRepository[F[_]]:
-  def find(id: ApplicationId): F[Option[Application]]
-
-  def findByCandidate(
-    candidateId: UserId,
-    cursor: Option[ApplicationCursor],
-    limit: Int
-  ): F[List[Application]]
-
-  def findByJob(
-    jobId: JobId,
-    cursor: Option[ApplicationCursor],
-    limit: Int
-  ): F[List[Application]]
+trait JobUseCases:
+  def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job]
 ```
 
 AI infrastructure is also hidden behind ports:
 
 ```scala
-trait EmbeddingService[F[_]]:
-  def embed(text: String): F[Vector[Float]]
-
-trait SemanticSearch[F[_]]:
-  def searchJobs(
-    embedding: Vector[Float],
-    filter: JobFilter,
-    limit: Int
-  ): F[List[JobMatch]]
+trait EmbeddingService:
+  def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]]
 ```
 
-Application services depend only on these interfaces.
+Application services depend on these interfaces. `RepositoryIO[A] = EitherT[IO, RepositoryError, A]` is also available as a helper, but port methods currently use the explicit `IO[Either[...]]` shape. `RepositoryError` belongs to this service boundary; adapters translate driver failures into it.
 
 ---
 
 # 6. Effect Architecture
 
 Cats Effect controls all side effects.
+
+The main Hiring runtime intentionally selects `IO` at service and repository boundaries. `UseCaseIO` keeps expected use-case failures typed, and repository ports keep expected persistence failures typed in `Either`; neither alias makes the application effect-polymorphic. See [local engineering quality](docs/engineering-quality.md) for the rationale and revisit condition.
 
 ```text
                     IOApp

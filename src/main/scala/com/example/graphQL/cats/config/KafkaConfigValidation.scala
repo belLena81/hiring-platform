@@ -6,9 +6,6 @@ import cats.syntax.all.*
 private[config] object KafkaConfigValidation {
   def read(kafka: RawKafkaConfig): ValidatedNel[ConfigError, KafkaConfig] =
     (
-      validKafkaBootstrapServers(kafka.bootstrapServers),
-      validKafkaTopic(kafka.topic),
-      validKafkaConsumerGroup(kafka.consumerGroup),
       validKafkaSaslSecurityProtocol(kafka.saslSecurityProtocol, kafka.bootstrapServers),
       validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
       validKafkaCredentials(
@@ -16,12 +13,12 @@ private[config] object KafkaConfigValidation {
         kafka.consumer.saslUsername,
         kafka.consumer.saslPassword
       )
-    ).mapN { (bootstrapServers, topic, consumerGroup, saslSecurityProtocol, _, _) =>
+    ).mapN { (saslSecurityProtocol, _, _) =>
       KafkaConfig(
         kafka.enabled,
-        bootstrapServers,
-        topic,
-        consumerGroup,
+        kafka.bootstrapServers,
+        kafka.topic,
+        kafka.consumerGroup,
         KafkaPublisherConfig(
           kafka.publisher.workerId,
           kafka.publisher.batchSize,
@@ -43,14 +40,6 @@ private[config] object KafkaConfigValidation {
       )
     }
 
-  def validKafkaBootstrapServers(value: String): ValidatedNel[ConfigError, String] =
-    Either
-      .cond(value.trim.nonEmpty && value.length <= 512, value, ConfigError.InvalidKafkaBootstrapServers)
-      .toValidatedNel
-  def validKafkaTopic(value: String): ValidatedNel[ConfigError, String] =
-    Either.cond(value.trim.nonEmpty && value.length <= 249, value, ConfigError.InvalidKafkaTopic).toValidatedNel
-  def validKafkaConsumerGroup(value: String): ValidatedNel[ConfigError, String] =
-    Either.cond(value.trim.nonEmpty && value.length <= 249, value, ConfigError.InvalidKafkaConsumerGroup).toValidatedNel
   def validKafkaBatchSize(value: Int): ValidatedNel[ConfigError, Int] =
     ConfigBounds.bounded(1, 500, ConfigError.InvalidKafkaBatchSize)(value)
   def validKafkaLeaseSeconds(value: Int): ValidatedNel[ConfigError, Int] =

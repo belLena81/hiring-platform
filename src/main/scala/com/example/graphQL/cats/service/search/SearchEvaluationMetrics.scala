@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.search
+package com.example.graphQL.cats.service.search
 
 /** Offline ranking measures for comparing bounded search runs against judged synthetic queries. */
 object SearchEvaluationMetrics {

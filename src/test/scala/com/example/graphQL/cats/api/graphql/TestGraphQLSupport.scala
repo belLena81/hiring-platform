@@ -22,8 +22,8 @@ import com.example.graphQL.cats.service.protocol.{
   SignUpInput,
   UseCaseIO
 }
-import com.example.graphQL.cats.shared.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
-import com.example.graphQL.cats.shared.search.JobSearchFilter
+import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
+import com.example.graphQL.cats.service.search.JobSearchFilter
 import io.circe.Json
 import org.http4s.Request
 

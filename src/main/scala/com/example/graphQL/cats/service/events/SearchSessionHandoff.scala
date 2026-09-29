@@ -2,14 +2,14 @@ package com.example.graphQL.cats.service.events
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   PendingSearchSessionWork,
   RepositoryError,
   SearchSessionWorkFailure,
   SearchSessionWorkRepository
 }
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
-import com.example.graphQL.cats.shared.events.{OperationalEventEnvelope, SearchSession}
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 
 import scala.concurrent.duration.*
 
@@ -41,7 +41,7 @@ object SearchSessionHandoff {
       .make(List.fill(config.parallelism)(worker.start).sequence)(_.traverse_(_.cancel))
       .as(new SearchSessionHandoff {
         def enqueue(session: SearchSession, event: OperationalEventEnvelope): IO[Unit] =
-          repository.enqueue(PendingSearchSessionWork(session, event), session.occurredAt).flatMap {
+          repository.enqueue(PendingSearchSessionWork(session, event), session.occurredAt).value.flatMap {
             case Right(())   => IO.unit
             case Left(error) =>
               diagnostics.emit(
@@ -62,13 +62,13 @@ object SearchSessionHandoff {
       diagnostics: Diagnostics
   ): IO[Unit] =
     (IO.realTimeInstant.flatMap { now =>
-      repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).flatMap {
+      repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).value.flatMap {
         case Right(Some(claim)) =>
-          repository.complete(claim, now).flatMap {
+          repository.complete(claim, now).value.flatMap {
             case Right(())                                       => IO.unit
             case Left(_) if claim.attempts >= config.maxAttempts =>
-              repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now).void
-            case Left(_) => repository.retry(claim, now.plusMillis(config.retryDelay.toMillis)).void
+              repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now).value.void
+            case Left(_) => repository.retry(claim, now.plusMillis(config.retryDelay.toMillis)).value.void
           }
         case Right(None) => IO.sleep(config.pollInterval)
         case Left(error) =>
@@ -85,7 +85,8 @@ object SearchSessionHandoff {
 
   private def errorType(error: RepositoryError): String =
     error match {
-      case RepositoryError.Unavailable | RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult =>
+      case RepositoryError.Unavailable | RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult |
+          RepositoryError.MissingStoredResult =>
         "java.lang.RuntimeException"
       case _ => "java.lang.IllegalStateException"
     }

@@ -3,7 +3,7 @@ package com.example.graphQL.cats.runtime
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.VectorSearchConfig
-import com.example.graphQL.cats.repository.protocol.EmbeddingService
+import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 
 private[runtime] sealed trait EmbeddingCapability[Work, Users, Jobs, Search] {

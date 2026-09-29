@@ -3,15 +3,14 @@ package com.example.graphQL.cats.service.search
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
 import cats.effect.Ref
-import com.example.graphQL.cats.repository.protocol.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
-import com.example.graphQL.cats.repository.protocol.*
+import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
-import com.example.graphQL.cats.shared.pagination.PageSize
-import com.example.graphQL.cats.shared.search.{
+import com.example.graphQL.cats.domain.pagination.PageSize
+import com.example.graphQL.cats.service.search.{
   CandidateMatchFilters,
   JobSearchFilter,
   RankedCandidate,
@@ -260,7 +259,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         FakeSearchRepository(candidates =
           List(
             RankedCandidate(
-              com.example.graphQL.cats.shared.search.CandidateSearchHit(
+              com.example.graphQL.cats.service.search.CandidateSearchHit(
                 candidateWithProfile.id,
                 candidateWithProfile.name,
                 candidateWithProfile.candidateProfile.get.skills,
@@ -343,26 +342,26 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       jobs: List[RankedJob] = Nil,
       candidates: List[RankedCandidate] = Nil
   ) extends SemanticSearchRepository {
-    override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-      IO.pure(Right(jobs))
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(jobs)) )
 
-    override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-      IO.pure(Right(jobs))
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(jobs)) )
 
-    override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
-      IO.pure(Right(candidates))
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      IO.pure(Right(candidates)) )
   }
 
   private final case class RecordingSearchRepository(
       queries: Ref[IO, Vector[VectorSearchQuery]]
   ) extends SemanticSearchRepository {
-    override def searchJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-      queries.update(_ :+ query).as(Right(Nil))
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      queries.update(_ :+ query).as(Right(Nil)) )
 
-    override def recommendedJobs(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedJob]]] =
-      queries.update(_ :+ query).as(Right(Nil))
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      queries.update(_ :+ query).as(Right(Nil)) )
 
-    override def candidateMatches(query: VectorSearchQuery): IO[Either[RepositoryError, List[RankedCandidate]]] =
-      queries.update(_ :+ query).as(Right(Nil))
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+      queries.update(_ :+ query).as(Right(Nil)) )
   }
 }

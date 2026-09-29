@@ -4,14 +4,14 @@ import cats.effect.IO
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job, User}
-import com.example.graphQL.cats.shared.pagination.{
+import com.example.graphQL.cats.domain.pagination.{
   ApplicationEventPageRequest,
   ApplicationPageRequest,
   JobPageRequest,
   PageSize
 }
-import com.example.graphQL.cats.shared.search.{JobSearchFilter, RankedCandidate, RankedJob}
-import com.example.graphQL.cats.repository.protocol.RepositoryError
+import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, RankedJob}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.util.UUID
@@ -93,11 +93,11 @@ trait SearchUseCases {
       actor: ActorContext,
       jobId: JobId,
       query: Option[String],
-      filters: com.example.graphQL.cats.shared.search.CandidateMatchFilters,
+      filters: com.example.graphQL.cats.service.search.CandidateMatchFilters,
       first: PageSize,
       searchId: UUID
   ): UseCaseIO[List[RankedCandidate]] =
-    if (query.isEmpty && filters == com.example.graphQL.cats.shared.search.CandidateMatchFilters.empty)
+    if (query.isEmpty && filters == com.example.graphQL.cats.service.search.CandidateMatchFilters.empty)
       candidateMatches(actor, jobId, first, searchId)
     else UseCaseIO.left(UseCaseError.Search(SearchError.VectorSearchUnavailable))
 }

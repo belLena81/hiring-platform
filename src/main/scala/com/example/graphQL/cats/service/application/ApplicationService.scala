@@ -1,11 +1,12 @@
 package com.example.graphQL.cats.service.application
 
-import cats.effect.IO
+import cats.effect.{Clock, IO}
+import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.HiringReadService
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.UseCaseError.*
-import com.example.graphQL.cats.repository.protocol.{
+import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
   JobRepository,
   MutationEntityReference,
@@ -13,10 +14,15 @@ import com.example.graphQL.cats.repository.protocol.{
   UserRepository
 }
 import com.example.graphQL.cats.domain.error.DomainError
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, JobId}
+import com.example.graphQL.cats.domain.model.Identifiers.{
+  ApplicationEventId,
+  ApplicationId,
+  JobId,
+  parse as parseIdentifier
+}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, UserRole}
-import com.example.graphQL.cats.shared.events.OperationalEventEnvelope
-import com.example.graphQL.cats.shared.events.OperationalEvents
+import com.example.graphQL.cats.service.events.OperationalEventEnvelope
+import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.domain.policy.{ApplicationLifecycle, ApplicationSubmission, StatusChange}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.job.AuthorizedJobAccess
@@ -27,8 +33,7 @@ import com.example.graphQL.cats.service.protocol.{
   UseCaseIO,
   UseCaseIO as UseCase
 }
-import com.example.graphQL.cats.shared.pagination.ApplicationPageRequest
-import java.time.Instant
+import com.example.graphQL.cats.domain.pagination.ApplicationPageRequest
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 
@@ -36,9 +41,9 @@ final class ApplicationService(
     users: UserRepository,
     jobs: JobRepository,
     applications: ApplicationRepository,
-    idempotent: Idempotent = Idempotent.noop,
-    currentTime: IO[Instant] = IO.realTimeInstant,
-    randomId: IO[UUID] = IO.randomUUID
+    idempotent: Idempotent,
+    clock: Clock[IO] = Clock[IO],
+    uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends ApplicationUseCases {
   private val authorization = ActorAuthorization(users)
   private val authorizedJobs = AuthorizedJobAccess(authorization, jobs)
@@ -64,9 +69,9 @@ final class ApplicationService(
         job <- UseCase
           .repository(jobs.findVersioned(jobId))
           .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-        now <- UseCase.liftIO(currentTime)
-        applicationId <- UseCase.liftIO(randomId.map(uuid => ApplicationId(uuid)))
-        eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
+        now <- UseCase.liftIO(clock.realTimeInstant)
+        applicationId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationId(uuid)))
+        eventId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
         application <- UseCase.fromEither(
           ApplicationSubmission.create(candidate, job.value, applicationId, now).widenUseCase
         )
@@ -138,8 +143,8 @@ final class ApplicationService(
             UseCaseError.Domain(DomainError.Forbidden)
           )
         )
-        now <- UseCase.liftIO(currentTime)
-        eventId <- UseCase.liftIO(randomId.map(uuid => ApplicationEventId(uuid)))
+        now <- UseCase.liftIO(clock.realTimeInstant)
+        eventId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
         (persistedApplication, change) <- UseCase.fromEither(
           ApplicationLifecycle
             .changeStatus(target, actorUser.id, now, feedback, reason)
@@ -154,9 +159,7 @@ final class ApplicationService(
   private def replayApplication(
       actor: ActorContext
   )(reference: MutationEntityReference): UseCaseIO[Application] =
-    scala.util
-      .Try(ApplicationId(UUID.fromString(reference.entityId)))
-      .toEither
+    parseIdentifier(reference.entityId)(ApplicationId.apply)
       .fold(
         _ =>
           UseCase
@@ -214,13 +217,6 @@ final class ApplicationService(
 }
 
 object ApplicationService {
-  def apply(
-      users: UserRepository,
-      jobs: JobRepository,
-      applications: ApplicationRepository
-  ): ApplicationService =
-    new ApplicationService(users, jobs, applications)
-
   def live(
       users: UserRepository,
       jobs: JobRepository,

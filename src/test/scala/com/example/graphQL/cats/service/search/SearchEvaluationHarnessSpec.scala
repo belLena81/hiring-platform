@@ -1,4 +1,4 @@
-package com.example.graphQL.cats.shared.search
+package com.example.graphQL.cats.service.search
 
 import io.circe.Json
 

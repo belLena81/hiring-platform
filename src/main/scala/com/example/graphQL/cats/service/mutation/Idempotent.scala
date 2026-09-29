@@ -1,18 +1,17 @@
 package com.example.graphQL.cats.service.mutation
 
 import cats.data.EitherT
-import cats.effect.IO
-import com.example.graphQL.cats.repository.protocol.*
+import cats.effect.{Clock, IO}
+import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
 
-import java.time.Instant
 import java.util.Locale
 import scala.concurrent.duration.*
 
 final class Idempotent private (
     receipts: MutationReceiptRepository,
-    currentTime: IO[Instant],
+    clock: Clock[IO],
     receiptTtl: FiniteDuration
 ) {
   def execute[A](
@@ -23,17 +22,20 @@ final class Idempotent private (
       replay: MutationEntityReference => UseCaseIO[A]
   )(write: MutationWriteContext => UseCaseIO[A]): UseCaseIO[A] =
     EitherT {
-      currentTime.flatMap { now =>
+      clock.realTimeInstant.flatMap { now =>
         val key = MutationReceiptKey(operation, actorScope, request.idempotencyKey)
         receipts
           .execute(key, request.fingerprint, now, now.plusSeconds(receiptTtl.toSeconds)) { context =>
-            write(context).value.map {
-              case Left(UseCaseError.Repository(error)) => Left(error)
-              case Left(error)                          => Right(MutationWriteOutcome.Rejected(error))
-              case Right(value)                         =>
-                Right(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value))))
-            }
+            RepositoryIO.fromIOEither(
+              write(context).value.map {
+                case Left(UseCaseError.Repository(error)) => Left(error)
+                case Left(error)                          => Right(MutationWriteOutcome.Rejected(error))
+                case Right(value)                         =>
+                  Right(MutationWriteOutcome.Applied(MutationReceiptWrite(value, entity(value))))
+              }
+            )
           }
+          .value
           .flatMap {
             case Left(error)                                         => IO.pure(Left(UseCaseError.Repository(error)))
             case Right(MutationReceiptExecution.Applied(value, _))   => IO.pure(Right(value))
@@ -52,15 +54,13 @@ object Idempotent {
   private val ReceiptTtl = 7.days
 
   def apply(receipts: MutationReceiptRepository): Idempotent =
-    new Idempotent(receipts, IO.realTimeInstant, ReceiptTtl)
+    new Idempotent(receipts, Clock[IO], ReceiptTtl)
 
   private[service] def withClock(
       receipts: MutationReceiptRepository,
-      currentTime: IO[Instant]
+      clock: Clock[IO]
   ): Idempotent =
-    new Idempotent(receipts, currentTime, ReceiptTtl)
-
-  val noop: Idempotent = apply(MutationReceiptRepository.noop)
+    new Idempotent(receipts, clock, ReceiptTtl)
 
   def actorScope(actor: ActorContext): String = actor.userId.value.toString
 

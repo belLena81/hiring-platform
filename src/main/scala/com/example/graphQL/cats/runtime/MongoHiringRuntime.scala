@@ -4,7 +4,7 @@ import cats.effect.{Deferred, IO, Resource}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
-import com.example.graphQL.cats.repository.protocol.EmbeddingService
+import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.{
   AnalyticsReportingService,
   DatabaseProbe,
@@ -47,9 +47,11 @@ import com.example.graphQL.cats.repository.mongo.{
   MongoSemanticSearchRepository,
   MongoUserRepository,
   MongoEmbeddingWorkRepository,
+  MongoEmbeddingWorkEnqueuer,
   AtlasSearchIndexConfig
 }
-import com.mongodb.reactivestreams.client.MongoDatabase
+import mongo4cats.client.MongoClient
+import mongo4cats.database.MongoDatabase
 
 final case class MongoHiringRuntime(
     probe: DatabaseProbe,
@@ -90,6 +92,10 @@ private[runtime] object SetupLifecycle {
 }
 
 object MongoHiringRuntime {
+  private val disabledEmbeddingPublisher = new EmbeddingWorkPublisher {
+    override def wake: IO[Unit] = IO.unit
+  }
+
   final case class RuntimeConfig(
       uri: String,
       databaseName: String,
@@ -106,7 +112,7 @@ object MongoHiringRuntime {
     for {
       passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
       client <- MongoDatabaseProbe.clientResource(config.uri)
-      database = client.getDatabase(config.databaseName)
+      database <- Resource.eval(client.getDatabase(config.databaseName))
       setup <- SetupLifecycle.resource(
         setupEffect(database, config.vectorSearch, config.resetOnStart),
         config.diagnostics
@@ -153,16 +159,32 @@ object MongoHiringRuntime {
   ]
 
   private def embeddingCapability(
-      database: MongoDatabase,
-      client: com.mongodb.reactivestreams.client.MongoClient,
+      database: MongoDatabase[IO],
+      client: MongoClient[IO],
       config: RuntimeConfig,
       embeddingWorkerReady: IO[Boolean]
   ): Resource[IO, RuntimeEmbeddingCapability] =
     EmbeddingCapability.resource(
       config.vectorSearch,
       IO(new MongoEmbeddingWorkRepository(database, config.diagnostics)),
-      embeddingWork => IO(MongoUserRepository.transactional(database, client, embeddingWork, config.diagnostics)),
-      embeddingWork => IO(MongoJobRepository.transactional(database, client, embeddingWork, config.diagnostics)),
+      embeddingWork =>
+        IO(
+          MongoUserRepository.transactional(
+            database,
+            client,
+            embeddingWork.fold(MongoEmbeddingWorkEnqueuer.disabled)(identity),
+            config.diagnostics
+          )
+        ),
+      embeddingWork =>
+        IO(
+          MongoJobRepository.transactional(
+            database,
+            client,
+            embeddingWork.fold(MongoEmbeddingWorkEnqueuer.disabled)(identity),
+            config.diagnostics
+          )
+        ),
       IO(
         new MongoSemanticSearchRepository(
           database,
@@ -237,7 +259,6 @@ object MongoHiringRuntime {
         accountService,
         semanticSearch,
         interactionService,
-        searchSessions,
         searchSessionHandoff,
         AnalyticsReportingService(users, analyticsReports)
       )
@@ -255,8 +276,16 @@ object MongoHiringRuntime {
             capability match {
               case EmbeddingCapability.Disabled(_, _) =>
                 val account =
-                  UserAccountService(users, users, hasher, tokenIssuer, erasureRequests, idempotent = idempotent)
-                val jobService = JobService.live(users, jobs, EmbeddingWorkPublisher.noop, idempotent)
+                  UserAccountService(
+                    users,
+                    users,
+                    hasher,
+                    tokenIssuer,
+                    erasureRequests,
+                    disabledEmbeddingPublisher,
+                    idempotent
+                  )
+                val jobService = JobService.live(users, jobs, disabledEmbeddingPublisher, idempotent)
                 assemble(jobService, account, searchSessionHandoff = searchSessionHandoff)
               case EmbeddingCapability.Enabled(_, _, _, search, embeddings, publisher, model) =>
                 val jobService = JobService.live(users, jobs, publisher, idempotent)
@@ -284,7 +313,7 @@ object MongoHiringRuntime {
     )
 
   private def probe(
-      database: MongoDatabase,
+      database: MongoDatabase[IO],
       metadata: Map[LogField, String],
       diagnostics: Diagnostics,
       setupReady: IO[Boolean]
@@ -302,7 +331,7 @@ object MongoHiringRuntime {
   }
 
   private def setupEffect(
-      database: com.mongodb.reactivestreams.client.MongoDatabase,
+      database: MongoDatabase[IO],
       vectorSearch: VectorSearchConfig,
       resetOnStart: Boolean
   ): IO[Unit] =

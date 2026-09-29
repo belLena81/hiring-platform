@@ -9,7 +9,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInteractionResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLJobResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
-import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.ioField
+import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{ioField, resultField}
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import sangria.execution.QueryReducer
 import sangria.execution.deferred.DeferredResolver
@@ -20,13 +20,13 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   private val MaxQueryComplexity = 1000d
   private val connectionComplexity: (RequestContext, Args, Double) => Double =
     (_, args, child) => 1d + args.arg(firstArgument) * child
-  final case class QueryComplexityExceeded(limit: Double)
-      extends IllegalArgumentException(s"Query complexity exceeds $limit")
-
   lazy val queryReducers: List[QueryReducer[RequestContext, ?]] = List(
     QueryReducer.rejectMaxDepth[RequestContext](MaxQueryDepth),
     QueryReducer
-      .rejectComplexQueries[RequestContext](MaxQueryComplexity, (_, _) => QueryComplexityExceeded(MaxQueryComplexity))
+      .rejectComplexQueries[RequestContext](
+        MaxQueryComplexity,
+        (_, context) => context.effectAdapter.complexityRejected(MaxQueryComplexity)
+      )
   )
 
   lazy val deferredResolver: DeferredResolver[RequestContext] =
@@ -37,56 +37,56 @@ private[graphql] object HiringGraphQLSchemaAssembly {
     fields[RequestContext, Unit](
       Field("health", healthType, resolve = _ => ()),
       ioField("readiness", readinessType)(context => context.ctx.readiness),
-      ioField("me", OptionType(userType))(accountMe),
-      ioField("analyticsReport", analyticsReportType, analyticsFromArgument :: analyticsToArgument :: Nil)(
+      resultField("me", OptionType(userType))(accountMe(_).map(Some(_))),
+      resultField("analyticsReport", analyticsReportType, analyticsFromArgument :: analyticsToArgument :: Nil)(
         analyticsReport
       ),
-      ioField("accountDeletionStatus", accountDeletionStatusType, deletionReceiptIdArgument :: Nil)(
+      resultField("accountDeletionStatus", accountDeletionStatusType, deletionReceiptIdArgument :: Nil)(
         accountDeletionStatus
       ),
-      ioField(
+      resultField(
         "users",
         userConnectionType,
         firstArgument :: afterArgument :: userRoleArgument :: userStatusArgument :: Nil,
         complexity = Some(connectionComplexity)
       )(users),
-      ioField(
+      resultField(
         "jobs",
         jobConnectionType,
         firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil,
         complexity = Some(connectionComplexity)
       )(jobs),
-      ioField(
+      resultField(
         "semanticJobSearch",
         rankedJobResultsType,
         queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil
       )(semanticJobSearch),
-      ioField("recommendedJobs", rankedJobResultsType, firstArgument :: searchIdArgument :: Nil)(recommendedJobs),
-      ioField(
+      resultField("recommendedJobs", rankedJobResultsType, firstArgument :: searchIdArgument :: Nil)(recommendedJobs),
+      resultField(
         "candidateMatches",
         rankedCandidateResultsType,
         jobIdArgument :: candidateSearchQueryArgument :: candidateMatchFilterArgument :: firstArgument :: searchIdArgument :: Nil
       )(candidateMatches),
-      ioField("job", OptionType(jobType), idArgument :: Nil)(job),
-      ioField(
+      resultField("job", OptionType(jobType), idArgument :: Nil)(job(_).map(Some(_))),
+      resultField(
         "myJobs",
         jobConnectionType,
         firstArgument :: afterArgument :: jobStatusArgument :: Nil,
         complexity = Some(connectionComplexity)
       )(myJobs),
-      ioField(
+      resultField(
         "myApplications",
         applicationConnectionType,
         firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
         complexity = Some(connectionComplexity)
       )(myApplications),
-      ioField(
+      resultField(
         "jobApplications",
         applicationConnectionType,
         jobIdArgument :: firstArgument :: afterArgument :: applicationStatusArgument :: Nil,
         complexity = Some(connectionComplexity)
       )(jobApplications),
-      ioField(
+      resultField(
         "applicationHistory",
         applicationEventConnectionType,
         applicationIdArgument :: firstArgument :: afterArgument :: Nil,
@@ -98,37 +98,39 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   lazy val mutationType: ObjectType[RequestContext, Unit] = ObjectType(
     "Mutation",
     fields[RequestContext, Unit](
-      ioField("submitApplication", submitApplicationResultType, submitApplicationInputArgument :: Nil)(
+      resultField("submitApplication", submitApplicationResultType, submitApplicationInputArgument :: Nil)(
         submitApplication
       ),
-      ioField("createJob", createJobResultType, createJobInputArgument :: Nil)(createJob),
-      ioField("updateJob", updateJobResultType, updateJobInputArgument :: Nil)(updateJob),
-      ioField("publishJob", publishJobResultType, jobActionInputArgument :: Nil)(context =>
+      resultField("createJob", createJobResultType, createJobInputArgument :: Nil)(createJob),
+      resultField("updateJob", updateJobResultType, updateJobInputArgument :: Nil)(updateJob),
+      resultField("publishJob", publishJobResultType, jobActionInputArgument :: Nil)(context =>
         changeJob(context, _.publishJob)
       ),
-      ioField("closeJob", closeJobResultType, jobActionInputArgument :: Nil)(context => changeJob(context, _.closeJob)),
-      ioField("acceptApplication", acceptApplicationResultType, applicationActionInputArgument :: Nil)(context =>
+      resultField("closeJob", closeJobResultType, jobActionInputArgument :: Nil)(context =>
+        changeJob(context, _.closeJob)
+      ),
+      resultField("acceptApplication", acceptApplicationResultType, applicationActionInputArgument :: Nil)(context =>
         applicationStatusAction(context, ApplicationStatus.Accepted)
       ),
-      ioField("moveApplicationToInterview", interviewApplicationResultType, applicationActionInputArgument :: Nil)(
+      resultField("moveApplicationToInterview", interviewApplicationResultType, applicationActionInputArgument :: Nil)(
         context => applicationStatusAction(context, ApplicationStatus.Interview)
       ),
-      ioField("hireApplication", hireApplicationResultType, applicationActionInputArgument :: Nil)(context =>
+      resultField("hireApplication", hireApplicationResultType, applicationActionInputArgument :: Nil)(context =>
         applicationStatusAction(context, ApplicationStatus.Hired)
       ),
-      ioField("rejectApplication", rejectApplicationResultType, rejectApplicationInputArgument :: Nil)(
+      resultField("rejectApplication", rejectApplicationResultType, rejectApplicationInputArgument :: Nil)(
         rejectApplication
       ),
-      ioField("declineApplication", declineApplicationResultType, declineApplicationInputArgument :: Nil)(
+      resultField("declineApplication", declineApplicationResultType, declineApplicationInputArgument :: Nil)(
         declineApplication
       ),
-      ioField("signUp", signUpResultType, signUpInputArgument :: Nil)(signUp),
-      ioField("login", loginResultType, loginInputArgument :: Nil)(login),
-      ioField("bootstrapAdmin", bootstrapAdminResultType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
-      ioField("updateMyProfile", updateMyProfileResultType, updateProfileInputArgument :: Nil)(updateMyProfile),
-      ioField("deleteMyAccount", deleteMyAccountResultType, deleteMyAccountInputArgument :: Nil)(deleteMyAccount),
-      ioField("recordJobView", recordJobViewResultType, recordJobViewInputArgument :: Nil)(recordJobView),
-      ioField(
+      resultField("signUp", signUpResultType, signUpInputArgument :: Nil)(signUp),
+      resultField("login", loginResultType, loginInputArgument :: Nil)(login),
+      resultField("bootstrapAdmin", bootstrapAdminResultType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
+      resultField("updateMyProfile", updateMyProfileResultType, updateProfileInputArgument :: Nil)(updateMyProfile),
+      resultField("deleteMyAccount", deleteMyAccountResultType, deleteMyAccountInputArgument :: Nil)(deleteMyAccount),
+      resultField("recordJobView", recordJobViewResultType, recordJobViewInputArgument :: Nil)(recordJobView),
+      resultField(
         "recordSearchResultClick",
         recordSearchResultClickResultType,
         recordSearchResultClickInputArgument :: Nil
