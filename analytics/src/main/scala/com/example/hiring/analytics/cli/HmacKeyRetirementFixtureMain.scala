@@ -626,7 +626,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                     operational.retention.deltaVacuumSafetyCheckEnabled.toString
                   )
                   .getOrCreate()
-              }
+              }.flatTap(session => sparkExecution.attachSparkContext(session.sparkContext))
             )(spark => sparkExecution(spark.stop()))
             .use { spark =>
               sparkExecution {

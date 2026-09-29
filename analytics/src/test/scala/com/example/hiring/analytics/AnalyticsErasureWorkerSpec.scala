@@ -1,11 +1,5 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.adapter.kafka.TransactionalProducerFencer
-import com.example.hiring.analytics.adapter.spark.{
-  ActiveDeletionMarkerSource,
-  AnalyticsErasureLakehouse,
-  AnalyticsErasureWorker
-}
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -16,7 +10,6 @@ import cats.effect.{Clock, IO, Outcome, Ref, Resource}
 import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import munit.CatsEffectSuite
-import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -68,11 +61,12 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       _ = assertEquals(appliedCounts.heartbeats, 1)
       lost <- Ref.of[IO, Counters](Counters())
       lostWorker = testWorker(lost, ErasureUpdate.LeaseLost, leaseDuration = 3.seconds)
-      lostOutcome <- TestControl.executeEmbed {
-        lostWorker.renewForever(claim).attempt *> lost.get
+      (lostOutcome, lostCounts) <- TestControl.executeEmbed {
+        lostWorker.renewForever(claim).flatMap(outcome => lost.get.map(outcome -> _))
       }
-      _ = assertEquals(lostOutcome.renewals, 1)
-      _ = assertEquals(lostOutcome.heartbeats, 0)
+      _ = assertEquals(lostOutcome, ErasureClaimOutcome.ReleasedForOthers)
+      _ = assertEquals(lostCounts.renewals, 1)
+      _ = assertEquals(lostCounts.heartbeats, 0)
     } yield ()
   }
 
@@ -89,16 +83,18 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
       )
       completedWorker = testWorker(completedState, ErasureUpdate.Applied, leaseDuration = 3.seconds)
       completedCounts <- TestControl.executeEmbed {
-        completedWorker.withLease(claim)(IO.unit) *> IO.sleep(4.seconds) *> completedState.get
+        completedWorker.withLease(claim)(IO.pure(ErasureClaimOutcome.Completed)) *> IO.sleep(
+          4.seconds
+        ) *> completedState.get
       }
       _ = assertEquals(completedCounts.renewals, 0)
       _ = assertEquals(completedCounts.heartbeats, 0)
       lostState <- Ref.of[IO, Counters](Counters())
       lostWorker = testWorker(lostState, ErasureUpdate.LeaseLost, leaseDuration = 3.seconds)
       (lostOutcome, lostCounts) <- TestControl.executeEmbed {
-        lostWorker.withLease(claim)(IO.never).attempt.flatMap(outcome => lostState.get.map(outcome -> _))
+        lostWorker.withLease(claim)(IO.never).flatMap(outcome => lostState.get.map(outcome -> _))
       }
-      _ = assertEquals(lostOutcome.left.toOption, Some(AnalyticsError.ErasureNotReady))
+      _ = assertEquals(lostOutcome, ErasureClaimOutcome.ReleasedForOthers)
       _ = assertEquals(lostCounts.renewals, 1)
       _ = assertEquals(lostCounts.heartbeats, 0)
       renewalFailure = new RuntimeException("renewal failed")
@@ -234,21 +230,22 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
   ): AnalyticsErasureWorker[IO] = {
     val store = new TestErasureStore(state, renewal, renewalFailure)
     val lock: AnalyticsLakehouseLock[IO] = (_: String) => Resource.pure[IO, Unit](())
-    val markers: ActiveDeletionMarkerSource[IO] = (_: SparkSession) => IO.pure(null.asInstanceOf[DataFrame])
+    val markers: ActiveDeletionMarkerSource[IO] = new ActiveDeletionMarkerSource[IO] {
+      override def activeSubjectTokens: IO[Vector[SubjectToken]] = IO.pure(Vector.empty)
+    }
     val lakehouse = new AnalyticsErasureLakehouse[IO] {
-      override def validateHmacConfiguration(spark: SparkSession): IO[Unit] = IO.unit
-      override def reclaimRetainedFiles(spark: SparkSession): IO[Long] = IO.pure(0L)
-      override def verifyMarkedSubjectsAbsent(spark: SparkSession, markerTokens: DataFrame): IO[Unit] = IO.unit
-      override def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): IO[Long] = IO.pure(0L)
-      override def captureMarkedFiles(spark: SparkSession, markerTokens: DataFrame): IO[Vector[String]] =
+      override def validateHmacConfiguration: IO[Unit] = IO.unit
+      override def reclaimRetainedFiles: IO[Long] = IO.pure(0L)
+      override def verifyMarkedSubjectsAbsent(markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
+      override def countMarkedRows(markerTokens: Vector[SubjectToken]): IO[Long] = IO.pure(0L)
+      override def captureMarkedFiles(markerTokens: Vector[SubjectToken]): IO[Vector[String]] =
         IO.pure(Vector.empty)
-      override def checkpointPurgedRawLogs(spark: SparkSession): IO[Vector[String]] = IO.pure(Vector.empty)
-      override def verifyFilesAbsent(spark: SparkSession, files: Vector[String]): IO[Unit] = IO.unit
-      override def checkpointRawTableLogs(spark: SparkSession): IO[Unit] = IO.unit
-      override def purgeMarkedSubjectRows(spark: SparkSession, path: String, markerTokens: DataFrame): IO[Unit] =
-        IO.unit
-      override def applyDeletionMarkers(spark: SparkSession, markerTokens: DataFrame): IO[Unit] = IO.unit
-      override def rebuildGoldAndExtractReport(spark: SparkSession, asOf: Instant): IO[AnalyticsReportOutput] =
+      override def checkpointPurgedRawLogs: IO[Vector[String]] = IO.pure(Vector.empty)
+      override def verifyFilesAbsent(files: Vector[String]): IO[Unit] = IO.unit
+      override def checkpointRawTableLogs: IO[Unit] = IO.unit
+      override def purgeMarkedSubjectRows(path: String, markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
+      override def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): IO[Unit] = IO.unit
+      override def rebuildGoldAndExtractReport(asOf: Instant): IO[AnalyticsReportOutput] =
         IO.pure(AnalyticsReportOutput(asOf, Vector.empty, None, Vector.empty))
     }
     val publisher = new AnalyticsReportPublisher[IO] {
@@ -280,7 +277,6 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         IO.pure(barrier.partitions.forall(_.endOffsetExclusive <= earliestOffset))
     }
     new AnalyticsErasureWorker[IO](
-      null.asInstanceOf[SparkSession],
       store,
       store,
       store,

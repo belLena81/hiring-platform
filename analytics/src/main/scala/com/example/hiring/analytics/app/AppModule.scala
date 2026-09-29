@@ -3,9 +3,10 @@ package com.example.hiring.analytics.app
 import com.example.hiring.analytics.adapter.kafka.{KafkaProducerFencer, KafkaRetentionAdapter}
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.spark.*
+import com.example.hiring.analytics.service.batch.HiringAnalyticsBatch
+import com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker
 import com.example.hiring.analytics.config.{AnalyticsBatchSettings, AnalyticsCommonSettings, AnalyticsWorkerSettings}
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.adapter.spark.AnalyticsErasureWorker
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 
@@ -44,24 +45,29 @@ object AppModule {
   def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
     shared[F](settings.common, appName = "hiring-analytics-batch").map { shared =>
       val common = settings.common
+      val manifestStore = new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution)
       val job = new HiringAnalyticsBatch[F](
         shared.paths,
-        common.pseudonymizer,
         shared.markers,
         Clock[F],
         new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational),
-        new DeltaManifestStore[F](shared.paths),
+        manifestStore,
+        new SparkAnalyticsBatchLakehouse[F](
+          shared.spark,
+          shared.paths,
+          common.pseudonymizer,
+          new KafkaOffsetRangeSource[F](common.kafka, shared.sparkExecution, shared.sparkExecution),
+          Clock[F],
+          manifestStore,
+          common.operational,
+          shared.sparkExecution,
+          shared.maintenance
+        ),
         shared.lock,
-        common.operational,
-        shared.sparkExecution,
-        shared.maintenance
+        common.operational
       )
       BatchProgram(
-        job.run(
-          shared.spark,
-          new KafkaOffsetRangeSource[F](common.kafka, shared.sparkExecution),
-          settings.manifest
-        )
+        job.run(settings.manifest)
       )
     }
 
@@ -71,7 +77,6 @@ object AppModule {
       val store = new MongoAnalyticsErasureWorkerStore[F](shared.client, shared.database, shared.streams)
       val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
       val job = new AnalyticsErasureWorker[F](
-        shared.spark,
         store,
         store,
         store,
@@ -85,8 +90,8 @@ object AppModule {
         shared.lock,
         Clock[F],
         Slf4jLogger.getLogger[F],
-        KafkaProducerFencer[F],
-        KafkaRetentionAdapter.liveRetention[F],
+        KafkaProducerFencer[F](shared.sparkExecution),
+        KafkaRetentionAdapter.liveRetention[F](shared.sparkExecution),
         common.operational.retention
       )
       WorkerProgram(job.run)
@@ -120,9 +125,10 @@ object AppModule {
         database,
         sparkExecution,
         streams,
-        new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams, sparkExecution),
+        new MongoActiveDeletionMarkerSource[F](database, common.pseudonymizer, streams),
         lock,
         new DeltaAnalyticsErasureLakehouse[F](
+          spark,
           paths,
           common.pseudonymizer,
           Clock[F],
@@ -153,9 +159,13 @@ object AppModule {
   ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     for {
       sparkExecution <- SparkBlockingExecution.resource[F]
-      spark <- Resource.make(acquireSpark(sparkExecution).adaptError { case NonFatal(cause) =>
-        AnalyticsError.SparkStartupFailure(cause)
-      })(session =>
+      spark <- Resource.make(
+        acquireSpark(sparkExecution)
+          .adaptError { case NonFatal(cause) =>
+            AnalyticsError.SparkStartupFailure(cause)
+          }
+          .flatTap(session => sparkExecution.attachSparkContext(session.sparkContext))
+      )(session =>
         sparkExecution(session.stop()).adaptError { case NonFatal(cause) =>
           AnalyticsError.LakehouseFailure(cause)
         }

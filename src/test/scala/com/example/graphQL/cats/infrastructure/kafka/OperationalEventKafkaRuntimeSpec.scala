@@ -266,18 +266,21 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
               }
         }
       }
-      supervised = Stream.suspend(
-        OperationalEventKafkaRuntime.resilientStream(
-          Diagnostics.noop,
-          generation,
-          1.millis,
-          OperationalEventKafkaRuntime.isProducerFenced
+      supervised = Stream
+        .suspend(
+          OperationalEventKafkaRuntime
+            .resilientStream(
+              Diagnostics.noop,
+              generation,
+              1.millis,
+              OperationalEventKafkaRuntime.isProducerFenced
+            )
+            .handleErrorWith {
+              case error if OperationalEventKafkaRuntime.isProducerFenced(error) => Stream.empty
+              case error                                                         => Stream.raiseError[IO](error)
+            }
         )
-          .handleErrorWith {
-            case error if OperationalEventKafkaRuntime.isProducerFenced(error) => Stream.empty
-            case error => Stream.raiseError[IO](error)
-          }
-      ).repeat
+        .repeat
       fiber <- supervised.compile.drain.start
       _ <- secondGeneration.get
       _ <- fiber.cancel

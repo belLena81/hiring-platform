@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.kafka
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.config.KafkaConnection
+import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.{KafkaRetention, KafkaRetentionBarrier}
 
@@ -20,9 +21,13 @@ private[analytics] object KafkaRetentionAdapter {
   /** Captures the topic's exclusive end offsets. Callers must first prove that no subject lease or retryable outbox
     * event can still publish, then persist this result before waiting for retention.
     */
-  def capture[F[_]: Async](connection: KafkaConnection, topic: String): F[KafkaRetentionBarrier] =
-    consumer[F](connection).use { client =>
-      Async[F]
+  def capture[F[_]: Async](
+      connection: KafkaConnection,
+      topic: String,
+      driverExecution: SparkBlockingExecution[F]
+  ): F[KafkaRetentionBarrier] =
+    consumer[F](connection, driverExecution).use { client =>
+      driverExecution
         .blocking {
           val partitions = Option(client.partitionsFor(topic)).toVector
             .flatMap(_.asScala)
@@ -58,10 +63,14 @@ private[analytics] object KafkaRetentionAdapter {
     }
 
   /** Checks actual broker earliest offsets rather than inferring expiry from wall-clock age. */
-  def retentionPassed[F[_]: Async](connection: KafkaConnection, barrier: KafkaRetentionBarrier): F[Boolean] =
+  def retentionPassed[F[_]: Async](
+      connection: KafkaConnection,
+      barrier: KafkaRetentionBarrier,
+      driverExecution: SparkBlockingExecution[F]
+  ): F[Boolean] =
     Async[F].fromEither(KafkaRetentionBarrier.validate(barrier)).flatMap { valid =>
-      consumer[F](connection).use { client =>
-        Async[F]
+      consumer[F](connection, driverExecution).use { client =>
+        driverExecution
           .blocking {
             val partitions = valid.partitions.map(partition => new TopicPartition(valid.topic, partition.number))
             val beginnings = client.beginningOffsets(partitions.asJava)
@@ -79,18 +88,22 @@ private[analytics] object KafkaRetentionAdapter {
       }
     }
 
-  def liveRetention[F[_]: Async]: KafkaRetention[F] = new KafkaRetention[F] {
-    override def capture(connection: KafkaConnection, topic: String): F[KafkaRetentionBarrier] =
-      KafkaRetentionAdapter.capture[F](connection, topic)
+  def liveRetention[F[_]: Async](driverExecution: SparkBlockingExecution[F]): KafkaRetention[F] =
+    new KafkaRetention[F] {
+      override def capture(connection: KafkaConnection, topic: String): F[KafkaRetentionBarrier] =
+        KafkaRetentionAdapter.capture[F](connection, topic, driverExecution)
 
-    override def retentionPassed(connection: KafkaConnection, barrier: KafkaRetentionBarrier): F[Boolean] =
-      KafkaRetentionAdapter.retentionPassed[F](connection, barrier)
-  }
+      override def retentionPassed(connection: KafkaConnection, barrier: KafkaRetentionBarrier): F[Boolean] =
+        KafkaRetentionAdapter.retentionPassed[F](connection, barrier, driverExecution)
+    }
 
-  private def consumer[F[_]: Async](connection: KafkaConnection): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
+  private def consumer[F[_]: Async](
+      connection: KafkaConnection,
+      driverExecution: SparkBlockingExecution[F]
+  ): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
     for {
       clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
-      client <- Resource.fromAutoCloseable(Async[F].blocking {
+      client <- Resource.make(driverExecution.blocking {
         val properties = new Properties()
         properties.setProperty("bootstrap.servers", connection.bootstrapServers)
         properties.setProperty("group.id", "hiring-analytics-erasure")
@@ -100,6 +113,6 @@ private[analytics] object KafkaRetentionAdapter {
         properties.setProperty("default.api.timeout.ms", "10000")
         clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
         new KafkaConsumer[Array[Byte], Array[Byte]](properties)
-      })
+      })(client => driverExecution.blocking(client.close()).void)
     } yield client
 }

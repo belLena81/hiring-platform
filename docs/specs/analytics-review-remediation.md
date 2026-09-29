@@ -174,3 +174,14 @@
 - Remaining verification: full analytics `IntegrationTest / test` ran 24 cases: 23 passed, 1 failed, and 1 was ignored. The remaining failure is `KafkaProducerFencerIntegrationSpec` failing to construct its Testcontainers consumer; the test's SASL setup does not match its broker, while the authenticated populated Compose proof passed. The Bronze statistics regression does not separately assert quarantine AddFile statistics; external writers bypassing the batch option remain outside its scope.
 - Independent review: Security Engineer and QA pass the scoped points 3–5 slice; Code Reviewer re-review is pending final checkpoint acknowledgment. Phase 6 remains in progress and overall completion is blocked on real horizons and remaining acceptance gates.
 - Phase 6 remains in progress. No real retention horizon was shortened or simulated, and no HMAC key was authorized or retired. The existing real-horizon checkpoint dates and writer-exclusion requirements remain controlling.
+
+## Erasure claim outcome review point (2026-09-29)
+
+- Scope: model normal erasure orchestration results as values while retaining throwable handling for actual failures and preserving durable failure recording.
+- Contract: `runClaim` returns `ErasureClaimOutcome` (`Completed`, `Deferred`, `ReleasedForOthers`, or `Failed(error)`). A durable defer and lease release do not raise `AnalyticsError`; actual effect failures are recorded before returning `Failed`. Guarded publication rejection remains an actual analytics failure with a distinct error case.
+
+| ID | Given / When / Then | Evidence |
+|---|---|---|
+| AR-27 | Given a claimed erasure request, when processing completes, defers, loses its lease, or fails, then the worker reports the corresponding typed outcome; deferred scheduling and failure persistence remain durable, and cancellation/resource behavior is preserved. No deferral or lease-release control flow uses `AnalyticsError`. | `AnalyticsErasureWorkerSpec` 4/4; isolated `MongoAnalyticsErasureWorkerStoreIntegrationSpec` 6/6; Java 17 production compile and analytics formatting pass; `git diff --check` passes. Full unit verification is incomplete: one run was interrupted after a Spark-heavy test went silent, and the latest run stopped on the unrelated dirty `SparkBlockingExecution.scala` compile error. Default integration compilation also stops on unrelated dirty `AnalyticsRetentionProofIntegrationSpec` and `KafkaProducerFencerIntegrationSpec` type errors; isolated target integration sources compile and pass. |
+
+- Final review (2026-09-29): Code Reviewer PASS, Security Engineer PASS, and QA PASS for AR-27. No public receipt, persisted-state, or retention contract changed.

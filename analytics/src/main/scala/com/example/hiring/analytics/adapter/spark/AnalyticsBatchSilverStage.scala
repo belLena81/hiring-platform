@@ -38,11 +38,9 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
           retention.quarantineDays.value
         )
       )
-      malformedCount <- blocking(malformed.count())
       malformedToPersist <- if (activeMarkersPresent) blocking(malformed.limit(0)) else Async[F].pure(malformed)
-      validRecords <- blocking(valid.count())
       safeValidRecords <- blocking(safeValid.count())
-      suppressedRecords = validRecords - safeValidRecords
+      suppressedRecords = bronze.validRecords - safeValidRecords
       newConflicts <- blocking(OperationalEventTransforms.conflictingEventIds(safeValid))
       incomingSilver <- blocking.either(OperationalEventTransforms.silver(safeValid, pseudonymizer, markerTokens))
       incomingSilverSchema <- blocking(incomingSilver.schema)
@@ -95,9 +93,9 @@ private[spark] final class AnalyticsBatchSilverStage[F[_]: Async](ports: SilverS
     } yield AnalyticsPreparedEvents(
       incomingSilver,
       conflicts,
-      validRecords,
+      bronze.validRecords,
       suppressedRecords,
-      malformedCount + conflictingRecords,
+      bronze.malformedRecords + conflictingRecords,
       conflictingEventIds
     )
   }

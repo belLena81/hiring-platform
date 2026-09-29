@@ -42,7 +42,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     streams: MongoPublisherStream,
     clock: Clock[F],
     mutex: AnalyticsLakehouseLock[F],
-    override protected val sparkExecution: SparkExecution[F]
+    override protected val sparkExecution: SparkBlockingExecution[F]
 ) extends LakehouseOperation[F] {
   private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database.underlying, streams)
   private val authorizations = new MongoHmacKeyRetirementAuthorizationStore[F](database, streams)
@@ -52,7 +52,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
   private def observeKafkaLineage: F[HmacKeyRetirementKafkaLineage] =
     Async[F].raiseUnless(writerSettings.volumeName.endsWith("_hmac-rotation-analytics"))(
       AnalyticsError.InvalidConfiguration("retirement analytics volume does not identify its isolated Kafka volume")
-    ) *> HmacKeyRetirementKafkaLineage.observe[F](kafka, topic, kafkaVolumeName)
+    ) *> HmacKeyRetirementKafkaLineage.observe[F](kafka, topic, kafkaVolumeName, sparkExecution)
 
   private def registryVerifier(keyId: String): F[String] = lakehouseEither {
     if (!DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry))
@@ -197,7 +197,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       lakehouseId <- Async[F].fromEither(MongoAnalyticsLakehouseLock.lockId(paths.root))
       verifier <- registryVerifier(keyId)
       lineageBefore <- observeKafkaLineage
-      barrier <- KafkaRetentionAdapter.capture[F](kafka, topic).adaptError {
+      barrier <- KafkaRetentionAdapter.capture[F](kafka, topic, sparkExecution).adaptError {
         case error: AnalyticsError => error
         case NonFatal(error)       =>
           AnalyticsError.InvalidConfiguration(
@@ -235,7 +235,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(preparation.lineage, lineageBefore))(
         AnalyticsError.InvalidConfiguration("Kafka broker, topic, or volume lineage changed since preparation")
       )
-      earliest <- HmacKeyRetirementKafkaOffsets.earliest[F](kafka, preparation.barrier)
+      earliest <- HmacKeyRetirementKafkaOffsets.earliest[F](kafka, preparation.barrier, sparkExecution)
       lineageAfter <- observeKafkaLineage
       _ <- Async[F].raiseUnless(HmacKeyRetirementKafkaLineage.matches(preparation.lineage, lineageAfter))(
         AnalyticsError.InvalidConfiguration("Kafka lineage changed during retirement authorization")

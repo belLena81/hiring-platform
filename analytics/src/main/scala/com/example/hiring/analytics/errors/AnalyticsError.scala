@@ -28,8 +28,8 @@ object AnalyticsError {
       extends AnalyticsError(s"analytics run ID '$runId' was already used with different offset ranges")
   case object MissingMarkerCollection extends AnalyticsError("analytics erasure request collection is unavailable")
   case object MalformedMarker extends AnalyticsError("pending analytics erasure request has an invalid subject id")
-  case object ErasureNotReady extends AnalyticsError("analytics erasure is not ready for guarded publication")
-  case object ErasureDeferred extends AnalyticsError("analytics erasure was durably deferred for a later retry")
+  case object GuardedErasurePublicationRejected
+      extends AnalyticsError("analytics erasure is not ready for guarded publication")
   case object InvalidGoldSchema extends AnalyticsError("Gold dataset does not match its declared report schema")
   case object PhysicalReclamationUnverified
       extends AnalyticsError("analytics erasure could not verify retention-safe physical Delta reclamation")

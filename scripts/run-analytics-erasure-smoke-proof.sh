@@ -70,6 +70,7 @@ run_fixture prepare
 compose up -d analytics-erasure-worker
 wait_for_phase DeltaPurged 180
 run_fixture append-retention-tail
+run_fixture smoke-pre-horizon
 compose stop analytics-erasure-worker
 printf 'Worker stopped; waiting for the configured one-minute Delta and Kafka retention periods.\n'
 sleep 75

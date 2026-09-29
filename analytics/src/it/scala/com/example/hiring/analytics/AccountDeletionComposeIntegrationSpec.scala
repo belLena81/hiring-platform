@@ -16,7 +16,6 @@ import com.example.hiring.analytics.adapter.mongo.*
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients, MongoDatabase}
 import com.mongodb.client.model.Filters
-import org.apache.kafka.clients.admin.{Admin, AdminClientConfig}
 import org.bson.Document
 import munit.FunSuite
 import org.apache.spark.sql.SparkSession
@@ -32,7 +31,7 @@ import java.nio.file.attribute.PosixFilePermissions
 import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
-import java.util.{Date, Properties, UUID}
+import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.Using
@@ -114,21 +113,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     value
   }
 
-  private def transactionEpoch(bootstrap: String, transactionalId: String): Int = {
-    val props = new Properties()
-    props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap)
-    props.put("security.protocol", "SASL_PLAINTEXT")
-    props.put("sasl.mechanism", "PLAIN")
-    props.put(
-      "sasl.jaas.config",
-      s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"analytics_fencer\" password=\"${required("KAFKA_FENCER_PASSWORD")}\";"
-    )
-    val admin = Admin.create(props)
-    try admin.describeTransactions(java.util.List.of(transactionalId)).all().get().get(transactionalId).producerEpoch()
-    finally admin.close(Duration.ofSeconds(5))
-  }
-
-  private def seedPublishableEvent(database: MongoDatabase, subjectId: String): String = {
+  private def seedPublishedOutboxEvent(database: MongoDatabase, subjectId: String): String = {
     val now = new Date()
     val eventId = UUID.randomUUID().toString
     val eventJson =
@@ -148,8 +133,9 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
           .append("payload", "{\"searchKind\":\"jobs\",\"query\":\"proof\",\"results\":[]}")
           .append("envelopeBytes", eventJson.getBytes(StandardCharsets.UTF_8))
           .append("partitionKey", s"deletion-proof-$eventId")
-          .append("state", "Retryable")
-          .append("attempts", 0)
+          .append("state", "Published")
+          .append("publishedAt", now)
+          .append("attempts", 1)
           .append("availableAt", now)
           .append("createdAt", now)
           .append("updatedAt", now)
@@ -230,7 +216,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       .getOrElse(fail("missing deletion status in authenticated GraphQL response"))
   }
 
-  test("production publisher claim is captured and fenced by the long-lived Compose erasure worker") {
+  test("account deletion purges a published outbox event and only the subject's Delta data") {
     if (enabled) {
       val databaseName = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_DATABASE")
       assert(databaseName.matches("account_deletion_[0-9a-f]{16}"))
@@ -240,10 +226,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       val api = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_API_URL")
       val kafka = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_KAFKA")
       val analyticsDir = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_ANALYTICS_DIR")
-      val publisherProofDir = Path.of(required("HIRING_ACCOUNT_DELETION_PUBLISHER_PROOF_DIR"))
       assertEquals(new File(analyticsDir).getCanonicalPath, new File(analyticsDir).getAbsolutePath)
-      assertEquals(publisherProofDir.toRealPath(), publisherProofDir.toAbsolutePath.normalize())
-      assertEquals(publisherProofDir.getFileName.toString, "publisher")
       val nonce = databaseName.stripPrefix("account_deletion_")
       assertEquals(topic, s"hiring.deletion.$nonce", "database and topic must use the same proof nonce")
       validateLocalEndpoints(api, uri, kafka)
@@ -292,113 +275,84 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
         )
         val (token, subjectId) = authResult(login, "login")
         val (subjectToken, controlToken) = seedAttributedDeltaRows(subjectId)
-        Files.createFile(publisherProofDir.resolve("armed"))
-        val eventId = seedPublishableEvent(database, subjectId)
-        eventually(Files.exists(publisherProofDir.resolve("held")))(identity)
-        val fence = eventually {
-          Option(database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first())
-        }(_.exists(doc => Option(doc.getList("transactionalIds", classOf[String])).exists(!_.isEmpty))).get
-        val transactionalIds = fence.getList("transactionalIds", classOf[String]).asScala.toVector
-        val transactionalId = transactionalIds.last
-        assert(
-          transactionalId.startsWith("hiring-publisher-"),
-          "ID must be registered by the production publisher claim"
+        val eventId = seedPublishedOutboxEvent(database, subjectId)
+        val deletion = graphql(
+          api,
+          s"""mutation { deleteMyAccount(input: { idempotencyKey: "${UUID
+              .randomUUID()}" }) { __typename ... on DeletionReceipt { receiptId status } ... on DomainError { code message } ... on ValidationError { code message } } }""",
+          Some(token)
         )
-        val heldOutbox = database.getCollection("event_outbox").find(Filters.eq("_id", eventId)).first()
-        assertEquals(heldOutbox.getString("state"), "InFlight", "the real publisher must hold the subject lease")
-        val initialEpoch = transactionEpoch(kafka, transactionalId)
+        val receiptId =
+          "(?s)\\\"deleteMyAccount\\\".*?\\\"receiptId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\".*?\\\"status\\\"\\s*:\\s*\\\"PENDING\\\"".r
+            .findFirstMatchIn(deletion)
+            .map(_.group(1))
+            .getOrElse(fail("deleteMyAccount did not return PENDING"))
+        val request = eventually(
+          Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
+        )(_.nonEmpty).get
+        assert(request.getString("receiptId") == receiptId, "deletion receipt must match the durable request")
+        val purgedRequest = eventually(
+          Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
+        )(doc => doc.exists(_.getString("phase") == ErasurePhase.DeltaPurged.toString)).get
+        assertEquals(
+          deletionStatus(api, receiptId, token),
+          "PENDING",
+          "real Delta retention horizon must remain pending"
+        )
+        val deletedFence = database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first()
+        assert(
+          java.lang.Boolean.TRUE == deletedFence.getBoolean("deleted"),
+          "account deletion must close the publisher fence"
+        )
+        val barrier = Option(purgedRequest.get("kafkaRetentionBarrier", classOf[Document]))
+          .getOrElse(fail("missing persisted Kafka barrier"))
+        assertEquals(barrier.getString("topic"), topic)
+        assert(barrier.getList("partitions", classOf[Document]).asScala.nonEmpty)
+        assertEquals(database.getCollection("event_outbox").countDocuments(Filters.eq("_id", eventId)), 0L)
+        val deltaEvidence = database
+          .getCollection("analytics_erasure_delta_files")
+          .find(Filters.eq("requestId", subjectId))
+          .into(new java.util.ArrayList[Document]())
+          .asScala
+          .toVector
+        assert(
+          deltaEvidence.exists(_.getString("filePath").contains("bronze/operational_events/")),
+          "worker must persist evidence for the populated subject-attributed Bronze file"
+        )
+        assert(
+          purgedRequest.getLong("deltaAffectedRows") > 0L,
+          "worker must record that populated Delta rows were purged"
+        )
+        val spark = SparkSession
+          .builder()
+          .master("local[1]")
+          .appName("AccountDeletionComposeIntegrationSpecVerify")
+          .config("spark.ui.enabled", "false")
+          .config("spark.sql.shuffle.partitions", "1")
+          .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+          .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+          .getOrCreate()
         try {
-          val deletion = graphql(
-            api,
-            s"""mutation { deleteMyAccount(input: { idempotencyKey: "${UUID
-                .randomUUID()}" }) { __typename ... on DeletionReceipt { receiptId status } ... on DomainError { code message } ... on ValidationError { code message } } }""",
-            Some(token)
-          )
-          val receiptId =
-            "(?s)\\\"deleteMyAccount\\\".*?\\\"receiptId\\\"\\s*:\\s*\\\"([^\\\"]+)\\\".*?\\\"status\\\"\\s*:\\s*\\\"PENDING\\\"".r
-              .findFirstMatchIn(deletion)
-              .map(_.group(1))
-              .getOrElse(fail("deleteMyAccount did not return PENDING"))
-          val request = eventually(
-            Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
-          )(_.nonEmpty).get
-          assert(request.getString("receiptId") == receiptId, "deletion receipt must match the durable request")
-          val captured =
-            Option(request.getList("transactionalIds", classOf[String])).fold(Vector.empty[String])(_.asScala.toVector)
-          assert(captured.contains(transactionalId), "deletion must capture the production claim's transactional ID")
-          eventually(transactionEpoch(kafka, transactionalId))(_ > initialEpoch)
-          Files.createFile(publisherProofDir.resolve("release"))
-          val commitResult = eventually {
-            if (Files.exists(publisherProofDir.resolve("result")))
-              Some(Files.readString(publisherProofDir.resolve("result")))
-            else None
-          }(_.nonEmpty).get
-          assertEquals(commitResult, "fenced", "the actual publisher's commit must fail due to broker fencing")
-          val purgedRequest = eventually(
-            Option(database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first())
-          )(doc => doc.exists(_.getString("phase") == ErasurePhase.DeltaPurged.toString)).get
+          val paths =
+            AnalyticsLakehousePaths.unsafe(new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse")
+          val currentBronze = spark.read.format("delta").load(paths.bronze)
           assertEquals(
-            deletionStatus(api, receiptId, token),
-            "PENDING",
-            "real Delta retention horizon must remain pending"
+            currentBronze.filter(array_contains(col("subjectTokens"), subjectToken)).count(),
+            0L,
+            "subject-attributed Delta row must be removed from current snapshot"
           )
-          val deletedFence = database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first()
-          assert(
-            java.lang.Boolean.TRUE == deletedFence.getBoolean("deleted"),
-            "account deletion must close the publisher fence"
+          assertEquals(
+            currentBronze.filter(array_contains(col("subjectTokens"), controlToken)).count(),
+            1L,
+            "unrelated subject row must remain in current snapshot"
           )
-          val barrier = Option(purgedRequest.get("kafkaRetentionBarrier", classOf[Document]))
-            .getOrElse(fail("missing persisted Kafka barrier"))
-          assertEquals(barrier.getString("topic"), topic)
-          assert(barrier.getList("partitions", classOf[Document]).asScala.nonEmpty)
-          assertEquals(database.getCollection("event_outbox").countDocuments(Filters.eq("_id", eventId)), 0L)
-          val deltaEvidence = database
-            .getCollection("analytics_erasure_delta_files")
-            .find(Filters.eq("requestId", subjectId))
-            .into(new java.util.ArrayList[Document]())
-            .asScala
-            .toVector
-          assert(
-            deltaEvidence.exists(_.getString("filePath").contains("bronze/operational_events/")),
-            "worker must persist evidence for the populated subject-attributed Bronze file"
-          )
-          assert(
-            purgedRequest.getLong("deltaAffectedRows") > 0L,
-            "worker must record that populated Delta rows were purged"
-          )
-          val spark = SparkSession
-            .builder()
-            .master("local[1]")
-            .appName("AccountDeletionComposeIntegrationSpecVerify")
-            .config("spark.ui.enabled", "false")
-            .config("spark.sql.shuffle.partitions", "1")
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-            .getOrCreate()
-          try {
-            val paths =
-              AnalyticsLakehousePaths.unsafe(new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse")
-            val currentBronze = spark.read.format("delta").load(paths.bronze)
-            assertEquals(
-              currentBronze.filter(array_contains(col("subjectTokens"), subjectToken)).count(),
-              0L,
-              "subject-attributed Delta row must be removed from current snapshot"
-            )
-            assertEquals(
-              currentBronze.filter(array_contains(col("subjectTokens"), controlToken)).count(),
-              1L,
-              "unrelated subject row must remain in current snapshot"
-            )
-          } finally spark.stop()
-          val phase = database
-            .getCollection("analytics_erasure_requests")
-            .find(Filters.eq("_id", subjectId))
-            .first()
-            .getString("phase")
-          assertEquals(phase, ErasurePhase.DeltaPurged.toString)
-        } finally
-          if (!Files.exists(publisherProofDir.resolve("release")))
-            Files.createFile(publisherProofDir.resolve("release"))
+        } finally spark.stop()
+        val phase = database
+          .getCollection("analytics_erasure_requests")
+          .find(Filters.eq("_id", subjectId))
+          .first()
+          .getString("phase")
+        assertEquals(phase, ErasurePhase.DeltaPurged.toString)
       } finally client.close()
     }
   }

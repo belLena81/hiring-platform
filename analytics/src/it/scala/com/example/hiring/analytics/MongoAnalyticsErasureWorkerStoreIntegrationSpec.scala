@@ -439,7 +439,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       val result = for {
         initialClaim <- firstStore.claim(startedAt, startedAt.plusSeconds(60L * 86400L), 1).map(_.head)
         reservation <- firstPublisher.reserve(runId, rangeFingerprint, startedAt)
-        firstAttempt <- firstWorker.process(initialClaim, reservation).attempt
+        firstAttempt <- firstWorker.process(initialClaim, reservation)
         checkpoint <- IO.blocking(
           database
             .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
@@ -448,7 +448,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
         )
         _ = assertEquals(checkpoint.getString("phase"), ErasurePhase.DeltaPurged.toString)
         _ = assert(checkpoint.getDate("resumeAfter").toInstant.isAfter(startedAt), "assertion failed")
-        _ = assert(firstAttempt.swap.toOption.exists(_ == AnalyticsError.ErasureDeferred), "assertion failed")
+        _ = assertEquals(firstAttempt, ErasureClaimOutcome.Deferred)
         _ <- IO.blocking {
           client.close()
           client = null
@@ -484,7 +484,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           producerFencer = producerFencer,
           kafkaRetention = retention
         )
-        _ <- restartedWorker.process(resumedClaim, resumedReservation)
+        resumedOutcome <- restartedWorker.process(resumedClaim, resumedReservation)
+        _ = assertEquals(resumedOutcome, ErasureClaimOutcome.Completed)
         readyToPublish <- IO.blocking(
           restartedDatabase
             .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
@@ -518,7 +519,8 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
           producerFencer = producerFencer,
           kafkaRetention = retention
         )
-        _ <- finalizerWorker.process(finalizerClaim, finalizerReservation)
+        finalizerOutcome <- finalizerWorker.process(finalizerClaim, finalizerReservation)
+        _ = assertEquals(finalizerOutcome, ErasureClaimOutcome.Completed)
         request <- IO.blocking(
           restartedDatabase
             .getCollection(MongoAnalyticsErasureWorkerStore.RequestCollection)
@@ -631,7 +633,7 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
       )
       val result = for {
         claim <- store.claim(now, now.plusSeconds(60L), 1).map(_.head)
-        _ <- worker.runClaim(claim)
+        outcome <- worker.runClaim(claim)
         barrier <- store.readBarrier(asAccountSubjectId(requestId))
         request <- IO.blocking(
           database
@@ -640,9 +642,13 @@ class MongoAnalyticsErasureWorkerStoreIntegrationSpec extends munit.FunSuite {
             .first()
         )
         outboxCount <- IO.blocking(database.getCollection("event_outbox").countDocuments())
-      } yield (claim, barrier, request, outboxCount)
+      } yield (claim, outcome, barrier, request, outboxCount)
 
-      val (claim, barrier, request, outboxCount) = result.unsafeRunSync()
+      val (claim, outcome, barrier, request, outboxCount) = result.unsafeRunSync()
+      assert(outcome match {
+        case ErasureClaimOutcome.Failed(_: Throwable) => true
+        case _                                        => false
+      })
       assertEquals(claim.phase, ErasurePhase.Requested)
       assertEquals(barrier, None)
       assertEquals(request.getString("state"), "Processing")

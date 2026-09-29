@@ -1,11 +1,10 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.adapter.spark.ActiveDeletionMarkerSource
-import com.example.hiring.analytics.adapter.spark.SparkExecution
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.domain.SubjectToken
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.ErasureRequestState
+import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
 
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
@@ -13,8 +12,6 @@ import mongo4cats.codecs.CodecRegistry
 import mongo4cats.database.MongoDatabase
 import com.mongodb.client.model.{Filters, Sorts}
 import fs2.Stream
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.bson.Document
 
 import java.util.UUID
@@ -28,7 +25,6 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
     database: MongoDatabase[F],
     pseudonymizer: SubjectPseudonymizer,
     streams: MongoPublisherStream,
-    sparkExecution: SparkExecution[F],
     private[analytics] val maximumPendingMarkers: Int = MongoActiveDeletionMarkerSource.MaximumPendingMarkers
 ) extends ActiveDeletionMarkerSource[F] {
   private val requestCollection = com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.ErasureRequests
@@ -72,7 +68,7 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
         case cause                 => Stream.raiseError[F](AnalyticsError.MarkerStorageFailure(cause))
       }
 
-  override def activeSubjectTokens(spark: SparkSession): F[DataFrame] =
+  override def activeSubjectTokens: F[Vector[SubjectToken]] =
     for {
       _ <- Async[F].raiseWhen(maximumPendingMarkers <= 0)(
         AnalyticsError.InvalidConfiguration("maximum pending marker count must be positive")
@@ -96,25 +92,7 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
         AnalyticsError.MarkerLimitExceeded(maximumPendingMarkers)
       )
       distinctTokens = tokens.flatten.distinct
-      frame <- sparkExecution(
-        spark.createDataFrame(
-          distinctTokens.map(token => Row(token.value)).asJava,
-          StructType(
-            Seq(
-              StructField(
-                com.example.hiring.analytics.adapter.mongo.AnalyticsCollections.Fields.SubjectToken,
-                StringType,
-                nullable = false
-              )
-            )
-          )
-        )
-      )
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-        }
-    } yield frame
+    } yield distinctTokens
 }
 
 private[analytics] object MongoActiveDeletionMarkerSource {

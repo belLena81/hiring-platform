@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import com.example.hiring.analytics.adapter.kafka.{KafkaProducerFencer, TransactionalProducerFencer}
+import com.example.hiring.analytics.adapter.kafka.KafkaProducerFencer
 import com.example.hiring.analytics.adapter.mongo.{
   MongoActiveDeletionMarkerSource,
   MongoAnalyticsErasureWorkerStore,
@@ -8,11 +8,16 @@ import com.example.hiring.analytics.adapter.mongo.{
   MongoAnalyticsReportPublisher,
   MongoHmacKeyRetirementAuthorizationStore
 }
-import com.example.hiring.analytics.adapter.spark.{AnalyticsErasureWorker, DeltaAnalyticsErasureLakehouse}
+import com.example.hiring.analytics.adapter.spark.DeltaAnalyticsErasureLakehouse
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsReportPublisher}
-import com.example.hiring.analytics.service.erasure.{KafkaRetention, KafkaRetentionBarrier}
+import com.example.hiring.analytics.service.erasure.{
+  AnalyticsErasureWorker,
+  KafkaRetention,
+  KafkaRetentionBarrier,
+  TransactionalProducerFencer
+}
 import com.example.hiring.analytics.domain.{AccountSubjectId, RangeFingerprint, RunId}
 import com.example.hiring.analytics.domain.AnalyticsDigest
 import cats.effect.{Clock, IO}
@@ -44,20 +49,22 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       leaseDuration: FiniteDuration = 90.seconds,
       deliveryTimeout: FiniteDuration = 30.seconds,
       pollInterval: FiniteDuration = 5.seconds,
-      producerFencer: TransactionalProducerFencer[IO] = KafkaProducerFencer[IO],
+      producerFencer: TransactionalProducerFencer[IO] =
+        KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution),
       kafkaRetention: KafkaRetention[IO] =
-        com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter.liveRetention[IO]
+        com.example.hiring.analytics.adapter.kafka.KafkaRetentionAdapter.liveRetention[IO](
+          AnalyticsBatchTestSupport.driverExecution
+        )
   ): AnalyticsErasureWorker[IO] = {
     val lock = new MongoAnalyticsLakehouseLock(database, clock, AnalyticsTestOperationalConfig.streams)
     val markers =
       new MongoActiveDeletionMarkerSource[IO](
         database,
         pseudonymizer,
-        streams = AnalyticsTestOperationalConfig.streams,
-        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+        streams = AnalyticsTestOperationalConfig.streams
       )
     val maintenance = new DeltaAnalyticsErasureLakehouse[IO](
+      spark,
       paths,
       pseudonymizer,
       clock,
@@ -69,7 +76,6 @@ private[analytics] object AnalyticsErasureWorkerTestSupport {
       Slf4jLogger.getLogger[IO]
     )
     new AnalyticsErasureWorker[IO](
-      spark,
       store,
       store,
       store,

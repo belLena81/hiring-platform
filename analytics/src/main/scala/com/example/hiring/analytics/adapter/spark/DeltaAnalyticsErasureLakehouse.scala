@@ -1,10 +1,14 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.domain.AnalyticsReportOutput
-import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.domain.{AnalyticsReportOutput, SubjectPseudonymizer, SubjectToken}
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsLakehousePaths}
+import com.example.hiring.analytics.service.batch.{
+  AnalyticsBatchMaintenance,
+  AnalyticsLakehouseLock,
+  AnalyticsLakehousePaths
+}
+import com.example.hiring.analytics.service.erasure.AnalyticsErasureLakehouse
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 
 import cats.effect.{Async, Clock}
@@ -14,9 +18,11 @@ import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.typelevel.log4cats.Logger
 
 import java.time.Instant
+import scala.jdk.CollectionConverters.*
 
 /** Coordinates Delta-backed erasure maintenance independently of batch publication. */
 private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
+    spark: SparkSession,
     paths: AnalyticsLakehousePaths,
     pseudonymizer: SubjectPseudonymizer,
     clock: Clock[F],
@@ -44,48 +50,50 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     ErasureStagePorts(paths, this, retention.configureRawTables, operational.maximumErasureEvidenceFiles)
   )
 
-  def validateHmacConfigurationLocked(spark: SparkSession): F[Unit] =
+  override def validateHmacConfigurationLocked: F[Unit] =
     keyContinuity.validateHmacConfiguration(spark)
 
-  def configureRawTables(spark: SparkSession): F[Unit] = retention.configureRawTables(spark)
+  override def configureRawTables: F[Unit] = retention.configureRawTables(spark)
 
-  def expireStored(spark: SparkSession, at: Instant): F[Unit] =
+  override def expireStored(at: Instant): F[Unit] =
     retention.expire(spark, paths.bronze, at) *>
       retention.expire(spark, paths.quarantine, at) *>
       retention.expire(spark, paths.silver, at)
 
-  override def validateHmacConfiguration(spark: SparkSession): F[Unit] =
-    lakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked(spark))
+  override def validateHmacConfiguration: F[Unit] =
+    lakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked)
 
-  override def reclaimRetainedFiles(spark: SparkSession): F[Long] =
+  override def reclaimRetainedFiles: F[Long] =
     retention.configureRawTables(spark) *>
       retention.vacuumExpiredFiles(spark).flatTap(_ => erasure.checkpointRawTableLogs(spark))
 
-  override def verifyMarkedSubjectsAbsent(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
-    erasure.verifyMarkedSubjectsAbsent(spark, markerTokens)
+  override def verifyMarkedSubjectsAbsent(markerTokens: Vector[SubjectToken]): F[Unit] =
+    withMarkerTokens(markerTokens)(frame => erasure.verifyMarkedSubjectsAbsent(spark, frame))
 
-  override def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): F[Long] =
-    erasure.countMarkedRows(spark, markerTokens)
+  override def countMarkedRows(markerTokens: Vector[SubjectToken]): F[Long] =
+    withMarkerTokens(markerTokens)(frame => erasure.countMarkedRows(spark, frame))
 
-  override def captureMarkedFiles(spark: SparkSession, markerTokens: DataFrame): F[Vector[String]] =
-    erasure.captureMarkedFiles(spark, markerTokens)
+  override def captureMarkedFiles(markerTokens: Vector[SubjectToken]): F[Vector[String]] =
+    withMarkerTokens(markerTokens)(frame => erasure.captureMarkedFiles(spark, frame))
 
-  override def checkpointPurgedRawLogs(spark: SparkSession): F[Vector[String]] =
-    erasure.checkpointPurgedRawLogs(spark)
+  override def checkpointPurgedRawLogs: F[Vector[String]] = erasure.checkpointPurgedRawLogs(spark)
 
-  override def verifyFilesAbsent(spark: SparkSession, files: Vector[String]): F[Unit] =
+  override def verifyFilesAbsent(files: Vector[String]): F[Unit] =
     erasure.verifyFilesAbsent(spark, files)
 
-  override def checkpointRawTableLogs(spark: SparkSession): F[Unit] =
+  override def checkpointRawTableLogs: F[Unit] =
     erasure.checkpointRawTableLogs(spark)
 
-  override def purgeMarkedSubjectRows(spark: SparkSession, path: String, markerTokens: DataFrame): F[Unit] =
-    erasure.purgeMarkedSubjectRows(spark, path, markerTokens)
+  override def purgeMarkedSubjectRows(path: String, markerTokens: Vector[SubjectToken]): F[Unit] =
+    withMarkerTokens(markerTokens)(frame => erasure.purgeMarkedSubjectRows(spark, path, frame))
 
-  override def applyDeletionMarkers(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
-    retention.configureRawTables(spark) *> applyActiveDeletions(spark, markerTokens)
+  override def applyDeletionMarkers(markerTokens: Vector[SubjectToken]): F[Unit] =
+    retention.configureRawTables(spark) *> applyActiveDeletions(markerTokens)
 
-  def applyActiveDeletions(spark: SparkSession, markerTokens: DataFrame): F[Unit] =
+  override def applyActiveDeletions(markerTokens: Vector[SubjectToken]): F[Unit] =
+    withMarkerTokens(markerTokens)(applyActiveDeletionsFrame)
+
+  private def applyActiveDeletionsFrame(markerTokens: DataFrame): F[Unit] =
     for {
       deletionTime <- clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
       _ <- retention.expire(spark, paths.bronze, deletionTime)
@@ -98,8 +106,19 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
       _ <- retention.vacuumExpiredFiles(spark).void
     } yield ()
 
-  override def rebuildGoldAndExtractReport(spark: SparkSession, asOf: Instant): F[AnalyticsReportOutput] =
+  override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
     rebuildGoldFromStoredSilver(spark) *> AnalyticsGoldStage.extract(spark, paths, asOf, this)
+
+  private def withMarkerTokens[A](tokens: Vector[SubjectToken])(use: DataFrame => F[A]): F[A] =
+    apply {
+      val schema = org.apache.spark.sql.types.StructType(
+        Seq(
+          org.apache.spark.sql.types
+            .StructField("subjectToken", org.apache.spark.sql.types.StringType, nullable = false)
+        )
+      )
+      spark.createDataFrame(tokens.map(token => org.apache.spark.sql.Row(token.value)).asJava, schema)
+    }.flatMap(use)
 
   private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
     apply(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {

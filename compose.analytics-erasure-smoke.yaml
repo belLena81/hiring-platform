@@ -22,6 +22,7 @@ services:
       HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON: "true"
     volumes: !override
       - erasure-smoke-analytics:/var/lib/hiring-analytics
+      - erasure-smoke-batch-build:/workspace/analytics/target
 
   analytics-erasure-worker:
     environment:
@@ -33,8 +34,11 @@ services:
       HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON: "true"
     volumes: !override
       - erasure-smoke-analytics:/var/lib/hiring-analytics
+      - erasure-smoke-worker-build:/workspace/analytics/target
 
 volumes:
   erasure-smoke-mongodb:
   erasure-smoke-kafka:
   erasure-smoke-analytics:
+  erasure-smoke-batch-build:
+  erasure-smoke-worker-build:

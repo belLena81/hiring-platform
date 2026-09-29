@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
+import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
 import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.erasure.KafkaRetentionBarrier
@@ -234,15 +235,16 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
   def observe[F[_]: Async](
       connection: KafkaConnection,
       topic: String,
-      volumeName: String
+      volumeName: String,
+      driverExecution: SparkBlockingExecution[F]
   ): F[HmacKeyRetirementKafkaLineage] =
     for {
       clientProperties <- Async[F].fromEither(KafkaClientProperties.clientProperties(connection))
       containerBefore <- dockerBrokerContainer[F](connection, volumeName)
       volume <- dockerVolume[F](volumeName)
       broker <- Resource
-        .fromAutoCloseable(
-          Async[F]
+        .make(
+          driverExecution
             .blocking {
               val properties = new Properties()
               properties.setProperty("bootstrap.servers", connection.bootstrapServers)
@@ -274,9 +276,9 @@ private[analytics] object HmacKeyRetirementKafkaLineage {
               created
             }
             .flatMap(Async[F].fromEither)
-        )
+        )(client => driverExecution.blocking(client.close()).void)
         .use { client =>
-          Async[F]
+          driverExecution
             .blocking {
               def observed[A](name: String)(read: => A): Either[AnalyticsError, A] =
                 Either.catchNonFatal(read).leftMap { error =>
@@ -407,10 +409,13 @@ private[analytics] final class MongoHmacKeyRetirementPreparationStore[F[_]: Asyn
 
 /** Reads actual broker offsets for every partition of the persisted retirement barrier. */
 private[analytics] object HmacKeyRetirementKafkaOffsets {
-  private def consumer[F[_]: Async](connection: KafkaConnection): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
+  private def consumer[F[_]: Async](
+      connection: KafkaConnection,
+      driverExecution: SparkBlockingExecution[F]
+  ): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
     for {
       clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
-      client <- Resource.fromAutoCloseable(Async[F].blocking {
+      client <- Resource.make(driverExecution.blocking {
         val properties = new Properties()
         properties.setProperty("bootstrap.servers", connection.bootstrapServers)
         properties.setProperty("group.id", "hiring-analytics-key-retirement")
@@ -420,13 +425,17 @@ private[analytics] object HmacKeyRetirementKafkaOffsets {
         properties.setProperty("default.api.timeout.ms", "10000")
         clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }
         new KafkaConsumer[Array[Byte], Array[Byte]](properties)
-      })
+      })(client => driverExecution.blocking(client.close()).void)
     } yield client
 
-  def earliest[F[_]: Async](connection: KafkaConnection, barrier: KafkaRetentionBarrier): F[Map[Int, Long]] =
+  def earliest[F[_]: Async](
+      connection: KafkaConnection,
+      barrier: KafkaRetentionBarrier,
+      driverExecution: SparkBlockingExecution[F]
+  ): F[Map[Int, Long]] =
     Async[F].fromEither(KafkaRetentionBarrier.validate(barrier)).flatMap { valid =>
-      consumer[F](connection).use { client =>
-        Async[F]
+      consumer[F](connection, driverExecution).use { client =>
+        driverExecution
           .blocking {
             val partitions = valid.partitions.map(partition => new TopicPartition(valid.topic, partition.number))
             val actual = client.beginningOffsets(partitions.asJava)

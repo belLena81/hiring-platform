@@ -59,32 +59,46 @@ private[analytics] object AnalyticsOffsetRanges {
     }
   }
 
-  def verify[F[_]: Async](frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
-    observedOffsets(frame).flatMap(found => verifyObservedOffsets(manifest, found, allowKafkaGaps = false))
+  def verify[F[_]: Async](
+      frame: DataFrame,
+      manifest: AnalyticsRunManifest,
+      sparkExecution: SparkExecution[F]
+  ): F[Unit] =
+    observedOffsets(frame, sparkExecution).flatMap(found =>
+      verifyObservedOffsets(manifest, found, allowKafkaGaps = false)
+    )
 
   /** Kafka offset coordinates are not dense record counts: control records consume offsets and `read_committed` omits
     * aborted records. The Kafka source validates low/high broker bounds before reading and enables failOnDataLoss; here
     * we check that every returned data record lies within its assigned range without treating legitimate transactional
     * gaps as missing records.
     */
-  def verifyCommittedKafkaRange[F[_]: Async](frame: DataFrame, manifest: AnalyticsRunManifest): F[Unit] =
-    observedOffsets(frame).flatMap(found => verifyObservedOffsets(manifest, found, allowKafkaGaps = true))
+  def verifyCommittedKafkaRange[F[_]: Async](
+      frame: DataFrame,
+      manifest: AnalyticsRunManifest,
+      sparkExecution: SparkExecution[F]
+  ): F[Unit] =
+    observedOffsets(frame, sparkExecution).flatMap(found =>
+      verifyObservedOffsets(manifest, found, allowKafkaGaps = true)
+    )
 
-  private def observedOffsets[F[_]: Async](frame: DataFrame): F[Map[(String, Int), Observed]] =
-    Async[F]
-      .blocking {
-        frame
-          .groupBy(col("topic"), col("partition"))
-          .agg(
-            countDistinct(col("offset")).as("observed"),
-            min(col("offset")).as("first"),
-            max(col("offset")).as("last")
-          )
-          .collect()
-          .iterator
-          .map(row => (row.getString(0), row.getInt(1)) -> Observed(row.getLong(2), row.getLong(3), row.getLong(4)))
-          .toMap
-      }
+  private def observedOffsets[F[_]: Async](
+      frame: DataFrame,
+      sparkExecution: SparkExecution[F]
+  ): F[Map[(String, Int), Observed]] =
+    sparkExecution {
+      frame
+        .groupBy(col("topic"), col("partition"))
+        .agg(
+          countDistinct(col("offset")).as("observed"),
+          min(col("offset")).as("first"),
+          max(col("offset")).as("last")
+        )
+        .collect()
+        .iterator
+        .map(row => (row.getString(0), row.getInt(1)) -> Observed(row.getLong(2), row.getLong(3), row.getLong(4)))
+        .toMap
+    }
       .adaptError {
         case error: AnalyticsError => error
         case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)

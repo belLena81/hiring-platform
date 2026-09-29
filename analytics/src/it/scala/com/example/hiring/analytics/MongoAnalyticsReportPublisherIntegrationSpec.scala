@@ -462,7 +462,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         )
       } yield (attempt, state, request, snapshot)
       val (attempt, state, request, snapshot) = result.unsafeRunSync()
-      assert(attempt.swap.toOption.exists(_.isInstanceOf[AnalyticsError.ErasureNotReady.type]))
+      assert(attempt.swap.toOption.exists(_.isInstanceOf[AnalyticsError.GuardedErasurePublicationRejected.type]))
       assertEquals(state.getString("state"), "Hidden")
       assertEquals(request.getString("state"), "Processing")
       assertEquals(snapshot, null)

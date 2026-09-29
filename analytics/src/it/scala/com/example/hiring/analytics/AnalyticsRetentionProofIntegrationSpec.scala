@@ -236,8 +236,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         new MongoActiveDeletionMarkerSource[IO](
           reactiveDb,
           pseudonymizer,
-          streams = AnalyticsTestOperationalConfig.streams,
-          sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+          streams = AnalyticsTestOperationalConfig.streams
         )
       )
       val manifest = AnalyticsRunManifest
@@ -252,6 +251,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           spark,
           new KafkaOffsetRangeSource(
             connection("analytics_reader", required("KAFKA_READER_PASSWORD")),
+            com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+              .forTests[IO](scala.concurrent.ExecutionContext.parasitic),
             com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
               .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
           ),
@@ -456,7 +457,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       .unsafeRunSync()
       .getOrElse(fail("Kafka barrier is missing"))
     val kafkaPassed = KafkaRetentionAdapter
-      .liveRetention[IO]
+      .liveRetention[IO](AnalyticsBatchTestSupport.driverExecution)
       .retentionPassed(
         connection("analytics_reader", required("KAFKA_READER_PASSWORD")),
         barrier
@@ -492,6 +493,16 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         assertEquals(request.getString("phase"), ErasurePhase.ReportPublished.toString)
       }
     }
+    if (mode == "smoke-pre-horizon") {
+      assertEquals(request.getString("state"), "Processing")
+      assertEquals(request.getString("phase"), ErasurePhase.DeltaPurged.toString)
+      assert(!deltaPassed, "smoke worker must defer before both configured Delta deadlines")
+      assert(!kafkaPassed, "smoke worker must defer until Kafka earliest offsets pass the barrier")
+      assert(
+        Option(request.getDate("resumeAfter")).exists(_.toInstant.isAfter(Instant.now())),
+        "worker must persist a future resume time while retention gates are closed"
+      )
+    }
     if (finalCheck) {
       assert(kafkaPassed && deltaPassed, "assertion failed")
       assertEquals(request.getString("state"), "Complete")
@@ -501,16 +512,15 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         val paths = AnalyticsLakehousePaths.unsafe(lakehouseRoot)
         val pseudonymizer =
           AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
-        val maintenance = AnalyticsBatchTestSupport.newMaintenance(paths, pseudonymizer)
+        val maintenance = AnalyticsBatchTestSupport.newMaintenance(spark, paths, pseudonymizer)
         val markers =
           new MongoActiveDeletionMarkerSource[IO](
             reactiveDb,
             pseudonymizer,
-            streams = AnalyticsTestOperationalConfig.streams,
-            sparkExecution = SparkBlockingExecution.forTests[IO](scala.concurrent.ExecutionContext.parasitic)
-          ).activeSubjectTokens(spark).unsafeRunSync()
-        maintenance.verifyMarkedSubjectsAbsent(spark, markers).unsafeRunSync()
-        maintenance.verifyFilesAbsent(spark, evidence).unsafeRunSync()
+            streams = AnalyticsTestOperationalConfig.streams
+          ).activeSubjectTokens.unsafeRunSync()
+        maintenance.verifyMarkedSubjectsAbsent(markers).unsafeRunSync()
+        maintenance.verifyFilesAbsent(evidence).unsafeRunSync()
       } finally spark.stop()
       assertEquals(db.getCollection("analytics_erasure_completions").countDocuments(Filters.eq("_id", subjectId)), 1L)
       assertEquals(db.getCollection("event_outbox").countDocuments(Filters.in("subjectIds", subjectId)), 0L)
@@ -557,6 +567,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           case "prepare"               => prepare(db, reactiveDb)
           case "append-retention-tail" => appendRetentionTail(reactiveClient, reactiveDb, db)
           case "inspect"               =>
+            inspect(reactiveClient, reactiveDb, db, requireKafka = false, requireAll = false, finalCheck = false)
+          case "smoke-pre-horizon" =>
             inspect(reactiveClient, reactiveDb, db, requireKafka = false, requireAll = false, finalCheck = false)
           case "require-kafka-retention" =>
             inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = false, finalCheck = false)

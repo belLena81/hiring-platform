@@ -1,22 +1,21 @@
 package com.example.hiring.analytics
 
 import com.example.hiring.analytics.adapter.spark.{
-  ActiveDeletionMarkerSource,
   AnalyticsKeyContinuityStage,
-  DataFrameDeletionMarkerSource,
   DeltaAnalyticsErasureLakehouse,
+  BoundedOperationalEventSource,
   DeltaManifestStore,
-  HiringAnalyticsBatch,
+  SparkAnalyticsBatchLakehouse,
   KeyContinuityStagePorts,
   KeyRetirementLookup,
-  ManifestStore,
   SparkExecution
 }
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.service.batch.*
+import com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 import cats.effect.{Clock, IO, Resource}
-import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark.sql.SparkSession
 import java.time.Instant
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 
@@ -56,6 +55,46 @@ private[analytics] object AnalyticsBatchTestSupport {
 
   private val sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
     .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+  val driverExecution: com.example.hiring.analytics.adapter.spark.SparkBlockingExecution[IO] = sparkExecution
+
+  final class BatchHarness private[AnalyticsBatchTestSupport] (
+      paths: AnalyticsLakehousePaths,
+      pseudonymizer: SubjectPseudonymizer,
+      markers: ActiveDeletionMarkerSource[IO],
+      clock: Clock[IO] = Clock[IO],
+      reportPublisher: AnalyticsReportPublisher[IO] = AnalyticsBatchTestSupport.reportPublisher,
+      manifests: Option[AnalyticsRunManifestStore[IO]] = None
+  ) {
+    def run(
+        spark: SparkSession,
+        source: BoundedOperationalEventSource[IO],
+        manifest: com.example.hiring.analytics.domain.AnalyticsRunManifest
+    ) = {
+      val store = manifests.getOrElse(new DeltaManifestStore[IO](spark, paths, sparkExecution))
+      val maintenance = newMaintenance(spark, paths, pseudonymizer, clock)
+      val lakehouse = new SparkAnalyticsBatchLakehouse[IO](
+        spark,
+        paths,
+        pseudonymizer,
+        source,
+        clock,
+        store,
+        AnalyticsTestOperationalConfig.operational,
+        sparkExecution,
+        maintenance
+      )
+      new HiringAnalyticsBatch[IO](
+        paths,
+        markers,
+        clock,
+        reportPublisher,
+        store,
+        lakehouse,
+        lakehouseLock,
+        AnalyticsTestOperationalConfig.operational
+      ).run(manifest)
+    }
+  }
 
   def newBatch(
       paths: AnalyticsLakehousePaths,
@@ -63,27 +102,18 @@ private[analytics] object AnalyticsBatchTestSupport {
       markers: ActiveDeletionMarkerSource[IO],
       clock: Clock[IO] = Clock[IO],
       reportPublisher: AnalyticsReportPublisher[IO] = AnalyticsBatchTestSupport.reportPublisher,
-      manifests: Option[ManifestStore[IO]] = None
-  ): HiringAnalyticsBatch[IO] =
-    new HiringAnalyticsBatch[IO](
-      paths,
-      pseudonymizer,
-      markers,
-      clock,
-      reportPublisher,
-      manifests.getOrElse(new DeltaManifestStore[IO](paths)),
-      lakehouseLock,
-      AnalyticsTestOperationalConfig.operational,
-      sparkExecution,
-      newMaintenance(paths, pseudonymizer, clock)
-    )
+      manifests: Option[AnalyticsRunManifestStore[IO]] = None
+  ): BatchHarness =
+    new BatchHarness(paths, pseudonymizer, markers, clock, reportPublisher, manifests)
 
   def newMaintenance(
+      spark: SparkSession,
       paths: AnalyticsLakehousePaths,
       pseudonymizer: SubjectPseudonymizer,
       clock: Clock[IO] = Clock[IO]
   ): DeltaAnalyticsErasureLakehouse[IO] =
     new DeltaAnalyticsErasureLakehouse[IO](
+      spark,
       paths,
       pseudonymizer,
       clock,

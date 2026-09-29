@@ -108,18 +108,15 @@ object OperationalEventTransforms {
     records.dropDuplicates(Columns.Topic, Columns.Partition, Columns.Offset)
 
   def validEvents(parsed: DataFrame): DataFrame =
-    parsed.filter(
-      requiredEnvelopeFields &&
-        col(Columns.EventType).isin(EventTypes*) &&
-        col(Columns.AggregateType).isin(AggregateTypes*)
-    )
+    parsed.filter(isValidEvent)
 
   def malformedEvents(parsed: DataFrame): DataFrame =
-    parsed.filter(
-      !(requiredEnvelopeFields &&
-        col(Columns.EventType).isin(EventTypes*) &&
-        col(Columns.AggregateType).isin(AggregateTypes*))
-    )
+    parsed.filter(!isValidEvent)
+
+  private[analytics] def isValidEvent: Column =
+    requiredEnvelopeFields &&
+      col(Columns.EventType).isin(EventTypes*) &&
+      col(Columns.AggregateType).isin(AggregateTypes*)
 
   /** Event IDs are idempotency keys. Same bytes are duplicates; different bytes are conflicts. */
   def conflictingEventIds(valid: DataFrame): DataFrame =

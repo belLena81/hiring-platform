@@ -104,9 +104,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val source = new MongoActiveDeletionMarkerSource[IO](
       mongo4catsDatabase(database.getName),
       pseudonymizer,
-      streams = AnalyticsTestOperationalConfig.streams,
-      sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-        .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+      streams = AnalyticsTestOperationalConfig.streams
     )
     val retainedSubject = UUID.randomUUID().toString
     requests.insertOne(
@@ -119,10 +117,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
         .append("state", "Complete")
         .append("expiresAt", Date.from(Instant.parse("2026-09-23T12:00:00Z")))
     )
-    val retainedOnly = source
-      .activeSubjectTokens(spark)
-      .flatMap(frame => IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet))
-      .unsafeRunSync()
+    val retainedOnly = source.activeSubjectTokens.map(_.map(_.value).toSet).unsafeRunSync()
     assertEquals(retainedOnly, Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, retainedSubject)))
 
     val pendingSubject = UUID.randomUUID().toString
@@ -130,12 +125,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val processingSubject = UUID.randomUUID().toString
     requests.insertOne(new Document("_id", processingSubject).append("state", "Processing"))
 
-    val tokens = source
-      .activeSubjectTokens(spark)
-      .flatMap { frame =>
-        IO.blocking(frame.select("subjectToken").collect().map(_.getString(0)).toSet)
-      }
-      .unsafeRunSync()
+    val tokens = source.activeSubjectTokens.map(_.map(_.value).toSet).unsafeRunSync()
 
     assertEquals(
       tokens,
@@ -159,12 +149,10 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     val source = new MongoActiveDeletionMarkerSource[IO](
       mongo4catsDatabase(database.getName),
       pseudonymizer,
-      streams = AnalyticsTestOperationalConfig.streams,
-      sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-        .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+      streams = AnalyticsTestOperationalConfig.streams
     )
 
-    val error = intercept[AnalyticsError](source.activeSubjectTokens(spark).unsafeRunSync())
+    val error = intercept[AnalyticsError](source.activeSubjectTokens.unsafeRunSync())
     assertEquals(error, AnalyticsError.MalformedMarker)
   }
 
@@ -178,9 +166,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       new MongoActiveDeletionMarkerSource[IO](
         mongo4catsDatabase(missingCollectionDatabase.getName),
         pseudonymizer,
-        streams = AnalyticsTestOperationalConfig.streams,
-        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+        streams = AnalyticsTestOperationalConfig.streams
       )
     )
     val missingManifest = manifest("missing-markers")
@@ -208,9 +194,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       new MongoActiveDeletionMarkerSource[IO](
         mongo4catsDatabase(malformedDatabase.getName),
         pseudonymizer,
-        streams = AnalyticsTestOperationalConfig.streams,
-        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+        streams = AnalyticsTestOperationalConfig.streams
       )
     )
 
@@ -237,9 +221,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       mongo4catsDatabase(database.getName),
       pseudonymizer,
       maximumPendingMarkers = 1,
-      streams = AnalyticsTestOperationalConfig.streams,
-      sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-        .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+      streams = AnalyticsTestOperationalConfig.streams
     )
     val batch = AnalyticsBatchTestSupport.newBatch(paths, pseudonymizer, markers)
     val overflowManifest = manifest("overflow-markers")
@@ -273,9 +255,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
         new MongoActiveDeletionMarkerSource[IO](
           unavailableCatsClient.getDatabase(s"unavailable_${UUID.randomUUID()}").unsafeRunSync(),
           pseudonymizer,
-          streams = AnalyticsTestOperationalConfig.streams,
-          sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-            .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+          streams = AnalyticsTestOperationalConfig.streams
         )
       )
       val unavailableManifest = manifest("unavailable-markers")
@@ -311,11 +291,9 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       new MongoActiveDeletionMarkerSource[IO](
         database,
         pseudonymizer,
-        streams = AnalyticsTestOperationalConfig.streams,
-        sparkExecution = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
-          .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
+        streams = AnalyticsTestOperationalConfig.streams
       )
-    val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeSubjectTokens(spark).unsafeRunSync())
+    val failure = intercept[AnalyticsError.MarkerStorageFailure](source.activeSubjectTokens.unsafeRunSync())
     assert(failure.getCause.isInstanceOf[IllegalStateException], "assertion failed")
   }
 }

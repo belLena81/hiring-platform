@@ -91,4 +91,19 @@ final class AnalyticsLayeringSpec extends FunSuite {
       assert(classOf[IOApp].isAssignableFrom(Class.forName(className)))
     }
   }
+
+  test("batch and erasure orchestration live in service, not the Spark adapter") {
+    assertEquals(
+      Class.forName("com.example.hiring.analytics.service.batch.HiringAnalyticsBatch").getName,
+      "com.example.hiring.analytics.service.batch.HiringAnalyticsBatch"
+    )
+    assertEquals(
+      Class.forName("com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker").getName,
+      "com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker"
+    )
+    intercept[ClassNotFoundException](Class.forName("com.example.hiring.analytics.adapter.spark.HiringAnalyticsBatch"))
+    intercept[ClassNotFoundException](
+      Class.forName("com.example.hiring.analytics.adapter.spark.AnalyticsErasureWorker")
+    )
+  }
 }

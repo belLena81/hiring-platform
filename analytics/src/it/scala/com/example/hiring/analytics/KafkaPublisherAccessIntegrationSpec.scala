@@ -192,11 +192,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         uncertainFencingCompleted = new AtomicBoolean(false)
         uncertainFencer = new TransactionalProducerFencer[IO] {
           override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
-            KafkaProducerFencer[IO].fence(connection, transactionalIds).flatMap { _ =>
-              IO.delay(uncertainFencingCompleted.set(true)) *> IO.raiseError(
-                new java.util.concurrent.TimeoutException("simulated client timeout after broker accepted fencing")
-              )
-            }
+            KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
+              .fence(connection, transactionalIds)
+              .flatMap { _ =>
+                IO.delay(uncertainFencingCompleted.set(true)) *> IO.raiseError(
+                  new java.util.concurrent.TimeoutException("simulated client timeout after broker accepted fencing")
+                )
+              }
         }
         uncertainWorker = AnalyticsErasureWorkerTestSupport.worker(
           null,
@@ -236,7 +238,9 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         retryFenced = new AtomicBoolean(false)
         correctFencer = new TransactionalProducerFencer[IO] {
           override def fence(connection: KafkaConnection, transactionalIds: Vector[String]): IO[Unit] =
-            KafkaProducerFencer[IO].fence(connection, transactionalIds).flatTap(_ => IO.delay(retryFenced.set(true)))
+            KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
+              .fence(connection, transactionalIds)
+              .flatTap(_ => IO.delay(retryFenced.set(true)))
         }
         retryWorker = AnalyticsErasureWorkerTestSupport.worker(
           null,
@@ -370,7 +374,11 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
             val firstAttempt =
               interruptedBroker match {
                 case Some(broker) =>
-                  KafkaProducerFencer.fenceAfterSubmission[IO](connection, transactionalIds) { future =>
+                  KafkaProducerFencer.fenceAfterSubmission[IO](
+                    connection,
+                    transactionalIds,
+                    AnalyticsBatchTestSupport.driverExecution
+                  ) { future =>
                     IO.raiseWhen(future.isDone)(
                       new AssertionError("AdminClient fencing completed before broker outage")
                     ) *>
@@ -401,7 +409,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
                     finally socket.close()
                   }
                 case None =>
-                  KafkaProducerFencer[IO].fence(
+                  KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution).fence(
                     connection.copy(saslPassword = Some(fencerPassword + "-invalid")),
                     transactionalIds
                   )
@@ -411,8 +419,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
                 IO(firstFailure.set(error)) *> IO.raiseError(error)
             }
           } else
-            interruptedBroker.fold(KafkaProducerFencer[IO].fence(connection, transactionalIds))(broker =>
-              KafkaProducerFencer[IO]
+            interruptedBroker.fold(
+              KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution).fence(connection, transactionalIds)
+            )(broker =>
+              KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
                 .fence(connection.copy(bootstrapServers = broker.getBootstrapServers), transactionalIds)
             )
       }
@@ -525,7 +535,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         stalePublisher
           .send(new ProducerRecord(topic, "acl-evidence", "pending-publisher-write"))
           .get(30, TimeUnit.SECONDS)
-        KafkaProducerFencer[IO]
+        KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
           .fence(
             KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
             Vector(transactionalId)
@@ -540,7 +550,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         assert(staleCommit.exists(hasProducerFencingFailure), clues(staleCommit))
       } finally stalePublisher.close(Duration.ofSeconds(5))
 
-      val unauthorizedFence = KafkaProducerFencer[IO]
+      val unauthorizedFence = KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
         .fence(
           KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(readerPassword)),
           Vector(transactionalId)
@@ -549,7 +559,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         .unsafeRunSync()
       assert(unauthorizedFence.swap.toOption.exists(hasKafkaAuthorizationFailure), clues(unauthorizedFence))
 
-      val badFencerCredential = KafkaProducerFencer[IO]
+      val badFencerCredential = KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
         .fence(
           KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
           Vector(transactionalId)

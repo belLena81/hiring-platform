@@ -21,14 +21,9 @@ import fs2.kafka.producer.MkProducer
 import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.producer.ProducerConfig
-import org.apache.kafka.common.serialization.ByteArraySerializer
 import retry.{HandlerDecision, RetryPolicies, retryingOnErrors}
 
-import java.nio.file.{Files, LinkOption, Path}
 import java.time.Instant
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import scala.jdk.CollectionConverters.*
 import scala.concurrent.duration.*
 
 object OperationalEventKafkaRuntime {
@@ -53,8 +48,7 @@ object OperationalEventKafkaRuntime {
       outbox: OperationalEventOutboxRepository,
       diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
-    val producerFactory = PublisherCommitProof.fromEnvironment.fold(MkProducer.mkProducerForSync[IO])(_.producerFactory)
-    given MkProducer[IO] = producerFactory
+    given MkProducer[IO] = MkProducer.mkProducerForSync[IO]
     val baseSettings =
       ProducerSettings(
         keySerializer = Serializer[IO, String],
@@ -344,61 +338,4 @@ object OperationalEventKafkaRuntime {
   private final case class ProducerGenerationFenced(cause: Throwable)
       extends RuntimeException("transactional producer generation was fenced", cause)
 
-  /** Local Compose proof gate. The real Kafka send has completed when fs2-kafka invokes commitTransaction. */
-  private final class PublisherCommitProof private (directory: Path) {
-    private val armed = directory.resolve("armed")
-    private val held = directory.resolve("held")
-    private val release = directory.resolve("release")
-    private val result = directory.resolve("result")
-    private val maxWaitNanos = 120.seconds.toNanos
-    private val heldOnce = new AtomicBoolean(false)
-
-    val producerFactory: MkProducer[IO] = new MkProducer[IO] {
-      override def apply[G[_]](settings: ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] = IO.delay {
-        new org.apache.kafka.clients.producer.KafkaProducer[Array[Byte], Array[Byte]](
-          settings.properties.asJava,
-          new ByteArraySerializer,
-          new ByteArraySerializer
-        ) {
-          override def commitTransaction(): Unit = {
-            val hold = Files.exists(armed) && heldOnce.compareAndSet(false, true)
-            if (hold) {
-              Files.writeString(held, "open-transaction-before-commit")
-              val deadline = System.nanoTime() + maxWaitNanos
-              while (!Files.exists(release) && System.nanoTime() < deadline)
-                TimeUnit.MILLISECONDS.sleep(50)
-              if (!Files.exists(release)) {
-                Files.writeString(result, "timeout")
-                throw new IllegalStateException("local publisher proof release timed out")
-              }
-            }
-            try {
-              super.commitTransaction()
-              if (hold) {
-                val _ = Files.writeString(result, "committed")
-              }
-            } catch {
-              case error: Throwable =>
-                if (hold) {
-                  val _ = Files.writeString(result, if (isProducerFenced(error)) "fenced" else "other-failure")
-                }
-                throw error
-            }
-          }
-        }
-      }
-    }
-  }
-
-  private object PublisherCommitProof {
-    def fromEnvironment: Option[PublisherCommitProof] =
-      sys.env.get("HIRING_ACCOUNT_DELETION_PUBLISHER_PROOF_DIR").map { raw =>
-        val root = Path.of(".local/data/account-deletion-compose-proof").toAbsolutePath.normalize()
-        val directory = Path.of(raw).toAbsolutePath.normalize()
-        require(directory.startsWith(root) && directory.getFileName.toString == "publisher")
-        require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS))
-        require(directory.toRealPath() == directory)
-        new PublisherCommitProof(directory)
-      }
-  }
 }

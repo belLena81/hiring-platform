@@ -29,9 +29,6 @@ chmod 700 "$proof_data_dir"
 # Host Spark and the rootless Compose worker share only this nonce-scoped tree.
 mkdir -p "$proof_data_dir/lakehouse"
 chmod 777 "$proof_data_dir/lakehouse"
-publisher_proof_dir="$proof_data_dir/publisher"
-mkdir -p "$publisher_proof_dir"
-chmod 700 "$publisher_proof_dir"
 read -r mongo_port kafka_port api_port < <(python3 -c 'import socket; ss=[]
 for _ in range(3):
  s=socket.socket(); s.bind(("127.0.0.1",0)); ss.append(s)
@@ -85,7 +82,6 @@ export HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID
 export HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64
 export KAFKA_TOPIC="$topic"
 export KAFKA_FENCER_PASSWORD
-export HIRING_ACCOUNT_DELETION_PUBLISHER_PROOF_DIR="$publisher_proof_dir"
 "${compose[@]}" up -d --wait mongodb kafka kafka-acl-init
 
 cat > "$config" <<EOF

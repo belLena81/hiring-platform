@@ -4,8 +4,10 @@ import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 
 import com.example.hiring.analytics.domain.AnalyticsRunManifest
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsManifestStatus
 
 import cats.effect.Async
+import cats.effect.Resource
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
 import io.delta.tables.DeltaTable
@@ -24,35 +26,51 @@ private[spark] final class AnalyticsBatchIngestionStage[F[_]: Async](ports: Inge
       source: BoundedOperationalEventSource[F],
       manifest: AnalyticsRunManifest,
       markerTokens: DataFrame
-  ): F[AnalyticsBronzeInput] =
-    for {
-      raw <- source.read(spark, manifest)
-      rawSchema <- blocking(raw.schema)
-      _ <- KafkaRecordColumns.validate(rawSchema)
-      _ <- source.verifyOffsets(raw, manifest)
-      _ <- validateRunIdentity(spark, manifest)
-      parsed <- blocking(OperationalEventTransforms.parseKafkaRecords(raw))
-      valid <- blocking(OperationalEventTransforms.validEvents(parsed))
-      pseudonymized <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
-      safeToPersist <- blocking.either(
-        AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens)
-      )
-      startedAt <- clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
-      incoming <- blocking(
-        deltaWriter.withExpiry(
-          OperationalEventTransforms.bronze(safeToPersist),
-          startedAt,
-          retention.bronzeDays.value
-        )
-      )
-      recordCount <- blocking(raw.count())
-      _ <- manifestStore.persist(spark, manifest, "STARTED", startedAt.toString)
-      _ <- deltaWriter.merge(
-        incoming,
-        paths.bronze,
-        "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
-      )
-    } yield AnalyticsBronzeInput(parsed, startedAt, recordCount)
+  ): Resource[F, AnalyticsBronzeInput] =
+    Resource
+      .make(
+        for {
+          raw <- source.read(spark, manifest)
+          rawSchema <- blocking(raw.schema)
+          _ <- KafkaRecordColumns.validate(rawSchema)
+          parsed <- blocking(OperationalEventTransforms.parseKafkaRecords(raw).persist())
+        } yield parsed
+      )(parsed => blocking(parsed.unpersist(blocking = true)).void)
+      .evalMap { parsed =>
+        for {
+          _ <- source.verifyOffsets(parsed, manifest)
+          _ <- validateRunIdentity(spark, manifest)
+          valid <- blocking(OperationalEventTransforms.validEvents(parsed))
+          pseudonymized <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
+          safeToPersist <- blocking.either(
+            AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens)
+          )
+          startedAt <- clock.realTime.map(duration => Instant.ofEpochMilli(duration.toMillis))
+          incoming <- blocking(
+            deltaWriter.withExpiry(
+              OperationalEventTransforms.bronze(safeToPersist),
+              startedAt,
+              retention.bronzeDays.value
+            )
+          )
+          counts <- blocking {
+            val row = parsed
+              .agg(
+                count(lit(1)).as("recordCount"),
+                count(when(OperationalEventTransforms.isValidEvent, lit(1))).as("validCount"),
+                count(when(!OperationalEventTransforms.isValidEvent, lit(1))).as("malformedCount")
+              )
+              .head()
+            (row.getLong(0), row.getLong(1), row.getLong(2))
+          }
+          _ <- manifestStore.persist(manifest, AnalyticsManifestStatus.Started, startedAt)
+          _ <- deltaWriter.merge(
+            incoming,
+            paths.bronze,
+            "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
+          )
+        } yield AnalyticsBronzeInput(parsed, startedAt, counts._1, counts._2, counts._3)
+      }
 
   private def validateRunIdentity(spark: SparkSession, manifest: AnalyticsRunManifest): F[Unit] = blocking.either {
     if (DeltaTable.isDeltaTable(spark, paths.manifests)) {

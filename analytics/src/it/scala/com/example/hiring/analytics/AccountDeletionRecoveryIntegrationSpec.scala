@@ -327,7 +327,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                 }
                 retention = new KafkaRetention[IO] {
                   override def capture(connection: KafkaConnection, name: String): IO[KafkaRetentionBarrier] =
-                    KafkaRetentionAdapter.capture(connection, name)
+                    KafkaRetentionAdapter.capture(connection, name, AnalyticsBatchTestSupport.driverExecution)
                   override def retentionPassed(
                       connection: KafkaConnection,
                       barrier: KafkaRetentionBarrier
@@ -339,18 +339,23 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                     attempt.updateAndGet(_ + 1).flatMap {
                       case 1 =>
                         val invalid = connection.copy(saslPassword = connection.saslPassword.map(_ + "-invalid"))
-                        KafkaProducerFencer[IO].fence(invalid, ids).attempt.flatMap {
-                          case Left(error)
-                              if Iterator
-                                .iterate(error)(_.getCause)
-                                .takeWhile(_ != null)
-                                .exists(_.isInstanceOf[AuthenticationException]) =>
-                            firstFailure.complete(()) *> IO.raiseError(error)
-                          case _ => IO.raiseError(new AssertionError("bad fencer credentials were not rejected"))
-                        }
+                        KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
+                          .fence(invalid, ids)
+                          .attempt
+                          .flatMap {
+                            case Left(error)
+                                if Iterator
+                                  .iterate(error)(_.getCause)
+                                  .takeWhile(_ != null)
+                                  .exists(_.isInstanceOf[AuthenticationException]) =>
+                              firstFailure.complete(()) *> IO.raiseError(error)
+                            case _ => IO.raiseError(new AssertionError("bad fencer credentials were not rejected"))
+                          }
                       case 2 =>
                         secondStarted
-                          .complete(()) *> continueSecond.get *> KafkaProducerFencer[IO].fence(connection, ids)
+                          .complete(()) *> continueSecond.get *> KafkaProducerFencer[IO](
+                          AnalyticsBatchTestSupport.driverExecution
+                        ).fence(connection, ids)
                       case _ => IO.raiseError(new AssertionError("unexpected additional fence attempt"))
                     }
                 }

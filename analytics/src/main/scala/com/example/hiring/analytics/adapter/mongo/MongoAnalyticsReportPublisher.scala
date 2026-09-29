@@ -375,7 +375,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
         val completion = rawDatabase.getCollection(AnalyticsCollections.ErasureCompletions, classOf[Document])
         for {
           request <- lift(streams.optional(erasureRequests.find(session.underlying, requestFilter).first))
-          requestDoc <- result(request.toRight(AnalyticsError.ErasureNotReady))
+          requestDoc <- result(request.toRight(AnalyticsError.GuardedErasurePublicationRejected))
           receiptId <- result {
             import BsonValueDecoder.given
             BsonDecoder.optional[String](
@@ -389,9 +389,9 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               users.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, claim.requestId.value)).first
             )
           )
-          userDoc <- result(user.toRight(AnalyticsError.ErasureNotReady))
+          userDoc <- result(user.toRight(AnalyticsError.GuardedErasurePublicationRejected))
           accountStatus <- result(requiredString(userDoc, AnalyticsCollections.Fields.AccountStatus))
-          _ <- result(Either.cond(accountStatus == "Deleted", (), AnalyticsError.ErasureNotReady))
+          _ <- result(Either.cond(accountStatus == "Deleted", (), AnalyticsError.GuardedErasurePublicationRejected))
           fence <- lift(
             streams.optional(
               fences
@@ -405,9 +405,9 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                 .first
             )
           )
-          _ <- result(Either.cond(fence.nonEmpty, (), AnalyticsError.ErasureNotReady))
+          _ <- result(Either.cond(fence.nonEmpty, (), AnalyticsError.GuardedErasurePublicationRejected))
           nonReadyCount <- lift(streams.one(erasureRequests.countDocuments(session.underlying, nonReadyOther)))
-          _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.ErasureNotReady))
+          _ <- result(Either.cond(nonReadyCount == 0L, (), AnalyticsError.GuardedErasurePublicationRejected))
           currentSnapshotRecord <- lift(
             streams.optional(
               snapshots.find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "current")).first
@@ -525,7 +525,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               )
             )
           )
-          _ <- result(Either.cond(completed, (), AnalyticsError.ErasureNotReady))
+          _ <- result(Either.cond(completed, (), AnalyticsError.GuardedErasurePublicationRejected))
           updates = receiptId.fold(
             Updates.combine(
               Updates.setOnInsert(AnalyticsCollections.Fields.Id, claim.requestId.value),

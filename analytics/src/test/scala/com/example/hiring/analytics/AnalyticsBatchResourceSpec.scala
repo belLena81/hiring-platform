@@ -14,7 +14,7 @@ import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
-import cats.effect.{Deferred, IO}
+import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 import cats.effect.unsafe.implicits.global
 import cats.syntax.all.*
@@ -23,6 +23,9 @@ import munit.FunSuite
 import org.apache.spark.sql.SparkSession
 
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import org.apache.spark.scheduler.{SparkListener, SparkListenerJobStart}
 import scala.concurrent.duration.*
 
 class AnalyticsBatchResourceSpec extends FunSuite {
@@ -33,20 +36,89 @@ class AnalyticsBatchResourceSpec extends FunSuite {
         for {
           first <- execution(Thread.currentThread().getName)
           second <- execution(Thread.currentThread().getName)
+          kafkaDriver <- execution.blocking(Thread.currentThread().getName)
           expected <- execution.either(Right("expected result"))
           rejected <- execution
             .either[Unit](Left(AnalyticsError.InvalidConfiguration("expected rejection")))
             .attempt
           failed <- execution(throw new IllegalStateException("injected Spark failure")).attempt
-        } yield (first, second, expected, rejected, failed)
+        } yield (first, second, kafkaDriver, expected, rejected, failed)
       }
       .unsafeRunSync()
 
     assertEquals(result._1, "analytics-spark-driver")
     assertEquals(result._2, "analytics-spark-driver")
-    assertEquals(result._3, "expected result")
-    assert(result._4.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
-    assert(result._5.left.exists(_.isInstanceOf[IllegalStateException]))
+    assertEquals(result._3, "analytics-spark-driver")
+    assertEquals(result._4, "expected result")
+    assert(result._5.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
+    assert(result._6.left.exists(_.isInstanceOf[IllegalStateException]))
+  }
+
+  test("canceling a Spark action cancels its job group and releases the driver executor") {
+    val result = com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+      .resource[IO]
+      .use { execution =>
+        Resource
+          .make(
+            execution {
+              org.apache.spark.sql.classic.SparkSession
+                .builder()
+                .master("local[2]")
+                .appName("AnalyticsSparkCancellationSpec")
+                .config("spark.ui.enabled", "false")
+                .getOrCreate()
+            }
+          )(spark => execution(spark.stop()))
+          .use { spark =>
+            val jobStarted = new CountDownLatch(1)
+            val listener = new SparkListener {
+              override def onJobStart(event: SparkListenerJobStart): Unit = jobStarted.countDown()
+            }
+            val context = spark.sparkContext
+            for {
+              _ <- execution.attachSparkContext(context)
+              successfulGroup <- execution(Option(context.getLocalProperty("spark.jobGroup.id")))
+              groupAfterSuccess <- execution.blocking(Option(context.getLocalProperty("spark.jobGroup.id")))
+              expectedFailure = new IllegalStateException("injected Spark failure")
+              failed <- execution[Unit](throw expectedFailure).attempt
+              groupAfterFailure <- execution.blocking(Option(context.getLocalProperty("spark.jobGroup.id")))
+              _ <- IO.delay(context.addSparkListener(listener))
+              fiber <- execution {
+                context
+                  .parallelize(Seq(1), 1)
+                  .mapPartitions { values =>
+                    values.map { value =>
+                      try Thread.sleep(TimeUnit.DAYS.toMillis(1L))
+                      catch { case _: InterruptedException => () }
+                      value
+                    }
+                  }
+                  .count()
+              }.start
+              started <- IO.blocking(jobStarted.await(10L, TimeUnit.SECONDS))
+              _ <- IO(assert(started, "Spark action did not start"))
+              _ <- fiber.cancel
+              groupAfterCancellation <- execution.blocking(Option(context.getLocalProperty("spark.jobGroup.id")))
+              next <- execution("driver executor available").timeout(10.seconds)
+              _ <- IO.delay(context.removeSparkListener(listener))
+            } yield (
+              successfulGroup,
+              groupAfterSuccess,
+              failed.swap.toOption.exists(_ eq expectedFailure),
+              groupAfterFailure,
+              groupAfterCancellation,
+              next
+            )
+          }
+      }
+      .unsafeRunSync()
+
+    assert(result._1.exists(_.nonEmpty), "Spark work should receive a job group")
+    assertEquals(result._2, None)
+    assert(result._3, "the injected Spark failure should be preserved")
+    assertEquals(result._4, None)
+    assertEquals(result._5, None)
+    assertEquals(result._6, "driver executor available")
   }
 
   test("process-local test lock serializes same-process access") {

@@ -143,7 +143,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .toEither
         .fold(errors => throw new AssertionError(errors.toString), identity)
       val openTransactionAvailability = KafkaOffsetRangeSource
-        .verifyAvailable[IO](connection, openTransactionManifest)
+        .verifyAvailable[IO](connection, openTransactionManifest, AnalyticsBatchTestSupport.driverExecution)
         .attempt
         .unsafeRunSync()
       assert(
@@ -151,7 +151,7 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         clues(openTransactionAvailability)
       )
 
-      KafkaProducerFencer[IO]
+      KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
         .fence(
           localKafkaConnection(kafka.getBootstrapServers, fencerUsername, fencerPassword),
           Vector(transactionalId)
@@ -192,7 +192,9 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .getOrCreate()
-      val barrier = KafkaRetentionAdapter.capture[IO](connection, topic).unsafeRunSync()
+      val barrier = KafkaRetentionAdapter
+        .capture[IO](connection, topic, AnalyticsBatchTestSupport.driverExecution)
+        .unsafeRunSync()
       val endOffset = barrier.partitions.head.endOffsetExclusive
       val manifest = AnalyticsRunManifest
         .validated(
@@ -218,6 +220,8 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
           spark,
           new KafkaOffsetRangeSource(
             connection,
+            com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
+              .forTests[IO](scala.concurrent.ExecutionContext.parasitic),
             com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
               .forTests[IO](scala.concurrent.ExecutionContext.parasitic)
           ),
