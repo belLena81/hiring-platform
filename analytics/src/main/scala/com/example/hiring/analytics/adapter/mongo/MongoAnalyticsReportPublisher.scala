@@ -8,6 +8,7 @@ import com.example.hiring.analytics.domain.RangeFingerprint
 import com.example.hiring.analytics.domain.RunId
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsReportPublisher
+import com.example.hiring.analytics.service.batch.AnalyticsReportPublicationReceipt
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 import com.example.hiring.analytics.service.erasure.ErasureClaim
 import com.example.hiring.analytics.service.erasure.ErasurePhase
@@ -258,6 +259,63 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
       expiresAt: Instant
   ): F[Unit] =
     rethrow(publishResult(reservation, report, expiresAt))
+
+  override def publicationReceipt(
+      reservation: AnalyticsReportReservation
+  )(using cats.Applicative[F]): F[AnalyticsReportPublicationReceipt] =
+    rethrow(publicationReceiptResult(reservation))
+
+  private def publicationReceiptResult(
+      reservation: AnalyticsReportReservation
+  ): Result[AnalyticsReportPublicationReceipt] = withCollections { collections =>
+    transactional { session =>
+      for {
+        runRecord <- lift(
+          streams.optional(
+            collections.reservations.underlying
+              .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, reservation.runId.value))
+              .projection(reservationProjection)
+              .first
+          )
+        )
+        receipt <- runRecord match {
+          case None         => EitherT.pure[F, AnalyticsError](AnalyticsReportPublicationReceipt.Absent)
+          case Some(record) =>
+            result(MongoAnalyticsReportRecords.decodeRun(record)).flatMap { decoded =>
+              if (decoded.reservation != reservation)
+                reject(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
+              else if (decoded.state != "Published")
+                EitherT.pure[F, AnalyticsError](AnalyticsReportPublicationReceipt.Absent)
+              else
+                for {
+                  controlRecord <- lift(
+                    streams.optional(
+                      collections.control.underlying
+                        .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
+                        .projection(controlProjection)
+                        .first
+                    )
+                  )
+                  control <- result(
+                    controlRecord.traverse(MongoAnalyticsReportRecords.decodeControl)
+                  )
+                  snapshotRecord <- lift(readSnapshot(session, collections.snapshots))
+                  snapshot <- result(snapshotRecord.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
+                  now <- lift(clock.realTimeInstant)
+                  isCurrent = control.exists(value =>
+                    value.generation == reservation.generation &&
+                      value.state == "Published" &&
+                      value.lastPublishedRevision == reservation.revision &&
+                      value.lastRunId.contains(reservation.runId.value)
+                  ) && snapshot.exists(value => value.matches(reservation) && value.expiresAt.exists(_.isAfter(now)))
+                } yield
+                  if (isCurrent) AnalyticsReportPublicationReceipt.CurrentGeneration
+                  else AnalyticsReportPublicationReceipt.Superseded
+            }
+        }
+      } yield receipt
+    }
+  }
 
   private def publishResult(
       reservation: AnalyticsReportReservation,

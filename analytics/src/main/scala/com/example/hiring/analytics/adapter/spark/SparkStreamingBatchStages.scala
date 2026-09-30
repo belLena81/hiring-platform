@@ -5,7 +5,11 @@ import cats.syntax.all.*
 import com.example.hiring.analytics.config.{AnalyticsPositiveInt, AnalyticsRetentionSettings}
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsReportPublisher}
+import com.example.hiring.analytics.service.batch.{
+  AnalyticsLakehousePaths,
+  AnalyticsReportPublicationReceipt,
+  AnalyticsReportPublisher
+}
 import com.example.hiring.analytics.service.streaming.*
 import io.delta.tables.DeltaTable
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
@@ -102,6 +106,18 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       deletionSuppressedCount: Long,
       newlyAdmittedOpenFacts: DataFrame
   )
+
+  override def publicationReceipt(
+      preparation: StreamingInputPreparation,
+      decision: StreamingDecisionRevision
+  )(using cats.Applicative[F]): F[AnalyticsReportPublicationReceipt] =
+    for {
+      _ <- authorizePublication
+      runId <- F.fromEither(streamRunId(decision))
+      rangeFingerprint <- F.fromEither(streamRangeFingerprint(preparation, decision))
+      reservation <- reportPublisher.reserve(runId, rangeFingerprint, preparation.observedAt)
+      receipt <- reportPublisher.publicationReceipt(reservation)
+    } yield receipt
 
   override def assess(
       preparation: StreamingInputPreparation,
