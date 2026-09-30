@@ -123,6 +123,16 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         )
         newer <- publisher.reserve(asRunId("newer"), asFingerprint("range-newer"), now)
         _ <- publisher.publish(newer, report, expiry)
+        currentReceipt <- publisher.publicationReceipt(newer)
+        _ <- IO.raiseWhen(currentReceipt != AnalyticsReportPublicationReceipt.CurrentGeneration)(
+          new AssertionError("a visible guarded publication did not produce a current receipt")
+        )
+        conflictingReceipt <- publisher
+          .publicationReceipt(newer.copy(rangeFingerprint = asFingerprint("other-range")))
+          .attempt
+        _ <- IO.raiseWhen(!conflictingReceipt.left.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
+          new AssertionError("a publication receipt accepted a conflicting range fingerprint")
+        )
         stale <- publisher.publish(older, report.copy(asOf = now.plusMillis(1)), expiry).attempt
         _ <- IO.raiseWhen(!stale.left.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
           new AssertionError("an older revision replaced a newer publication")
@@ -143,6 +153,10 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         hidden <- publisher.publish(hiddenRun, report.copy(asOf = now.plusMillis(2)), expiry).attempt
         _ <- IO.raiseWhen(!hidden.left.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
           new AssertionError("normal publication was accepted while report control was Hidden")
+        )
+        supersededReceipt <- publisher.publicationReceipt(newer)
+        _ <- IO.raiseWhen(supersededReceipt != AnalyticsReportPublicationReceipt.Superseded)(
+          new AssertionError("a receipt from a hidden prior generation was treated as current")
         )
         refreshed <- publisher.reserve(asRunId("older"), asFingerprint("range-older"), now.plusMillis(2))
         _ <- IO.raiseWhen(refreshed.generation != 1L || refreshed.revision <= retryAfterNewer.revision)(
