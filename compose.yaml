@@ -94,6 +94,7 @@ services:
     environment:
       ANALYTICS_RUN_ID: ${ANALYTICS_RUN_ID:-}
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
       ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
       # Local Compose broker only: credentials are unencrypted on this private Compose network.
       ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
@@ -129,6 +130,7 @@ services:
     environment:
       ANALYTICS_JOB: erasure-worker
       SPARK_MASTER: ${SPARK_MASTER:-local[*]}
+      ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
       ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
       # Local Compose broker only: credentials are unencrypted on this private Compose network.
       ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT

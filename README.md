@@ -48,6 +48,8 @@ ANALYTICS_RUN_ID=local-001 \
 
 The batch reads up to 100,000 pending account-erasure markers before it mutates Delta data. With active markers it purges marked Delta rows, rebuilds Gold, and leaves the report hidden until the erasure worker completes the full lifecycle.
 
+Continuous Hiring Analytics implementation is underway with domain and configuration contracts; no streaming query or Compose service is enabled. See [the Phase 7 specification](docs/specs/continuous-hiring-analytics.md). Activation depends on closing the real-horizon Phase 6 retention, writer-exclusion, HMAC-retirement, audit, and independent-signoff gates.
+
 ### Local analytics erasure worker
 
 Run the API at least once so MongoDB migrations and analytics control collections are initialized. Keep the API process running, then start the worker in another terminal:

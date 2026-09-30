@@ -111,6 +111,17 @@ private[analytics] object AnalyticsMongoRecords {
       evidenceDigest: String,
       authorizedAt: Instant
   )
+  final case class StreamingActivation(
+      _id: String,
+      streamId: String,
+      sourceIdentity: String,
+      lakehouseId: String,
+      contractFingerprint: String,
+      settingsFingerprint: String,
+      evidenceReferences: Vector[String],
+      independentReviewerReferences: Vector[String],
+      evidenceDigest: String
+  )
   final case class UserAccountStatus(_id: String, accountStatus: String)
   final case class LakehouseLock(_id: String, ownerToken: String, acquiredAt: Instant)
 
@@ -203,6 +214,7 @@ private[analytics] object AnalyticsMongoRecords {
   val reportRunRegistry: CodecRegistry = registry[ReportRun](Set("generation", "revision"))
   val reportSnapshotRegistry: CodecRegistry = registry[ReportSnapshotMetadata](Set("generation", "revision"))
   val hmacAuthorizationRegistry: CodecRegistry = registry[HmacAuthorization]()
+  val streamingActivationRegistry: CodecRegistry = registry[StreamingActivation]()
   val userAccountStatusRegistry: CodecRegistry = registry[UserAccountStatus]()
   val lakehouseLockRegistry: CodecRegistry = registry[LakehouseLock]()
 }

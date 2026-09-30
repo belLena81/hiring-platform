@@ -71,6 +71,25 @@ object KafkaOffsetRangeSource {
       })(client => driverExecution.blocking(client.close()).void)
     } yield client
 
+  private[analytics] def availablePartitions[F[_]: Async](
+      connection: KafkaConnection,
+      topic: AnalyticsTopic,
+      driverExecution: SparkBlockingExecution[F]
+  ): F[Set[Int]] =
+    consumer[F](connection, driverExecution).use { client =>
+      driverExecution
+        .blocking(
+          Option(client.partitionsFor(AnalyticsTopic.unwrap(topic))).toVector
+            .flatMap(_.asScala)
+            .map(_.partition())
+            .toSet
+        )
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
+    }
+
   private[analytics] def verifyAvailable[F[_]: Async](
       connection: KafkaConnection,
       manifest: AnalyticsRunManifest,

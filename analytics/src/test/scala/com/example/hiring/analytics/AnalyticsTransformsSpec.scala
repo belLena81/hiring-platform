@@ -133,6 +133,50 @@ class AnalyticsTransformsSpec extends FunSuite {
     assertEquals(OperationalEventTransforms.bronze(source).count(), 1L)
   }
 
+  test("parsed-frame ingestion persists Bronze coordinates without a batch manifest") {
+    val lakehouseRoot = Files.createTempDirectory("analytics-streaming-bronze-").toUri.toString
+    val paths = AnalyticsLakehousePaths.from(lakehouseRoot).toEither.fold(errors => fail(errors.toString), identity)
+    val deltaWriter = new DeltaBatchWriter[IO](paths, sparkExecution)
+    val manifestStore = new AnalyticsRunManifestStore[IO] {
+      override def persist(
+          manifest: AnalyticsRunManifest,
+          status: AnalyticsManifestStatus,
+          updatedAt: Instant
+      ): IO[Unit] =
+        fail("parsed-frame ingestion must not create a batch manifest")
+    }
+    val stage = new AnalyticsBatchIngestionStage[IO](
+      paths,
+      pseudonymizer,
+      sparkExecution,
+      manifestStore,
+      deltaWriter,
+      AnalyticsTestOperationalConfig.operational.retention
+    )
+    val payload = event("event-stream", "APPLICATION_CREATED")
+    val parsed = OperationalEventTransforms.parseKafkaRecords(
+      records(
+        Seq(
+          ("hiring.operational-events", 0, 7L, payload),
+          ("hiring.operational-events", 0, 7L, payload)
+        )
+      )
+    )
+    val observedAt = Instant.parse("2026-09-30T10:00:00Z")
+
+    val result = stage
+      .persistParsed(spark, parsed, emptyMarkers, IO.unit, IO.pure(observedAt), _ => IO.unit)
+      .unsafeRunSync()
+
+    assertEquals(result.records, 2L)
+    assertEquals(result.validRecords, 2L)
+    assertEquals(spark.read.format("delta").load(paths.bronze).count(), 1L)
+    assertEquals(
+      spark.read.format("delta").load(paths.bronze).select("partition", "offset").head().getLong(1),
+      7L
+    )
+  }
+
   test("silver keeps identical event retries and quarantines conflicting event ids") {
     val same = event("event-1", "APPLICATION_CREATED")
     val conflict = event("event-1", "APPLICATION_STATUS_CHANGED")

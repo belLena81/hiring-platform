@@ -90,6 +90,7 @@ object AppModule {
           silverStage
         ),
         shared.lock,
+        new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
         common.operational
       )
       BatchProgram(
@@ -142,7 +143,12 @@ object AppModule {
   ): Resource[F, Shared[F]] =
     for {
       paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
-      (spark, client, sparkExecution) <- sparkMongo[F](common.mongoUri, common.sparkMaster, appName)
+      (spark, client, sparkExecution) <- sparkMongo[F](
+        common.mongoUri,
+        common.sparkMaster,
+        appName,
+        sparkLocalDirectory = common.sparkLocalDirectory
+      )
       database <- Resource.eval(mongoDatabase[F](client, common.mongoDatabase))
     } yield {
       val streams = new MongoPublisherStream(common.operational)
@@ -189,10 +195,11 @@ object AppModule {
       mongoUri: String,
       sparkMaster: String,
       appName: String,
-      sparkUiEnabled: Option[Boolean] = None
+      sparkUiEnabled: Option[Boolean] = None,
+      sparkLocalDirectory: String = "/var/lib/hiring-analytics/spark-temp"
   ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     managedSparkMongo(
-      execution => sparkSession(sparkMaster, appName, sparkUiEnabled, execution),
+      execution => sparkSession(sparkMaster, appName, sparkUiEnabled, sparkLocalDirectory, execution),
       mongoClient[F](mongoUri)
     )
 
@@ -236,6 +243,7 @@ object AppModule {
       master: String,
       appName: String,
       sparkUiEnabled: Option[Boolean],
+      sparkLocalDirectory: String,
       sparkExecution: SparkExecution[F]
   ): F[SparkSession] =
     sparkExecution {
@@ -243,6 +251,7 @@ object AppModule {
         .builder()
         .appName(appName)
         .master(master)
+        .config("spark.local.dir", sparkLocalDirectory)
       sparkUiEnabled.foreach(enabled => builder.config("spark.ui.enabled", enabled.toString))
       builder
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")

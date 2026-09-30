@@ -8,6 +8,10 @@ Completion requires local source-to-projection evidence, data-quality and retent
 
 The account-deletion workflow is Phase 6's cross-system saga candidate. Keep the existing durable receipt, erasure phases, and MongoDB transaction; finish forward recovery across publisher fencing, Kafka retention, Delta erasure, and guarded report publication. The account tombstone and elapsed retention cannot be compensated. Completion requires restart and failure recovery evidence, an operator-visible path for work that cannot progress, and the lakehouse specification's full retention and review gates. Do not add a generic saga framework to close this milestone.
 
+## Continuous Hiring Analytics (Phase 7)
+
+Phase 7 contract implementation is underway in [Continuous Hiring Analytics](specs/continuous-hiring-analytics.md). Its current slice defines validated streaming settings and pure event-time contracts only. Do not activate a query until Phase 6 has actual Kafka/Delta retention completion, external-writer exclusion, guarded HMAC retirement, final HAL-01–HAL-14 audit, and independent signoff. The configured 60-second trigger does not satisfy UC11's Bronze p95 under 30 seconds target; the 120-second report freshness target needs workload measurement.
+
 ## Interview Scheduling and Workflow Resilience (Phase 10)
 
 Add interview scheduling as a scoped hiring feature when an external calendar integration is introduced. The current `moveApplicationToInterview` status/history write remains a MongoDB transaction. Coordinate the new calendar reservation and candidate/recruiter notifications through a durable application-owned saga with idempotent steps, restart recovery, bounded retries, and observable failure state. Reserve the slot before committing the guarded status change; release it if that change fails. Send notifications after the status commits, and retry or reconcile uncertain delivery because a delivered notification cannot be recalled. Preserve authorization and the permitted application-status transitions.

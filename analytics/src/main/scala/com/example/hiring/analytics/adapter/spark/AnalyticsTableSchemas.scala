@@ -55,6 +55,29 @@ private[analytics] object AnalyticsTableSchemas {
     "status" -> StringType,
     "updatedAt" -> StringType
   )
+  val streamingProgress: Shape = Vector(
+    "lineage" -> StringType,
+    "batchId" -> LongType,
+    "observedAt" -> TimestampType,
+    "priorWatermark" -> TimestampType,
+    "preparedCandidateWatermark" -> TimestampType,
+    "inputFingerprint" -> StringType,
+    "deliveredOffsets" -> ArrayType(
+      StructType(
+        Vector(
+          StructField("topic", StringType, nullable = false),
+          StructField("partition", IntegerType, nullable = false),
+          StructField("minimumDeliveredOffset", LongType, nullable = false),
+          StructField("maximumDeliveredOffset", LongType, nullable = false),
+          StructField("deliveredRecordCount", LongType, nullable = false)
+        )
+      ),
+      containsNull = false
+    ),
+    "outcome" -> StringType,
+    "candidateWatermark" -> TimestampType,
+    "completedAt" -> TimestampType
+  )
   val quarantine: Shape = Vector(
     Columns.Topic -> StringType,
     Columns.Partition -> IntegerType,

@@ -54,38 +54,62 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
         for {
           _ <- source.verifyOffsets(parsed, manifest)
           _ <- validateRunIdentity(spark, manifest)
-          _ <- configureTables
-          valid <- blocking(OperationalEventTransforms.validEvents(parsed))
-          pseudonymized <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
-          safeToPersist <- blocking.either(
-            AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens)
+          bronze <- persistParsed(
+            spark,
+            parsed,
+            markerTokens,
+            configureTables,
+            now,
+            startedAt => manifestStore.persist(manifest, AnalyticsManifestStatus.Started, startedAt)
           )
-          startedAt <- now
-          incoming <- blocking(
-            deltaWriter.withExpiry(
-              OperationalEventTransforms.bronze(safeToPersist),
-              startedAt,
-              retention.bronzeDays.value
-            )
-          )
-          counts <- blocking {
-            val row = parsed
-              .agg(
-                count(lit(1)).as("recordCount"),
-                count(when(OperationalEventTransforms.isValidEvent, lit(1))).as("validCount"),
-                count(when(!OperationalEventTransforms.isValidEvent, lit(1))).as("malformedCount")
-              )
-              .head()
-            (row.getLong(0), row.getLong(1), row.getLong(2))
-          }
-          _ <- manifestStore.persist(manifest, AnalyticsManifestStatus.Started, startedAt)
-          _ <- deltaWriter.merge(
-            incoming,
-            paths.bronze,
-            "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
-          )
-        } yield AnalyticsBronzeInput(parsed, startedAt, counts._1, counts._2, counts._3)
+        } yield bronze
       }
+
+  /** Persists the shared Bronze representation of an already parsed Kafka frame.
+    *
+    * Streaming callers supply their stable observation time and no batch manifest callback. This method deliberately
+    * consumes the provided frame as-is: it neither reads a source nor derives Kafka offset spans.
+    */
+  private[analytics] def persistParsed(
+      spark: SparkSession,
+      parsed: DataFrame,
+      markerTokens: DataFrame,
+      configureTables: F[Unit],
+      startedAt: F[java.time.Instant],
+      beforeMerge: java.time.Instant => F[Unit]
+  ): F[AnalyticsBronzeInput] =
+    for {
+      _ <- configureTables
+      valid <- blocking(OperationalEventTransforms.validEvents(parsed))
+      pseudonymized <- blocking(AnalyticsSubjectPrivacy.withSubjectToken(valid, pseudonymizer))
+      safeToPersist <- blocking.either(
+        AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(pseudonymized, markerTokens)
+      )
+      observedAt <- startedAt
+      incoming <- blocking(
+        deltaWriter.withExpiry(
+          OperationalEventTransforms.bronze(safeToPersist),
+          observedAt,
+          retention.bronzeDays.value
+        )
+      )
+      counts <- blocking {
+        val row = parsed
+          .agg(
+            count(lit(1)).as("recordCount"),
+            count(when(OperationalEventTransforms.isValidEvent, lit(1))).as("validCount"),
+            count(when(!OperationalEventTransforms.isValidEvent, lit(1))).as("malformedCount")
+          )
+          .head()
+        (row.getLong(0), row.getLong(1), row.getLong(2))
+      }
+      _ <- beforeMerge(observedAt)
+      _ <- deltaWriter.merge(
+        incoming,
+        paths.bronze,
+        "target.topic = source.topic AND target.partition = source.partition AND target.offset = source.offset"
+      )
+    } yield AnalyticsBronzeInput(parsed, observedAt, counts._1, counts._2, counts._3)
 
   private def validateRunIdentity(spark: SparkSession, manifest: AnalyticsRunManifest): F[Unit] = blocking.either {
     if (DeltaTable.isDeltaTable(spark, paths.manifests)) {

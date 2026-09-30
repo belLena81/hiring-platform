@@ -41,7 +41,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
   private val hocon = """
     |analytics {
     |  mongo { uri = ${?MONGODB_URI}, database = "hiring" }
-    |  spark { master = "local[*]" }
+    |  spark { master = "local[*]", local-directory = "/var/lib/hiring-analytics/spark-temp/runtime-test" }
     |  kafka {
     |    bootstrap-servers = ${?ANALYTICS_BOOTSTRAP_SERVERS}
     |    username = ${?ANALYTICS_KAFKA_USERNAME}

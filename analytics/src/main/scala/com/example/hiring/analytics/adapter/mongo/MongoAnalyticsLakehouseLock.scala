@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.domain.AnalyticsDigest
+import com.example.hiring.analytics.domain.AnalyticsLakehouseIdentity
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 
@@ -11,8 +11,6 @@ import com.mongodb.WriteConcern
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
-import java.net.URI
-import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
@@ -111,21 +109,8 @@ private[analytics] object MongoAnalyticsLakehouseLock {
 
   /** The hash lets operators locate the mutex without storing a potentially sensitive URI in Mongo. */
   def lockId(root: String): Either[AnalyticsError, String] =
-    Either
-      .catchNonFatal {
-        val uri = new URI(root).normalize()
-        require(
-          uri.getScheme != null && uri.getRawUserInfo == null && uri.getRawQuery == null && uri.getRawFragment == null
-        )
-        require(!uri.isOpaque)
-        val rawPath = Option(uri.getRawPath).getOrElse("")
-        val authority = Option(uri.getRawAuthority).fold("")(a => s"//${a.toLowerCase(java.util.Locale.ROOT)}")
-        val withRootSlash = if (authority.nonEmpty && rawPath.isEmpty) "/" else rawPath
-        val canonicalPath =
-          if (withRootSlash.length > 1) withRootSlash.reverse.dropWhile(_ == '/').reverse else withRootSlash
-        val normalized = s"${uri.getScheme.toLowerCase(java.util.Locale.ROOT)}:${authority}${canonicalPath}"
-        AnalyticsDigest.sha256Hex(normalized.getBytes(StandardCharsets.UTF_8))
-      }
+    AnalyticsLakehouseIdentity
+      .from(root)
       .leftMap(_ =>
         AnalyticsError.InvalidConfiguration(
           "analytics lakehouse root must be an absolute URI without credentials or query parameters"

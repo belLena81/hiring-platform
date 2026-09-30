@@ -21,6 +21,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
     manifestStore: AnalyticsRunManifestStore[F],
     lakehouse: AnalyticsBatchLakehouse[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
+    streamingRegistry: AnalyticsStreamingRegistry[F],
     operational: AnalyticsOperationalSettings,
     private[analytics] val nowOverride: Option[F[Instant]] = None
 ) {
@@ -39,6 +40,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
       }
       publication <- lakehouseLock.resource(paths.root).use { _ =>
         for {
+          _ <- streamingRegistry.rejectBatchIfRegistered(paths.root)
           markerTokens <- deletionMarkers.activeSubjectTokens
           _ <- lakehouse.validateHmacConfiguration
           reservedAt <- now

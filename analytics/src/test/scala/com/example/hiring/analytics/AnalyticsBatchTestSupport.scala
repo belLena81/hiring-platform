@@ -114,6 +114,7 @@ private[analytics] object AnalyticsBatchTestSupport {
         store,
         lakehouse,
         lakehouseLock,
+        com.example.hiring.analytics.service.batch.AnalyticsStreamingRegistry.allowUnregistered[IO],
         AnalyticsTestOperationalConfig.operational,
         Some(clock.realTimeInstant)
       ).run(manifest)

@@ -86,7 +86,7 @@ final class AnalyticsPrivacyAndErasurePropertySpec extends ScalaCheckSuite {
   private def runtimeConfig(encodedKey: String): String =
     s"""analytics {
        | mongo { uri = "mongodb://localhost:27017/?replicaSet=rs0", database = "hiring" }
-       | spark { master = "local[*]" }
+       | spark { master = "local[*]", local-directory = "/var/lib/hiring-analytics/spark-temp/runtime-test" }
        | kafka { bootstrap-servers = "localhost:9092", username = "reader", password = "reader-secret", topic = "hiring.operational-events", fencer { username = "fencer", password = "fencer-secret" } }
        | lakehouse { root = "file:///tmp/hiring-analytics" }
        | hmac { secret-base64 = "$encodedKey", key-id = "hmac-v1" }

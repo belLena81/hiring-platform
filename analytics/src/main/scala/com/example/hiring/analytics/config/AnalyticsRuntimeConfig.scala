@@ -32,6 +32,7 @@ import scala.deriving.Mirror
 import scala.jdk.CollectionConverters.*
 import scala.concurrent.duration.*
 import java.time.Instant
+import java.nio.file.Paths
 
 type AnalyticsNonBlank = String :| Not[Blank]
 
@@ -39,6 +40,7 @@ final case class AnalyticsCommonSettings(
     mongoUri: AnalyticsNonBlank,
     mongoDatabase: AnalyticsNonBlank,
     sparkMaster: AnalyticsNonBlank,
+    sparkLocalDirectory: AnalyticsNonBlank,
     kafka: KafkaConnection,
     lakehouseRoot: AnalyticsNonBlank,
     hmac: AnalyticsHmacSettings,
@@ -407,6 +409,7 @@ object AnalyticsRuntimeConfig {
         security._2
       )
     ).andThen(KafkaConnection.validate)
+    val sparkLocalDirectory = validateSparkLocalDirectory(raw.spark.localDirectory)
     val lakehouseRoot = raw.lakehouse.root.validNec[String]
     val hmac = validateHmac(raw.hmac)
     val operationalSettings = operational(raw.operational)
@@ -415,11 +418,32 @@ object AnalyticsRuntimeConfig {
       mongoUri,
       raw.mongo.database.validNec[String],
       raw.spark.master.validNec[String],
+      sparkLocalDirectory,
       kafka,
       lakehouseRoot,
       hmac,
       operationalSettings
-    ).mapN(AnalyticsCommonSettings.apply)
+    ).mapN((uri, database, sparkMaster, localDirectory, kafka, root, hmac, operational) =>
+      AnalyticsCommonSettings(uri, database, sparkMaster, localDirectory, kafka, root, hmac, operational)
+    )
+  }
+
+  private def validateSparkLocalDirectory(value: AnalyticsNonBlank): ValidatedNec[String, AnalyticsNonBlank] = {
+    val valid = Either
+      .catchNonFatal(Paths.get(value).normalize())
+      .leftMap(_ => "analytics.spark.local-directory must be an owned absolute directory")
+      .flatMap { path =>
+        val dockerRoot = Paths.get("/var/lib/hiring-analytics/spark-temp")
+        val parts = path.iterator().asScala.map(_.toString).toVector
+        val localRoot = parts.sliding(4).exists(_ == Vector(".local", "data", "analytics", "spark-temp"))
+        Either.cond(
+          path.isAbsolute && (path.startsWith(dockerRoot) || localRoot) &&
+            !value.contains(".."),
+          value,
+          "analytics.spark.local-directory must be inside the owned analytics runtime directory"
+        )
+      }
+    valid.toValidatedNec
   }
 
   private def operational(

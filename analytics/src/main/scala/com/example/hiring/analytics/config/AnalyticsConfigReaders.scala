@@ -46,6 +46,6 @@ private[analytics] object AnalyticsConfigReaders {
   }
 
   final case class Mongo(uri: AnalyticsNonBlank, database: AnalyticsNonBlank) derives ConfigReader
-  final case class Spark(master: AnalyticsNonBlank) derives ConfigReader
+  final case class Spark(master: AnalyticsNonBlank, localDirectory: AnalyticsNonBlank) derives ConfigReader
   final case class Lakehouse(root: AnalyticsNonBlank) derives ConfigReader
 }

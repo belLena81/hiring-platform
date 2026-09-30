@@ -32,4 +32,4 @@ Raw Kafka records cannot be selectively deleted and expire on broker retention. 
 
 ## Non-goals
 
-Structured Streaming, cloud storage, Databricks deployment, search evaluation, and reports beyond the 30-day retained window are not part of this slice.
+This Phase 6 batch slice does not include Structured Streaming, cloud storage, Databricks deployment, search evaluation, or reports beyond the 30-day retained window. Phase 7 contract work is tracked in [Continuous Hiring Analytics](specs/continuous-hiring-analytics.md); its runtime remains disabled until the Phase 6 real-horizon retention, writer-exclusion, guarded HMAC-retirement, audit, and independent-signoff gates close.

@@ -17,6 +17,7 @@ final class AnalyticsLakehousePaths private (val root: LakehouseRoot) {
   val timeToHireGold: String = s"$normalizedRoot/gold/time_to_hire"
   val skillsGold: String = s"$normalizedRoot/gold/job_skills"
   val manifests: String = s"$normalizedRoot/control/run_manifests"
+  val streamingProgress: String = s"$normalizedRoot/control/streaming_progress"
   val hmacKeyRegistry: String = s"$normalizedRoot/control/hmac_key_registry"
 }
 
