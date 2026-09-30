@@ -29,38 +29,42 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
 
   private def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
-    if (!DeltaTable.isDeltaTable(spark, paths.silver)) Right(())
-    else {
-      val stored = spark.read.format("delta").load(paths.silver)
-      val columns = stored.columns.toSet
-      if (stored.limit(1).count() > 0L && !columns.contains("subjectToken"))
-        Left(AnalyticsError.InvalidConfiguration("Silver data has no versioned subject tokens"))
-      else if (columns.contains("subjectToken")) {
-        val activeData =
-          if (columns.contains("expiresAt")) col("expiresAt").isNull || col("expiresAt") > lit(Timestamp.from(at))
-          else lit(true)
-        val expectedPrefix = pseudonymizer.primaryKeyId + "_"
-        val incompatible =
-          stored
-            .filter(activeData && (col("subjectToken").isNull || !col("subjectToken").startsWith(expectedPrefix)))
-            .limit(1)
-            .count()
-        Either.cond(
-          incompatible == 0L,
-          (),
-          AnalyticsError.InvalidConfiguration(
-            "unexpired Silver rows use a different HMAC key; retain the old primary until Silver retention expires"
-          )
-        )
-      } else Right(())
+    Vector(paths.silver, paths.lateFacts).foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
+      result.flatMap { _ =>
+        if (!DeltaTable.isDeltaTable(spark, path)) Right(())
+        else {
+          val stored = spark.read.format("delta").load(path)
+          val columns = stored.columns.toSet
+          if (stored.limit(1).count() > 0L && !columns.contains("subjectToken"))
+            Left(AnalyticsError.InvalidConfiguration("retained analytical data has no versioned subject tokens"))
+          else if (columns.contains("subjectToken")) {
+            val activeData =
+              if (columns.contains("expiresAt")) col("expiresAt").isNull || col("expiresAt") > lit(Timestamp.from(at))
+              else lit(true)
+            val expectedPrefix = pseudonymizer.primaryKeyId + "_"
+            val incompatible =
+              stored
+                .filter(activeData && (col("subjectToken").isNull || !col("subjectToken").startsWith(expectedPrefix)))
+                .limit(1)
+                .count()
+            Either.cond(
+              incompatible == 0L,
+              (),
+              AnalyticsError.InvalidConfiguration(
+                "unexpired analytical rows use a different HMAC key; retain the old primary until their retention expires"
+              )
+            )
+          } else Right(())
+        }
+      }
     }
   }
 
   def validateStoredTokenKeys(spark: SparkSession): F[Unit] = blocking.either {
     val allowedKeyIds = pseudonymizer.keyIds.toVector.sorted.mkString("(?:", "|", ")")
     val tokenPattern = s"^${allowedKeyIds}_[A-Za-z0-9_-]{43}$$"
-    Vector(paths.bronze, paths.quarantine, paths.silver).foldLeft[Either[AnalyticsError, Unit]](Right(())) {
-      (result, path) =>
+    Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
+      .foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
         result.flatMap { _ =>
           if (DeltaTable.isDeltaTable(spark, path)) {
             val frame = spark.read.format("delta").load(path)
@@ -82,7 +86,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
             else Right(())
           } else Right(())
         }
-    }
+      }
   }
 
   def validateKeyMaterialContinuity(spark: SparkSession): F[Unit] =
@@ -93,6 +97,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
           paths.bronze,
           paths.quarantine,
           paths.silver,
+          paths.lateFacts,
           paths.funnelGold,
           paths.timeToHireGold,
           paths.skillsGold,
@@ -151,7 +156,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     } yield ()
 
   private def hasStoredTokenForKey(spark: SparkSession, keyId: String): Boolean =
-    Vector(paths.bronze, paths.quarantine, paths.silver).exists { path =>
+    Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts).exists { path =>
       if (!DeltaTable.isDeltaTable(spark, path)) false
       else {
         val frame = spark.read.format("delta").load(path)

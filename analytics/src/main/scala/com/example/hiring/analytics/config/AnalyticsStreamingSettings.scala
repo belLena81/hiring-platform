@@ -58,7 +58,8 @@ final case class AnalyticsStreamingSettings private (
   def lateFactRetentionDays: Int = AnalyticsEventTimePolicy.LateFactRetentionDays
 
   def activationIdentity(
-      bootstrapServers: String,
+      sourceClusterId: String,
+      sourceTopicId: String,
       topic: String,
       lakehouseRoot: String
   ): Either[AnalyticsError, StreamingActivationIdentity] = {
@@ -72,22 +73,29 @@ final case class AnalyticsStreamingSettings private (
       triggerInterval.toString,
       maxOffsetsPerTrigger.asInstanceOf[Int].toString,
       maximumReplayRecords.toString,
+      AnalyticsStreamingSettings.ConsumerGroupId,
       offsets
     ).mkString("\n")
-    AnalyticsLakehouseIdentity
-      .from(lakehouseRoot)
-      .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics lakehouse root is invalid"))
-      .map(lakehouseId =>
-        StreamingActivationIdentity(
-          streamId,
-          AnalyticsDigest.sha256Hex(s"$bootstrapServers\n$topic".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-          lakehouseId,
-          AnalyticsDigest.sha256Hex(
-            "hiring-operational-event-envelope:seven-field:v1".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-          ),
-          AnalyticsDigest.sha256Hex(settings.getBytes(java.nio.charset.StandardCharsets.UTF_8))
-        )
+    for {
+      _ <- Either.cond(
+        sourceClusterId.trim.nonEmpty && sourceTopicId.trim.nonEmpty,
+        (),
+        AnalyticsError.InvalidConfiguration("Kafka cluster and topic IDs are required for streaming identity")
       )
+      lakehouseId <- AnalyticsLakehouseIdentity
+        .from(lakehouseRoot)
+        .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics lakehouse root is invalid"))
+    } yield StreamingActivationIdentity(
+      streamId,
+      AnalyticsDigest.sha256Hex(
+        s"$sourceClusterId\n$topic\n$sourceTopicId".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+      ),
+      lakehouseId,
+      AnalyticsDigest.sha256Hex(
+        "hiring-operational-event-envelope:seven-field:v1".getBytes(java.nio.charset.StandardCharsets.UTF_8)
+      ),
+      AnalyticsDigest.sha256Hex(settings.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    )
   }
 }
 
@@ -109,6 +117,7 @@ object AnalyticsStreamingSettings {
     AnalyticsError.InvalidConfiguration("analytics.streaming configuration is invalid")
 
   val TriggerInterval: FiniteDuration = 60.seconds
+  val ConsumerGroupId: String = "hiring-analytics-streaming-v1"
   val MaximumOffsetsPerTrigger: Int = 100000
 
   /** Check before checkpoint creation that the explicit offsets cover exactly the broker's current partition set. */

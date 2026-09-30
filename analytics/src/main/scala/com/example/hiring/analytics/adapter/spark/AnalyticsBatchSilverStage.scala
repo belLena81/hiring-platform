@@ -3,6 +3,7 @@ package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import com.example.hiring.analytics.config.AnalyticsRetentionSettings
 import com.example.hiring.analytics.domain.SubjectPseudonymizer
+import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
@@ -11,6 +12,7 @@ import io.github.iltotore.iron.*
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
 
+import java.sql.Timestamp
 import java.time.Instant
 
 private final case class AnalyticsBatchConflictCounts(
@@ -59,6 +61,20 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       incomingSilver <- blocking.either(OperationalEventTransforms.silver(safeValid, pseudonymizer, markerTokens))
       incomingSilverSchema <- blocking(incomingSilver.schema)
       storedSilver <- deltaReader.readOrEmpty(spark, paths.silver, incomingSilverSchema)
+      storedLateFacts <- deltaReader.readOrEmpty(
+        spark,
+        paths.lateFacts,
+        AnalyticsTableSchemas.struct(AnalyticsTableSchemas.lateFacts)
+      )
+      storedLateFactFingerprints <- blocking.either {
+        Either.cond(
+          AnalyticsTableSchemas.matches(storedLateFacts.schema, AnalyticsTableSchemas.lateFacts),
+          storedLateFacts
+            .filter(col(Columns.ExpiresAt).isNull || col(Columns.ExpiresAt) > lit(Timestamp.from(bronze.startedAt)))
+            .select("eventId", "eventFingerprint"),
+          AnalyticsError.InvalidLateFactSchema("persisted dataset does not match its declared schema")
+        )
+      }
       historicalConflicts <- blocking(
         safeValid
           .select("eventId", "rawValue")
@@ -66,6 +82,7 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
           .join(
             storedSilver
               .select("eventId", "eventFingerprint")
+              .unionByName(storedLateFactFingerprints)
               .withColumnRenamed("eventFingerprint", "storedFingerprint"),
             Seq("eventId"),
             "inner"

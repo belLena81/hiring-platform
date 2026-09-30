@@ -9,5 +9,7 @@ class AnalyticsLakehousePathsSpec extends munit.FunSuite {
     val paths = AnalyticsLakehousePaths.from("file:///tmp/hiring-analytics/").toEither.toOption.get
     assertEquals(paths.root, "file:///tmp/hiring-analytics/")
     assertEquals(paths.bronze, "file:///tmp/hiring-analytics/bronze/operational_events")
+    assertEquals(paths.lateFacts, "file:///tmp/hiring-analytics/silver/late_operational_events")
+    assertEquals(paths.streamingDecisions, "file:///tmp/hiring-analytics/control/streaming_decisions")
   }
 }

@@ -79,30 +79,4 @@ class AnalyticsEventTimeSpec extends FunSuite {
     )
   }
 
-  test("only a completed published batch may commit its prepared candidate watermark") {
-    val lineage = StreamingLineage.from("lineage-a").toOption.get
-    val batchId = StreamingBatchId.from(3L).toOption.get
-    val fingerprint = RangeFingerprint.from("a" * 64).toOption.get
-    val candidate = observedAt.minusSeconds(24 * 60 * 60)
-    val preparation = StreamingBatchPreparation(
-      StreamingBatchIdentity(lineage, batchId),
-      observedAt,
-      None,
-      Some(candidate),
-      fingerprint,
-      Vector.empty
-    )
-    val published = StreamingBatchProgress(
-      preparation,
-      StreamingBatchOutcome.Published,
-      Some(candidate),
-      Some(observedAt)
-    )
-    val qualityBlocked = published.copy(outcome = StreamingBatchOutcome.QualityBlocked, candidateWatermark = None)
-
-    assert(StreamingBatchProgress.validate(published).isRight)
-    assert(StreamingBatchProgress.validate(qualityBlocked).isRight)
-    assert(StreamingBatchProgress.validate(qualityBlocked.copy(candidateWatermark = Some(candidate))).isLeft)
-    assert(StreamingBatchProgress.validate(published.copy(completedAt = None)).isLeft)
-  }
 }

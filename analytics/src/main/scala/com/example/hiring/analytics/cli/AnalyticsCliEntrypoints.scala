@@ -62,6 +62,22 @@ object HiringAnalyticsBatchMain extends IOApp {
     )
 }
 
+object HiringAnalyticsStreamingMain extends IOApp {
+  private def program: IO[Unit] =
+    AnalyticsRuntimeConfig.loadStreaming[IO].flatMap(settings => AppModule.streaming[IO](settings).use(_.run))
+
+  override def run(args: List[String]): IO[ExitCode] =
+    AnalyticsCliProgram.runProgram(
+      if (args.nonEmpty)
+        IO.raiseError[Unit](
+          AnalyticsError.InvalidConfiguration(
+            "streaming settings are loaded from HOCON; command-line arguments are not accepted"
+          )
+        )
+      else program
+    )
+}
+
 object AnalyticsErasureWorkerMain extends IOApp {
   private val logger = Slf4jLogger.getLogger[IO]
 

@@ -115,51 +115,6 @@ object StreamingPartitionSummary {
   }
 }
 
-/** Stable preparation evidence, including the candidate progress computed before any durable sink writes. */
-final case class StreamingBatchPreparation(
-    identity: StreamingBatchIdentity,
-    observedAt: Instant,
-    priorWatermark: Option[Instant],
-    candidateWatermark: Option[Instant],
-    inputFingerprint: RangeFingerprint,
-    deliveredOffsets: Vector[StreamingPartitionSummary]
-)
-
-enum StreamingBatchOutcome {
-  case Prepared, IngestionCommitted, QualityBlocked, ErasurePending, Published
-}
-
-object StreamingBatchOutcome {
-  def fromPersisted(value: String): Either[String, StreamingBatchOutcome] =
-    values.find(_.toString == value).toRight("streaming progress outcome is invalid")
-}
-
-/** Durable terminal/progress projection; checkpoint acknowledgement is reconciled separately. */
-final case class StreamingBatchProgress(
-    preparation: StreamingBatchPreparation,
-    outcome: StreamingBatchOutcome,
-    candidateWatermark: Option[Instant],
-    completedAt: Option[Instant]
-)
-
-object StreamingBatchProgress {
-  def validate(progress: StreamingBatchProgress): Either[String, StreamingBatchProgress] = {
-    val expectedWatermark = progress.outcome match {
-      case StreamingBatchOutcome.Published => progress.preparation.candidateWatermark
-      case _                               => None
-    }
-    val monotonic = progress.candidateWatermark.forall(candidate =>
-      progress.preparation.priorWatermark.forall(prior => !candidate.isBefore(prior))
-    )
-    Either.cond(
-      progress.outcome != StreamingBatchOutcome.Prepared &&
-        progress.completedAt.nonEmpty && progress.candidateWatermark == expectedWatermark && monotonic,
-      progress,
-      "terminal progress must be complete and only published batches may advance the prepared watermark"
-    )
-  }
-}
-
 enum EventTimeAdmission {
   case Admitted(effectiveEventTime: Instant)
   case LateClosedDay(day: LocalDate)

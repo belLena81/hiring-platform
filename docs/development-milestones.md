@@ -10,7 +10,7 @@ The account-deletion workflow is Phase 6's cross-system saga candidate. Keep the
 
 ## Continuous Hiring Analytics (Phase 7)
 
-Phase 7 contract implementation is underway in [Continuous Hiring Analytics](specs/continuous-hiring-analytics.md). Its current slice defines validated streaming settings and pure event-time contracts only. Do not activate a query until Phase 6 has actual Kafka/Delta retention completion, external-writer exclusion, guarded HMAC retirement, final HAL-01–HAL-14 audit, and independent signoff. The configured 60-second trigger does not satisfy UC11's Bronze p95 under 30 seconds target; the 120-second report freshness target needs workload measurement.
+Phase 7 implementation is underway in [Continuous Hiring Analytics](specs/continuous-hiring-analytics.md), including the opt-in query/runtime composition, durable streaming journal, and late-fact retention path. Runtime acceptance is not established. Do not activate a query until Phase 6 has actual Kafka/Delta retention completion, external-writer exclusion, guarded HMAC retirement, final HAL-01–HAL-14 audit, and independent signoff. The configured 60-second trigger does not satisfy UC11's Bronze p95 under 30 seconds target; the 120-second report freshness target needs workload measurement.
 
 ## Interview Scheduling and Workflow Resilience (Phase 10)
 

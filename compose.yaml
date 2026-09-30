@@ -70,7 +70,9 @@ services:
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_fencer --operation WRITE --operation DESCRIBE --transactional-id hiring-publisher- --resource-pattern-type prefixed
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_fencer --operation IdempotentWrite --cluster
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --operation DESCRIBE --topic "$${KAFKA_TOPIC:-hiring.operational-events}"
+        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation DESCRIBE --cluster
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-analytics-batch
+        /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-analytics-streaming-v1
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-operational-events-local
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:analytics_reader --operation READ --group hiring-operational-events-integration
     environment:
@@ -114,6 +116,42 @@ services:
       MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
     volumes:
       - ./.local/data/analytics:/var/lib/hiring-analytics
+
+  analytics-streaming:
+    profiles: ["analytics-streaming"]
+    build:
+      context: .
+      dockerfile: analytics/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_started
+      kafka-acl-init:
+        condition: service_completed_successfully
+      mongodb:
+        condition: service_healthy
+    environment:
+      JAVA_TOOL_OPTIONS: -Dconfig.file=/var/lib/hiring-analytics/config/analytics-streaming.conf
+      SPARK_MASTER: ${SPARK_MASTER:-local[2]}
+      ANALYTICS_SPARK_LOCAL_DIRECTORY: /var/lib/hiring-analytics/spark-temp
+      ANALYTICS_BOOTSTRAP_SERVERS: kafka:9092
+      # Local Compose broker only: credentials are unencrypted on this private Compose network.
+      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_PLAINTEXT
+      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "true"
+      ANALYTICS_KAFKA_USERNAME: analytics_reader
+      ANALYTICS_KAFKA_PASSWORD: ${KAFKA_READER_PASSWORD:?Set KAFKA_READER_PASSWORD in ignored .env}
+      ANALYTICS_LAKEHOUSE_ROOT: file:///var/lib/hiring-analytics/lakehouse
+      ANALYTICS_TOPIC: ${ANALYTICS_TOPIC:-hiring.operational-events}
+      HIRING_ANALYTICS_HMAC_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_SECRET_BASE64:?Set HIRING_ANALYTICS_HMAC_SECRET_BASE64 in ignored .env}
+      HIRING_ANALYTICS_HMAC_KEY_ID: ${HIRING_ANALYTICS_HMAC_KEY_ID:-hmac-v1}
+      HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID: ${HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID:-}
+      HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64: ${HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64:-}
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true}
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-hiring}
+    volumes:
+      - ./.local/data/analytics:/var/lib/hiring-analytics
+      - ./.local/config/analytics-streaming.conf:/var/lib/hiring-analytics/config/analytics-streaming.conf:ro
+    entrypoint: ["sbt"]
+    command: ["runMain", "com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain"]
 
   analytics-erasure-worker:
     profiles: ["analytics-erasure"]

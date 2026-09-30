@@ -57,7 +57,8 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
   override def expireStored(at: Instant): F[Unit] =
     retention.expire(spark, paths.bronze, at) *>
       retention.expire(spark, paths.quarantine, at) *>
-      retention.expire(spark, paths.silver, at)
+      retention.expire(spark, paths.silver, at) *>
+      retention.expire(spark, paths.lateFacts, at)
 
   override def validateHmacConfiguration: F[Unit] =
     lakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked)
@@ -98,9 +99,11 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
       _ <- retention.expire(spark, paths.bronze, deletionTime)
       _ <- retention.expire(spark, paths.quarantine, deletionTime)
       _ <- retention.expire(spark, paths.silver, deletionTime)
+      _ <- retention.expire(spark, paths.lateFacts, deletionTime)
       _ <- erasure.purgeMarkedSubjectRows(spark, paths.bronze, markerTokens)
       _ <- erasure.purgeMarkedSubjectRows(spark, paths.quarantine, markerTokens)
       _ <- erasure.purgeMarkedSubjectRows(spark, paths.silver, markerTokens)
+      _ <- erasure.purgeMarkedSubjectRows(spark, paths.lateFacts, markerTokens)
       _ <- rebuildGoldFromStoredSilver(spark)
       _ <- retention.vacuumExpiredFiles(spark).void
     } yield ()

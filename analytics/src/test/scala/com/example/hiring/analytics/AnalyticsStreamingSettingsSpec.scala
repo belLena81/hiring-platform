@@ -28,6 +28,17 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     assert(parsed.flatMap(AnalyticsStreamingSettings.validatePartitionCoverage(_, Set(0, 1, 2))).isLeft)
   }
 
+  test("activation identity is bound to Kafka cluster and topic IDs") {
+    val settings = AnalyticsStreamingSettings.fromHocon(valid).fold(error => fail(error.getMessage), identity)
+    val original = settings.activationIdentity("cluster-a", "topic-a", "hiring.events", "file:///tmp/lakehouse")
+    val changedCluster = settings.activationIdentity("cluster-b", "topic-a", "hiring.events", "file:///tmp/lakehouse")
+    val changedTopic = settings.activationIdentity("cluster-a", "topic-b", "hiring.events", "file:///tmp/lakehouse")
+
+    assert(original.isRight)
+    assertNotEquals(original.toOption.map(_.sourceIdentity), changedCluster.toOption.map(_.sourceIdentity))
+    assertNotEquals(original.toOption.map(_.sourceIdentity), changedTopic.toOption.map(_.sourceIdentity))
+  }
+
   test("stream settings reject implicit latest offsets and duplicate partition declarations") {
     val emptyOffsets = valid.replace(
       "[{ partition = 0, offset = 12 }, { partition = 1, offset = 0 }]",

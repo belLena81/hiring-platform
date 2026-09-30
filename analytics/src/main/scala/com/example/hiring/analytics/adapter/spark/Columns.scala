@@ -41,6 +41,7 @@ private[analytics] object Columns {
   val SubjectToken = "subjectToken"
   val SubjectTokens = "subjectTokens"
   val EventFingerprint = "eventFingerprint"
+  val AdmissionReason = "admissionReason"
   val IngestedAt = "ingestedAt"
   val ExpiresAt = "expiresAt"
   val DistinctPayloads = "distinctPayloads"

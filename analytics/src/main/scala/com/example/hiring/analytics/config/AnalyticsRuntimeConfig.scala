@@ -62,6 +62,14 @@ final case class AnalyticsBatchSettings(common: AnalyticsCommonSettings, manifes
   override def toString: String = "AnalyticsBatchSettings([REDACTED])"
 }
 
+final case class AnalyticsStreamingRuntimeSettings(
+    common: AnalyticsCommonSettings,
+    streaming: AnalyticsStreamingSettings,
+    topic: AnalyticsTopic
+) {
+  override def toString: String = "AnalyticsStreamingRuntimeSettings([REDACTED])"
+}
+
 final case class AnalyticsWorkerSettings(
     common: AnalyticsCommonSettings,
     topic: AnalyticsTopic,
@@ -213,6 +221,13 @@ object AnalyticsRuntimeConfig {
 
   def loadWorker[F[_]: Async]: F[AnalyticsWorkerSettings] =
     load[F].flatMap(raw => Async[F].fromEither(worker(raw)))
+
+  def loadStreaming[F[_]: Async]: F[AnalyticsStreamingRuntimeSettings] =
+    (load[F], AnalyticsStreamingSettings.load[F]).tupled.flatMap { case (raw, streaming) =>
+      Async[F].fromEither(
+        complete(common(raw).map(settings => AnalyticsStreamingRuntimeSettings(settings, streaming, raw.kafka.topic)))
+      )
+    }
 
   def loadKeyRetirementAudit[F[_]: Async]: F[AnalyticsKeyRetirementAuditSettings] =
     load[F].flatMap(raw => Async[F].fromEither(keyRetirementAudit(raw)))

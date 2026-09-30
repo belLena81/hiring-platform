@@ -10,12 +10,14 @@ import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 import io.circe.Json
 import org.apache.kafka.clients.consumer.KafkaConsumer
+import org.apache.kafka.clients.admin.AdminClient
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import org.apache.spark.sql.functions.{col, lit}
 
 import java.util.Properties
+import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
@@ -52,6 +54,49 @@ private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
 }
 
 object KafkaOffsetRangeSource {
+
+  /** Stable broker identity used to bind streaming activation and checkpoints across endpoint changes. */
+  private[analytics] def sourceIdentity[F[_]: Async](
+      connection: KafkaConnection,
+      topic: AnalyticsTopic,
+      driverExecution: SparkBlockingExecution[F]
+  ): F[(String, String)] =
+    for {
+      clientProperties <- Async[F].fromEither(KafkaClientProperties.clientProperties(connection))
+      identity <- driverExecution
+        .blocking {
+          val settings = new Properties()
+          settings.setProperty("bootstrap.servers", connection.bootstrapServers)
+          settings.setProperty("default.api.timeout.ms", "10000")
+          settings.setProperty("request.timeout.ms", "10000")
+          clientProperties.foreach { case (key, value) => settings.setProperty(key, value) }
+          val client = AdminClient.create(settings)
+          try {
+            val timeoutSeconds = 10L
+            val clusterId = Option(client.describeCluster().clusterId().get(timeoutSeconds, TimeUnit.SECONDS))
+            val topicName = AnalyticsTopic.unwrap(topic)
+            val description = client
+              .describeTopics(java.util.Collections.singleton(topicName))
+              .allTopicNames()
+              .get(timeoutSeconds, TimeUnit.SECONDS)
+              .get(topicName)
+            for {
+              cluster <- clusterId.toRight(new IllegalStateException("Kafka cluster ID is unavailable"))
+              topicId <- Option(description)
+                .flatMap(value => Option(value.topicId()))
+                .map(_.toString)
+                .filter(_.nonEmpty)
+                .toRight(new IllegalStateException("Kafka topic ID is unavailable"))
+            } yield cluster -> topicId
+          } finally client.close(java.time.Duration.ofSeconds(10L))
+        }
+        .flatMap(Async[F].fromEither)
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
+        }
+    } yield identity
+
   private def consumer[F[_]: Async](
       connection: KafkaConnection,
       driverExecution: SparkBlockingExecution[F]

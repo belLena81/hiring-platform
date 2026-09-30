@@ -20,12 +20,13 @@ private[analytics] final class DeltaBatchWriter[F[_]: Async](
     val shape =
       if (path == paths.bronze) AnalyticsTableSchemas.bronze
       else if (path == paths.quarantine) AnalyticsTableSchemas.quarantine
+      else if (path == paths.lateFacts) AnalyticsTableSchemas.lateFacts
       else AnalyticsTableSchemas.silver ++ AnalyticsTableSchemas.expiry
     AnalyticsTableSchemas.createOrValidate(
       source.sparkSession,
       path,
       shape,
-      raw = path == paths.bronze || path == paths.quarantine
+      raw = path == paths.bronze || path == paths.quarantine || path == paths.lateFacts
     )
     if (!AnalyticsTableSchemas.matches(source.schema, shape))
       throw com.example.hiring.analytics.errors.AnalyticsError.LakehouseFailure(

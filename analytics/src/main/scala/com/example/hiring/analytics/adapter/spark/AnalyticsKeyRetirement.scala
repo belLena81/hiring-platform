@@ -286,6 +286,7 @@ private[analytics] object AnalyticsKeyRetirement {
       paths.bronze,
       paths.quarantine,
       paths.silver,
+      paths.lateFacts,
       paths.funnelGold,
       paths.timeToHireGold,
       paths.skillsGold,

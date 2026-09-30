@@ -28,6 +28,21 @@ private[analytics] object AnalyticsTableSchemas {
     Columns.EventFingerprint -> StringType
   )
   val expiry: Shape = Vector(Columns.IngestedAt -> TimestampType, Columns.ExpiresAt -> TimestampType)
+
+  /** Closed-day facts retain only normalized, pseudonymized fields needed for bounded replay. */
+  val lateFacts: Shape = Vector(
+    Columns.EventId -> StringType,
+    Columns.EventFingerprint -> StringType,
+    Columns.Topic -> StringType,
+    Columns.Partition -> IntegerType,
+    Columns.Offset -> LongType,
+    Columns.OccurredAt -> TimestampType,
+    Columns.SubjectToken -> StringType,
+    Columns.SubjectTokens -> ArrayType(StringType, containsNull = false),
+    Columns.AdmissionReason -> StringType,
+    Columns.IngestedAt -> TimestampType,
+    Columns.ExpiresAt -> TimestampType
+  )
   val funnel: Shape = Vector(
     Columns.Day -> TimestampType,
     Columns.Created -> LongType,
@@ -54,29 +69,6 @@ private[analytics] object AnalyticsTableSchemas {
     "endOffsetExclusive" -> LongType,
     "status" -> StringType,
     "updatedAt" -> StringType
-  )
-  val streamingProgress: Shape = Vector(
-    "lineage" -> StringType,
-    "batchId" -> LongType,
-    "observedAt" -> TimestampType,
-    "priorWatermark" -> TimestampType,
-    "preparedCandidateWatermark" -> TimestampType,
-    "inputFingerprint" -> StringType,
-    "deliveredOffsets" -> ArrayType(
-      StructType(
-        Vector(
-          StructField("topic", StringType, nullable = false),
-          StructField("partition", IntegerType, nullable = false),
-          StructField("minimumDeliveredOffset", LongType, nullable = false),
-          StructField("maximumDeliveredOffset", LongType, nullable = false),
-          StructField("deliveredRecordCount", LongType, nullable = false)
-        )
-      ),
-      containsNull = false
-    ),
-    "outcome" -> StringType,
-    "candidateWatermark" -> TimestampType,
-    "completedAt" -> TimestampType
   )
   val quarantine: Shape = Vector(
     Columns.Topic -> StringType,

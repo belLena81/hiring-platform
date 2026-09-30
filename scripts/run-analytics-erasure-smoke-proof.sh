@@ -54,6 +54,12 @@ export HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE="hiring_erasure_smoke_$nonce"
 export HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC="hiring.erasure.smoke.$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_NONCE="$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$subject_id"
+export HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS="${HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS:-60}"
+[[ "$HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS" =~ ^[1-9][0-9]*$ ]] &&
+  (( HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS <= 2592000 )) || {
+  printf 'HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS must be an integer from 1 to 2592000.\n' >&2
+  exit 2
+}
 export KAFKA_TOPIC="$HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC"
 export KAFKA_BROKER_PASSWORD KAFKA_PUBLISHER_V2_PASSWORD KAFKA_READER_PASSWORD KAFKA_FENCER_PASSWORD HIRING_ANALYTICS_HMAC_SECRET_BASE64
 
@@ -79,6 +85,7 @@ run_fixture() {
   compose run --rm --no-deps \
     -e HIRING_ANALYTICS_RETENTION_PROOF_ENABLED=true \
     -e HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON=true \
+    -e HIRING_ANALYTICS_RETENTION_PROOF_HORIZON_SECONDS="$HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS" \
     -e HIRING_ANALYTICS_RETENTION_PROOF_MODE="$fixture_mode" \
     -e HIRING_ANALYTICS_RETENTION_PROOF_NONCE="$nonce" \
     -e HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$subject_id" \
@@ -123,13 +130,14 @@ if [[ "$mode" == start ]]; then
   [[ ! -e "$state_file" && ! -L "$state_file" ]] || { printf 'Smoke state already exists: %s\n' "$state_file" >&2; exit 1; }
   printf '%s %s\n' "$nonce" "$subject_id" > "$state_file"
   chmod 600 "$state_file"
-  printf 'Smoke staged on preserved volumes. Resume after the next UTC day plus one minute: %s resume %s\n' "$0" "$nonce"
+  printf 'Smoke staged on preserved volumes. Resume after the next UTC day plus %s seconds: %s resume %s\n' \
+    "$HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS" "$0" "$nonce"
 else
   compose up -d mongodb kafka kafka-acl-init
   deadline_ms=""
   for attempt in {1..60}; do
     deadline_ms="$(compose exec -T mongodb mongosh --quiet --eval \
-      "const r=db.getSiblingDB('$HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE').analytics_erasure_requests.findOne({_id:'$subject_id'}); if (!r || !r.deltaPurgedAt || r.repairRequired) { print('INVALID'); } else { const d=r.deltaPurgedAt; print(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()+1)+60000); }" \
+      "const r=db.getSiblingDB('$HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE').analytics_erasure_requests.findOne({_id:'$subject_id'}); if (!r || !r.deltaPurgedAt || r.repairRequired) { print('INVALID'); } else { const d=r.deltaPurgedAt; print(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()+1)+$((HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS * 1000))); }" \
       2>/dev/null | tail -n 1 || true)"
     [[ "$deadline_ms" == INVALID || "$deadline_ms" =~ ^[0-9]+$ ]] && break
     sleep 2

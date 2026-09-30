@@ -3,9 +3,10 @@ package com.example.hiring.analytics
 import com.example.hiring.analytics.adapter.spark.SparkHiringAnalyticsStream
 import com.example.hiring.analytics.config.{AnalyticsStreamingSettings, KafkaConnection}
 import com.example.hiring.analytics.domain.StreamingActivationIdentity
+import com.example.hiring.analytics.domain.{StreamingBatchId, StreamingBatchIdentity, StreamingLineage}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
-import com.example.hiring.analytics.service.streaming.StreamingActivationGate
+import com.example.hiring.analytics.service.streaming.{StreamingActivationGate, StreamingCheckpointAcknowledgement}
 
 import cats.effect.{IO, Ref, Resource}
 import munit.CatsEffectSuite
@@ -46,7 +47,16 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
         gate,
         lock,
         "/lakehouse",
-        (_, _) => IO.unit
+        new StreamingCheckpointAcknowledgement[IO] {
+          override def callbackMayAcknowledge(identity: StreamingBatchIdentity): IO[Unit] = IO.unit
+          override def reconcile(
+              lineage: StreamingLineage,
+              checkpointedBatchIds: Set[StreamingBatchId],
+              checkpointEstablished: Boolean
+          ): IO[Unit] = IO.unit
+        },
+        (_, _, _) => IO.unit,
+        () => IO.pure("cluster-id" -> "topic-id")
       )
 
       stream.resource.use(_ => IO.unit).attempt.flatMap { result =>

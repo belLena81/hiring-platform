@@ -48,7 +48,9 @@ ANALYTICS_RUN_ID=local-001 \
 
 The batch reads up to 100,000 pending account-erasure markers before it mutates Delta data. With active markers it purges marked Delta rows, rebuilds Gold, and leaves the report hidden until the erasure worker completes the full lifecycle.
 
-Continuous Hiring Analytics implementation is underway with domain and configuration contracts; no streaming query or Compose service is enabled. See [the Phase 7 specification](docs/specs/continuous-hiring-analytics.md). Activation depends on closing the real-horizon Phase 6 retention, writer-exclusion, HMAC-retirement, audit, and independent-signoff gates.
+Continuous Hiring Analytics implementation is underway with an opt-in `analytics-streaming` Compose profile and a fail-closed resource-managed query runtime. The runtime requires a matching immutable Mongo activation record and remains unavailable until the Phase 6 real-horizon retention, writer-exclusion, guarded HMAC-retirement, audit, and independent-signoff gates close. See [the Phase 7 specification](docs/specs/continuous-hiring-analytics.md); no activation record is provisioned by this repository.
+
+The streaming profile reads `.local/config/analytics-streaming.conf` and requires explicit starting offsets for every Kafka partition. Start it only after the activation record is authorized and all Phase 6 gates close. The checked-in [sanitized configuration example](analytics/analytics-streaming.conf.example) intentionally uses a single example partition and must be adjusted to the broker's actual partition set.
 
 ### Local analytics erasure worker
 

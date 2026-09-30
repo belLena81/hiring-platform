@@ -11,6 +11,8 @@ object AnalyticsError {
   final case class InvalidConfiguration(detail: String) extends AnalyticsError(detail)
   final case class InvalidSourceSchema(missing: Vector[String])
       extends AnalyticsError(s"Kafka batch records are missing required columns: ${missing.mkString(", ")}")
+  final case class InvalidLateFactSchema(detail: String)
+      extends AnalyticsError(s"late hiring fact has an invalid schema: $detail")
   case object InvalidSilverSchema extends AnalyticsError("Silver dataset does not match its declared event schema")
   final case class EmptyRequestedRange(topic: String, partition: Int, offset: Long)
       extends AnalyticsError(s"requested analytics range is empty: $topic partition $partition at offset $offset")

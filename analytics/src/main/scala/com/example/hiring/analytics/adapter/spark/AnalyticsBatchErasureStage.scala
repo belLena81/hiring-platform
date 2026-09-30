@@ -24,8 +24,8 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
 
   def verifyMarkedSubjectsAbsent(spark: SparkSession, markerTokens: DataFrame): F[Unit] = blocking.either {
     val marker = BatchSubjectMatching.markerRows(markerTokens)
-    Vector(paths.bronze, paths.quarantine, paths.silver).foldLeft[Either[AnalyticsError, Unit]](Right(())) {
-      (result, path) =>
+    Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
+      .foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
         result.flatMap { _ =>
           if (DeltaTable.isDeltaTable(spark, path)) {
             val matched = BatchSubjectMatching.matchedBySubject(spark.read.format("delta").load(path), marker)
@@ -38,12 +38,12 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
             )
           } else Right(())
         }
-    }
+      }
   }
 
   def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): F[Long] = blocking {
     val marker = BatchSubjectMatching.markerRows(markerTokens)
-    Vector(paths.bronze, paths.quarantine, paths.silver).foldLeft(0L) { (total, path) =>
+    Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts).foldLeft(0L) { (total, path) =>
       if (!DeltaTable.isDeltaTable(spark, path)) total
       else total + BatchSubjectMatching.matchedBySubject(spark.read.format("delta").load(path), marker).count()
     }
@@ -52,16 +52,16 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
   def captureMarkedFiles(spark: SparkSession, markerTokens: DataFrame): F[Vector[String]] =
     configureRawTablePrivacy(spark) *> blocking.either {
       val marker = BatchSubjectMatching.markerRows(markerTokens)
-      val rawPaths = Set(paths.bronze, paths.quarantine)
-      val files = Vector(paths.bronze, paths.quarantine, paths.silver).flatMap { path =>
+      val subjectBearingPaths = Set(paths.bronze, paths.quarantine, paths.lateFacts)
+      val files = Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts).flatMap { path =>
         if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
         else {
           val frame = spark.read.format("delta").load(path)
           val columns = frame.columns.toSet
           val attributed = BatchSubjectMatching.matchedBySubject(frame, marker)
           val affected =
-            if (rawPaths.contains(path) && !columns.contains("subjectTokens")) frame
-            else if (rawPaths.contains(path) && columns.contains("subjectTokens")) {
+            if (subjectBearingPaths.contains(path) && !columns.contains("subjectTokens")) frame
+            else if (subjectBearingPaths.contains(path) && columns.contains("subjectTokens")) {
               val unattributed = frame.filter(col("subjectTokens").isNull || size(col("subjectTokens")) === 0)
               attributed.unionByName(unattributed, allowMissingColumns = true)
             } else attributed
@@ -73,7 +73,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
             .toVector
             .map(_.getString(0))
             .distinct
-          dataFiles ++ (if (rawPaths.contains(path)) rawLogFiles(spark, path, None) else Vector.empty)
+          dataFiles ++ (if (subjectBearingPaths.contains(path)) rawLogFiles(spark, path, None) else Vector.empty)
         }
       }.distinct
       Either.cond(
@@ -84,7 +84,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
     }
 
   def checkpointPurgedRawLogs(spark: SparkSession): F[Vector[String]] = blocking.either {
-    val retiredLogs = Vector(paths.bronze, paths.quarantine).flatMap { path =>
+    val retiredLogs = Vector(paths.bronze, paths.quarantine, paths.lateFacts).flatMap { path =>
       if (!DeltaTable.isDeltaTable(spark, path)) Vector.empty
       else {
         val log = DeltaLog.forTable(spark, path)
@@ -115,7 +115,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
   }
 
   def checkpointRawTableLogs(spark: SparkSession): F[Unit] = blocking {
-    Vector(paths.bronze, paths.quarantine).foreach { path =>
+    Vector(paths.bronze, paths.quarantine, paths.lateFacts).foreach { path =>
       if (DeltaTable.isDeltaTable(spark, path)) {
         val log = DeltaLog.forTable(spark, path)
         log.checkpointAndCleanUpDeltaLog(log.update(), None)
@@ -127,7 +127,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async](
     if (DeltaTable.isDeltaTable(spark, path)) {
       val markedSubjects = markerTokens.select(col("subjectToken")).filter(col("subjectToken").isNotNull).distinct()
       val columns = spark.read.format("delta").load(path).columns.toSet
-      val rawScope = path == paths.bronze || path == paths.quarantine
+      val rawScope = path == paths.bronze || path == paths.quarantine || path == paths.lateFacts
       if (rawScope) {
         val table = DeltaTable.forPath(spark, path)
         if (columns.contains("subjectTokens"))

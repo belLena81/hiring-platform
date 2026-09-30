@@ -44,13 +44,17 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   private val enabled = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_ENABLED").contains("true")
   private val mode = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_MODE", "")
   private val shortHorizon = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON").contains("true")
+  private val shortHorizonSeconds =
+    sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_HORIZON_SECONDS").flatMap(_.toLongOption).getOrElse(60L)
   private val nonce = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_NONCE", "")
   private val subjectId = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID", "")
   private val databaseName = sys.env.getOrElse("MONGODB_DATABASE", "")
   private val topic = sys.env.getOrElse("ANALYTICS_TOPIC", "")
   private val bootstrap = sys.env.getOrElse("ANALYTICS_BOOTSTRAP_SERVERS", "kafka:9092")
   private val lakehouseRoot = sys.env.getOrElse("ANALYTICS_LAKEHOUSE_ROOT", "")
-  private val retentionMs = if (shortHorizon) 60L * 1000L else 7L * 24L * 60L * 60L * 1000L
+  require(shortHorizonSeconds >= 1L && shortHorizonSeconds <= 30L * 86400L, "short retention proof horizon must be from 1 second to 30 days")
+  private val retentionMs =
+    if (shortHorizon) shortHorizonSeconds * 1000L else 7L * 24L * 60L * 60L * 1000L
   private val segmentBytes = 16 * 1024
   private val producerId = "hiring-publisher-retention-" + nonce
   private def runId(rangeEnd: Long): String = "retention-proof-" + nonce + "-" + rangeEnd
@@ -470,7 +474,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
         barrier
       )
       .unsafeRunSync()
-    val deltaLogHorizon = if (shortHorizon) 60L else 30L * 86400L
+    val deltaLogHorizon = if (shortHorizon) shortHorizonSeconds else 30L * 86400L
     // Delta truncates the log-cleanup cutoff to a UTC day before deleting old logs.
     val deltaDeadline = purgedAt
       .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
