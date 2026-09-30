@@ -17,6 +17,59 @@ class AnalyticsDomainContractsSpec extends munit.FunSuite {
     assert(RangeFingerprint.from(digest.toUpperCase).isLeft)
   }
 
+  test("late-fact replay selections are bounded, unique, and canonically fingerprinted") {
+    val left = AnalyticsLateFactReplayRequest.from(
+      "replay-request-1",
+      Vector(("hiring.events", 1, 8L), ("hiring.events", 0, 3L))
+    )
+    val reordered = AnalyticsLateFactReplayRequest.from(
+      "replay-request-2",
+      Vector(("hiring.events", 0, 3L), ("hiring.events", 1, 8L))
+    )
+    assert(left.isValid)
+    assert(reordered.isValid)
+    assertEquals(left.toEither.toOption.get.selectionDigest, reordered.toEither.toOption.get.selectionDigest)
+    assertEquals(left.toEither.toOption.get.coordinates.size, 2)
+    val changed = AnalyticsLateFactReplayRequest.from(
+      "replay-request-3",
+      Vector(("hiring.events", 1, 9L), ("hiring.events", 0, 3L))
+    )
+    assertNotEquals(left.toEither.toOption.get.selectionDigest, changed.toEither.toOption.get.selectionDigest)
+
+    val duplicate = AnalyticsLateFactReplayRequest.from(
+      "replay-request-1",
+      Vector(("hiring.events", 0, 3L), ("hiring.events", 0, 3L))
+    )
+    assert(
+      duplicate.toEither.swap.toOption
+        .exists(_.toNonEmptyList.toList.contains("replay Kafka coordinates must be unique"))
+    )
+
+    val maximum =
+      Vector.tabulate(AnalyticsLateFactReplayRequest.MaximumCoordinates)(index => ("hiring.events", 0, index.toLong))
+    assert(AnalyticsLateFactReplayRequest.from("maximum-request", maximum).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("oversized-request", maximum :+ ("hiring.events", 0, 1000L)).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("empty-request", Vector.empty).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("zero-limit", Vector(("hiring.events", 0, 1L)), 0).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("too-large-limit", Vector(("hiring.events", 0, 1L)), 1001).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("below-count-limit", maximum.take(2), 1).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("control-request\n", Vector(("hiring.events", 0, 1L))).isValid)
+    assert(
+      !AnalyticsLateFactReplayRequest.from("oversized-id-" + ("x" * 128), Vector(("hiring.events", 0, 1L))).isValid
+    )
+    assert(!AnalyticsLateFactReplayRequest.from("invalid-topic", Vector(("bad:topic", 0, 1L))).isValid)
+    assert(!AnalyticsLateFactReplayRequest.from("invalid-topic", Vector(("bad\ntopic", 0, 1L))).isValid)
+  }
+
+  test("late-fact replay selections accumulate independent identity and coordinate errors") {
+    val invalid = AnalyticsLateFactReplayRequest.from(" ", Vector(("", -1, -1L)))
+    val errors = invalid.toEither.swap.toOption.toList.flatMap(_.toNonEmptyList.toList)
+    assert(errors.exists(_.contains("request ID")))
+    assert(errors.exists(_.contains("topic")))
+    assert(errors.exists(_.contains("partition")))
+    assert(errors.exists(_.contains("offset")))
+  }
+
   test("validated ranges remain trusted when constructing manifests") {
     val range = PartitionOffsetRange.from("hiring.operational-events", 0, 2L, 7L).toEither.toOption.get
     val runId = RunId.from("valid-run").toOption.get
