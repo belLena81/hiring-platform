@@ -21,6 +21,20 @@ object StreamingLineage {
 
 final case class StreamingBatchIdentity(lineage: StreamingLineage, batchId: StreamingBatchId)
 
+final case class StreamingPartitionEndOffset private (
+    topic: AnalyticsTopic,
+    partition: AnalyticsPartition,
+    offset: AnalyticsOffset
+)
+object StreamingPartitionEndOffset {
+  def from(topic: String, partition: Int, offset: Long): ValidatedNec[String, StreamingPartitionEndOffset] =
+    (
+      AnalyticsTopic.from(topic).toValidatedNec,
+      AnalyticsPartition.from(partition).toValidatedNec,
+      AnalyticsOffset.from(offset).toValidatedNec
+    ).mapN(StreamingPartitionEndOffset.apply)
+}
+
 /** Runtime identity covered by immutable analytics activation evidence. */
 final case class StreamingActivationIdentity(
     streamId: String,

@@ -75,6 +75,28 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       }
     }
 
+  override def reconciliationStates(
+      lineage: StreamingLineage,
+      retainedBatchIds: Set[StreamingBatchId]
+  ): F[Vector[StreamingJournalState]] =
+    execution.either {
+      if (!deltaTableExists(paths.streamingProgress)) Right(Vector.empty)
+      else {
+        ensureProgressSchema()
+        val retained =
+          if (retainedBatchIds.isEmpty) lit(false) else col(BatchIdColumn).isin(retainedBatchIds.toSeq.map(_.value)*)
+        val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
+        val rows = spark.read
+          .format("delta")
+          .load(paths.streamingProgress)
+          .filter(col(LineageColumn) === lit(lineage.value) && (retained || unfinished))
+          .limit(retainedBatchIds.size + 2)
+          .collect()
+          .toVector
+        Either.cond(rows.size <= retainedBatchIds.size + 1, rows, malformedProgress).flatMap(_.traverse(decodeProgress))
+      }
+    }
+
   private def latestPublishedWatermark(lineage: StreamingLineage): Either[AnalyticsError, Option[Instant]] = {
     val row = spark.read
       .format("delta")
@@ -295,6 +317,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       inputFingerprint <- RangeFingerprint
         .from(row.getAs[String](InputFingerprintColumn))
         .leftMap(_ => malformedProgress)
+      sourceEndOffsets <- row.getAs[Seq[Row]](SourceEndOffsetsColumn).toVector.traverse(decodeEndOffset)
       offsets <- row.getAs[Seq[Row]](DeliveredOffsetsColumn).toVector.traverse(decodeOffset)
       status <- Option(row.getAs[String](OutcomeColumn)).toRight(malformedProgress)
       state <- status match {
@@ -321,6 +344,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
         observedAt,
         priorWatermark,
         inputFingerprint,
+        sourceEndOffsets,
         offsets
       ),
       state._1,
@@ -340,6 +364,20 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
             row.getAs[Long]("minimumDeliveredOffset"),
             row.getAs[Long]("maximumDeliveredOffset"),
             row.getAs[Long]("deliveredRecordCount")
+          )
+          .toEither
+      )
+      .leftMap(_ => malformedProgress)
+      .flatMap(_.leftMap(_ => malformedProgress))
+
+  private def decodeEndOffset(row: Row): Either[AnalyticsError, StreamingPartitionEndOffset] =
+    Either
+      .catchNonFatal(
+        StreamingPartitionEndOffset
+          .from(
+            row.getAs[String]("topic"),
+            row.getAs[Int]("partition"),
+            row.getAs[Long]("endOffset")
           )
           .toEither
       )
@@ -383,6 +421,9 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       readRequiredInstant(row, ObservedAtColumn).contains(nowMicros(preparation.observedAt)) &&
       readOptionalInstant(row, PriorWatermarkColumn).toOption.flatten == preparation.priorWatermark.map(nowMicros) &&
       row.getAs[String](InputFingerprintColumn) == preparation.inputFingerprint.value &&
+      row.getAs[Seq[Row]](SourceEndOffsetsColumn).toVector.map(endOffsetValues) == sortedEndOffsets(preparation).map(
+        endOffsetSummaryValues
+      ) &&
       row.getAs[Seq[Row]](DeliveredOffsetsColumn).toVector.map(offsetValues) == sortedOffsets(preparation).map(
         summaryValues
       )
@@ -411,6 +452,21 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       (AnalyticsTopic.unwrap(summary.topic), AnalyticsPartition.unwrap(summary.partition))
     )
 
+  private def endOffsetValues(row: Row): (String, Int, Long) =
+    (row.getAs[String]("topic"), row.getAs[Int]("partition"), row.getAs[Long]("endOffset"))
+
+  private def endOffsetSummaryValues(offset: StreamingPartitionEndOffset): (String, Int, Long) =
+    (
+      AnalyticsTopic.unwrap(offset.topic),
+      AnalyticsPartition.unwrap(offset.partition),
+      AnalyticsOffset.unwrap(offset.offset)
+    )
+
+  private def sortedEndOffsets(preparation: StreamingInputPreparation): Vector[StreamingPartitionEndOffset] =
+    preparation.sourceEndOffsets.sortBy(offset =>
+      (AnalyticsTopic.unwrap(offset.topic), AnalyticsPartition.unwrap(offset.partition))
+    )
+
   private def preparationRow(preparation: StreamingInputPreparation): Row =
     Row(
       preparation.identity.lineage.value,
@@ -418,6 +474,13 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       Timestamp.from(nowMicros(preparation.observedAt)),
       preparation.priorWatermark.map(value => Timestamp.from(nowMicros(value))).orNull,
       preparation.inputFingerprint.value,
+      sortedEndOffsets(preparation).map { offset =>
+        Row(
+          AnalyticsTopic.unwrap(offset.topic),
+          AnalyticsPartition.unwrap(offset.partition),
+          AnalyticsOffset.unwrap(offset.offset)
+        )
+      },
       sortedOffsets(preparation).map { summary =>
         Row(
           AnalyticsTopic.unwrap(summary.topic),
@@ -528,6 +591,7 @@ private object DeltaStreamingBatchJournal {
   private val ObservedAtColumn = "observedAt"
   private val PriorWatermarkColumn = "priorWatermark"
   private val InputFingerprintColumn = "inputFingerprint"
+  private val SourceEndOffsetsColumn = "sourceEndOffsets"
   private val DeliveredOffsetsColumn = "deliveredOffsets"
   private val OutcomeColumn = "outcome"
   private val CandidateWatermarkColumn = "candidateWatermark"
@@ -549,12 +613,20 @@ private object DeltaStreamingBatchJournal {
       StructField("deliveredRecordCount", LongType, nullable = false)
     )
   )
+  private val EndOffsetType = StructType(
+    Vector(
+      StructField("topic", StringType, nullable = false),
+      StructField("partition", IntegerType, nullable = false),
+      StructField("endOffset", LongType, nullable = false)
+    )
+  )
   private val ProgressShape: AnalyticsTableSchemas.Shape = Vector(
     LineageColumn -> StringType,
     BatchIdColumn -> LongType,
     ObservedAtColumn -> TimestampType,
     PriorWatermarkColumn -> TimestampType,
     InputFingerprintColumn -> StringType,
+    SourceEndOffsetsColumn -> ArrayType(EndOffsetType, containsNull = false),
     DeliveredOffsetsColumn -> ArrayType(OffsetType, containsNull = false),
     OutcomeColumn -> StringType,
     CandidateWatermarkColumn -> TimestampType,

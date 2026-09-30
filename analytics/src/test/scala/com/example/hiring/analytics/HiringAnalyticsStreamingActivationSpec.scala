@@ -6,7 +6,11 @@ import com.example.hiring.analytics.domain.StreamingActivationIdentity
 import com.example.hiring.analytics.domain.{StreamingBatchId, StreamingBatchIdentity, StreamingLineage}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsStreamingRegistry}
-import com.example.hiring.analytics.service.streaming.{StreamingActivationGate, StreamingCheckpointAcknowledgement}
+import com.example.hiring.analytics.service.streaming.{
+  StreamingActivationGate,
+  StreamingCheckpointAcknowledgement,
+  StreamingCheckpointBatch
+}
 
 import cats.effect.{IO, Ref, Resource}
 import munit.CatsEffectSuite
@@ -53,11 +57,11 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
           override def callbackMayAcknowledge(identity: StreamingBatchIdentity): IO[Unit] = IO.unit
           override def reconcile(
               lineage: StreamingLineage,
-              checkpointedBatchIds: Set[StreamingBatchId],
+              checkpointBatches: Vector[StreamingCheckpointBatch],
               checkpointEstablished: Boolean
           ): IO[Unit] = IO.unit
         },
-        (_, _, _, _) => IO.unit,
+        (_, _, _, _, _) => IO.unit,
         () => IO.pure("cluster-id" -> "topic-id")
       )
 

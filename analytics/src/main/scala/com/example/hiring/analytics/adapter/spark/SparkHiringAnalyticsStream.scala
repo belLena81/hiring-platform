@@ -15,7 +15,8 @@ import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, Analy
 import com.example.hiring.analytics.service.streaming.StreamingActivationGate
 import com.example.hiring.analytics.service.streaming.StreamingCheckpointAcknowledgement
 
-import cats.effect.{Async, Resource}
+import cats.effect.{Async, Deferred, Resource}
+import cats.effect.syntax.all.*
 import cats.effect.std.Dispatcher
 import cats.syntax.all.*
 import io.circe.Json
@@ -45,9 +46,13 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     lakehouseLock: AnalyticsLakehouseLock[F],
     lakehouseRoot: String,
     checkpointAcknowledgement: StreamingCheckpointAcknowledgement[F],
-    processBatch: (DataFrame, StreamingBatchId, com.example.hiring.analytics.domain.StreamingLineage, F[Unit]) => F[
-      Unit
-    ],
+    processBatch: (
+        DataFrame,
+        StreamingBatchId,
+        com.example.hiring.analytics.domain.StreamingLineage,
+        Map[(String, Int), Long],
+        F[Unit]
+    ) => F[Unit],
     resolveSourceIdentity: () => F[(String, String)]
 ) {
   private val effect = Async[F]
@@ -105,14 +110,21 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
 
   private def start(dispatcher: Dispatcher[F], activationIdentity: StreamingActivationIdentity): F[StreamingQuery] =
     for {
+      _ <- effect.delay {
+        callbackLifecycle.synchronized {
+          stopping = false
+          activeCallbackCancellation.set(None)
+        }
+      }
       partitions <- KafkaOffsetRangeSource.availablePartitions(connection, topic, driverExecution)
       _ <- effect.fromEither(AnalyticsStreamingSettings.validatePartitionCoverage(settings, partitions))
       checkpointEstablished <- validateCheckpointIdentity(activationIdentity)
-      committedBatchIds <- checkpointCommittedBatchIds
+      checkpointBatches <- checkpointBatches
       lineage <- lineageFor(activationIdentity)
-      _ <- checkpointAcknowledgement.reconcile(lineage, committedBatchIds, checkpointEstablished)
+      _ <- checkpointAcknowledgement.reconcile(lineage, checkpointBatches, checkpointEstablished)
       properties <- effect.fromEither(KafkaClientProperties.sparkOptions(connection))
       _ <- activationGate.requireAuthorized(activationIdentity, settings.activationGrantId).void
+      queryIdentityReady <- Deferred[F, Either[Throwable, Unit]]
       query <- execution {
         spark.readStream
           .format("kafka")
@@ -130,7 +142,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           .option("checkpointLocation", settings.checkpointLocation)
           .trigger(Trigger.ProcessingTime(settings.triggerInterval))
           .foreachBatch((frame: DataFrame, batchNumber: Long) =>
-            runCallback(dispatcher, frame, batchNumber, lineage, activationIdentity)
+            runCallback(dispatcher, frame, batchNumber, lineage, activationIdentity, queryIdentityReady)
           )
           .start()
       }
@@ -138,6 +150,30 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           case error: AnalyticsError => error
           case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
         }
+        .handleErrorWith { error =>
+          queryIdentityReady.complete(Left(error)).void *>
+            stopQueryByName.attempt.flatMap {
+              case Right(_)           => effect.raiseError[StreamingQuery](error)
+              case Left(cleanupError) =>
+                effect.delay(cleanupError.addSuppressed(error)) *>
+                  effect.raiseError[StreamingQuery](AnalyticsError.LakehouseFailure(cleanupError))
+            }
+        }
+        .onCancel(
+          queryIdentityReady.complete(Left(invalidCheckpoint)).void *>
+            stopQueryByName
+        )
+      _ <- (persistQueryIdentity(activationIdentity, query.id.toString) *>
+        queryIdentityReady.complete(Right(())).void)
+        .handleErrorWith { error =>
+          queryIdentityReady.complete(Left(error)).void *>
+            stop(query) *>
+            effect.raiseError[Unit](error)
+        }
+        .onCancel(
+          queryIdentityReady.complete(Left(invalidCheckpoint)).void *>
+            stop(query)
+        )
     } yield query
 
   private def lineageFor(
@@ -159,6 +195,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
         val lineageDirectory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
         val lineageFile = lineagePath(lineageDirectory, activationIdentity)
         val establishedFile = establishedPath(lineageDirectory, activationIdentity)
+        val queryIdentityFile = queryIdentityPath(lineageDirectory, activationIdentity)
 
         def readExisting: Either[AnalyticsError, Unit] =
           Either
@@ -235,7 +272,11 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
                 val hasCommittedBatches = fileSystem.exists(commits) && fileSystem.listStatus(commits).exists(_.isFile)
                 val established = fileSystem.exists(establishedFile) || hasCommittedBatches
                 val checkpointState = if (!established) Right(()) else validateEstablishedCheckpoint()
-                checkpointState.map(_ => established)
+                checkpointState
+                  .flatMap(_ =>
+                    Either.cond(!established || fileSystem.exists(queryIdentityFile), (), invalidCheckpoint)
+                  )
+                  .map(_ => established)
               }
             }
         }
@@ -245,21 +286,17 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           persistLineage(activationIdentity).as(established)
       }
 
-  private def checkpointCommittedBatchIds: F[Set[StreamingBatchId]] = execution.either {
-    val checkpoint = new Path(settings.checkpointLocation)
-    val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
-    val commits = new Path(checkpoint, "commits")
-    if (!fileSystem.exists(commits)) Right(Set.empty)
-    else {
-      val parsed = fileSystem
-        .listStatus(commits)
-        .toVector
-        .filter(_.isFile)
-        .map(_.getPath.getName)
-        .traverse(name => scala.util.Try(name.toLong).toEither.leftMap(_ => invalidCheckpoint))
-      parsed.flatMap(_.traverse(id => StreamingBatchId.from(id).leftMap(_ => invalidCheckpoint))).map(_.toSet)
+  private def checkpointBatches: F[Vector[com.example.hiring.analytics.service.streaming.StreamingCheckpointBatch]] =
+    execution.either {
+      val checkpoint = new Path(settings.checkpointLocation)
+      val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
+      SparkCheckpointLogs.read(
+        fileSystem,
+        checkpoint,
+        AnalyticsTopic.unwrap(topic),
+        settings.initialOffsets.map(offset => AnalyticsPartition.unwrap(offset.partition)).toSet
+      )
     }
-  }
 
   private def registerCheckpointLineage(identity: StreamingActivationIdentity): F[Unit] =
     execution
@@ -316,6 +353,43 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     }
   }
 
+  private def persistQueryIdentity(identity: StreamingActivationIdentity, queryId: String): F[Unit] = execution.either {
+    val fileSystem = new Path(lakehouseRoot).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+    val file = queryIdentityPath(directory, identity)
+    val expected = scala.util.Try(java.util.UUID.fromString(queryId).toString).toOption.toRight(invalidCheckpoint)
+    expected.flatMap { normalized =>
+      try {
+        if (!fileSystem.mkdirs(directory) && !fileSystem.exists(directory)) Left(invalidCheckpoint)
+        else if (fileSystem.exists(file)) {
+          val input = fileSystem.open(file)
+          val existing = try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+          finally input.close()
+          Either.cond(existing == normalized, (), invalidCheckpoint)
+        } else {
+          val output = fileSystem.create(file, false)
+          try {
+            output.write(normalized.getBytes(StandardCharsets.UTF_8))
+            output.hflush()
+            output.hsync()
+          } finally output.close()
+          Right(())
+        }
+      } catch {
+        case _: FileAlreadyExistsException =>
+          Either
+            .catchNonFatal {
+              val input = fileSystem.open(file)
+              try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+              finally input.close()
+            }
+            .leftMap(_ => invalidCheckpoint)
+            .flatMap(value => Either.cond(value == normalized, (), invalidCheckpoint))
+        case NonFatal(_) => Left(invalidCheckpoint)
+      }
+    }
+  }
+
   private def persistLineage(identity: StreamingActivationIdentity): F[Unit] = execution.either {
     val fileSystem = new Path(settings.checkpointLocation).getFileSystem(spark.sparkContext.hadoopConfiguration)
     val expected = identity.canonical
@@ -356,7 +430,8 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       frame: DataFrame,
       batchNumber: Long,
       lineage: com.example.hiring.analytics.domain.StreamingLineage,
-      activationIdentity: StreamingActivationIdentity
+      activationIdentity: StreamingActivationIdentity,
+      queryIdentityReady: Deferred[F, Either[Throwable, Unit]]
   ): Unit = {
     val authorize = activationGate.requireAuthorized(activationIdentity, settings.activationGrantId).void
     val effectForBatch = StreamingBatchId
@@ -364,16 +439,21 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       .leftMap(problem => AnalyticsError.InvalidInput(cats.data.NonEmptyChain.one(problem)))
       .liftTo[F]
       .flatMap(batchId =>
-        lakehouseLock
-          .resource(lakehouseRoot)
-          .use(_ =>
-            authorize *> registerCheckpointLineage(activationIdentity) *> processBatch(
-              frame,
-              batchId,
-              lineage,
-              authorize
-            )
-          )
+        checkpointBatches.flatMap { batches =>
+          batches.find(_.batchId == batchId).toRight(invalidCheckpoint).liftTo[F].flatMap { checkpointBatch =>
+            lakehouseLock
+              .resource(lakehouseRoot)
+              .use(_ =>
+                queryIdentityReady.get.flatMap(_.liftTo[F]) *> authorize *> processBatch(
+                  frame,
+                  batchId,
+                  lineage,
+                  checkpointBatch.endOffsets,
+                  authorize
+                ) *> registerCheckpointLineage(activationIdentity)
+              )
+          }
+        }
       )
     val (completed, cancel) = dispatcher.unsafeToFutureCancelable(effectForBatch)
     // Spark's foreachBatch contract is synchronous: returning before this future completes would acknowledge offsets.
@@ -401,10 +481,32 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       .handleErrorWith(_ => effect.unit) *> effect
       .blocking(query.stop())
       .void
-      .handleErrorWith {
-        case error: AnalyticsError => effect.raiseError(error)
-        case NonFatal(cause)       => effect.raiseError(AnalyticsError.LakehouseFailure(cause))
+
+  /** Spark may finish registering a query after its blocking start call is cancelled but before it returns a handle. */
+  private def stopQueryByName: F[Unit] =
+    for {
+      callbackCancellation <- effect.delay {
+        callbackLifecycle.synchronized {
+          stopping = true
+          activeCallbackCancellation.getAndSet(None)
+        }
       }
+      callbackResult <- callbackCancellation.traverse_(cancel => effect.fromFuture(effect.delay(cancel())).void).attempt
+      queryResult <- driverExecution
+        .blocking(spark.streams.active.filter(_.name.contains(settings.streamId)).foreach(_.stop()))
+        .adaptError {
+          case error: AnalyticsError => error
+          case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
+        }
+        .attempt
+      _ <- (callbackResult, queryResult) match {
+        case (Right(_), Right(_))              => effect.unit
+        case (Left(callbackError), Right(_))   => effect.raiseError[Unit](callbackError)
+        case (callbackError, Left(queryError)) =>
+          callbackError.left.foreach(queryError.addSuppressed)
+          effect.raiseError[Unit](queryError)
+      }
+    } yield ()
 
   private def startingOffsets: String = {
     val partitions = settings.initialOffsets
@@ -433,6 +535,9 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
 
   private def establishedPath(directory: Path, identity: StreamingActivationIdentity): Path =
     new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.established")
+
+  private def queryIdentityPath(directory: Path, identity: StreamingActivationIdentity): Path =
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.query-id")
 
   private def failAtGrantExpiry(expiresAt: Instant): F[Unit] =
     effect.realTimeInstant.flatMap { now =>

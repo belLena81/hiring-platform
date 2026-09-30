@@ -181,12 +181,20 @@ object AppModule {
           shared.lock,
           common.lakehouseRoot,
           checkpoint,
-          (rawFrame, batchId, lineage, authorize) =>
+          (rawFrame, batchId, lineage, sourceEndOffsets, authorize) =>
             for {
               observedAt <- Async[F].realTimeInstant
               _ <- shared.maintenance.validateHmacConfigurationLocked
               parsed <- shared.lakehouseExecution(OperationalEventTransforms.parseKafkaRecords(rawFrame))
-              preparation <- prepareStreamingBatch(shared, parsed, lineage, batchId, observedAt, journal)
+              preparation <- prepareStreamingBatch(
+                shared,
+                parsed,
+                lineage,
+                batchId,
+                observedAt,
+                sourceEndOffsets,
+                journal
+              )
               _ <- SparkStreamingBatchStages
                 .resource(
                   shared.spark,
@@ -284,6 +292,7 @@ object AppModule {
       lineage: StreamingLineage,
       batchId: StreamingBatchId,
       observedAt: java.time.Instant,
+      sourceEndOffsets: Map[(String, Int), Long],
       journal: StreamingBatchJournal[F]
   ): F[StreamingInputPreparation] = {
     import org.apache.spark.sql.functions.{col, sha2}
@@ -319,15 +328,25 @@ object AppModule {
         fingerprint <- RangeFingerprint
           .from(AnalyticsDigest.sha256Hex(canonical.getBytes(StandardCharsets.UTF_8)))
           .leftMap(problem => AnalyticsError.InvalidInput(cats.data.NonEmptyChain.one(problem)))
-      } yield (fingerprint, safeOffsets)
+        safeEndOffsets <- sourceEndOffsets.toVector
+          .sortBy(_._1)
+          .traverse { case ((topic, partition), offset) =>
+            StreamingPartitionEndOffset
+              .from(topic, partition, offset)
+              .toEither
+              .left
+              .map(errors => AnalyticsError.InvalidInput(errors))
+          }
+      } yield (fingerprint, safeOffsets, safeEndOffsets)
     }
-    fingerprintAndOffsets.flatMap { case (fingerprint, offsets) =>
+    fingerprintAndOffsets.flatMap { case (fingerprint, offsets, safeEndOffsets) =>
       journal.latestWatermark(lineage).map { watermark =>
         StreamingInputPreparation(
           StreamingBatchIdentity(lineage, batchId),
           observedAt,
           watermark,
           fingerprint,
+          safeEndOffsets,
           offsets
         )
       }

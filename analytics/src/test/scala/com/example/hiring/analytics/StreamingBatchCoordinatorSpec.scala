@@ -17,6 +17,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     Instant.parse("2026-09-30T12:00:00Z"),
     None,
     right(RangeFingerprint.from("a" * 64)),
+    Vector(right(StreamingPartitionEndOffset.from("hiring.events", 0, 11L).toEither.left.map(_.toList.mkString("; ")))),
     Vector(
       right(
         StreamingPartitionSummary.from("hiring.events", 0, 9L, 10L, 2L).toEither.left.map(_.toList.mkString("; "))
@@ -184,6 +185,20 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
         state.get.map(_.latestWatermark)
       override def hasLineageState(id: StreamingLineage): IO[Boolean] =
         state.get.map(_.journal.keysIterator.exists(_.lineage == id))
+      override def reconciliationStates(
+          id: StreamingLineage,
+          retainedBatchIds: Set[StreamingBatchId]
+      ): IO[Vector[StreamingJournalState]] =
+        state.get.map(
+          _.journal.iterator
+            .collect {
+              case (identity, entry)
+                  if identity.lineage == id && (retainedBatchIds
+                    .contains(identity.batchId) || entry.terminal.isEmpty) =>
+                entry.asState
+            }
+            .toVector
+        )
       override def prepare(preparation: StreamingInputPreparation): IO[Unit] =
         state.update(s => s.copy(journal = s.journal.updated(preparation.identity, JournalEntry(preparation))))
       override def markIngestionCommitted(id: StreamingBatchIdentity): IO[Unit] =
@@ -290,7 +305,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
         state.update(s => s.copy(events = s.events :+ "callback-ack"))
       override def reconcile(
           lineage: StreamingLineage,
-          checkpointedBatchIds: Set[StreamingBatchId],
+          checkpointBatches: Vector[StreamingCheckpointBatch],
           checkpointEstablished: Boolean
       ): IO[Unit] = IO.unit
     }

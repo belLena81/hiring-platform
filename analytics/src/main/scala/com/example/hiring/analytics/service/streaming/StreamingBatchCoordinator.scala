@@ -10,6 +10,7 @@ import com.example.hiring.analytics.domain.{
   StreamingBatchId,
   StreamingBatchIdentity,
   StreamingLineage,
+  StreamingPartitionEndOffset,
   StreamingPartitionSummary,
   SubjectToken
 }
@@ -25,6 +26,7 @@ final case class StreamingInputPreparation(
     observedAt: Instant,
     priorWatermark: Option[Instant],
     inputFingerprint: RangeFingerprint,
+    sourceEndOffsets: Vector[StreamingPartitionEndOffset],
     deliveredOffsets: Vector[StreamingPartitionSummary]
 )
 
@@ -58,6 +60,10 @@ trait StreamingBatchJournal[F[_]] {
   def load(identity: StreamingBatchIdentity): F[Option[StreamingJournalState]]
   def latestWatermark(lineage: StreamingLineage): F[Option[Instant]]
   def hasLineageState(lineage: StreamingLineage): F[Boolean]
+  def reconciliationStates(
+      lineage: StreamingLineage,
+      retainedBatchIds: Set[StreamingBatchId]
+  ): F[Vector[StreamingJournalState]]
   def prepare(preparation: StreamingInputPreparation): F[Unit]
   def markIngestionCommitted(identity: StreamingBatchIdentity): F[Unit]
   def appendDecision(decision: StreamingDecisionRevision): F[Unit]
@@ -106,10 +112,17 @@ trait StreamingCheckpointAcknowledgement[F[_]] {
   /** Reconciles Spark's actual committed batch IDs against durable terminal journal rows. */
   def reconcile(
       lineage: StreamingLineage,
-      checkpointedBatchIds: Set[StreamingBatchId],
+      checkpointBatches: Vector[StreamingCheckpointBatch],
       checkpointEstablished: Boolean
   ): F[Unit]
 }
+
+/** Parsed Spark offset/commit evidence for one micro-batch. Kafka end offsets are exclusive positions. */
+final case class StreamingCheckpointBatch(
+    batchId: StreamingBatchId,
+    endOffsets: Map[(String, Int), Long],
+    committed: Boolean
+)
 
 final case class StreamingCoordinatorResult(
     outcome: StreamingTerminalOutcome,

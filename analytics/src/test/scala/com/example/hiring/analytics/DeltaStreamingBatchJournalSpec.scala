@@ -53,6 +53,7 @@ final class DeltaStreamingBatchJournalSpec extends FunSuite {
     Instant.parse("2026-09-30T12:00:00.123456789Z"),
     None,
     fingerprint,
+    Vector(StreamingPartitionEndOffset.from("hiring.events", 0, 13L).toEither.toOption.get),
     offsets
   )
   private val decision = StreamingDecisionRevision(
