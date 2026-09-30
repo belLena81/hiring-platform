@@ -52,7 +52,56 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
     val stored = spark.read.format("delta").load(paths.lateFacts)
     assertEquals(stored.count(), 2L)
     assertEquals(stored.columns.toVector, AnalyticsTableSchemas.lateFacts.map(_._1))
-    assert(!stored.columns.exists(Set("rawValue", "payload", "actorId", "aggregateId", "candidateId")))
+    assert(!stored.columns.exists(Set("rawValue", "payload", "actorId", "candidateId")))
+    assert(stored.columns.contains(Columns.AggregateId))
+    assert(stored.columns.contains(Columns.ApplicationId))
+    assert(stored.columns.contains(Columns.NewStatus))
+    val retainedReplayFields = stored
+      .select(
+        Columns.EventType,
+        Columns.AggregateType,
+        Columns.AggregateId,
+        Columns.ApplicationId,
+        Columns.JobId,
+        Columns.NewStatus,
+        Columns.JobSkills
+      )
+      .collect()
+      .map(row =>
+        (
+          row.getString(0),
+          row.getString(1),
+          row.getString(2),
+          row.getString(3),
+          row.getString(4),
+          row.getString(5),
+          row.getSeq[String](6).toVector
+        )
+      )
+      .toSet
+    assertEquals(
+      retainedReplayFields,
+      Set(
+        (
+          "APPLICATION_STATUS_CHANGED",
+          "Application",
+          "application-1",
+          "application-1",
+          "job-1",
+          "Hired",
+          Vector("Scala")
+        ),
+        (
+          "APPLICATION_STATUS_CHANGED",
+          "Application",
+          "application-2",
+          "application-2",
+          "job-1",
+          "Hired",
+          Vector("Scala")
+        )
+      )
+    )
     assertEquals(
       stored.select("expiresAt").distinct().head().getTimestamp(0).toInstant,
       observedAt.plus(30, java.time.temporal.ChronoUnit.DAYS)
@@ -90,6 +139,34 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
     )
     val result = stage.persistClosedDayFacts(invalid, markers(Vector.empty), Instant.EPOCH).attempt.unsafeRunSync()
     assert(result.swap.toOption.exists(_.isInstanceOf[AnalyticsError.InvalidLateFactSchema]))
+  }
+
+  test("incompatible retained late-fact tables fail closed without rewriting existing data") {
+    val paths = TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("hiring-late-facts-drift").toUri.toString)
+    val oldShape = StructType(
+      Seq(
+        StructField("eventId", StringType, nullable = true),
+        StructField("topic", StringType, nullable = true)
+      )
+    )
+    val existing =
+      spark.createDataFrame(spark.sparkContext.parallelize(Seq(Row("legacy-event", "hiring.events"))), oldShape)
+    existing.write.format("delta").save(paths.lateFacts)
+
+    val stage = new AnalyticsLateFactStage[IO](paths, execution, new DeltaBatchWriter[IO](paths, execution))
+    val result = stage
+      .persistClosedDayFacts(
+        closedDayEvents().filter(col("eventId") === "event-1"),
+        markers(Vector.empty),
+        Instant.EPOCH
+      )
+      .attempt
+      .unsafeRunSync()
+
+    assert(result.swap.toOption.exists(_.isInstanceOf[AnalyticsError.LakehouseFailure]))
+    val unchanged = spark.read.format("delta").load(paths.lateFacts)
+    assertEquals(unchanged.schema, oldShape)
+    assertEquals(unchanged.collect().toVector.map(_.getString(0)), Vector("legacy-event"))
   }
 
   test("conflicting event IDs are detected against retained late facts") {
@@ -193,10 +270,14 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
       Seq(
         StructField("eventId", StringType, nullable = false),
         StructField("rawValue", StringType, nullable = false),
+        StructField("eventType", StringType, nullable = false),
         StructField("topic", StringType, nullable = false),
         StructField("partition", IntegerType, nullable = false),
         StructField("offset", LongType, nullable = false),
         StructField("occurredAt", TimestampType, nullable = false),
+        StructField("aggregateType", StringType, nullable = false),
+        StructField("aggregateId", StringType, nullable = false),
+        StructField("payload", OperationalEventTransforms.payloadSchema, nullable = false),
         StructField("subjectToken", StringType, nullable = false),
         StructField("subjectTokens", ArrayType(StringType, containsNull = false), nullable = false)
       )
@@ -208,20 +289,28 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
           Row(
             "event-1",
             "raw envelope with candidate-1",
+            "APPLICATION_STATUS_CHANGED",
             "hiring.events",
             Int.box(0),
             Long.box(10L),
             eventTime,
+            "Application",
+            "application-1",
+            Row("application-1", "candidate-1", "job-1", "Hired", null, null, null, Row(Seq("Scala"))),
             token("candidate-token-1").value,
             Seq(token("candidate-token-1").value)
           ),
           Row(
             "event-2",
             "raw envelope with candidate-2",
+            "APPLICATION_STATUS_CHANGED",
             "hiring.events",
             Int.box(1),
             Long.box(20L),
             eventTime,
+            "Application",
+            "application-2",
+            Row("application-2", "candidate-2", "job-1", "Hired", null, null, null, Row(Seq("Scala"))),
             token("candidate-token-2").value,
             Seq(token("candidate-token-2").value)
           )

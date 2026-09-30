@@ -63,10 +63,15 @@ private[analytics] final class AnalyticsLateFactStage[F[_]: Async](
       AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(events, markerTokens).map { safe =>
         safe
           .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
+          .withColumn(Columns.ApplicationId, col(Columns.PayloadApplicationId))
+          .withColumn(Columns.JobId, col(Columns.PayloadJobId))
+          .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
+          .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
           .withColumn(Columns.AdmissionReason, lit(closedDayReason))
           .withColumn(Columns.IngestedAt, lit(Timestamp.from(observedAt)))
           .withColumn(Columns.ExpiresAt, lit(Timestamp.from(observedAt.plus(java.time.Duration.ofDays(retentionDays)))))
-          // This projection is the privacy boundary: no raw value, payload, actor, or aggregate identity is retained.
+          // This projection retains only the normalized fields required by the existing report transforms. No raw
+          // value, payload, actor, or direct subject identity is retained.
           .select(AnalyticsTableSchemas.lateFacts.map { case (name, _) => col(name) }*)
           .dropDuplicates(Columns.Topic, Columns.Partition, Columns.Offset)
       }
@@ -76,10 +81,14 @@ private[analytics] final class AnalyticsLateFactStage[F[_]: Async](
   private val lateInputShape: AnalyticsTableSchemas.Shape = Vector(
     Columns.EventId -> org.apache.spark.sql.types.StringType,
     Columns.RawValue -> org.apache.spark.sql.types.StringType,
+    Columns.EventType -> org.apache.spark.sql.types.StringType,
     Columns.Topic -> org.apache.spark.sql.types.StringType,
     Columns.Partition -> org.apache.spark.sql.types.IntegerType,
     Columns.Offset -> org.apache.spark.sql.types.LongType,
     Columns.OccurredAt -> org.apache.spark.sql.types.TimestampType,
+    Columns.AggregateType -> org.apache.spark.sql.types.StringType,
+    Columns.AggregateId -> org.apache.spark.sql.types.StringType,
+    Columns.Payload -> OperationalEventTransforms.payloadSchema,
     Columns.SubjectToken -> org.apache.spark.sql.types.StringType,
     Columns.SubjectTokens -> org.apache.spark.sql.types.ArrayType(
       org.apache.spark.sql.types.StringType,
