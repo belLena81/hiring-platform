@@ -44,15 +44,21 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
   private val enabled = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_ENABLED").contains("true")
   private val mode = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_MODE", "")
   private val shortHorizon = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_SHORT_HORIZON").contains("true")
-  private val shortHorizonSeconds =
-    sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_HORIZON_SECONDS").flatMap(_.toLongOption).getOrElse(60L)
+  private val shortHorizonSeconds = sys.env.get("HIRING_ANALYTICS_RETENTION_PROOF_HORIZON_SECONDS") match {
+    case None        => 60L
+    case Some(value) =>
+      value.toLongOption
+        .filter(seconds => seconds >= 1L && seconds <= 30L * 86400L)
+        .getOrElse(
+          fail("HIRING_ANALYTICS_RETENTION_PROOF_HORIZON_SECONDS must be an integer from 1 second to 30 days")
+        )
+  }
   private val nonce = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_NONCE", "")
   private val subjectId = sys.env.getOrElse("HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID", "")
   private val databaseName = sys.env.getOrElse("MONGODB_DATABASE", "")
   private val topic = sys.env.getOrElse("ANALYTICS_TOPIC", "")
   private val bootstrap = sys.env.getOrElse("ANALYTICS_BOOTSTRAP_SERVERS", "kafka:9092")
   private val lakehouseRoot = sys.env.getOrElse("ANALYTICS_LAKEHOUSE_ROOT", "")
-  require(shortHorizonSeconds >= 1L && shortHorizonSeconds <= 30L * 86400L, "short retention proof horizon must be from 1 second to 30 days")
   private val retentionMs =
     if (shortHorizon) shortHorizonSeconds * 1000L else 7L * 24L * 60L * 60L * 1000L
   private val segmentBytes = 16 * 1024

@@ -30,6 +30,7 @@ check_state_directory() {
 }
 
 mode="${1:-start}"
+requested_horizon_seconds="${HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS:-}"
 if [[ "$mode" == start && $# -le 1 ]]; then
   nonce="$(openssl rand -hex 8)"
   subject_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
@@ -41,10 +42,18 @@ elif [[ "$mode" == resume && $# -eq 2 && "$2" =~ ^[a-f0-9]{16}$ ]]; then
   [[ "$(stat -c '%u:%a' "$state_file")" == "$(id -u):600" ]] || {
     printf 'Smoke state must be owned by this user with mode 600.\n' >&2; exit 1;
   }
-  read -r stored_nonce subject_id < "$state_file"
+  read -r stored_nonce subject_id stored_horizon_seconds < "$state_file"
   [[ "$stored_nonce" == "$nonce" && "$subject_id" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || {
     printf 'Smoke state has invalid identity.\n' >&2; exit 1;
   }
+  [[ "$stored_horizon_seconds" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'Smoke state does not contain a valid pinned retention horizon; start a fresh proof.\n' >&2
+    exit 1
+  }
+  if [[ -n "$requested_horizon_seconds" && "$requested_horizon_seconds" != "$stored_horizon_seconds" ]]; then
+    printf 'Smoke horizon is fixed at %s seconds for this proof.\n' "$stored_horizon_seconds" >&2
+    exit 2
+  fi
 else
   printf 'Usage: %s [start | resume <16-hex-nonce>]\n' "$0" >&2
   exit 2
@@ -54,10 +63,21 @@ export HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE="hiring_erasure_smoke_$nonce"
 export HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC="hiring.erasure.smoke.$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_NONCE="$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$subject_id"
-export HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS="${HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS:-60}"
+if [[ "$mode" == resume ]]; then
+  HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS="$stored_horizon_seconds"
+else
+  HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS="${requested_horizon_seconds:-60}"
+fi
 [[ "$HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS" =~ ^[1-9][0-9]*$ ]] &&
   (( HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS <= 2592000 )) || {
   printf 'HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS must be an integer from 1 to 2592000.\n' >&2
+  exit 2
+}
+export HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS
+export HIRING_ANALYTICS_ERASURE_SMOKE_KAFKA_RETENTION_HOURS="${HIRING_ANALYTICS_ERASURE_SMOKE_KAFKA_RETENTION_HOURS:-1}"
+[[ "$HIRING_ANALYTICS_ERASURE_SMOKE_KAFKA_RETENTION_HOURS" =~ ^[1-9][0-9]*$ ]] &&
+  (( HIRING_ANALYTICS_ERASURE_SMOKE_KAFKA_RETENTION_HOURS <= 720 )) || {
+  printf 'HIRING_ANALYTICS_ERASURE_SMOKE_KAFKA_RETENTION_HOURS must be an integer from 1 to 720.\n' >&2
   exit 2
 }
 export KAFKA_TOPIC="$HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC"
@@ -128,7 +148,7 @@ if [[ "$mode" == start ]]; then
   check_state_directory
   git check-ignore -q "$state_file" || { printf 'Smoke state path is not ignored by Git.\n' >&2; exit 1; }
   [[ ! -e "$state_file" && ! -L "$state_file" ]] || { printf 'Smoke state already exists: %s\n' "$state_file" >&2; exit 1; }
-  printf '%s %s\n' "$nonce" "$subject_id" > "$state_file"
+  printf '%s %s %s\n' "$nonce" "$subject_id" "$HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS" > "$state_file"
   chmod 600 "$state_file"
   printf 'Smoke staged on preserved volumes. Resume after the next UTC day plus %s seconds: %s resume %s\n' \
     "$HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS" "$0" "$nonce"
@@ -153,5 +173,5 @@ else
   compose up -d analytics-erasure-worker
   wait_for_phase ReportPublished 1200
   run_fixture smoke-verify
-  printf 'Smoke proof passed: populated synthetic Delta rows, worker restart, actual Kafka earliest offsets, completion receipt, report publication, and captured file absence. Project-scoped named volumes remain available as local evidence. This is flow evidence only; the full-horizon retention gate remains open.\n'
+  printf 'Smoke proof passed: populated synthetic Delta rows, worker restart, actual Kafka earliest offsets, completion receipt, report publication, and captured file absence. Project-scoped named volumes remain available as local evidence. This supports local implementation closure; full-horizon retention remains a production rollout gate.\n'
 fi
