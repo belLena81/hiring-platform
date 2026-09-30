@@ -3,6 +3,7 @@ package com.example.hiring.analytics.config
 import AnalyticsPositiveInt.*
 
 import com.example.hiring.analytics.domain.{
+  AnalyticsLateFactReplayRequest,
   AnalyticsRunManifest,
   AnalyticsTopic,
   PartitionOffsetRange,
@@ -68,6 +69,13 @@ final case class AnalyticsStreamingRuntimeSettings(
     topic: AnalyticsTopic
 ) {
   override def toString: String = "AnalyticsStreamingRuntimeSettings([REDACTED])"
+}
+
+final case class AnalyticsLateFactReplaySettings(
+    common: AnalyticsCommonSettings,
+    request: AnalyticsLateFactReplayRequest
+) {
+  override def toString: String = "AnalyticsLateFactReplaySettings([REDACTED])"
 }
 
 final case class AnalyticsWorkerSettings(
@@ -143,6 +151,12 @@ object AnalyticsRuntimeConfig {
       startOffset: Option[Long],
       endOffsetExclusive: Option[Long]
   )
+  private final case class ReplayCoordinateSettings(topic: String, partition: Int, offset: Long)
+  private final case class ReplayInvocationSettings(
+      requestId: Option[String],
+      maximumRecords: Option[Int],
+      coordinates: Option[List[ReplayCoordinateSettings]]
+  )
   private final case class KafkaRetentionEvidence(
       barrierOffset: Option[Long],
       earliestAvailableOffset: Option[Long],
@@ -164,7 +178,8 @@ object AnalyticsRuntimeConfig {
       hmac: AnalyticsHmacSettings,
       batch: Option[BatchInvocationSettings],
       operational: AnalyticsOperationalSettings,
-      keyRetirementAudit: Option[KeyRetirementAuditConfiguration]
+      keyRetirementAudit: Option[KeyRetirementAuditConfiguration],
+      replay: Option[ReplayInvocationSettings]
   )
 
   @nowarn("cat=deprecation")
@@ -188,6 +203,8 @@ object AnalyticsRuntimeConfig {
   private given ConfigReader[KafkaRuntimeSettings] = KebabCaseConfigReader.derive[KafkaRuntimeSettings]
   private given ConfigReader[AnalyticsHmacSettings] = KebabCaseConfigReader.derive[AnalyticsHmacSettings]
   private given ConfigReader[BatchInvocationSettings] = KebabCaseConfigReader.derive[BatchInvocationSettings]
+  private given ConfigReader[ReplayCoordinateSettings] = KebabCaseConfigReader.derive[ReplayCoordinateSettings]
+  private given ConfigReader[ReplayInvocationSettings] = KebabCaseConfigReader.derive[ReplayInvocationSettings]
   private given ConfigReader[AnalyticsPositiveInt] = ConfigReader[Int].emap { value =>
     value.refineEither[Positive].leftMap(_ => UserValidationFailed("must be greater than zero"))
   }
@@ -229,6 +246,9 @@ object AnalyticsRuntimeConfig {
       )
     }
 
+  def loadLateFactReplay[F[_]: Async]: F[AnalyticsLateFactReplaySettings] =
+    load[F].flatMap(raw => Async[F].fromEither(lateFactReplay(raw)))
+
   def loadKeyRetirementAudit[F[_]: Async]: F[AnalyticsKeyRetirementAuditSettings] =
     load[F].flatMap(raw => Async[F].fromEither(keyRetirementAudit(raw)))
 
@@ -252,6 +272,12 @@ object AnalyticsRuntimeConfig {
       environment: Map[String, String] = Map.empty
   ): Either[AnalyticsError, AnalyticsWorkerSettings] =
     resolve(value, environment).flatMap(worker)
+
+  def lateFactReplayFromHocon(
+      value: String,
+      environment: Map[String, String] = Map.empty
+  ): Either[AnalyticsError, AnalyticsLateFactReplaySettings] =
+    resolve(value, environment).flatMap(lateFactReplay)
 
   private[analytics] def keyRetirementAuditFromHocon(
       value: String,
@@ -358,6 +384,34 @@ object AnalyticsRuntimeConfig {
             .map(AnalyticsWorkerSettings(settings, topic, _))
         }
     )
+
+  private def lateFactReplay(raw: AnalyticsConfigValues): Either[AnalyticsError, AnalyticsLateFactReplaySettings] = {
+    val invocation = raw.replay.toValidNec("analytics.replay configuration is required")
+    val validatedRequest = invocation.andThen { value =>
+      val requestId = value.requestId.toValidNec("analytics.replay.request-id is required")
+      val coordinates = value.coordinates.toValidNec("analytics.replay.coordinates is required")
+      val builtRequest =
+        (requestId, coordinates).mapN((id, selected) => (id, selected)).andThen { case (id, selected) =>
+          val maximum = value.maximumRecords.getOrElse(AnalyticsLateFactReplayRequest.MaximumCoordinates)
+          AnalyticsLateFactReplayRequest
+            .from(id, selected.map(row => (row.topic, row.partition, row.offset)).toVector, maximum)
+            .leftMap(_.toNonEmptyList.toList.mkString("; "))
+            .toValidatedNec
+        }
+      val configuredTopic = raw.kafka.topic
+      val topicBound = coordinates.andThen { selected =>
+        Either
+          .cond(
+            selected.forall(_.topic == AnalyticsTopic.unwrap(configuredTopic)),
+            (),
+            "analytics.replay coordinates must use analytics.kafka.topic"
+          )
+          .toValidatedNec
+      }
+      (builtRequest, topicBound).mapN((request, _) => request)
+    }
+    complete((common(raw), validatedRequest).mapN(AnalyticsLateFactReplaySettings.apply))
+  }
 
   private def keyRetirementAudit(
       raw: AnalyticsConfigValues

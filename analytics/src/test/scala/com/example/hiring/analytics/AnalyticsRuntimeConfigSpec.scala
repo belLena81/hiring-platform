@@ -141,6 +141,84 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assert(!loaded.toString.contains(key))
   }
 
+  test("late-fact replay settings bind an explicit request to the configured Kafka topic") {
+    val replayHocon = hocon.replace(
+      "  batch {",
+      """|  replay {
+        |    request-id = "late-replay-2026-09-30"
+        |    maximum-records = 2
+        |    coordinates = [
+        |      { topic = "hiring.operational-events", partition = 0, offset = 7 }
+        |      { topic = "hiring.operational-events", partition = 1, offset = 19 }
+        |    ]
+        |  }
+        |  batch {""".stripMargin
+    )
+    val loaded = AnalyticsRuntimeConfig
+      .lateFactReplayFromHocon(replayHocon, settings)
+      .toOption
+      .getOrElse(fail("expected valid late-fact replay config"))
+
+    assertEquals(loaded.request.requestId.value, "late-replay-2026-09-30")
+    assertEquals(loaded.request.coordinates.size, 2)
+    assertEquals(loaded.request.selectionDigest.length, 64)
+    assert(!loaded.toString.contains("reader-secret"))
+  }
+
+  test("late-fact replay configuration rejects topic drift and invalid request limits") {
+    val replayHocon = hocon.replace(
+      "  batch {",
+      """|  replay {
+        |    request-id = "late-replay-2026-09-30"
+        |    maximum-records = 1
+        |    coordinates = [
+        |      { topic = "other.topic", partition = 0, offset = 7 }
+        |      { topic = "hiring.operational-events", partition = 1, offset = 19 }
+        |    ]
+        |  }
+        |  batch {""".stripMargin
+    )
+    val error = AnalyticsRuntimeConfig
+      .lateFactReplayFromHocon(replayHocon, settings)
+      .swap
+      .toOption
+      .getOrElse(fail("expected topic mismatch and over-limit errors"))
+    assert(error.getMessage.contains("replay request exceeds its configured limit"))
+    assert(error.getMessage.contains("coordinates must use analytics.kafka.topic"))
+  }
+
+  test("late-fact replay configuration requires identity and coordinates and rejects duplicate selections") {
+    val missingBlock = AnalyticsRuntimeConfig.lateFactReplayFromHocon(hocon, settings)
+    assert(missingBlock.swap.toOption.exists(_.getMessage.contains("analytics.replay configuration is required")))
+
+    val incomplete = AnalyticsRuntimeConfig.lateFactReplayFromHocon(
+      hocon.replace("  batch {", "  replay { maximum-records = 1000 }\n  batch {"),
+      settings
+    )
+    val incompleteMessage = incomplete.swap.toOption.getOrElse(fail("expected required replay fields to fail"))
+    assert(incompleteMessage.getMessage.contains("analytics.replay.request-id is required"))
+    assert(incompleteMessage.getMessage.contains("analytics.replay.coordinates is required"))
+
+    val duplicate = AnalyticsRuntimeConfig.lateFactReplayFromHocon(
+      hocon.replace(
+        "  batch {",
+        """  replay {
+          request-id = "duplicate-selection"
+          coordinates = [
+            { topic = "hiring.operational-events", partition = 0, offset = 7 }
+            { topic = "hiring.operational-events", partition = 0, offset = 7 }
+          ]
+        }
+        batch {"""
+      ),
+      settings
+    )
+    assert(
+      duplicate.swap.toOption
+        .exists(_.getMessage.contains("replay Kafka coordinates must be unique"))
+    )
+  }
+
   test("runtime composition resolves validated lakehouse roots into service paths") {
     val paths = AppModule
       .resolveLakehousePaths("file:///tmp/hiring-analytics")
