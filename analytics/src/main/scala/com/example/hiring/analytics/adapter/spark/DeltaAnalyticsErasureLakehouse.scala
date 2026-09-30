@@ -50,7 +50,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
   )
 
   override def validateHmacConfigurationLocked: F[Unit] =
-    keyContinuity.validateHmacConfiguration(spark)
+    retention.recoverAbandonedRewrites(spark) *> keyContinuity.validateHmacConfiguration(spark)
 
   override def configureRawTables: F[Unit] = retention.configureRawTables(spark)
 
@@ -68,7 +68,8 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
       retention.vacuumExpiredFiles(spark).flatTap(_ => erasure.checkpointRawTableLogs(spark))
 
   override def verifyMarkedSubjectsAbsent(markerTokens: Vector[SubjectToken]): F[Unit] =
-    withMarkerTokens(markerTokens)(frame => erasure.verifyMarkedSubjectsAbsent(spark, frame))
+    retention.recoverAbandonedRewrites(spark) *>
+      withMarkerTokens(markerTokens)(frame => erasure.verifyMarkedSubjectsAbsent(spark, frame))
 
   override def countMarkedRows(markerTokens: Vector[SubjectToken]): F[Long] =
     withMarkerTokens(markerTokens)(frame => erasure.countMarkedRows(spark, frame))

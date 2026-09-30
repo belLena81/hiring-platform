@@ -49,8 +49,9 @@ cleanup() {
           ! -L "$proof_data_dir" && ! -L "$proof_data_dir/lakehouse" &&
           "$(dirname "$proof_data_dir")" == "$proof_parent" ]]; then
       # Rootless worker files are owned by its mapped host UID. The mount is
-      # restricted to this run's lakehouse, then the host removes its parent.
-      if ! docker run --rm -v "$proof_data_dir/lakehouse:/work" alpine:3.21 sh -c \
+      # restricted to this run's validated directory, including Spark scratch
+      # files as well as the lakehouse, then the host removes its parent.
+      if ! docker run --rm -v "$proof_data_dir:/work" alpine:3.21 sh -c \
         'for entry in /work/* /work/.[!.]* /work/..?*; do if [ -e "$entry" ] || [ -L "$entry" ]; then rm -rf -- "$entry"; fi; done'; then
         result=1
       fi

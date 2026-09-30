@@ -42,6 +42,17 @@ private[analytics] final class MongoActiveDeletionMarkerSource[F[_]: Async](
           collection.underlying
             .find(
               Filters.or(
+                // Invalid states must reach the decoder, including arrays containing a valid state.
+                Filters.nin(
+                  AnalyticsCollections.Fields.State,
+                  ErasureRequestState.values.map(_.persistedName).toList.asJava
+                ),
+                Filters.expr(
+                  new Document(
+                    "$ne",
+                    List(new Document("$type", s"$$${AnalyticsCollections.Fields.State}"), "string").asJava
+                  )
+                ),
                 Filters.in(
                   AnalyticsCollections.Fields.State,
                   ErasureRequestState.Pending.persistedName,

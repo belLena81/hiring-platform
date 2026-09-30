@@ -2,7 +2,7 @@ package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 
-import com.example.hiring.analytics.config.AnalyticsOperationalSettings
+import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MaximumErasureEvidenceFiles}
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
@@ -25,6 +25,15 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
     logger: Logger[F]
 ) {
   private val retention = operational.retention
+
+  /** Must run while the caller owns the shared lakehouse mutex. */
+  def recoverAbandonedRewrites(spark: SparkSession): F[Unit] =
+    DeltaPurgeRewrite.recover(
+      paths.root,
+      spark.sparkContext.hadoopConfiguration,
+      MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles),
+      execution
+    )
 
   def configureRawTables(spark: SparkSession): F[Unit] =
     execution {
@@ -88,7 +97,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
   }
 
   def vacuumExpiredFiles(spark: SparkSession): F[Long] =
-    Vector(
+    recoverAbandonedRewrites(spark) *> Vector(
       paths.bronze,
       paths.quarantine,
       paths.silver,

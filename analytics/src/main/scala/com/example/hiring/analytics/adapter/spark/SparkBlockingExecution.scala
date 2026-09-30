@@ -2,10 +2,11 @@ package com.example.hiring.analytics.adapter.spark
 
 import cats.effect.{Async, Resource}
 import cats.effect.syntax.all.*
+import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import org.apache.spark.SparkContext
 
-import java.util.concurrent.{Executors, ThreadFactory}
+import java.util.concurrent.{CompletableFuture, Executors, ThreadFactory}
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.util.UUID
@@ -19,9 +20,11 @@ private[analytics] final class SparkBlockingExecution[F[_]] private (
   private val sparkContext = new AtomicReference[Option[SparkContext]](None)
 
   override def apply[A](work: => A): F[A] =
-    sparkContext.get() match {
-      case Some(context) => runSpark(context, work)
-      case None          => blocking(work)
+    async.defer {
+      sparkContext.get() match {
+        case Some(context) => runSpark(context, work)
+        case None          => blocking(work)
+      }
     }
 
   /** Evaluates a synchronous non-Spark driver call on the same owned executor. */
@@ -49,38 +52,62 @@ private[analytics] final class SparkBlockingExecution[F[_]] private (
     )
   }
 
-  /** Submits the thunk directly so cancellation can interrupt its worker and run independently of it. */
+  /** Cancellation prevents queued work from starting and retains resource ownership until running work exits. */
   private def submit[A](work: => A, cancelWork: () => Unit): F[A] =
-    async.async[A] { callback =>
-      val cancelled = new AtomicBoolean(false)
-      val workerLock = new Object
-      var worker: Thread = null
-      val task = new Runnable {
-        override def run(): Unit = {
-          val current = Thread.currentThread()
-          val shouldRun = workerLock.synchronized {
-            if (cancelled.get()) false
-            else {
-              worker = current
-              true
+    async.defer {
+      val completed = new CompletableFuture[Unit]()
+      async.async[A] { callback =>
+        val cancelled = new AtomicBoolean(false)
+        val workerLock = new Object
+        var worker: Thread = null
+        val task = new Runnable {
+          override def run(): Unit = {
+            val current = Thread.currentThread()
+            val shouldRun = workerLock.synchronized {
+              if (cancelled.get()) false
+              else {
+                worker = current
+                true
+              }
+            }
+            try {
+              if (!shouldRun) callback(Left(new CancellationException("Driver operation was cancelled")))
+              else {
+                val result =
+                  try scala.util.Try(work).toEither
+                  catch { case interrupted: InterruptedException => Left(interrupted) }
+                callback(result)
+              }
+            } finally {
+              Thread.interrupted()
+              workerLock.synchronized {
+                worker = null
+                completed.complete(())
+              }
             }
           }
-          try {
-            if (!shouldRun) callback(Left(new CancellationException("Driver operation was cancelled")))
-            else callback(scala.util.Try(work).toEither.left.map(identity[Throwable]))
-          } finally {
-            workerLock.synchronized { worker = null }
-            Thread.interrupted()
-          }
         }
+        try executionContext.execute(task)
+        catch { case error: Throwable => callback(Left(error)) }
+        val cancel = async
+          .delay {
+            workerLock.synchronized {
+              cancelled.set(true)
+              Option(worker).nonEmpty
+            }
+          }
+          .flatMap {
+            case false => async.unit
+            case true  =>
+              async
+                .delay(cancelWork())
+                .guarantee(async.delay {
+                  workerLock.synchronized { Option(worker).foreach(_.interrupt()) }
+                })
+                .guarantee(async.fromCompletableFuture(async.pure(completed)))
+          }
+        async.pure(Some(cancel))
       }
-      try executionContext.execute(task)
-      catch { case error: Throwable => callback(Left(error)) }
-      async.pure(Some(async.delay {
-        cancelled.set(true)
-        cancelWork()
-        workerLock.synchronized { Option(worker).foreach(_.interrupt()) }
-      }))
     }
 
   override def either[A](work: => Either[AnalyticsError, A]): F[A] =

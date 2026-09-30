@@ -264,7 +264,11 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       .getOrElse(fail("missing deletion status in authenticated GraphQL response"))
   }
 
-  test("account deletion fences a registered publisher transaction and purges only the subject's data") {
+  test(
+    new munit.TestOptions(
+      "account deletion fences a registered publisher transaction and purges only the subject's data"
+    ).withTags(if (enabled) Set.empty else Set(munit.Ignore))
+  ) {
     if (enabled) {
       val databaseName = required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_DATABASE")
       assert(databaseName.matches("account_deletion_[0-9a-f]{16}"))

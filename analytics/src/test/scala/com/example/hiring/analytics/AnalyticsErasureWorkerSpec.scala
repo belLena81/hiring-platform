@@ -148,6 +148,36 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  Vector(
+    ("data deadline dominates", 12.hours, 2.days, 1.minute, 60.hours),
+    ("log deadline dominates", 12.hours, 1.minute, 2.minutes, 1.day + 2.minutes),
+    ("purge just before UTC midnight", 1.day - 1.second, 1.second, 1.minute, 1.day + 1.minute),
+    ("purge exactly at UTC midnight", 1.day, 1.second, 1.minute, 2.days + 1.minute)
+  ).foreach { case (label, purgeOffset, dataRetention, logRetention, deadline) =>
+    test(s"retention gate boundaries: $label") {
+      val barrier = KafkaRetentionBarrier.from("hiring.operational-events", Vector(0 -> 12L)).toOption.get
+      val horizons = AnalyticsTestOperationalConfig.operational.retention.copy(
+        deltaVacuumSafety = dataRetention,
+        deltaLogRetention = logRetention
+      )
+      val purgedAt = Instant.EPOCH.plusNanos(purgeOffset.toNanos)
+      val observations = for {
+        at <- Vector(deadline - 1.nano, deadline, deadline + 1.nano)
+        earliest <- Vector(11L, 12L, 13L)
+      } yield (at, earliest)
+      observations.traverse_ { case (at, earliest) =>
+        TestControl.executeEmbed {
+          for {
+            state <- Ref.of[IO, Counters](Counters())
+            _ <- IO.sleep(at)
+            passed <- workerForRetention(horizons, earliest, state).replayHorizonsPassed(barrier, purgedAt)
+            _ = assertEquals(passed, at >= deadline && earliest >= 12L, clues(label, at, earliest))
+          } yield ()
+        }
+      }
+    }
+  }
+
   private final case class Counters(claims: Int = 0, heartbeats: Int = 0, renewals: Int = 0)
 
   private final class TestErasureStore(

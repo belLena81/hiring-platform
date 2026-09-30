@@ -573,7 +573,10 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     Files.writeString(path, body, StandardCharsets.UTF_8)
   }
 
-  test("actual local retention proof stages, checks, and verifies durable erasure") {
+  test(
+    new munit.TestOptions("actual local retention proof stages, checks, and verifies durable erasure")
+      .withTags(if (enabled) Set.empty else Set(munit.Ignore))
+  ) {
     if (enabled) {
       assert(nonce.matches("[a-f0-9]{16}"), "assertion failed")
       if (shortHorizon) {

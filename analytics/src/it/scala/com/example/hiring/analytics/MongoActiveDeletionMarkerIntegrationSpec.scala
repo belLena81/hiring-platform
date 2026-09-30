@@ -206,6 +206,74 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, malformedPaths.bronze), "assertion failed")
   }
 
+  Vector[(String, Document => Document)](
+    "unknown" -> (_.append("state", "Unexpected")),
+    "missing" -> identity[Document],
+    "null" -> (_.append("state", null)),
+    "numeric" -> (_.append("state", Int.box(1))),
+    "array containing Complete" -> (_.append("state", List("Complete").asJava))
+  ).foreach { case (label, malformedState) =>
+    test(s"$label marker state fails before registry, report reservation, or Delta writes") {
+      val database = mongoClient.getDatabase(s"invalid_state_${UUID.randomUUID()}")
+      database
+        .getCollection("analytics_erasure_requests")
+        .insertOne(
+          malformedState(new Document("_id", UUID.randomUUID().toString))
+            .append("expiresAt", Date.from(Instant.EPOCH))
+        )
+      val root = Files.createTempDirectory("analytics-invalid-marker-state")
+      val paths = IntegrationAnalyticsLakehousePaths.unsafe(root.toUri.toString)
+      val rejectingPublisher = new AnalyticsReportPublisher[IO] {
+        override def reserve(
+            runId: RunId,
+            fingerprint: RangeFingerprint,
+            now: Instant
+        ): IO[AnalyticsReportReservation] =
+          IO.raiseError(new AssertionError("invalid markers must fail before report reservation"))
+        override def publish(
+            reservation: AnalyticsReportReservation,
+            report: AnalyticsReportOutput,
+            expiresAt: Instant
+        ): IO[Unit] =
+          IO.raiseError(new AssertionError("invalid markers must fail before publication"))
+        override def publishErasure(
+            reservation: AnalyticsReportReservation,
+            report: AnalyticsReportOutput,
+            expiresAt: Instant,
+            claim: ErasureClaim,
+            completedAt: Instant
+        ): IO[Unit] =
+          IO.raiseError(new AssertionError("invalid markers must fail before erasure publication"))
+      }
+      val batch = AnalyticsBatchTestSupport.newBatch(
+        paths,
+        pseudonymizer,
+        new MongoActiveDeletionMarkerSource[IO](
+          mongo4catsDatabase(database.getName),
+          pseudonymizer,
+          AnalyticsTestOperationalConfig.streams
+        ),
+        reportPublisher = rejectingPublisher
+      )
+      val noReadSource = new BoundedOperationalEventSource[IO] {
+        override def read(spark: SparkSession, manifest: AnalyticsRunManifest): IO[org.apache.spark.sql.DataFrame] =
+          IO.raiseError(new AssertionError("invalid markers must fail before reading Kafka"))
+        override def verifyOffsets(frame: org.apache.spark.sql.DataFrame, manifest: AnalyticsRunManifest): IO[Unit] =
+          IO.raiseError(new AssertionError("invalid markers must fail before checking offsets"))
+      }
+      try {
+        val error = intercept[AnalyticsError](batch.run(spark, noReadSource, manifest("invalid-state")).unsafeRunSync())
+        assertEquals(error, AnalyticsError.MalformedMarker)
+        val files = Files.list(root)
+        try assert(!files.findAny().isPresent, "marker rejection must precede every lakehouse mutation")
+        finally files.close()
+      } finally {
+        database.drop()
+        Files.deleteIfExists(root)
+      }
+    }
+  }
+
   test("pending marker overflow fails before any Delta mutation") {
     val database = mongoClient.getDatabase(s"overflow_${UUID.randomUUID()}")
     database

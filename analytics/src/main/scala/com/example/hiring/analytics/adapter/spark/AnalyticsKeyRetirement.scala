@@ -195,7 +195,12 @@ private[analytics] object AnalyticsKeyRetirement {
       (validateRetention(retention, now), validateWriters(writers, now))
         .mapN((_, _) => ())
         .fold(_.toChain, _ => Chain.empty[String])
-    sparkExecution {
+    DeltaPurgeRewrite.verifyRecovered(
+      paths.root,
+      spark.sparkContext.hadoopConfiguration,
+      MaximumAuditedErasureSubjects,
+      sparkExecution
+    ) *> sparkExecution {
       val delta = scanDelta(spark, paths, retiringKeyId)
       val registry = validateRegistry(spark, paths, retiringKeyId)
       (delta, registry)

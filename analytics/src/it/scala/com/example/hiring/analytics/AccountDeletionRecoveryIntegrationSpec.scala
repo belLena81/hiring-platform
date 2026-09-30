@@ -262,7 +262,10 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
   private def eventually[A](read: IO[A])(matches: A => Boolean): IO[A] =
     read.flatMap(value => if (matches(value)) IO.pure(value) else IO.sleep(200.millis) *> eventually(read)(matches))
 
-  test("running worker retries a failed fence and completes the same public deletion receipt") {
+  test(
+    new munit.TestOptions("running worker retries a failed fence and completes the same public deletion receipt")
+      .withTags(if (enabled) Set.empty else Set(munit.Ignore))
+  ) {
     if (enabled) {
 
       val databaseName = required("HIRING_ACCOUNT_DELETION_RECOVERY_DATABASE")

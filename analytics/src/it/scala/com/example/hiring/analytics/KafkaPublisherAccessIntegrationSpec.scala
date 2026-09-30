@@ -504,7 +504,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     }
   }
 
-  test("Compose permits the current publisher and rejects retired publisher authentication") {
+  test(
+    new munit.TestOptions("Compose permits the current publisher and rejects retired publisher authentication")
+      .withTags(if (enabled) Set.empty else Set(munit.Ignore))
+  ) {
     if (!enabled) ()
     else {
       val regularBrokerCutover = sys.env.get("HIRING_ANALYTICS_REGULAR_BROKER_CUTOVER_EVIDENCE").contains("true")
@@ -606,7 +609,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     }
   }
 
-  test("the erasure worker poll loop recovers after a refused transport connection") {
+  test(
+    new munit.TestOptions("the erasure worker poll loop recovers after a refused transport connection")
+      .withTags(if (transportRecoveryEnabled) Set.empty else Set(munit.Ignore))
+  ) {
     if (transportRecoveryEnabled) {
       val fencerPassword = sys.env.getOrElse("KAFKA_FENCER_PASSWORD", "")
       assert(fencerPassword.nonEmpty, "Compose fencer credentials are required")
@@ -614,7 +620,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
     }
   }
 
-  test("the erasure worker retries after Kafka interrupts an in-flight AdminClient fencing request") {
+  test(
+    new munit.TestOptions("the erasure worker retries after Kafka interrupts an in-flight AdminClient fencing request")
+      .withTags(if (adminOutageRecoveryEnabled) Set.empty else Set(munit.Ignore))
+  ) {
     if (adminOutageRecoveryEnabled) {
       val image = DockerImageName.parse("apache/kafka:3.9.2").asCompatibleSubstituteFor("apache/kafka")
       val broker = new KafkaContainer(image)
