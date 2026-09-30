@@ -26,8 +26,9 @@ import org.apache.spark.sql.streaming.{StreamingQuery, Trigger}
 
 import java.util.concurrent.atomic.AtomicReference
 import java.nio.charset.StandardCharsets
+import java.time.Instant
 import scala.concurrent.{Await, Future}
-import scala.concurrent.duration.Duration
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
@@ -40,10 +41,13 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     topic: AnalyticsTopic,
     settings: AnalyticsStreamingSettings,
     activationGate: StreamingActivationGate[F],
+    streamingRegistry: AnalyticsStreamingRegistry[F],
     lakehouseLock: AnalyticsLakehouseLock[F],
     lakehouseRoot: String,
     checkpointAcknowledgement: StreamingCheckpointAcknowledgement[F],
-    processBatch: (DataFrame, StreamingBatchId, com.example.hiring.analytics.domain.StreamingLineage) => F[Unit],
+    processBatch: (DataFrame, StreamingBatchId, com.example.hiring.analytics.domain.StreamingLineage, F[Unit]) => F[
+      Unit
+    ],
     resolveSourceIdentity: () => F[(String, String)]
 ) {
   private val effect = Async[F]
@@ -61,11 +65,30 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
               .fromEither(settings.activationIdentity(clusterId, topicId, AnalyticsTopic.unwrap(topic), lakehouseRoot))
           )
           .flatMap { identity =>
-            Resource.eval(activationGate.requireAuthorized(identity)) *>
-              streamOwnerResource *>
-              Dispatcher.parallel[F].flatMap { dispatcher =>
-                Resource.make(start(dispatcher, identity))(stop).flatMap { query =>
-                  Resource.eval(effect.interruptibleMany(query.awaitTermination()).void)
+            Resource.eval(activationGate.requireAuthorized(identity, settings.activationGrantId)) *> Resource.eval(
+              lakehouseLock
+                .resource(lakehouseRoot)
+                .use(_ =>
+                  activationGate.requireAuthorized(identity, settings.activationGrantId) *>
+                    streamingRegistry.registerLakehouse(lakehouseRoot) *>
+                    activationGate.requireAuthorized(identity, settings.activationGrantId).void
+                )
+            ) *> streamOwnerResource *> Resource
+              .eval(
+                activationGate.requireAuthorized(identity, settings.activationGrantId)
+              )
+              .flatMap { grantExpiresAt =>
+                Dispatcher.parallel[F].flatMap { dispatcher =>
+                  Resource.make(start(dispatcher, identity))(stop).flatMap { query =>
+                    Resource.eval(
+                      effect
+                        .race(
+                          effect.interruptibleMany(query.awaitTermination()).void,
+                          failAtGrantExpiry(grantExpiresAt)
+                        )
+                        .void
+                    )
+                  }
                 }
               }
           }
@@ -76,9 +99,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       .make(
         effect
           .fromEither(AnalyticsStreamingRegistry.ownerLockRoot(lakehouseRoot))
-          .flatMap(ownerRoot =>
-            lakehouseLock.resource(lakehouseRoot).use(_ => lakehouseLock.resource(ownerRoot).allocated)
-          )
+          .flatMap(ownerRoot => lakehouseLock.resource(ownerRoot).allocated)
       )(_._2)
       .void
 
@@ -91,6 +112,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       lineage <- lineageFor(activationIdentity)
       _ <- checkpointAcknowledgement.reconcile(lineage, committedBatchIds, checkpointEstablished)
       properties <- effect.fromEither(KafkaClientProperties.sparkOptions(connection))
+      _ <- activationGate.requireAuthorized(activationIdentity, settings.activationGrantId).void
       query <- execution {
         spark.readStream
           .format("kafka")
@@ -128,97 +150,100 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     )
 
   private def validateCheckpointIdentity(activationIdentity: StreamingActivationIdentity): F[Boolean] =
-    execution.either {
-      val checkpoint = new Path(settings.checkpointLocation)
-      val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
-      val identityFile = new Path(checkpoint, "_hiring_stream_identity")
-      val expected = activationIdentity.canonical
-      val lineageDirectory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
-      val lineageFile = new Path(
-        lineageDirectory,
-        s"${AnalyticsDigest.sha256Hex(expected.getBytes(StandardCharsets.UTF_8))}.identity"
-      )
+    execution
+      .either {
+        val checkpoint = new Path(settings.checkpointLocation)
+        val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
+        val identityFile = new Path(checkpoint, "_hiring_stream_identity")
+        val expected = activationIdentity.canonical
+        val lineageDirectory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+        val lineageFile = lineagePath(lineageDirectory, activationIdentity)
+        val establishedFile = establishedPath(lineageDirectory, activationIdentity)
 
-      def readExisting: Either[AnalyticsError, Unit] =
-        Either
-          .catchNonFatal {
-            val input = fileSystem.open(identityFile)
-            try new String(input.readAllBytes(), StandardCharsets.UTF_8)
-            finally input.close()
-          }
-          .leftMap(_ => invalidCheckpoint)
-          .flatMap(identity => Either.cond(identity == expected, (), invalidCheckpoint))
+        def readExisting: Either[AnalyticsError, Unit] =
+          Either
+            .catchNonFatal {
+              val input = fileSystem.open(identityFile)
+              try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+              finally input.close()
+            }
+            .leftMap(_ => invalidCheckpoint)
+            .flatMap(identity => Either.cond(identity == expected, (), invalidCheckpoint))
 
-      def writeNewIdentity(): Either[AnalyticsError, Unit] =
-        try {
-          val output = fileSystem.create(identityFile, false)
+        def writeNewIdentity(): Either[AnalyticsError, Unit] =
           try {
-            output.write(expected.getBytes(StandardCharsets.UTF_8))
-            output.hflush()
-            output.hsync()
-          } finally output.close()
-          Right(())
-        } catch {
-          case _: FileAlreadyExistsException => readExisting
-          case NonFatal(_)                   => Left(invalidCheckpoint)
-        }
-
-      def registerLineage(): Either[AnalyticsError, Unit] =
-        try {
-          if (!fileSystem.mkdirs(lineageDirectory) && !fileSystem.exists(lineageDirectory)) Left(invalidCheckpoint)
-          else if (fileSystem.exists(lineageFile)) {
-            val input = fileSystem.open(lineageFile)
-            val registered = try new String(input.readAllBytes(), StandardCharsets.UTF_8)
-            finally input.close()
-            Either.cond(registered == expected, (), invalidCheckpoint)
-          } else {
-            val output = fileSystem.create(lineageFile, false)
+            val output = fileSystem.create(identityFile, false)
             try {
               output.write(expected.getBytes(StandardCharsets.UTF_8))
               output.hflush()
               output.hsync()
             } finally output.close()
             Right(())
+          } catch {
+            case _: FileAlreadyExistsException => readExisting
+            case NonFatal(_)                   => Left(invalidCheckpoint)
           }
-        } catch {
-          case _: FileAlreadyExistsException => registerLineage()
-          case NonFatal(_)                   => Left(invalidCheckpoint)
+
+        def validateEstablishedCheckpoint(): Either[AnalyticsError, Unit] = {
+          val metadata = new Path(checkpoint, "metadata")
+          val offsets = new Path(checkpoint, "offsets")
+          val commits = new Path(checkpoint, "commits")
+          Either
+            .catchNonFatal(
+              fileSystem.getFileStatus(metadata).isFile &&
+                fileSystem.getFileStatus(offsets).isDirectory &&
+                fileSystem.getFileStatus(commits).isDirectory
+            )
+            .leftMap(_ => invalidCheckpoint)
+            .flatMap(valid => Either.cond(valid, (), invalidCheckpoint))
         }
 
-      def validateEstablishedCheckpoint(): Either[AnalyticsError, Unit] = {
-        val metadata = new Path(checkpoint, "metadata")
-        val offsets = new Path(checkpoint, "offsets")
-        val commits = new Path(checkpoint, "commits")
-        Either
-          .catchNonFatal(
-            fileSystem.getFileStatus(metadata).isFile &&
-              fileSystem.getFileStatus(offsets).isDirectory &&
-              fileSystem.getFileStatus(commits).isDirectory
-          )
+        val registeredIdentities = Either
+          .catchNonFatal {
+            if (!fileSystem.exists(lineageDirectory)) Vector.empty
+            else
+              fileSystem
+                .listStatus(lineageDirectory)
+                .filter(_.isFile)
+                .filter(_.getPath.getName.endsWith(".identity"))
+                .toVector
+                .map { status =>
+                  val input = fileSystem.open(status.getPath)
+                  try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+                  finally input.close()
+                }
+          }
           .leftMap(_ => invalidCheckpoint)
-          .flatMap(valid => Either.cond(valid, (), invalidCheckpoint))
-      }
-
-      val previouslyRegistered = fileSystem.exists(lineageFile)
-      if (!fileSystem.exists(checkpoint)) {
-        if (previouslyRegistered) Left(invalidCheckpoint)
-        else if (!fileSystem.mkdirs(checkpoint)) Left(invalidCheckpoint)
-        else writeNewIdentity().map(_ => false)
-      } else if (previouslyRegistered && !fileSystem.exists(identityFile)) Left(invalidCheckpoint)
-      else if (!fileSystem.exists(identityFile)) {
-        if (fileSystem.listStatus(checkpoint).nonEmpty) Left(invalidCheckpoint)
-        else writeNewIdentity().map(_ => false)
-      } else
-        readExisting.flatMap { _ =>
-          val sparkArtifacts = fileSystem.listStatus(checkpoint).filterNot(_.getPath == identityFile)
-          if (sparkArtifacts.isEmpty && previouslyRegistered) Left(invalidCheckpoint)
-          else {
-            val established = sparkArtifacts.nonEmpty
-            val checkpointState = if (!established) Right(()) else validateEstablishedCheckpoint()
-            checkpointState.flatMap(_ => registerLineage()).map(_ => established)
-          }
+        registeredIdentities.flatMap { identities =>
+          val previousIdentityMatches = identities.forall(_ == expected)
+          val previouslyRegistered =
+            fileSystem.exists(lineageFile) || identities.nonEmpty || fileSystem.exists(establishedFile)
+          if (!previousIdentityMatches) Left(invalidCheckpoint)
+          else if (!fileSystem.exists(checkpoint)) {
+            if (fileSystem.exists(establishedFile)) Left(invalidCheckpoint)
+            else if (!fileSystem.mkdirs(checkpoint)) Left(invalidCheckpoint)
+            else writeNewIdentity().map(_ => false)
+          } else if (previouslyRegistered && !fileSystem.exists(identityFile)) Left(invalidCheckpoint)
+          else if (!fileSystem.exists(identityFile)) {
+            if (fileSystem.listStatus(checkpoint).nonEmpty) Left(invalidCheckpoint)
+            else writeNewIdentity().map(_ => false)
+          } else
+            readExisting.flatMap { _ =>
+              val sparkArtifacts = fileSystem.listStatus(checkpoint).filterNot(_.getPath == identityFile)
+              {
+                val commits = new Path(checkpoint, "commits")
+                val hasCommittedBatches = fileSystem.exists(commits) && fileSystem.listStatus(commits).exists(_.isFile)
+                val established = fileSystem.exists(establishedFile) || hasCommittedBatches
+                val checkpointState = if (!established) Right(()) else validateEstablishedCheckpoint()
+                checkpointState.map(_ => established)
+              }
+            }
         }
-    }
+      }
+      .flatMap { established =>
+        activationGate.requireAuthorized(activationIdentity, settings.activationGrantId) *>
+          persistLineage(activationIdentity).as(established)
+      }
 
   private def checkpointCommittedBatchIds: F[Set[StreamingBatchId]] = execution.either {
     val checkpoint = new Path(settings.checkpointLocation)
@@ -236,53 +261,93 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     }
   }
 
-  private def registerCheckpointLineage(identity: StreamingActivationIdentity): F[Unit] = execution.either {
-    val checkpoint = new Path(settings.checkpointLocation)
-    val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
-    val expected = identity.canonical
-    val metadata = new Path(checkpoint, "metadata")
-    val offsets = new Path(checkpoint, "offsets")
-    val commits = new Path(checkpoint, "commits")
-    val established = Either
-      .catchNonFatal(
-        fileSystem.getFileStatus(metadata).isFile &&
-          fileSystem.getFileStatus(offsets).isDirectory &&
-          fileSystem.getFileStatus(commits).isDirectory
-      )
-      .leftMap(_ => invalidCheckpoint)
-      .flatMap(valid => Either.cond(valid, (), invalidCheckpoint))
-    established.flatMap { _ =>
-      val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
-      val file =
-        new Path(directory, s"${AnalyticsDigest.sha256Hex(expected.getBytes(StandardCharsets.UTF_8))}.identity")
-      try {
-        if (!fileSystem.mkdirs(directory) && !fileSystem.exists(directory)) Left(invalidCheckpoint)
-        else if (fileSystem.exists(file)) {
-          val input = fileSystem.open(file)
-          val registered = try new String(input.readAllBytes(), StandardCharsets.UTF_8)
-          finally input.close()
-          Either.cond(registered == expected, (), invalidCheckpoint)
-        } else {
-          val output = fileSystem.create(file, false)
-          try {
-            output.write(expected.getBytes(StandardCharsets.UTF_8))
-            output.hflush()
-            output.hsync()
-          } finally output.close()
-          Right(())
-        }
-      } catch {
-        case _: FileAlreadyExistsException =>
-          Either
-            .catchNonFatal {
-              val input = fileSystem.open(file)
-              try new String(input.readAllBytes(), StandardCharsets.UTF_8)
-              finally input.close()
-            }
-            .leftMap(_ => invalidCheckpoint)
-            .flatMap(value => Either.cond(value == expected, (), invalidCheckpoint))
-        case NonFatal(_) => Left(invalidCheckpoint)
+  private def registerCheckpointLineage(identity: StreamingActivationIdentity): F[Unit] =
+    execution
+      .either {
+        val checkpoint = new Path(settings.checkpointLocation)
+        val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
+        val metadata = new Path(checkpoint, "metadata")
+        val offsets = new Path(checkpoint, "offsets")
+        val commits = new Path(checkpoint, "commits")
+        val established = Either
+          .catchNonFatal(
+            fileSystem.getFileStatus(metadata).isFile &&
+              fileSystem.getFileStatus(offsets).isDirectory &&
+              fileSystem.getFileStatus(commits).isDirectory
+          )
+          .leftMap(_ => invalidCheckpoint)
+          .flatMap(valid => Either.cond(valid, (), invalidCheckpoint))
+        established
       }
+      .flatMap(_ => persistLineage(identity) *> persistEstablished(identity))
+
+  private def persistEstablished(identity: StreamingActivationIdentity): F[Unit] = execution.either {
+    val fileSystem = new Path(lakehouseRoot).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+    val file = establishedPath(directory, identity)
+    val expected = identity.canonical
+    try {
+      if (!fileSystem.mkdirs(directory) && !fileSystem.exists(directory)) Left(invalidCheckpoint)
+      else if (fileSystem.exists(file)) {
+        val input = fileSystem.open(file)
+        val value = try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+        finally input.close()
+        Either.cond(value == expected, (), invalidCheckpoint)
+      } else {
+        val output = fileSystem.create(file, false)
+        try {
+          output.write(expected.getBytes(StandardCharsets.UTF_8))
+          output.hflush()
+          output.hsync()
+        } finally output.close()
+        Right(())
+      }
+    } catch {
+      case _: FileAlreadyExistsException =>
+        Either
+          .catchNonFatal {
+            val input = fileSystem.open(file)
+            try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+            finally input.close()
+          }
+          .leftMap(_ => invalidCheckpoint)
+          .flatMap(value => Either.cond(value == expected, (), invalidCheckpoint))
+      case NonFatal(_) => Left(invalidCheckpoint)
+    }
+  }
+
+  private def persistLineage(identity: StreamingActivationIdentity): F[Unit] = execution.either {
+    val fileSystem = new Path(settings.checkpointLocation).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val expected = identity.canonical
+    val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+    val file = lineagePath(directory, identity)
+    try {
+      if (!fileSystem.mkdirs(directory) && !fileSystem.exists(directory)) Left(invalidCheckpoint)
+      else if (fileSystem.exists(file)) {
+        val input = fileSystem.open(file)
+        val registered = try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+        finally input.close()
+        Either.cond(registered == expected, (), invalidCheckpoint)
+      } else {
+        val output = fileSystem.create(file, false)
+        try {
+          output.write(expected.getBytes(StandardCharsets.UTF_8))
+          output.hflush()
+          output.hsync()
+        } finally output.close()
+        Right(())
+      }
+    } catch {
+      case _: FileAlreadyExistsException =>
+        Either
+          .catchNonFatal {
+            val input = fileSystem.open(file)
+            try new String(input.readAllBytes(), StandardCharsets.UTF_8)
+            finally input.close()
+          }
+          .leftMap(_ => invalidCheckpoint)
+          .flatMap(value => Either.cond(value == expected, (), invalidCheckpoint))
+      case NonFatal(_) => Left(invalidCheckpoint)
     }
   }
 
@@ -293,13 +358,22 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       lineage: com.example.hiring.analytics.domain.StreamingLineage,
       activationIdentity: StreamingActivationIdentity
   ): Unit = {
+    val authorize = activationGate.requireAuthorized(activationIdentity, settings.activationGrantId).void
     val effectForBatch = StreamingBatchId
       .from(batchNumber)
       .leftMap(problem => AnalyticsError.InvalidInput(cats.data.NonEmptyChain.one(problem)))
       .liftTo[F]
       .flatMap(batchId =>
-        registerCheckpointLineage(activationIdentity) *>
-          lakehouseLock.resource(lakehouseRoot).use(_ => processBatch(frame, batchId, lineage))
+        lakehouseLock
+          .resource(lakehouseRoot)
+          .use(_ =>
+            authorize *> registerCheckpointLineage(activationIdentity) *> processBatch(
+              frame,
+              batchId,
+              lineage,
+              authorize
+            )
+          )
       )
     val (completed, cancel) = dispatcher.unsafeToFutureCancelable(effectForBatch)
     // Spark's foreachBatch contract is synchronous: returning before this future completes would acknowledge offsets.
@@ -353,4 +427,19 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   private val invalidCheckpoint = AnalyticsError.InvalidConfiguration(
     "analytics streaming checkpoint is missing, malformed, or bound to another stream identity"
   )
+
+  private def lineagePath(directory: Path, identity: StreamingActivationIdentity): Path =
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.identity")
+
+  private def establishedPath(directory: Path, identity: StreamingActivationIdentity): Path =
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.established")
+
+  private def failAtGrantExpiry(expiresAt: Instant): F[Unit] =
+    effect.realTimeInstant.flatMap { now =>
+      val remainingNanos =
+        if (!expiresAt.isAfter(now)) 0L
+        else scala.util.Try(java.time.Duration.between(now, expiresAt).toNanos).getOrElse(Long.MaxValue)
+      effect.sleep(FiniteDuration(remainingNanos, NANOSECONDS)) *>
+        effect.raiseError[Unit](AnalyticsError.InvalidConfiguration("analytics streaming activation grant expired"))
+    }
 }

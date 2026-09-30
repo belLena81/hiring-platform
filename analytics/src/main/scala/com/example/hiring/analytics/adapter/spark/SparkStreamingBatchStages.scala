@@ -37,7 +37,8 @@ private[analytics] object SparkStreamingBatchStages {
       reportPublisher: AnalyticsReportPublisher[F],
       retention: AnalyticsRetentionSettings,
       configureTables: F[Unit],
-      applyActiveDeletions: Vector[SubjectToken] => F[Unit]
+      applyActiveDeletions: Vector[SubjectToken] => F[Unit],
+      authorizePublication: F[Unit]
   ): Resource[F, StreamingBatchStages[F]] =
     Resource
       .make(execution(parsedEvents.persist(StorageLevel.MEMORY_AND_DISK)))(frame =>
@@ -58,7 +59,8 @@ private[analytics] object SparkStreamingBatchStages {
           reportPublisher,
           retention,
           configureTables,
-          applyActiveDeletions
+          applyActiveDeletions,
+          authorizePublication
         )
       )
 }
@@ -77,7 +79,8 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     reportPublisher: AnalyticsReportPublisher[F],
     retention: AnalyticsRetentionSettings,
     configureTables: F[Unit],
-    applyActiveDeletions: Vector[SubjectToken] => F[Unit]
+    applyActiveDeletions: Vector[SubjectToken] => F[Unit],
+    authorizePublication: F[Unit]
 ) extends StreamingBatchStages[F] {
   private val F = Async[F]
   private val AdmissionColumn = "_hiringEventTimeAdmission"
@@ -152,6 +155,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     if (activeTokens.nonEmpty) F.pure(StreamingPublicationResult.ErasurePending)
     else
       for {
+        _ <- authorizePublication
         report <- rebuildAndExtract(preparation.observedAt)
         runId <- F.fromEither(streamRunId(decision))
         rangeFingerprint <- F.fromEither(streamRangeFingerprint(preparation, decision))

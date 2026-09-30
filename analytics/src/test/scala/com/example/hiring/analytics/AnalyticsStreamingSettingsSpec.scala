@@ -5,13 +5,15 @@ import com.example.hiring.analytics.config.MaximumOffsetsPerTrigger.*
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import munit.FunSuite
+import scala.concurrent.duration.*
 
 class AnalyticsStreamingSettingsSpec extends FunSuite {
   private val valid = """
     |analytics.streaming {
     |  stream-id = "hiring-events"
+    |  activation-grant-id = "grant-2026-09"
     |  checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
-    |  trigger-interval = 60 seconds
+    |  trigger-interval = 10 seconds
     |  max-offsets-per-trigger = 1000
     |  maximum-replay-records = 1000
     |  initial-offsets = [{ partition = 0, offset = 12 }, { partition = 1, offset = 0 }]
@@ -28,6 +30,11 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     assert(parsed.flatMap(AnalyticsStreamingSettings.validatePartitionCoverage(_, Set(0, 1, 2))).isLeft)
   }
 
+  test("trigger interval is configurable up to the ten-second default bound") {
+    val configured = valid.replace("trigger-interval = 10 seconds", "trigger-interval = 5 seconds")
+    assertEquals(AnalyticsStreamingSettings.fromHocon(configured).map(_.triggerInterval), Right(5.seconds))
+  }
+
   test("activation identity is bound to Kafka cluster and topic IDs") {
     val settings = AnalyticsStreamingSettings.fromHocon(valid).fold(error => fail(error.getMessage), identity)
     val original = settings.activationIdentity("cluster-a", "topic-a", "hiring.events", "file:///tmp/lakehouse")
@@ -37,6 +44,20 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     assert(original.isRight)
     assertNotEquals(original.toOption.map(_.sourceIdentity), changedCluster.toOption.map(_.sourceIdentity))
     assertNotEquals(original.toOption.map(_.sourceIdentity), changedTopic.toOption.map(_.sourceIdentity))
+  }
+
+  test("activation grant renewal does not change checkpoint identity") {
+    val original = AnalyticsStreamingSettings.fromHocon(valid).toOption.get
+    val renewed = AnalyticsStreamingSettings
+      .fromHocon(
+        valid.replace("grant-2026-09", "grant-2026-10")
+      )
+      .toOption
+      .get
+    assertEquals(
+      original.activationIdentity("cluster-a", "topic-a", "hiring.events", "file:///tmp/lakehouse"),
+      renewed.activationIdentity("cluster-a", "topic-a", "hiring.events", "file:///tmp/lakehouse")
+    )
   }
 
   test("stream settings reject implicit latest offsets and duplicate partition declarations") {
@@ -77,8 +98,8 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
 
   test("batch limits and trigger policy are bounded and invalid values are not echoed in diagnostics") {
     val excessiveOffsets = valid.replace("max-offsets-per-trigger = 1000", "max-offsets-per-trigger = 100001")
-    val unsupportedTrigger = valid.replace("trigger-interval = 60 seconds", "trigger-interval = 1 nanosecond")
-    val sensitiveInvalidValue = valid.replace("trigger-interval = 60 seconds", "trigger-interval = \"private-value\"")
+    val unsupportedTrigger = valid.replace("trigger-interval = 10 seconds", "trigger-interval = 11 seconds")
+    val sensitiveInvalidValue = valid.replace("trigger-interval = 10 seconds", "trigger-interval = \"private-value\"")
 
     assert(AnalyticsStreamingSettings.fromHocon(excessiveOffsets).isLeft)
     assert(AnalyticsStreamingSettings.fromHocon(unsupportedTrigger).isLeft)

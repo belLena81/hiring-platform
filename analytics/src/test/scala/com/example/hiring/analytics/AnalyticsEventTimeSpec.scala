@@ -58,24 +58,72 @@ class AnalyticsEventTimeSpec extends FunSuite {
 
   test("activation authorization binds Phase 6 evidence and independent reviewer references to runtime identity") {
     val identity = StreamingActivationIdentity("stream-a", "source-digest", "lakehouse-digest", "contract", "settings")
+    val validFrom = Instant.parse("2026-09-30T11:00:00Z")
+    val expiresAt = Instant.parse("2026-09-30T13:00:00Z")
+    val grantId = "grant-2026-09"
     val authorization = StreamingActivationAuthorization
-      .fromEvidence(identity, Vector("hal-audit", "retention-proof"), Vector("security-review", "qa-review"))
+      .fromEvidence(
+        identity,
+        grantId,
+        validFrom,
+        expiresAt,
+        Vector("hal-audit", "retention-proof"),
+        Vector("security-review", "qa-review")
+      )
       .toOption
       .get
 
-    assertEquals(StreamingActivationAuthorization.validate(authorization, identity), Right(authorization))
-    assert(
-      StreamingActivationAuthorization.validate(authorization, identity.copy(settingsFingerprint = "changed")).isLeft
+    assertEquals(
+      StreamingActivationAuthorization.validate(authorization, identity, grantId, validFrom),
+      Right(authorization)
     )
     assert(
       StreamingActivationAuthorization
-        .fromEvidence(identity, Vector("retention-proof"), Vector("one-review"))
+        .validate(authorization, identity.copy(settingsFingerprint = "changed"), grantId, validFrom)
         .isLeft
     )
     assert(
       StreamingActivationAuthorization
-        .fromEvidence(identity, Vector("retention-proof"), Vector("same-review", "same-review"))
+        .validate(authorization, identity, "another-grant", validFrom)
         .isLeft
+    )
+    assert(
+      StreamingActivationAuthorization
+        .validate(authorization, identity, grantId, validFrom.minusNanos(1))
+        .isLeft
+    )
+    assert(
+      StreamingActivationAuthorization
+        .validate(authorization, identity, grantId, expiresAt)
+        .isLeft
+    )
+    assert(
+      StreamingActivationAuthorization
+        .fromEvidence(identity, grantId, expiresAt, expiresAt, Vector("retention-proof"), Vector("one-review"))
+        .isLeft
+    )
+    assert(
+      StreamingActivationAuthorization
+        .fromEvidence(identity, grantId, validFrom, expiresAt, Vector("retention-proof"), Vector("one-review"))
+        .isLeft
+    )
+    assert(
+      StreamingActivationAuthorization
+        .fromEvidence(
+          identity,
+          grantId,
+          validFrom,
+          expiresAt,
+          Vector("retention-proof"),
+          Vector("same-review", "same-review")
+        )
+        .isLeft
+    )
+
+    val changedExpiry = authorization.copy(expiresAt = expiresAt.plusSeconds(1))
+    assert(
+      StreamingActivationAuthorization.validate(changedExpiry, identity, grantId, validFrom).isLeft,
+      "grant timestamps must be covered by the evidence digest"
     )
   }
 

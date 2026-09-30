@@ -177,10 +177,11 @@ object AppModule {
           settings.topic,
           settings.streaming,
           new MongoStreamingActivationGate[F](shared.database, shared.streams),
+          new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
           shared.lock,
           common.lakehouseRoot,
           checkpoint,
-          (rawFrame, batchId, lineage) =>
+          (rawFrame, batchId, lineage, authorize) =>
             for {
               observedAt <- Async[F].realTimeInstant
               _ <- shared.maintenance.validateHmacConfigurationLocked
@@ -201,11 +202,12 @@ object AppModule {
                   publisher,
                   common.operational.retention,
                   shared.maintenance.configureRawTables,
-                  shared.maintenance.applyActiveDeletions
+                  shared.maintenance.applyActiveDeletions,
+                  authorize
                 )
                 .use(stages =>
                   new StreamingBatchCoordinator[F](journal, shared.markers, stages, checkpoint)
-                    .process(preparation)
+                    .process(preparation, authorize)
                     .void
                 )
             } yield (),

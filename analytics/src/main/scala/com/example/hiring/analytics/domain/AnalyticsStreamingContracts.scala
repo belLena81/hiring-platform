@@ -21,7 +21,7 @@ object StreamingLineage {
 
 final case class StreamingBatchIdentity(lineage: StreamingLineage, batchId: StreamingBatchId)
 
-/** Identity covered by the one-time Phase 6 activation authorization. */
+/** Runtime identity covered by immutable analytics activation evidence. */
 final case class StreamingActivationIdentity(
     streamId: String,
     sourceIdentity: String,
@@ -33,9 +33,12 @@ final case class StreamingActivationIdentity(
     Vector(streamId, sourceIdentity, lakehouseId, contractFingerprint, settingsFingerprint).mkString("\n")
 }
 
-/** Immutable evidence record. Runtime code only reads this record and never provisions or refreshes it. */
+/** Immutable, time-bounded grant record. Runtime code only reads it and never provisions or renews it. */
 final case class StreamingActivationAuthorization(
     identity: StreamingActivationIdentity,
+    grantId: String,
+    validFrom: Instant,
+    expiresAt: Instant,
     evidenceReferences: Vector[String],
     independentReviewerReferences: Vector[String],
     evidenceDigest: String
@@ -44,31 +47,63 @@ final case class StreamingActivationAuthorization(
 object StreamingActivationAuthorization {
   def fromEvidence(
       identity: StreamingActivationIdentity,
+      grantId: String,
+      validFrom: Instant,
+      expiresAt: Instant,
       evidenceReferences: Vector[String],
       independentReviewerReferences: Vector[String]
   ): Either[String, StreamingActivationAuthorization] = {
-    val canonicalEvidence = (identity.canonical +: (evidenceReferences ++ independentReviewerReferences).sorted)
+    val authorizationFacts = Vector(identity.canonical, grantId, validFrom.toString, expiresAt.toString)
+    val canonicalEvidence = (authorizationFacts ++ (evidenceReferences ++ independentReviewerReferences).sorted)
       .mkString("\n")
     validate(
       StreamingActivationAuthorization(
         identity,
+        grantId,
+        validFrom,
+        expiresAt,
         evidenceReferences,
         independentReviewerReferences,
         AnalyticsDigest.sha256Hex(canonicalEvidence.getBytes(java.nio.charset.StandardCharsets.UTF_8))
       ),
-      identity
+      identity,
+      grantId,
+      validFrom
     )
   }
 
   def validate(
       authorization: StreamingActivationAuthorization,
-      expected: StreamingActivationIdentity
+      expected: StreamingActivationIdentity,
+      expectedGrantId: String,
+      now: Instant
   ): Either[String, StreamingActivationAuthorization] = {
     val references = authorization.evidenceReferences ++ authorization.independentReviewerReferences
-    val canonicalEvidence = (authorization.identity.canonical +: references.sorted).mkString("\n")
+    val authorizationFacts = Vector(
+      authorization.identity.canonical,
+      authorization.grantId,
+      authorization.validFrom.toString,
+      authorization.expiresAt.toString
+    )
+    val canonicalEvidence = (authorizationFacts ++ references.sorted).mkString("\n")
     val digest = AnalyticsDigest.sha256Hex(canonicalEvidence.getBytes(java.nio.charset.StandardCharsets.UTF_8))
     for {
       _ <- Either.cond(authorization.identity == expected, (), "activation authorization identity does not match")
+      _ <- Either.cond(
+        authorization.grantId == expectedGrantId && expectedGrantId.trim.nonEmpty,
+        (),
+        "activation grant does not match"
+      )
+      _ <- Either.cond(
+        authorization.validFrom.isBefore(authorization.expiresAt),
+        (),
+        "activation grant interval is invalid"
+      )
+      _ <- Either.cond(
+        !now.isBefore(authorization.validFrom) && now.isBefore(authorization.expiresAt),
+        (),
+        "activation grant is outside its validity interval"
+      )
       _ <- Either.cond(authorization.evidenceReferences.nonEmpty, (), "activation evidence references are required")
       _ <- Either.cond(
         authorization.independentReviewerReferences.distinct.size >= 2,

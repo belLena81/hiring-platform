@@ -3,7 +3,16 @@ package com.example.hiring.analytics.service.streaming
 import cats.effect.Async
 import cats.data.NonEmptyChain
 import cats.syntax.all.*
-import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.domain.{
+  AnalyticsDigest,
+  AnalyticsEventTimePolicy,
+  RangeFingerprint,
+  StreamingBatchId,
+  StreamingBatchIdentity,
+  StreamingLineage,
+  StreamingPartitionSummary,
+  SubjectToken
+}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
 
@@ -117,6 +126,12 @@ final class StreamingBatchCoordinator[F[_]: Async](
   private val F = Async[F]
 
   def process(preparation: StreamingInputPreparation): F[StreamingCoordinatorResult] =
+    process(preparation, F.unit)
+
+  def process(
+      preparation: StreamingInputPreparation,
+      authorizeAcknowledgement: F[Unit]
+  ): F[StreamingCoordinatorResult] =
     for {
       existing <- journal.load(preparation.identity)
       stable = existing.fold(preparation)(_.preparation)
@@ -126,7 +141,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
         case Some(outcome) => F.pure(resultFor(outcome, existing.flatMap(_.latestDecision)))
         case None          => processUnfinished(stable, existing.nonEmpty)
       }
-      _ <- checkpoint.callbackMayAcknowledge(preparation.identity)
+      _ <- authorizeAcknowledgement *> checkpoint.callbackMayAcknowledge(preparation.identity)
     } yield result
 
   private def processUnfinished(

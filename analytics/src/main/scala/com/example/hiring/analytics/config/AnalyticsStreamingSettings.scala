@@ -47,6 +47,7 @@ object KafkaStartingOffset {
 
 final case class AnalyticsStreamingSettings private (
     streamId: AnalyticsNonBlank,
+    activationGrantId: AnalyticsNonBlank,
     checkpointLocation: AnalyticsNonBlank,
     triggerInterval: FiniteDuration,
     maxOffsetsPerTrigger: MaximumOffsetsPerTrigger,
@@ -101,6 +102,7 @@ final case class AnalyticsStreamingSettings private (
 
 private final case class StreamingSettingsInput(
     streamId: AnalyticsNonBlank,
+    activationGrantId: AnalyticsNonBlank,
     checkpointLocation: AnalyticsNonBlank,
     triggerInterval: FiniteDuration,
     maxOffsetsPerTrigger: Int,
@@ -116,7 +118,7 @@ object AnalyticsStreamingSettings {
   private val InvalidStreamingConfiguration =
     AnalyticsError.InvalidConfiguration("analytics.streaming configuration is invalid")
 
-  val TriggerInterval: FiniteDuration = 60.seconds
+  val TriggerInterval: FiniteDuration = 10.seconds
   val ConsumerGroupId: String = "hiring-analytics-streaming-v1"
   val MaximumOffsetsPerTrigger: Int = 100000
 
@@ -214,16 +216,18 @@ object AnalyticsStreamingSettings {
         "analytics.streaming.initial-offsets must explicitly name every source partition"
       )
       .toValidatedNec
+    val triggerInterval = Either
+      .cond(
+        raw.triggerInterval > Duration.Zero && raw.triggerInterval <= TriggerInterval,
+        raw.triggerInterval,
+        "analytics.streaming.trigger-interval must be positive and no greater than 10 seconds"
+      )
+      .toValidatedNec
     val settings = (
       raw.streamId.validNec[String],
+      raw.activationGrantId.validNec[String],
       validateCheckpointLocation(raw.checkpointLocation),
-      Either
-        .cond(
-          raw.triggerInterval == TriggerInterval,
-          TriggerInterval,
-          "analytics.streaming.trigger-interval must be 60 seconds"
-        )
-        .toValidatedNec,
+      triggerInterval,
       raw.maxOffsetsPerTrigger
         .refineEither[Interval.Closed[1, 100000]]
         .leftMap(_ => "max-offsets-per-trigger must be between 1 and 100000")

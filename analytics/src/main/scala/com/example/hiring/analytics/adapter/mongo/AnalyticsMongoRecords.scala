@@ -118,12 +118,18 @@ private[analytics] object AnalyticsMongoRecords {
       lakehouseId: String,
       contractFingerprint: String,
       settingsFingerprint: String,
+      grantId: String,
+      validFrom: Instant,
+      expiresAt: Instant,
       evidenceReferences: Vector[String],
       independentReviewerReferences: Vector[String],
       evidenceDigest: String
   )
   final case class UserAccountStatus(_id: String, accountStatus: String)
   final case class LakehouseLock(_id: String, ownerToken: String, acquiredAt: Instant)
+
+  /** Permanent stream ownership; deliberately has no lease, grant, or process-lock fields. */
+  final case class StreamingLakehouseRegistration(_id: String, lakehouseId: String)
 
   private object circeCodecs extends MongoJsonCodecs
   import circeCodecs.*
@@ -217,4 +223,5 @@ private[analytics] object AnalyticsMongoRecords {
   val streamingActivationRegistry: CodecRegistry = registry[StreamingActivation]()
   val userAccountStatusRegistry: CodecRegistry = registry[UserAccountStatus]()
   val lakehouseLockRegistry: CodecRegistry = registry[LakehouseLock]()
+  val streamingLakehouseRegistrationRegistry: CodecRegistry = registry[StreamingLakehouseRegistration]()
 }

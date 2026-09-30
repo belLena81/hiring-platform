@@ -26,16 +26,16 @@ private[analytics] final class MongoStreamingActivationGate[F[_]: Async](
     )
     .map(_.withWriteConcern(WriteConcern.MAJORITY.withJournal(true).withWTimeout(15000L, TimeUnit.MILLISECONDS)))
 
-  override def requireAuthorized(identity: StreamingActivationIdentity): F[Unit] =
+  override def requireAuthorized(identity: StreamingActivationIdentity, grantId: String): F[java.time.Instant] =
     collection
       .flatMap(value =>
         streams
-          .stream(capacity => value.find(new org.bson.Document("_id", identity.streamId)).boundedStream(capacity))
+          .stream(capacity => value.find(new org.bson.Document("_id", grantId)).boundedStream(capacity))
           .compile
           .last
       )
       .flatMap {
-        case None         => Async[F].raiseError[Unit](ClosedGate)
+        case None         => Async[F].raiseError[java.time.Instant](ClosedGate)
         case Some(record) =>
           val authorization = StreamingActivationAuthorization(
             StreamingActivationIdentity(
@@ -45,15 +45,22 @@ private[analytics] final class MongoStreamingActivationGate[F[_]: Async](
               record.contractFingerprint,
               record.settingsFingerprint
             ),
+            record.grantId,
+            record.validFrom,
+            record.expiresAt,
             record.evidenceReferences,
             record.independentReviewerReferences,
             record.evidenceDigest
           )
-          Async[F]
-            .fromEither(
-              StreamingActivationAuthorization.validate(authorization, identity).leftMap(_ => ClosedGate)
-            )
-            .void
+          Async[F].realTimeInstant.flatMap { now =>
+            Async[F]
+              .fromEither(
+                StreamingActivationAuthorization
+                  .validate(authorization, identity, grantId, now)
+                  .leftMap(_ => ClosedGate)
+              )
+              .map(_.expiresAt)
+          }
       }
       .adaptError {
         case error: AnalyticsError => error

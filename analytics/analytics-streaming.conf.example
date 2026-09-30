@@ -2,8 +2,9 @@ include classpath("application.conf")
 
 analytics.streaming {
   stream-id = "hiring-operational-events-v1"
+  activation-grant-id = "replace-with-immutable-grant-id"
   checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-operational-events-v1"
-  trigger-interval = 60 seconds
+  trigger-interval = 10 seconds
   max-offsets-per-trigger = 1000
   maximum-replay-records = 1000
 

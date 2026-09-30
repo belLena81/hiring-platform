@@ -5,7 +5,7 @@ import com.example.hiring.analytics.config.{AnalyticsStreamingSettings, KafkaCon
 import com.example.hiring.analytics.domain.StreamingActivationIdentity
 import com.example.hiring.analytics.domain.{StreamingBatchId, StreamingBatchIdentity, StreamingLineage}
 import com.example.hiring.analytics.errors.AnalyticsError
-import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
+import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsStreamingRegistry}
 import com.example.hiring.analytics.service.streaming.{StreamingActivationGate, StreamingCheckpointAcknowledgement}
 
 import cats.effect.{IO, Ref, Resource}
@@ -16,8 +16,9 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
     .fromHocon("""
     |analytics.streaming {
     |  stream-id = "hiring-events"
+    |  activation-grant-id = "grant-2026-09"
     |  checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
-    |  trigger-interval = 60 seconds
+    |  trigger-interval = 10 seconds
     |  max-offsets-per-trigger = 1000
     |  maximum-replay-records = 1000
     |  initial-offsets = [{ partition = 0, offset = 0 }]
@@ -33,7 +34,7 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
           Resource.make(ownerAcquired.set(true))(_ => IO.unit)
       }
       val gate = new StreamingActivationGate[IO] {
-        override def requireAuthorized(identity: StreamingActivationIdentity): IO[Unit] =
+        override def requireAuthorized(identity: StreamingActivationIdentity, grantId: String): IO[java.time.Instant] =
           IO.raiseError(AnalyticsError.InvalidConfiguration("activation authorization is absent"))
       }
       val topic = com.example.hiring.analytics.domain.AnalyticsTopic.from("hiring.events").toOption.get
@@ -45,6 +46,7 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
         topic,
         settings,
         gate,
+        AnalyticsStreamingRegistry.allowUnregistered[IO],
         lock,
         "/lakehouse",
         new StreamingCheckpointAcknowledgement[IO] {
@@ -55,7 +57,7 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
               checkpointEstablished: Boolean
           ): IO[Unit] = IO.unit
         },
-        (_, _, _) => IO.unit,
+        (_, _, _, _) => IO.unit,
         () => IO.pure("cluster-id" -> "topic-id")
       )
 
