@@ -89,12 +89,27 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("a superseded receipt rebuilds and publishes under a fresh reservation") {
+    for {
+      calls <- Ref.of[IO, Vector[String]](Vector.empty)
+      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
+      service = replayService(calls, lock, retrySupersededOnce = true)
+      result <- service.run(replayRequest("replay-republish"))
+      observed <- calls.get
+      _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
+      _ = assertEquals(observed.count(_ == "advance"), 1)
+      _ = assertEquals(observed.count(_ == "reserve"), 2)
+      _ = assertEquals(observed.count(_ == "publish"), 1)
+    } yield ()
+  }
+
   private def replayService(
       calls: Ref[IO, Vector[String]],
       lock: AnalyticsLakehouseLock[IO],
       rejectSelection: Boolean = false,
       reconcilePublished: Boolean = false,
-      reconcileSuperseded: Boolean = false
+      reconcileSuperseded: Boolean = false,
+      retrySupersededOnce: Boolean = false
   ): AnalyticsLateFactReplayService[IO] = {
     def record(value: String): IO[Unit] = calls.update(_ :+ value)
     val journal = new AnalyticsLateFactReplayJournal[IO] {
@@ -153,11 +168,13 @@ final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
       override def publicationReceipt(reservation: AnalyticsReportReservation)(using
           cats.Applicative[IO]
       ): IO[AnalyticsReportPublicationReceipt] =
-        record("receipt").as(
+        record("receipt") *> calls.get.map { values =>
           if (reconcilePublished) AnalyticsReportPublicationReceipt.CurrentGeneration
+          else if (retrySupersededOnce && values.count(_ == "receipt") == 1)
+            AnalyticsReportPublicationReceipt.Superseded
           else if (reconcileSuperseded) AnalyticsReportPublicationReceipt.Superseded
           else AnalyticsReportPublicationReceipt.Absent
-        )
+        }
       override def publishErasure(
           reservation: AnalyticsReportReservation,
           report: AnalyticsReportOutput,
