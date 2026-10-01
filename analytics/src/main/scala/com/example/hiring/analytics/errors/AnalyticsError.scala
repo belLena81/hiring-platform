@@ -32,6 +32,9 @@ object AnalyticsError {
   case object MalformedMarker extends AnalyticsError("pending analytics erasure request has an invalid subject id")
   case object GuardedErasurePublicationRejected
       extends AnalyticsError("analytics erasure is not ready for guarded publication")
+  case object LateFactReplayRejected extends AnalyticsError("late-fact replay selection is no longer eligible")
+  case object LateFactReplayRequestConflict
+      extends AnalyticsError("late-fact replay request ID conflicts with its durable selection")
   case object InvalidGoldSchema extends AnalyticsError("Gold dataset does not match its declared report schema")
   case object PhysicalReclamationUnverified
       extends AnalyticsError("analytics erasure could not verify retention-safe physical Delta reclamation")
