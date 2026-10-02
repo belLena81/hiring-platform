@@ -64,12 +64,9 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
     tables.foreach { path =>
       if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
         val escaped = SparkPhysicalLocation.resolve(path).replace("`", "``")
-        val properties = DeltaTable
-          .forPath(spark, SparkPhysicalLocation.resolve(path))
-          .detail()
-          .select("properties")
-          .head()
-          .getAs[scala.collection.Map[String, String]]("properties")
+        // DESCRIBE DETAIL computes file counts and sizes even when only properties are selected.
+        // Read the same fresh snapshot's metadata without reconstructing those unused statistics.
+        val properties = DeltaLogFactory.system(spark, path).update().metadata.configuration
         val desired = Map(
           "delta.deletedFileRetentionDuration" -> desiredVacuumRetention,
           "delta.logRetentionDuration" -> desiredLogRetention
@@ -138,7 +135,15 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async](
           else {
             val escaped = SparkPhysicalLocation.resolve(path).replace("`", "``")
             val hours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
-            val candidates = spark.sql(s"VACUUM delta.`$escaped` RETAIN $hours HOURS DRY RUN").limit(1).count()
+            val noCandidates = DeltaVacuumEligibility.canSkip(
+              spark,
+              path,
+              hours,
+              MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles)
+            )
+            val candidates =
+              if (noCandidates) 0L
+              else spark.sql(s"VACUUM delta.`$escaped` RETAIN $hours HOURS DRY RUN").limit(1).count()
             if (candidates == 0L) 0L
             else DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).vacuum(hours).count()
           }

@@ -6,7 +6,7 @@ import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
 import com.example.hiring.analytics.adapter.mongo.{MongoPublisherStream, MongoStreamingActivationGate}
 import com.example.hiring.analytics.adapter.spark.SparkPhysicalLocation
 import com.example.hiring.analytics.app.AppModule
-import com.example.hiring.analytics.config.{AnalyticsRuntimeConfig, AnalyticsStreamingRuntimeSettings}
+import com.example.hiring.analytics.config.{AnalyticsRuntimeConfig, AnalyticsStreamingRuntimeSettings, KafkaConnection}
 import com.example.hiring.analytics.domain.{AnalyticsTopic, StreamingActivationIdentity}
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.mongodb.ReadConcern
@@ -41,6 +41,15 @@ object StreamingGrantExpiryProofMain extends IOApp {
   private given ConfigReader[ApiSettings] = ConfigReader.forProduct3("url", "nonce", "password")(ApiSettings.apply)
   private case class Control(eventId: String, partition: Int, offset: Long)
   private case class Publication(runId: String, generation: Long, revision: Long, asOf: Instant)
+
+  /** Identity metadata is read with the runtime reader principal; producer privileges remain separate. */
+  private[cli] def identityAdminProperties(reader: KafkaConnection): Either[AnalyticsError, Properties] =
+    KafkaClientProperties.clientProperties(reader).map { values =>
+      val properties = new Properties()
+      properties.setProperty("bootstrap.servers", reader.bootstrapServers)
+      values.foreach { case (key, value) => properties.setProperty(key, value) }
+      properties
+    }
 
   private[cli] def isExpiryFailure(error: Throwable): Boolean = error match {
     case AnalyticsError.InvalidConfiguration("analytics streaming activation grant expired") => true
@@ -218,9 +227,11 @@ object StreamingGrantExpiryProofMain extends IOApp {
         result.setProperty("transactional.id", "hiring-publisher-expiry-" + UUID.randomUUID().toString)
         result
       }
+      identityProperties <- IO.fromEither(identityAdminProperties(settings.common.kafka))
       topic = AnalyticsTopic.unwrap(settings.topic)
-      identity <- Resource.make(IO.blocking(Admin.create(properties)))(admin => IO.blocking(admin.close())).use {
-        admin =>
+      identity <- Resource
+        .make(IO.blocking(Admin.create(identityProperties)))(admin => IO.blocking(admin.close()))
+        .use { admin =>
           IO.blocking {
             val description = admin
               .describeTopics(List(topic).asJava)
@@ -237,7 +248,7 @@ object StreamingGrantExpiryProofMain extends IOApp {
               )
               .fold(error => throw error, value => value)
           }
-      }
+        }
       expiresAt <- gate(settings, identity)
       _ <- (
         Resource.make(IO.blocking(new KafkaProducer[String, String](properties)))(producer =>

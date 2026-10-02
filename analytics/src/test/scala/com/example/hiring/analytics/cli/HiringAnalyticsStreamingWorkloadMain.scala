@@ -36,7 +36,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
   }
   private[cli] given ConfigReader[ApiSettings] =
     ConfigReader.forProduct3("url", "nonce", "password")(ApiSettings.apply)
-  private case class Sample(
+  private[cli] case class Sample(
       eventId: String,
       partition: Int,
       offset: Long,
@@ -44,7 +44,44 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
       bronzeAt: Option[Long] = None,
       reportAt: Option[Long] = None
   )
-  private case class Observations(maxBacklog: Int = 0, maxObserverHeapBytes: Long = 0L)
+  private[cli] case class Observations(maxBacklog: Int = 0, maxObserverHeapBytes: Long = 0L)
+
+  /** Bronze availability ends at its completed read, before unrelated report verification. */
+  private[cli] def observeBronze(
+      samples: Ref[IO, Vector[Sample]],
+      observations: Ref[IO, Observations],
+      coordinates: Set[(Int, Long)],
+      observedAt: Long
+  ): IO[Unit] =
+    samples
+      .modify { current =>
+        val updated = current.map(sample =>
+          sample.copy(bronzeAt =
+            sample.bronzeAt.orElse(
+              Option
+                .when(sample.committedAt <= observedAt && coordinates((sample.partition, sample.offset)))(observedAt)
+            )
+          )
+        )
+        (updated, updated.count(_.bronzeAt.isEmpty))
+      }
+      .flatMap(backlog => observations.update(value => value.copy(maxBacklog = math.max(value.maxBacklog, backlog))))
+
+  private[cli] def observeReport(
+      samples: Ref[IO, Vector[Sample]],
+      publishedIds: Set[String],
+      observedAt: Long
+  ): IO[Unit] =
+    samples.update(
+      _.map(sample =>
+        sample.copy(reportAt =
+          sample.reportAt.orElse(
+            Option.when(sample.committedAt <= observedAt && publishedIds(sample.eventId))(observedAt)
+          )
+        )
+      )
+    )
+
   private val pollInterval = 2.seconds
   private val drainTimeout = 180.seconds
 
@@ -260,6 +297,8 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
                             .toSet
                         }
                       }
+                      bronzeObserved <- IO.realTime.map(_.toMillis)
+                      _ <- observeBronze(samples, observations, coordinates, bronzeObserved)
                       snapshot <- IO.blocking {
                         val report = mongo
                           .getDatabase(settings.common.mongoDatabase)
@@ -336,22 +375,11 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
                         }
                         matched.getOrElse(Set.empty[String])
                       }
-                      observed <- IO.realTime.map(_.toMillis)
-                      _ <- samples.update(_.map { sample =>
-                        sample.copy(
-                          bronzeAt = sample.bronzeAt
-                            .orElse(Option.when(coordinates((sample.partition, sample.offset)))(observed)),
-                          reportAt = sample.reportAt.orElse(Option.when(publishedIds(sample.eventId))(observed))
-                        )
-                      })
-                      current <- samples.get
+                      reportObserved <- IO.realTime.map(_.toMillis)
+                      _ <- observeReport(samples, publishedIds, reportObserved)
                       heap <- IO(ManagementFactory.getMemoryMXBean.getHeapMemoryUsage.getUsed)
-                      _ <- observations.update(value =>
-                        Observations(
-                          math.max(value.maxBacklog, current.count(_.bronzeAt.isEmpty)),
-                          math.max(value.maxObserverHeapBytes, heap)
-                        )
-                      )
+                      _ <- observations
+                        .update(value => value.copy(maxObserverHeapBytes = math.max(value.maxObserverHeapBytes, heap)))
                     } yield ()
                     def drained: IO[Unit] = samples.get.flatMap { values =>
                       if (values.forall(value => value.bronzeAt.nonEmpty && value.reportAt.nonEmpty)) IO.unit

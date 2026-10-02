@@ -28,65 +28,75 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   private val blocking = execution
   private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
 
-  private def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
-    Vector(paths.silver, paths.lateFacts).foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
-      result.flatMap { _ =>
-        if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Right(())
+  private[spark] def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
+    val failureColumn = "_hiringPrimaryTokenFailure"
+    // Priorities retain the original Silver-before-late-facts error order when several tables are invalid.
+    val failures = Vector(paths.silver, paths.lateFacts).zipWithIndex.flatMap { case (path, index) =>
+      if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Vector.empty
+      else {
+        val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+        val columns = stored.columns.toSet
+        if (!columns.contains("subjectToken"))
+          Vector(stored.limit(1).select(lit(index * 2).as(failureColumn)))
         else {
-          val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
-          val columns = stored.columns.toSet
-          if (stored.limit(1).count() > 0L && !columns.contains("subjectToken"))
-            Left(AnalyticsError.InvalidConfiguration("retained analytical data has no versioned subject tokens"))
-          else if (columns.contains("subjectToken")) {
-            val activeData =
-              if (columns.contains("expiresAt")) col("expiresAt").isNull || col("expiresAt") > lit(Timestamp.from(at))
-              else lit(true)
-            val expectedPrefix = pseudonymizer.primaryKeyId + "_"
-            val incompatible =
-              stored
-                .filter(activeData && (col("subjectToken").isNull || !col("subjectToken").startsWith(expectedPrefix)))
-                .limit(1)
-                .count()
-            Either.cond(
-              incompatible == 0L,
-              (),
-              AnalyticsError.InvalidConfiguration(
-                "unexpired analytical rows use a different HMAC key; retain the old primary until their retention expires"
-              )
-            )
-          } else Right(())
+          val activeData =
+            if (columns.contains("expiresAt")) col("expiresAt").isNull || col("expiresAt") > lit(Timestamp.from(at))
+            else lit(true)
+          val expectedPrefix = pseudonymizer.primaryKeyId + "_"
+          Vector(
+            stored
+              .filter(activeData && (col("subjectToken").isNull || !col("subjectToken").startsWith(expectedPrefix)))
+              .limit(1)
+              .select(lit(index * 2 + 1).as(failureColumn))
+          )
         }
       }
+    }
+    val firstFailure = failures.reduceOption(_.unionByName(_)).flatMap { frame =>
+      Option(frame.agg(min(col(failureColumn))).head().getAs[java.lang.Integer](0)).map(_.intValue())
+    }
+    firstFailure match {
+      case None                                => Right(())
+      case Some(priority) if priority % 2 == 0 =>
+        Left(AnalyticsError.InvalidConfiguration("retained analytical data has no versioned subject tokens"))
+      case Some(_) =>
+        Left(
+          AnalyticsError.InvalidConfiguration(
+            "unexpired analytical rows use a different HMAC key; retain the old primary until their retention expires"
+          )
+        )
     }
   }
 
   def validateStoredTokenKeys(spark: SparkSession): F[Unit] = blocking.either {
     val allowedKeyIds = pseudonymizer.keyIds.toVector.sorted.mkString("(?:", "|", ")")
     val tokenPattern = s"^${allowedKeyIds}_[A-Za-z0-9_-]{43}$$"
-    Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
-      .foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
-        result.flatMap { _ =>
-          if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
-            val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
-            val tokenFrames = Vector(
-              Option.when(frame.columns.contains("subjectTokens"))(
-                frame.select(explode(col("subjectTokens")).as("token"))
-              ),
-              Option.when(frame.columns.contains("subjectToken"))(frame.select(col("subjectToken").as("token")))
-            ).flatten
-            val tokenValues = tokenFrames
-              .reduceOption(_.unionByName(_))
-              .getOrElse(
-                frame.limit(0).select(lit(null).cast(StringType).as("token"))
-              )
-            if (tokenValues.filter(col("token").isNotNull && !col("token").rlike(tokenPattern)).limit(1).count() > 0L)
-              Left(
-                AnalyticsError.InvalidConfiguration("stored analytical rows require an HMAC key that is not configured")
-              )
-            else Right(())
-          } else Right(())
-        }
+    val invalidTokens = Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
+      .flatMap { path =>
+        if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
+          val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+          val tokenFrames = Vector(
+            Option.when(frame.columns.contains("subjectTokens"))(
+              frame.select(explode(col("subjectTokens")).as("token"))
+            ),
+            Option.when(frame.columns.contains("subjectToken"))(frame.select(col("subjectToken").as("token")))
+          ).flatten
+          val tokenValues = tokenFrames
+            .reduceOption(_.unionByName(_))
+            .getOrElse(
+              frame.limit(0).select(lit(null).cast(StringType).as("token"))
+            )
+          Vector(tokenValues.filter(col("token").isNotNull && !col("token").rlike(tokenPattern)).limit(1))
+        } else Vector.empty
       }
+    val incompatible = invalidTokens.reduceOption(_.unionByName(_)).exists(_.limit(1).count() > 0L)
+    Either.cond(
+      !incompatible,
+      (),
+      AnalyticsError.InvalidConfiguration(
+        "stored analytical rows require an HMAC key that is not configured"
+      )
+    )
   }
 
   def validateKeyMaterialContinuity(spark: SparkSession): F[Unit] =

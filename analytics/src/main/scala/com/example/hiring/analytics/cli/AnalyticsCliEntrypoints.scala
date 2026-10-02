@@ -74,7 +74,7 @@ object HiringAnalyticsStreamingMain extends IOApp {
             "streaming settings are loaded from HOCON; command-line arguments are not accepted"
           )
         )
-      else program
+      else StreamingProcessTermination.run(program)
     )
 }
 
