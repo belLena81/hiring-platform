@@ -577,7 +577,8 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
         // The serialized envelope is used only to derive a fingerprint and is removed before Delta persistence.
         .drop(Columns.RawValue, Columns.ActorId, Columns.Payload, Columns.SubjectToken)
         .select(AnalyticsTableSchemas.quarantine.map { case (name, _) => col(name) }*)
-      future
+      // The fresh admission measurement proves this projection empty; the native writer still validates it.
+      if (facts.futureCount == 0L) future.limit(0) else future
     }.flatMap { future =>
       deltaWriter.merge(
         future,

@@ -139,7 +139,12 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
             "expiresAt"
           )
       )
-      _ <- deltaWriter.merge(quarantine, paths.quarantine, "target.quarantineId = source.quarantineId")
+      // Keep native target creation, schema validation and MERGE analysis even when measured input is empty.
+      quarantineSource <- blocking {
+        if (bronze.malformedRecords == 0L && conflictCounts.conflictingRecords == 0L) quarantine.limit(0)
+        else quarantine
+      }
+      _ <- deltaWriter.merge(quarantineSource, paths.quarantine, "target.quarantineId = source.quarantineId")
     } yield AnalyticsPreparedEvents(
       incomingSilver,
       conflicts,

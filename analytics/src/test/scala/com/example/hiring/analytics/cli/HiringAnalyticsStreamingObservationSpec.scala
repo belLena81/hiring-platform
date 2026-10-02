@@ -10,6 +10,26 @@ final class HiringAnalyticsStreamingObservationSpec extends CatsEffectSuite {
   private def fixture(initial: Vector[Sample]) =
     (Ref.of[IO, Vector[Sample]](initial), Ref.of[IO, Observations](Observations())).tupled
 
+  test("restart workloads preserve prior skill counts including their untimed controls") {
+    val (firstWorkload, firstControl) = HiringAnalyticsStreamingWorkloadMain.syntheticSkills("a" * 32)
+    val (secondWorkload, secondControl) = HiringAnalyticsStreamingWorkloadMain.syntheticSkills("b" * 32)
+    assertEquals(firstWorkload, "workload" + "a" * 32)
+    assertEquals(firstControl, "control" + "a" * 32)
+    assertEquals(HiringAnalyticsStreamingWorkloadMain.syntheticSkills("a" * 32), firstWorkload -> firstControl)
+    assertEquals(Set(firstWorkload, firstControl, secondWorkload, secondControl).size, 4)
+    val baseline = Map(firstWorkload -> 7500L, firstControl -> 1L)
+    val afterBurst = baseline ++ Map(secondWorkload -> 1000L, secondControl -> 1L)
+    assert(baseline.forall { case (skill, count) => afterBurst.get(skill).contains(count) })
+    val baselineBeforeControl = Map(firstWorkload -> 7500L)
+    assert(baselineBeforeControl.forall { case (skill, count) => afterBurst.get(skill).contains(count) })
+  }
+
+  test("synthetic skills reject unbounded or malformed workload namespaces") {
+    Vector("", "a" * 31, "a" * 33, "A" * 32, "../" + "a" * 29).foreach { nonce =>
+      intercept[IllegalArgumentException](HiringAnalyticsStreamingWorkloadMain.syntheticSkills(nonce))
+    }
+  }
+
   test("delayed report verification cannot delay Bronze availability or overwrite producer appends") {
     fixture(Vector(Sample("first", 0, 1L, 10L))).flatMap { case (samples, observations) =>
       for {

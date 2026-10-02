@@ -6,8 +6,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 mode="${1:-stage}"
 nonce="${2:-$(openssl rand -hex 8)}"
-[[ "$nonce" =~ ^[a-f0-9]{16}$ && ( "$mode" == stage || "$mode" == run || "$mode" == stop ) ]] || {
-  printf 'Usage: %s stage [nonce] | run nonce acceptance.json review-directory | stop nonce\n' "$0" >&2; exit 2;
+[[ "$nonce" =~ ^[a-f0-9]{16}$ && ( "$mode" == stage || "$mode" == run || "$mode" == scenarios || "$mode" == stop ) ]] || {
+  printf 'Usage: %s stage [nonce] | run nonce acceptance.json review-directory | scenarios nonce acceptance.json review-directory | stop nonce\n' "$0" >&2; exit 2;
 }
 [[ -r .env ]] || { printf 'Ignored local .env credentials are required.\n' >&2; exit 1; }
 . ./.env
@@ -53,7 +53,7 @@ PY
   export HIRING_STREAMING_PROOF_MONGO_PORT="${values[0]}"
   export HIRING_STREAMING_PROOF_KAFKA_PORT="${values[1]}"
   export HIRING_STREAMING_PROOF_MONGO_PASSWORD="${values[4]}"
-  if [[ "$mode" == run ]]; then analytics_cp="$(cat "$config_dir/analytics.classpath")"; fi
+  if [[ "$mode" == run || "$mode" == scenarios ]]; then analytics_cp="$(cat "$config_dir/analytics.classpath")"; fi
 }
 
 if [[ "$mode" == stage ]]; then
@@ -266,7 +266,7 @@ PY
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain fingerprint >"$log_dir/source-fingerprint.log" 2>&1
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain identity >"$log_dir/runtime-identity.log" 2>&1
   printf 'Isolated authenticated proof staged: %s. Runtime remains gated. Evidence metadata: %s\n' "$nonce" "$log_dir"
-elif [[ "$mode" == run ]]; then
+elif [[ "$mode" == run || "$mode" == scenarios ]]; then
   [[ $# -eq 4 ]] || { printf 'Run requires acceptance JSON and independent review directory.\n' >&2; exit 2; }
   read_state
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain \
@@ -282,7 +282,12 @@ elif [[ "$mode" == run ]]; then
     sleep 5
   done) >"$log_dir/stream-resources.log" &
   resource_pid=$!
-  java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain >"$log_dir/healthy-workload.log" 2>&1
+  if [[ "$mode" == run ]]; then
+    java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain >"$log_dir/healthy-workload.log" 2>&1
+  else
+    printf 'STREAMING_SCENARIO_SCOPE healthyFreshness=NOT_MEASURED healthyCadence=NOT_MEASURED overallAcceptance=OPEN\n' >"$log_dir/scenario-scope.log"
+    java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain burst >"$log_dir/scenario-seed-burst.log" 2>&1
+  fi
   kill -0 "$stream_pid"
   python3 - "$config_dir" "$log_dir/restart-baseline.json" <<'PY'
 import datetime, json, pathlib, sys, urllib.request, uuid
@@ -350,6 +355,37 @@ PY
   [[ -d "$checkpoint_dir" && ! -L "$checkpoint_dir" && ! -e "$preserved_checkpoint" ]] || {
     printf 'Checkpoint fault proof requires the exact established task checkpoint.\n' >&2; exit 1;
   }
+  checkpoint_inventory() {
+    python3 - "$checkpoint_dir" "$log_dir/checkpoint-before-faults.json" "$1" <<'PY'
+import hashlib, json, os, pathlib, stat, sys
+root=pathlib.Path(sys.argv[1]); output=pathlib.Path(sys.argv[2]); mode=sys.argv[3]
+if root.is_symlink() or not root.is_dir(): raise RuntimeError('owned checkpoint directory required')
+files={}; entries=0; total=0; directories=[root]
+while directories:
+ with os.scandir(directories.pop()) as children:
+  for child in children:
+   entries+=1
+   if entries>10000: raise RuntimeError('checkpoint inventory entry bound exceeded')
+   path=pathlib.Path(child.path); metadata=child.stat(follow_symlinks=False)
+   if stat.S_ISLNK(metadata.st_mode): raise RuntimeError('checkpoint inventory must remain literal')
+   if stat.S_ISDIR(metadata.st_mode):
+    directories.append(path); continue
+   if not stat.S_ISREG(metadata.st_mode) or metadata.st_size>1048576: raise RuntimeError('checkpoint file must be bounded and regular')
+   total+=metadata.st_size
+   if total>33554432: raise RuntimeError('checkpoint inventory byte bound exceeded')
+   with path.open('rb') as stream: data=stream.read(1048577)
+   if len(data)!=metadata.st_size or len(data)>1048576: raise RuntimeError('checkpoint file changed during inventory')
+   files[path.relative_to(root).as_posix()]=hashlib.sha256(data).hexdigest()
+if mode=='capture':
+ with output.open('x') as stream: json.dump(files,stream,sort_keys=True)
+elif mode=='verify':
+ if output.is_symlink() or not output.is_file() or output.stat().st_size>2097152: raise RuntimeError('original checkpoint inventory required')
+ if json.loads(output.read_text())!=files: raise RuntimeError('checkpoint fault proof changed durable checkpoint bytes')
+ print('STREAMING_CHECKPOINT_BYTES_RESTORED files='+str(len(files))+' exactHashes=true')
+else: raise RuntimeError('invalid checkpoint inventory operation')
+PY
+  }
+  checkpoint_inventory capture
   reject_runtime() {
     local output="$1" fault_mode="$2"
     (cd analytics && timeout --kill-after=10s 110s java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED \
@@ -366,18 +402,27 @@ PY
   identity_file="$checkpoint_dir/_hiring_stream_identity"
   [[ -f "$identity_file" && ! -L "$identity_file" ]] || { printf 'Established checkpoint identity is absent.\n' >&2; exit 1; }
   cp -- "$identity_file" "$config_dir/checkpoint-identity.backup"
+  identity_checksum="$checkpoint_dir/._hiring_stream_identity.crc"
+  [[ -f "$identity_checksum" && ! -L "$identity_checksum" ]] || { printf 'Native local checkpoint identity checksum is absent.\n' >&2; exit 1; }
+  cp -- "$identity_checksum" "$config_dir/checkpoint-identity.crc.backup"
   printf 'corrupted synthetic checkpoint identity\n' >"$identity_file"
   corruption_result=0
   reject_runtime "$log_dir/checkpoint-corruption.log" corrupt-identity || corruption_result=$?
   cp -- "$config_dir/checkpoint-identity.backup" "$identity_file"
   [[ "$corruption_result" -eq 0 ]] || { printf 'Checkpoint corruption did not produce the expected fail-closed result.\n' >&2; exit 1; }
+  foreign_result=0
+  reject_runtime "$log_dir/checkpoint-foreign-identity.log" foreign-identity || foreign_result=$?
+  cp -- "$config_dir/checkpoint-identity.backup" "$identity_file"
+  cp -- "$config_dir/checkpoint-identity.crc.backup" "$identity_checksum"
+  [[ "$foreign_result" -eq 0 ]] || { printf 'Foreign checkpoint identity did not produce the expected fail-closed result.\n' >&2; exit 1; }
+  checkpoint_inventory verify >"$log_dir/checkpoint-byte-restoration.log"
   setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
     _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" >>"$log_dir/stream.log" 2>&1 &
   stream_pid=$!
   trap 'kill -- "-$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true' EXIT
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain continuation >"$log_dir/checkpoint-restored-continuation.log" 2>&1
   rg -q '^STREAMING_CHECKPOINT_RESTORED_CONTINUATION_PASS actualNewRecords=12 adminVisible=true$' "$log_dir/checkpoint-restored-continuation.log"
-  printf 'STREAMING_CHECKPOINT_FAULTS_VERIFIED missing=exactCheckpointIdentityRejection corruptedIdentity=exactCheckpointIdentityRejection originalCheckpointRestored=true actualNewSourceAndAdminContinuation=true\n' >"$log_dir/checkpoint-faults.log"
+  printf 'STREAMING_CHECKPOINT_FAULTS_VERIFIED missing=exactCheckpointIdentityRejection corruptedIdentity=exactCheckpointIdentityRejection foreignIdentity=exactCheckpointIdentityRejection originalCheckpointRestored=true exactCheckpointHashesRestored=true actualNewSourceAndAdminContinuation=true\n' >"$log_dir/checkpoint-faults.log"
   # Owner deletion runs last: its durable pending marker deliberately fences later report publication.
   java_run "$config_dir/scenarios-race.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain race-replay >"$log_dir/live-replay-deletion-race.log" 2>&1
   rg -q '^STREAMING_REPLAY_HTTP_DELETION_BARRIER_PASSED actualMergeBeforeDelete=true oldReservationPinned=true$' "$log_dir/live-replay-deletion-race.log"
@@ -386,7 +431,11 @@ PY
   kill -- "-$stream_pid"
   wait "$stream_pid" || true
   trap - EXIT
-  printf 'Real-clock healthy and bounded burst workload passed. State and resource evidence retained: %s\n' "$log_dir"
+  if [[ "$mode" == run ]]; then
+    printf 'Real-clock healthy and bounded burst workload passed. State and resource evidence retained: %s\n' "$log_dir"
+  else
+    printf 'Isolated continuous scenarios passed; healthy-load acceptance was NOT MEASURED. Evidence retained: %s\n' "$log_dir"
+  fi
 else
   read_state
   api_pid="${values[3]}"

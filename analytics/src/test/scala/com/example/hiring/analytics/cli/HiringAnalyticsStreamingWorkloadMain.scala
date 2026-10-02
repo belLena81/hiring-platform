@@ -85,6 +85,11 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
   private val pollInterval = 2.seconds
   private val drainTimeout = 180.seconds
 
+  private[cli] def syntheticSkills(nonce: String): (String, String) = {
+    require(nonce.matches("[0-9a-f]{32}"), "synthetic workload nonce is invalid")
+    ("workload" + nonce, "control" + nonce)
+  }
+
   private[cli] def storage(
       settings: com.example.hiring.analytics.config.AnalyticsStreamingRuntimeSettings
   ): (Long, Long) = {
@@ -251,7 +256,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
         storageBefore <- IO.blocking(storage(settings))
         productionDuration <- Ref.of[IO, FiniteDuration](Duration.Zero)
         nonce = UUID.randomUUID().toString.replace("-", "")
-        skill = "workload" + nonce
+        (skill, controlSkill) = syntheticSkills(nonce)
         subjects = Vector.fill(12)(UUID.randomUUID().toString)
         started <- IO.monotonic
         _ <- Resource
@@ -421,7 +426,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
                               // An untimed control forces a final stream publication after any coincident maintenance tick.
                               val eventId = UUID.randomUUID().toString
                               val body = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"${Instant
-                                  .now()}","aggregateType":"Job","aggregateId":"$eventId","actorId":"${subjects.head}","payload":{"job":{"skills":["control"]}}}"""
+                                  .now()}","aggregateType":"Job","aggregateId":"$eventId","actorId":"${subjects.head}","payload":{"job":{"skills":["$controlSkill"]}}}"""
                               producer.beginTransaction()
                               producer
                                 .send(new ProducerRecord[String, String](topic, eventId, body))
