@@ -151,7 +151,7 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
         }
         hiddenRun <- publisher.reserve(asRunId("hidden-run"), asFingerprint("range-hidden"), now)
         hidden <- publisher.publish(hiddenRun, report.copy(asOf = now.plusMillis(2)), expiry).attempt
-        _ <- IO.raiseWhen(!hidden.left.exists(_.isInstanceOf[AnalyticsError.RunIdRangeConflict]))(
+        _ <- IO.raiseWhen(!hidden.left.exists(_ == AnalyticsError.GuardedErasurePublicationRejected))(
           new AssertionError("normal publication was accepted while report control was Hidden")
         )
         supersededReceipt <- publisher.publicationReceipt(newer)
@@ -224,6 +224,133 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)
+      container.stop()
+    }
+  }
+
+  test("cancelling a contended lakehouse mutex leaves its owner intact and releases the waiter promptly") {
+    val container = replicaSet()
+    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val sync = MongoClients.create(uri)
+    val reactive = AnalyticsMongo4catsTestSupport.client(uri)
+    try {
+      val database = sync.getDatabase(s"mutex_cancellation_${UUID.randomUUID()}")
+      val db = AnalyticsMongo4catsTestSupport.database(reactive, database.getName)
+      val root = "file:///tmp/mutex-cancellation-" + UUID.randomUUID()
+      val mutex = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+        db,
+        AnalyticsTestOperationalConfig.streams
+      )
+      (for {
+        attempted <- cats.effect.Deferred[IO, Unit]
+        waiting = new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+          db,
+          AnalyticsTestOperationalConfig.streams,
+          nowOverride = Some(attempted.complete(()).void *> IO.realTimeInstant)
+        )
+        _ <- mutex.resource(root).use { _ =>
+          for {
+            original <- IO.blocking(
+              database.getCollection("analytics_lakehouse_mutexes").find().first().getString("ownerToken")
+            )
+            waiter <- waiting.resource(root).use(_ => IO.never[Unit]).start
+            _ <- attempted.get
+            _ <- waiter.cancel.timeout(5.seconds)
+            current <- IO.blocking(
+              database.getCollection("analytics_lakehouse_mutexes").find().first().getString("ownerToken")
+            )
+            _ <- IO(assertEquals(current, original))
+          } yield ()
+        }
+        _ <- mutex.resource(root).use(_ => IO.unit).timeout(5.seconds)
+        remaining <- IO.blocking(database.getCollection("analytics_lakehouse_mutexes").countDocuments())
+        _ <- IO(assertEquals(remaining, 0L))
+      } yield ()).unsafeRunSync()
+    } finally {
+      sync.close()
+      AnalyticsMongo4catsTestSupport.close(reactive)
+      container.stop()
+    }
+  }
+
+  test("pinned reservation survives TTL policy and never refreshes across a completed deletion generation") {
+    val container = replicaSet()
+    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val client = MongoClients.create(uri)
+    val reactive = AnalyticsMongo4catsTestSupport.client(uri)
+    try {
+      val database = client.getDatabase(s"pinned_report_${UUID.randomUUID()}")
+      val control = database.getCollection("analytics_report_control")
+      control.insertOne(
+        new Document("_id", "analytics-report")
+          .append("generation", 0L)
+          .append("state", "Unpublished")
+          .append("nextRevision", 0L)
+          .append("lastPublishedRevision", 0L)
+          .append("lastRunId", "")
+      )
+      val publisher = new MongoAnalyticsReportPublisher[IO](
+        reactive,
+        AnalyticsMongo4catsTestSupport.database(reactive, database.getName),
+        AnalyticsTestOperationalConfig.operational
+      )
+      publisher.ensurePinnedRetentionIndex.unsafeRunSync()
+      publisher.ensurePinnedRetentionIndex.unsafeRunSync()
+      val now = Instant.now()
+      val run = asRunId("stream-pinned")
+      val fingerprint = asFingerprint("stream-input")
+      val reservation = publisher.reservePinned(run, fingerprint, now).unsafeRunSync()
+      val stored = database.getCollection("analytics_report_runs").find(new Document("_id", run.value)).first()
+      assert(
+        !stored.containsKey("expiresAt") || stored.get("expiresAt") == null,
+        "unfinished pinned receipts must not be removed by the existing TTL index"
+      )
+      control.updateOne(
+        new Document("_id", "analytics-report"),
+        Updates.combine(Updates.set("generation", 1L), Updates.set("state", "Unpublished"))
+      )
+      val retry = publisher.reservePinned(run, fingerprint, now.plusSeconds(1000)).unsafeRunSync()
+      assertEquals(retry, reservation)
+      assertEquals(publisher.publicationReceipt(retry).unsafeRunSync(), AnalyticsReportPublicationReceipt.Superseded)
+      val stale = publisher
+        .publish(retry, AnalyticsReportOutput(now, Vector.empty, None, Vector.empty), now.plusSeconds(3600))
+        .attempt
+        .unsafeRunSync()
+      assertEquals(stale.left.toOption, Some(AnalyticsError.GuardedErasurePublicationRejected))
+      assertEquals(database.getCollection("analytics_report_snapshots").countDocuments(), 0L)
+      val next = publisher.reservePinned(asRunId("stream-pinned-next"), fingerprint, now).unsafeRunSync()
+      publisher
+        .publish(next, AnalyticsReportOutput(now, Vector.empty, None, Vector.empty), now.plusSeconds(3600))
+        .unsafeRunSync()
+      assertEquals(
+        publisher.publicationReceipt(next).unsafeRunSync(),
+        AnalyticsReportPublicationReceipt.CurrentGeneration
+      )
+      val published =
+        database.getCollection("analytics_report_runs").find(new Document("_id", next.runId.value)).first()
+      assert(!published.containsKey("expiresAt") || published.get("expiresAt") == null)
+      val runs = database.getCollection("analytics_report_runs")
+      val old = Date.from(now.minusSeconds(40L * 86400L))
+      runs.updateMany(new Document(), Updates.set("createdAt", old))
+      def oldPublished(id: String): Document = new Document("_id", id)
+        .append("rangeFingerprint", fingerprint.value)
+        .append("generation", 1L)
+        .append("revision", 0L)
+        .append("state", "Published")
+        .append("createdAt", old)
+      runs.insertOne(oldPublished("removable-completed"))
+      runs.insertOne(oldPublished("protected-replay"))
+      runs.insertOne(oldPublished("stream-maintenance-abandoned").append("state", "Reserved"))
+      val removed = publisher.compactPublished(Set(asRunId("protected-replay")), now).unsafeRunSync()
+      assertEquals(removed, 2L)
+      assertEquals(runs.countDocuments(new Document("_id", "removable-completed")), 0L)
+      assertEquals(runs.countDocuments(new Document("_id", "protected-replay")), 1L)
+      assertEquals(runs.countDocuments(new Document("_id", run.value)), 1L) // unfinished reservation
+      assertEquals(runs.countDocuments(new Document("_id", next.runId.value)), 1L) // current snapshot
+      assertEquals(publisher.compactPublished(Set(asRunId("protected-replay")), now).unsafeRunSync(), 0L)
+    } finally {
+      client.close()
+      AnalyticsMongo4catsTestSupport.close(reactive)
       container.stop()
     }
   }

@@ -40,6 +40,27 @@ class AnalyticsKeyRetirementSpec extends ScalaCheckSuite {
   private def messages(result: cats.data.ValidatedNec[String, Unit]): List[String] =
     result.fold(_.toNonEmptyList.toList, _ => Nil)
 
+  test("permanent lineage metadata accepts only the declared identity and query shapes") {
+    val streamId = "hiring-stream"
+    val prefix = AnalyticsDigest.sha256Hex(streamId.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    val body = Vector(streamId, "a" * 64, "b" * 64, "c" * 64, "d" * 64).mkString("\n")
+    assert(validLineageControl(prefix + ".identity", body))
+    assert(validLineageControl(prefix + ".established", body))
+    assert(validLineageControl(prefix + ".query-id", "a0371c68-e873-45be-a729-a9395fe6fc73"))
+    assert(!validLineageControl(prefix + ".identity", body + "\nsubject material"))
+    assert(!validLineageControl(prefix + ".identity", body.replace("hiring-stream", "another-stream")))
+    assert(!validLineageControl(prefix + ".query-id", body))
+    assert(!validLineageControl(prefix + ".payload", body))
+    val multilineStream = "hiring\nstream"
+    val multilinePrefix = AnalyticsDigest.sha256Hex(multilineStream.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    assert(
+      validLineageControl(
+        multilinePrefix + ".identity",
+        Vector(multilineStream, "a" * 64, "b" * 64, "c" * 64, "d" * 64).mkString("\n")
+      )
+    )
+  }
+
   test("retention gate requires passed Kafka barrier and every elapsed horizon") {
     assert(validateRetention(passedRetention, now).isValid)
 

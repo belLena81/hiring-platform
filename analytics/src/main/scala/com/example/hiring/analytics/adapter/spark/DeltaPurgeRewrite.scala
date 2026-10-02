@@ -83,7 +83,7 @@ private[analytics] object DeltaPurgeRewrite {
       configuration: Configuration,
       maximumEntries: Int
   ): Either[AnalyticsError, (FileSystem, Vector[Path])] = {
-    val rootPath = new Path(root)
+    val rootPath = new Path(SparkPhysicalLocation.resolve(root))
     val fileSystem = rootPath.getFileSystem(configuration)
     val qualifiedRoot = fileSystem.makeQualified(rootPath)
     val control = new Path(qualifiedRoot, "control")
@@ -171,7 +171,7 @@ private[analytics] object DeltaPurgeRewrite {
     Resource
       .make(
         sparkExecution {
-          val path = new org.apache.hadoop.fs.Path(temporaryPath)
+          val path = new org.apache.hadoop.fs.Path(SparkPhysicalLocation.resolve(temporaryPath))
           (path.getFileSystem(spark.sparkContext.hadoopConfiguration), path)
         }
       ) { case (fileSystem, path) =>

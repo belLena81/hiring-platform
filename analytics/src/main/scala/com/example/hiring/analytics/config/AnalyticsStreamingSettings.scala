@@ -52,7 +52,9 @@ final case class AnalyticsStreamingSettings private (
     triggerInterval: FiniteDuration,
     maxOffsetsPerTrigger: MaximumOffsetsPerTrigger,
     maximumReplayRecords: MaximumStreamingReplayRecords,
-    initialOffsets: Vector[KafkaStartingOffset]
+    initialOffsets: Vector[KafkaStartingOffset],
+    maintenanceInterval: FiniteDuration,
+    progressRetention: FiniteDuration
 ) {
   def allowedFutureSkew: FiniteDuration = AnalyticsEventTimePolicy.AllowedFutureSkew
   def watermarkLag: FiniteDuration = AnalyticsEventTimePolicy.WatermarkLag
@@ -75,7 +77,9 @@ final case class AnalyticsStreamingSettings private (
       maxOffsetsPerTrigger.asInstanceOf[Int].toString,
       maximumReplayRecords.toString,
       AnalyticsStreamingSettings.ConsumerGroupId,
-      offsets
+      offsets,
+      maintenanceInterval.toString,
+      progressRetention.toString
     ).mkString("\n")
     for {
       _ <- Either.cond(
@@ -107,7 +111,9 @@ private final case class StreamingSettingsInput(
     triggerInterval: FiniteDuration,
     maxOffsetsPerTrigger: Int,
     maximumReplayRecords: Int,
-    initialOffsets: Vector[KafkaStartingOffsetInput]
+    initialOffsets: Vector[KafkaStartingOffsetInput],
+    maintenanceInterval: FiniteDuration,
+    progressRetention: FiniteDuration
 )
 
 private final case class KafkaStartingOffsetInput(partition: Int, offset: Long)
@@ -149,7 +155,8 @@ object AnalyticsStreamingSettings {
         }
         val permitted = (path.startsWith(dockerRoot) && path != dockerRoot) || localRootPresent
         uri.getScheme == "file" && uri.getAuthority == null && uri.getQuery == null && uri.getFragment == null &&
-        path.isAbsolute && permitted && !Option(uri.getPath).toVector.flatMap(_.split("/")).contains("..")
+        path.isAbsolute && permitted && AnalyticsLakehouseIdentity.from(value).isRight &&
+        !Option(uri.getPath).toVector.flatMap(_.split("/")).contains("..")
       }
       .leftMap(_ => "checkpoint-location must be inside the owned analytics runtime checkpoint directory")
       .flatMap(isAllowed =>
@@ -236,7 +243,13 @@ object AnalyticsStreamingSettings {
         .refineEither[Interval.Closed[1, 1000]]
         .leftMap(_ => "maximum-replay-records must be between 1 and 1000")
         .toValidatedNec,
-      (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets)
+      (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets),
+      Either
+        .cond(raw.maintenanceInterval > Duration.Zero, raw.maintenanceInterval, "maintenance-interval must be positive")
+        .toValidatedNec,
+      Either
+        .cond(raw.progressRetention > Duration.Zero, raw.progressRetention, "progress-retention must be positive")
+        .toValidatedNec
     ).mapN(AnalyticsStreamingSettings.apply)
     settings.toEither.leftMap(errors =>
       AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; "))

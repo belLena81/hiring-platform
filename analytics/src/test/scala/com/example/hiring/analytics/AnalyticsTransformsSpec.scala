@@ -873,6 +873,13 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val reportPublisher = new AnalyticsReportPublisher[IO] {
+      override def reservePinned(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
+        reserve(runId, rangeFingerprint, now)
+
       override def reserve(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -943,6 +950,13 @@ class AnalyticsTransformsSpec extends FunSuite {
     val published = new AtomicInteger(0)
     val failPublishedManifestOnce = new AtomicBoolean(true)
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def reservePinned(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
+        reserve(runId, rangeFingerprint, now)
+
       override def reserve(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -1006,6 +1020,13 @@ class AnalyticsTransformsSpec extends FunSuite {
       }
     }
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def reservePinned(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
+        reserve(runId, rangeFingerprint, now)
+
       override def reserve(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -1526,7 +1547,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val valid = OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(source))
     val attributed = AnalyticsSubjectPrivacy.withSubjectToken(valid, current).first()
-    val tokens = attributed.getAs[Seq[String]]("subjectTokens").toSet
+    val tokens = attributed.getAs[scala.collection.Seq[String]]("subjectTokens").toSet
     assertEquals(
       attributed.getAs[String]("subjectToken"),
       AnalyticsTestSubjectPseudonymizer.tokenValue(current, "rotation-candidate")
@@ -1760,6 +1781,13 @@ class AnalyticsTransformsSpec extends FunSuite {
       .range(1L)
       .select(org.apache.spark.sql.functions.expr("raise_error('marker evaluation failed')").as("subjectToken"))
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def reservePinned(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
+        reserve(runId, rangeFingerprint, now)
+
       override def reserve(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,
@@ -1907,8 +1935,12 @@ class AnalyticsTransformsSpec extends FunSuite {
     val maintenance = AnalyticsBatchTestSupport.newMaintenance(spark, paths, pseudonymizer)
 
     val affectedFiles = maintenance.captureMarkedFiles(Vector(deletedToken)).unsafeRunSync()
-    assertEquals(affectedFiles.size, 1)
-    val affectedPath = new org.apache.hadoop.fs.Path(affectedFiles.head)
+    val dataPaths = affectedFiles.filter(_.endsWith(".parquet"))
+    val logPaths = affectedFiles.filter(_.contains("/_delta_log/"))
+    assertEquals(dataPaths.size, 1)
+    assert(logPaths.nonEmpty, "Silver transaction logs must be captured with affected data")
+    assertEquals((dataPaths ++ logPaths).toSet, affectedFiles.toSet)
+    val affectedPath = new org.apache.hadoop.fs.Path(dataPaths.head)
     val fileSystem = affectedPath.getFileSystem(spark.sparkContext.hadoopConfiguration)
     assert(fileSystem.exists(affectedPath))
     intercept[AnalyticsError.PhysicalReclamationUnverified.type](
@@ -1916,6 +1948,10 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
 
     assert(fileSystem.delete(affectedPath, false))
+    intercept[AnalyticsError.PhysicalReclamationUnverified.type](
+      maintenance.verifyFilesAbsent(affectedFiles).unsafeRunSync()
+    )
+    logPaths.foreach(path => assert(fileSystem.delete(new org.apache.hadoop.fs.Path(path), false)))
     maintenance.verifyFilesAbsent(affectedFiles).unsafeRunSync()
   }
 

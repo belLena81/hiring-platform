@@ -38,7 +38,7 @@ private[analytics] final class DeltaManifestStore[F[_]: Async](
       val condition =
         "target.runId = source.runId AND target.topic = source.topic AND target.partition = source.partition"
       DeltaTable
-        .forPath(spark, paths.manifests)
+        .forPath(spark, SparkPhysicalLocation.resolve(paths.manifests))
         .as("target")
         .merge(frame.as("source"), condition)
         .whenMatched()

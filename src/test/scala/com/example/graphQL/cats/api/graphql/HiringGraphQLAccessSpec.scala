@@ -1091,22 +1091,22 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       ref: Ref[IO, Map[UserId, User]],
       batches: Ref[IO, Vector[List[UserId]]]
   ) extends com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
-    override def find(id: UserId): RepositoryIO[Option[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      ref.get.map(_.get(id)).map(Right(_)) )
+    override def find(id: UserId): RepositoryIO[Option[User]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map(_.get(id)).map(Right(_)))
 
-    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      batches.update(_ :+ ids) *> ref.get.map(users => Right(ids.distinct.flatMap(users.get))) )
+    override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
+      com.example.graphQL.cats.service.port.RepositoryIO
+        .fromIOEither(batches.update(_ :+ ids) *> ref.get.map(users => Right(ids.distinct.flatMap(users.get))))
 
     override def updateEmbedding(
         id: UserId,
         embedding: com.example.graphQL.cats.domain.model.EntityEmbedding
-    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      ref.modify { users =>
-        users.get(id) match {
-          case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
-          case None       => (users, Left(RepositoryError.Conflict))
-        }
-      } )
+    ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { users =>
+      users.get(id) match {
+        case Some(user) => (users + (id -> user.copy(embedding = Some(embedding))), Right(()))
+        case None       => (users, Left(RepositoryError.Conflict))
+      }
+    })
   }
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])
@@ -1116,14 +1116,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository {
-    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.pure(Right(jobs)) )
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
 
-    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.pure(Right(jobs)) )
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
 
-    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.pure(Right(Nil)) )
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
   }
 
   private final class RecordingAccountService(updateCalls: Ref[IO, Int]) extends AccountUseCases {

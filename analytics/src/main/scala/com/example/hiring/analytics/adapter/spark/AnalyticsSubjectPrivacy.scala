@@ -49,7 +49,7 @@ object AnalyticsSubjectPrivacy {
             eventType match {
               case Some(value) if value == AnalyticsEventType.SearchPerformed.wire =>
                 payload
-                  .flatMap(result => Option(result.getAs[Seq[Row]]("results")))
+                  .flatMap(result => Option(result.getAs[scala.collection.Seq[Row]]("results")))
                   .toVector
                   .flatten
                   .flatMap(result => Option(result.getAs[String]("resultId")))

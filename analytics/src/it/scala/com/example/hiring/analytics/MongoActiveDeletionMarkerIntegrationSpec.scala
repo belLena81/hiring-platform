@@ -224,6 +224,13 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
       val root = Files.createTempDirectory("analytics-invalid-marker-state")
       val paths = IntegrationAnalyticsLakehousePaths.unsafe(root.toUri.toString)
       val rejectingPublisher = new AnalyticsReportPublisher[IO] {
+        override def reservePinned(
+            runId: RunId,
+            rangeFingerprint: RangeFingerprint,
+            now: Instant
+        ): IO[AnalyticsReportReservation] =
+          reserve(runId, rangeFingerprint, now)
+
         override def reserve(
             runId: RunId,
             fingerprint: RangeFingerprint,

@@ -34,7 +34,7 @@ requested_horizon_seconds="${HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS:-}"
 if [[ "$mode" == start && $# -le 1 ]]; then
   nonce="$(openssl rand -hex 8)"
   subject_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-elif [[ "$mode" == resume && $# -eq 2 && "$2" =~ ^[a-f0-9]{16}$ ]]; then
+elif [[ ( "$mode" == resume || "$mode" == calendar-resume ) && $# -eq 2 && "$2" =~ ^[a-f0-9]{16}$ ]]; then
   nonce="$2"
   state_file=".local/config/analytics-erasure-smoke-$nonce.state"
   check_state_directory
@@ -55,7 +55,7 @@ elif [[ "$mode" == resume && $# -eq 2 && "$2" =~ ^[a-f0-9]{16}$ ]]; then
     exit 2
   fi
 else
-  printf 'Usage: %s [start | resume <16-hex-nonce>]\n' "$0" >&2
+  printf 'Usage: %s [start | resume <16-hex-nonce> | calendar-resume <16-hex-nonce>]\n' "$0" >&2
   exit 2
 fi
 project="hiring-analytics-erasure-smoke-$nonce"
@@ -63,7 +63,7 @@ export HIRING_ANALYTICS_ERASURE_SMOKE_DATABASE="hiring_erasure_smoke_$nonce"
 export HIRING_ANALYTICS_ERASURE_SMOKE_TOPIC="hiring.erasure.smoke.$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_NONCE="$nonce"
 export HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$subject_id"
-if [[ "$mode" == resume ]]; then
+if [[ "$mode" != start ]]; then
   HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS="$stored_horizon_seconds"
 else
   HIRING_ANALYTICS_ERASURE_SMOKE_HORIZON_SECONDS="${requested_horizon_seconds:-60}"
@@ -91,8 +91,11 @@ if [[ "$mode" == start ]]; then
 fi
 
 compose() {
-  docker compose --profile analytics --profile analytics-erasure \
-    -f compose.yaml -f compose.analytics-erasure-smoke.yaml -p "$project" "$@"
+  local files=(-f compose.yaml -f compose.analytics-erasure-smoke.yaml)
+  if [[ "$mode" == calendar-resume ]]; then
+    files+=(-f compose.analytics-erasure-calendar-proof.yaml)
+  fi
+  docker compose --profile analytics --profile analytics-erasure "${files[@]}" -p "$project" "$@"
 }
 
 cleanup() {
@@ -164,14 +167,22 @@ else
   done
   [[ "$deadline_ms" =~ ^[0-9]+$ ]] || { printf 'Smoke request is missing, invalid, or requires repair.\n' >&2; exit 1; }
   now_ms="$(date -u +%s%3N)"
-  if (( now_ms < deadline_ms )); then
+  if [[ "$mode" == resume ]] && (( now_ms < deadline_ms )); then
     printf 'Delta log cleanup is pending until %s UTC. Resume with: %s resume %s\n' \
       "$(date -u -d "@$((deadline_ms / 1000))" '+%Y-%m-%d %H:%M:%S')" "$0" "$nonce"
     exit 0
   fi
-  printf 'Resuming smoke worker after the physical Delta log-cleanup horizon.\n'
+  if [[ "$mode" == calendar-resume ]]; then
+    printf 'Restarting the test worker with an accelerated Delta calendar; Kafka and data retention use actual time.\n'
+  else
+    printf 'Resuming smoke worker after the physical Delta log-cleanup horizon.\n'
+  fi
   compose up -d analytics-erasure-worker
   wait_for_phase ReportPublished 1200
-  run_fixture smoke-verify
+  if [[ "$mode" == calendar-resume ]]; then
+    run_fixture calendar-verify
+  else
+    run_fixture smoke-verify
+  fi
   printf 'Smoke proof passed: populated synthetic Delta rows, worker restart, actual Kafka earliest offsets, completion receipt, report publication, and captured file absence. Project-scoped named volumes remain available as local evidence. This supports local implementation closure; full-horizon retention remains a production rollout gate.\n'
 fi

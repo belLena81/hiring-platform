@@ -20,7 +20,9 @@ final class AnalyticsLakehousePaths private (val root: LakehouseRoot) {
   val manifests: String = s"$normalizedRoot/control/run_manifests"
   val streamingProgress: String = s"$normalizedRoot/control/streaming_progress"
   val streamingDecisions: String = s"$normalizedRoot/control/streaming_decisions"
+  val streamingLineage: String = s"$normalizedRoot/control/streaming_lineage"
   val hmacKeyRegistry: String = s"$normalizedRoot/control/hmac_key_registry"
+  lazy val inventory: AnalyticsStorageInventory = AnalyticsStorageInventory(this)
 }
 
 object AnalyticsLakehousePaths {

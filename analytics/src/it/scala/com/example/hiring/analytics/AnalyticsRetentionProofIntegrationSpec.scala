@@ -24,7 +24,7 @@ import mongo4cats.database.MongoDatabase as CatsMongoDatabase
 import com.mongodb.client.model.{Filters, ReplaceOptions, UpdateOptions, Updates}
 import io.delta.tables.DeltaTable
 import munit.FunSuite
-import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry}
+import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry, NewPartitions}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.serialization.StringSerializer
@@ -217,20 +217,49 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       return
     }
     configureTopic(if (shortHorizon) 15L * 60L * 1000L else retentionMs)
+    val partitions = {
+      val admin = Admin.create(adminProperties)
+      try {
+        val current = admin
+          .describeTopics(List(topic).asJava)
+          .allTopicNames()
+          .get(30, java.util.concurrent.TimeUnit.SECONDS)
+          .get(topic)
+          .partitions()
+          .size()
+        if (shortHorizon && current < 3)
+          admin
+            .createPartitions(Map(topic -> NewPartitions.increaseTo(3)).asJava)
+            .all()
+            .get(30, java.util.concurrent.TimeUnit.SECONDS)
+        if (shortHorizon) 3 else current
+      } finally admin.close()
+    }
 
     val producer = new KafkaProducer[String, String](
       properties("hiring_publisher_v2", required("KAFKA_PUBLISHER_V2_PASSWORD"), Some(producerId))
     )
+    val controlSubject = UUID.randomUUID().toString
     val metadata = try {
       producer.initTransactions()
       producer.beginTransaction()
-      val valid = (0 until 24).map { _ =>
-        new ProducerRecord(topic, subjectId, event(UUID.randomUUID().toString, subjectId, "x" * 12000))
+      val valid = (0 until 24).map { index =>
+        new ProducerRecord(
+          topic,
+          Int.box(index % partitions),
+          subjectId,
+          event(UUID.randomUUID().toString, subjectId, "x" * 12000)
+        )
       }
       val malformed =
         new ProducerRecord(topic, subjectId, event(UUID.randomUUID().toString, subjectId, "", malformed = true))
       val sent =
-        (valid :+ malformed).map(record => producer.send(record).get(60, java.util.concurrent.TimeUnit.SECONDS))
+        (valid :+ malformed :+ new ProducerRecord(
+          topic,
+          controlSubject,
+          event(UUID.randomUUID().toString, controlSubject, "")
+        ))
+          .map(record => producer.send(record).get(60, java.util.concurrent.TimeUnit.SECONDS))
       producer.commitTransaction()
       sent.toVector
     } finally producer.close()
@@ -252,7 +281,9 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       val manifest = AnalyticsRunManifest
         .validated(
           runId(rangeEnd),
-          Vector(IntegrationPartitionOffsetRange.unsafe(topic, 0, 0L, rangeEnd))
+          metadata.groupBy(_.partition()).toVector.sortBy(_._1).map { case (partition, values) =>
+            IntegrationPartitionOffsetRange.unsafe(topic, partition, 0L, values.map(_.offset()).max + 1L)
+          }
         )
         .toEither
         .fold(errors => fail(errors.toString), identity)
@@ -348,6 +379,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           Updates.set("stage", "Prepared"),
           Updates.set("runId", runId(rangeEnd)),
           Updates.set("subjectId", subjectId),
+          Updates.set("controlSubjectId", controlSubject),
           Updates.set("topic", topic),
           Updates.set("retentionMs", retentionMs),
           Updates.set("segmentBytes", segmentBytes),
@@ -408,7 +440,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       .unsafeRunSync()
       .getOrElse(fail("worker must persist its Kafka barrier"))
     assertEquals(AnalyticsTopic.unwrap(barrier.topic), topic)
-    assertEquals(barrier.partitions.size, 1)
+    assert(barrier.partitions.nonEmpty, "barrier must cover the source partitions")
     val barrierOffset = barrier.partitions.head.endOffsetExclusive.asInstanceOf[Long]
     val unrelated = UUID.randomUUID().toString
     val producer = new KafkaProducer[String, String](
@@ -420,22 +452,27 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     )
     val sent = try {
       producer.initTransactions()
-      val payloads = Vector.fill(2)(event(UUID.randomUUID().toString, unrelated, "t" * (segmentBytes / 2)))
-      assert(payloads.forall(_.getBytes(StandardCharsets.UTF_8).length < segmentBytes - 1024), "assertion failed")
-      payloads.map { payload =>
+      val payloads = barrier.partitions.flatMap(partition =>
+        Vector.fill(2)((partition, event(UUID.randomUUID().toString, unrelated, "t" * (segmentBytes / 2))))
+      )
+      assert(payloads.forall(_._2.getBytes(StandardCharsets.UTF_8).length < segmentBytes - 1024), "assertion failed")
+      payloads.map { case (partition, payload) =>
         producer.beginTransaction()
         val result = producer
-          .send(new ProducerRecord(topic, unrelated, payload))
+          .send(new ProducerRecord(topic, Int.box(partition.number.asInstanceOf[Int]), unrelated, payload))
           .get(60, java.util.concurrent.TimeUnit.SECONDS)
         producer.commitTransaction()
         result
       }
     } finally producer.close()
-    assert(
-      sent.head.offset() >= barrierOffset,
-      "post-barrier tail must begin at or after the exclusive barrier, allowing aborted-offset gaps"
-    )
-    assert(sent.last.offset() > sent.head.offset(), "assertion failed")
+    barrier.partitions.foreach { partition =>
+      val tail = sent.filter(_.partition() == partition.number.asInstanceOf[Int])
+      assert(
+        tail.head.offset() >= partition.endOffsetExclusive.asInstanceOf[Long],
+        "post-barrier tail must begin at or after each exclusive barrier"
+      )
+      assert(tail.last.offset() > tail.head.offset(), "tail must roll every partition")
+    }
     db.getCollection(proofCollection)
       .updateOne(
         Filters.eq("_id", nonce),
@@ -486,7 +523,15 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
       .truncatedTo(java.time.temporal.ChronoUnit.DAYS)
       .plus(1L, java.time.temporal.ChronoUnit.DAYS)
       .plusSeconds(deltaLogHorizon)
-    val deltaPassed = !Instant.now().isBefore(deltaDeadline)
+    val fixture = db.getCollection(proofCollection).find(Filters.eq("_id", nonce)).first()
+    val calendarShift = if (mode == "calendar-verify") {
+      assert(shortHorizon, "calendar acceleration is restricted to the isolated short proof")
+      Option(fixture.get("simulatedCalendarShiftMillis", classOf[java.lang.Long]))
+        .map(_.longValue())
+        .getOrElse(fail("calendar restart evidence is missing"))
+    } else 0L
+    val actualDataPassed = !Instant.now().isBefore(purgedAt.plusSeconds(shortHorizonSeconds))
+    val deltaPassed = !Instant.now().plusMillis(calendarShift).isBefore(deltaDeadline)
     val evidence = db
       .getCollection("analytics_erasure_delta_files")
       .find(Filters.eq("requestId", subjectId))
@@ -526,6 +571,7 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
     }
     if (finalCheck) {
       assert(kafkaPassed && deltaPassed, "assertion failed")
+      if (mode == "calendar-verify") assert(actualDataPassed, "actual short data retention must elapse")
       assertEquals(request.getString("state"), "Complete")
       assertEquals(request.getString("phase"), ErasurePhase.ReportPublished.toString)
       val spark = sparkSession()
@@ -542,6 +588,17 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           ).activeSubjectTokens.unsafeRunSync()
         maintenance.verifyMarkedSubjectsAbsent(markers).unsafeRunSync()
         maintenance.verifyFilesAbsent(evidence).unsafeRunSync()
+        val controlToken = pseudonymizer
+          .typedToken(fixture.getString("controlSubjectId"))
+          .fold(problem => fail(problem), _.value)
+        assertEquals(
+          spark.read
+            .format("delta")
+            .load(paths.silver)
+            .filter(org.apache.spark.sql.functions.col("subjectToken") === controlToken)
+            .count(),
+          1L
+        )
       } finally spark.stop()
       assertEquals(db.getCollection("analytics_erasure_completions").countDocuments(Filters.eq("_id", subjectId)), 1L)
       assertEquals(db.getCollection("event_outbox").countDocuments(Filters.in("subjectIds", subjectId)), 0L)
@@ -608,6 +665,8 @@ final class AnalyticsRetentionProofIntegrationSpec extends FunSuite {
           case "verify" =>
             inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = true)
           case "smoke-verify" =>
+            inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = true)
+          case "calendar-verify" =>
             inspect(reactiveClient, reactiveDb, db, requireKafka = true, requireAll = true, finalCheck = true)
           case other => fail("unsupported retention proof mode: " + other)
         }

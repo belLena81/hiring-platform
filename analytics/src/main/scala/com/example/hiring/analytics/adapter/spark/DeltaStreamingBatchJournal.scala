@@ -16,8 +16,10 @@ import org.apache.spark.sql.types.*
 import java.sql.Timestamp
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import scala.concurrent.duration.FiniteDuration
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
+import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
 
 /** Delta-backed journal for immutable input evidence, retry decisions, and publication progress. */
 private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
@@ -66,7 +68,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
         ensureProgressSchema()
         val found = spark.read
           .format("delta")
-          .load(paths.streamingProgress)
+          .load(SparkPhysicalLocation.resolve(paths.streamingProgress))
           .filter(col(LineageColumn) === lit(lineage.value))
           .limit(1)
           .take(1)
@@ -88,7 +90,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
         val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
         val rows = spark.read
           .format("delta")
-          .load(paths.streamingProgress)
+          .load(SparkPhysicalLocation.resolve(paths.streamingProgress))
           .filter(col(LineageColumn) === lit(lineage.value) && (retained || unfinished))
           .limit(retainedBatchIds.size + 2)
           .collect()
@@ -97,10 +99,125 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       }
     }
 
+  /** Receipt cleanup uses every retained decision, including obsolete revisions needed by recovery. */
+  def retainedPublicationRunIds(lineage: StreamingLineage): F[Set[RunId]] = retainedPublicationRunIdsFor(Some(lineage))
+
+  /** Root-wide receipt cleanup must also protect decisions belonging to other stream lineages. */
+  def allRetainedPublicationRunIds: F[Set[RunId]] = retainedPublicationRunIdsFor(None)
+
+  private def retainedPublicationRunIdsFor(lineage: Option[StreamingLineage]): F[Set[RunId]] = execution.either {
+    if (!deltaTableExists(paths.streamingDecisions)) Right(Set.empty)
+    else {
+      ensureDecisionSchema()
+      val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.streamingDecisions))
+      lineage
+        .fold(stored)(value => stored.filter(col(LineageColumn) === lit(value.value)))
+        .select(col(PublicationRunIdColumn))
+        .distinct()
+        .collect()
+        .toVector
+        .traverse(row => RunId.from(row.getString(0)).leftMap(_ => malformedProgress))
+        .map(_.toSet)
+    }
+  }
+
+  /** Call under the lakehouse mutex, after reading Spark's retained offset/commit IDs. Never edits Spark logs. */
+  def prune(
+      lineage: StreamingLineage,
+      retainedBatchIds: Set[StreamingBatchId],
+      observedAt: Instant,
+      retention: FiniteDuration
+  ): F[Unit] = execution.either {
+    if (retention.toMillis <= 0L)
+      Left(AnalyticsError.InvalidConfiguration("streaming progress retention must be positive"))
+    else if (!deltaTableExists(paths.streamingProgress)) Right(())
+    else {
+      ensureProgressSchema()
+      if (deltaTableExists(paths.streamingDecisions)) ensureDecisionSchema()
+      val progress = spark.read
+        .format("delta")
+        .load(SparkPhysicalLocation.resolve(paths.streamingProgress))
+        .filter(col(LineageColumn) === lit(lineage.value))
+      val malformed = progress
+        .filter(
+          col(OutcomeColumn).isNull || !col(OutcomeColumn).isin(
+            PreparedName,
+            IngestionCommittedName,
+            QualityBlockedName,
+            ErasurePendingName,
+            PublishedName
+          )
+        )
+        .limit(1)
+        .count() > 0L
+      if (malformed) Left(malformedProgress)
+      else {
+        val unfinished = col(OutcomeColumn).isin(PreparedName, IngestionCommittedName)
+        val terminal = progress.filter(!unfinished)
+        val latestTerminal = terminal.orderBy(col(BatchIdColumn).desc).limit(1).select(col(BatchIdColumn))
+        val latestWatermark = progress
+          .filter(col(OutcomeColumn) === lit(PublishedName) && col(CandidateWatermarkColumn).isNotNull)
+          .orderBy(col(BatchIdColumn).desc)
+          .limit(1)
+          .select(col(BatchIdColumn))
+        val sparkRetained =
+          if (retainedBatchIds.isEmpty) lit(false)
+          else col(BatchIdColumn).isin(retainedBatchIds.toVector.map(_.value)*)
+        val recent = col(CompletedAtColumn).isNull || col(CompletedAtColumn) > lit(
+          Timestamp.from(observedAt.minusMillis(retention.toMillis))
+        )
+        val protectedIds = progress
+          .filter(unfinished || sparkRetained || recent)
+          .select(col(BatchIdColumn))
+          .union(latestTerminal)
+          .union(latestWatermark)
+          .distinct()
+        val obsolete = progress
+          .join(protectedIds, Seq(BatchIdColumn), "left_anti")
+          .select(col(LineageColumn), col(BatchIdColumn))
+        // Materialize selection before mutating the source table; a crash can only leave extra decision records.
+        val cached = obsolete.persist()
+        try {
+          if (cached.limit(1).count() > 0L) {
+            DeltaTable
+              .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingProgress))
+              .as("target")
+              .merge(cached.as("source"), identityCondition)
+              .whenMatched()
+              .delete()
+              .execute()
+          }
+          if (deltaTableExists(paths.streamingDecisions)) {
+            val remaining = spark.read
+              .format("delta")
+              .load(SparkPhysicalLocation.resolve(paths.streamingProgress))
+              .select(col(LineageColumn), col(BatchIdColumn))
+            val orphaned = spark.read
+              .format("delta")
+              .load(SparkPhysicalLocation.resolve(paths.streamingDecisions))
+              .filter(col(LineageColumn) === lit(lineage.value))
+              .select(col(LineageColumn), col(BatchIdColumn))
+              .distinct()
+              .join(remaining, Seq(LineageColumn, BatchIdColumn), "left_anti")
+            if (orphaned.limit(1).count() > 0L)
+              DeltaTable
+                .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingDecisions))
+                .as("target")
+                .merge(orphaned.as("source"), identityCondition)
+                .whenMatched()
+                .delete()
+                .execute()
+          }
+          Right(())
+        } finally { cached.unpersist(); () }
+      }
+    }
+  }
+
   private def latestPublishedWatermark(lineage: StreamingLineage): Either[AnalyticsError, Option[Instant]] = {
     val row = spark.read
       .format("delta")
-      .load(paths.streamingProgress)
+      .load(SparkPhysicalLocation.resolve(paths.streamingProgress))
       .filter(
         col(LineageColumn) === lit(lineage.value) &&
           col(OutcomeColumn) === lit(PublishedName) &&
@@ -117,22 +234,17 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
     execution.either {
       ensureProgressTable()
       readProgress(preparation.identity) match {
-        case Some(row) if immutablePreparationMatches(row, preparation) => Right(())
-        case Some(_)                                                    => Left(preparationConflict)
-        case None                                                       =>
+        case Some(row) => verifyPreparation(row, preparation)
+        case None      =>
           val frame = spark.createDataFrame(Vector(preparationRow(preparation)).asJava, ProgressSchema)
           DeltaTable
-            .forPath(spark, paths.streamingProgress)
+            .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingProgress))
             .as("target")
             .merge(frame.as("source"), identityCondition)
             .whenNotMatched()
             .insertAll()
             .execute()
-          Either.cond(
-            readProgress(preparation.identity).exists(immutablePreparationMatches(_, preparation)),
-            (),
-            preparationConflict
-          )
+          readProgress(preparation.identity).toRight(preparationConflict).flatMap(verifyPreparation(_, preparation))
       }
     }
 
@@ -179,7 +291,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
                 else {
                   val frame = spark.createDataFrame(Vector(decisionRow(decision)).asJava, DecisionSchema)
                   DeltaTable
-                    .forPath(spark, paths.streamingDecisions)
+                    .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingDecisions))
                     .as("target")
                     .merge(frame.as("source"), decisionCondition)
                     .whenNotMatched()
@@ -268,7 +380,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       ensureDecisionSchema()
       val rows = spark.read
         .format("delta")
-        .load(paths.streamingDecisions)
+        .load(SparkPhysicalLocation.resolve(paths.streamingDecisions))
         .filter(identityFilter(identity))
         .orderBy(col(RevisionColumn).desc)
         .limit(1)
@@ -279,7 +391,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
   private def readProgress(identity: StreamingBatchIdentity): Option[Row] =
     spark.read
       .format("delta")
-      .load(paths.streamingProgress)
+      .load(SparkPhysicalLocation.resolve(paths.streamingProgress))
       .filter(identityFilter(identity))
       .limit(1)
       .collect()
@@ -294,7 +406,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       ensureDecisionSchema()
       spark.read
         .format("delta")
-        .load(paths.streamingDecisions)
+        .load(SparkPhysicalLocation.resolve(paths.streamingDecisions))
         .filter(identityFilter(identity) && col(RevisionColumn) === lit(revision))
         .limit(1)
         .collect()
@@ -305,20 +417,25 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
   private def decodeProgress(row: Row): Either[AnalyticsError, StreamingJournalState] =
     Either
       .catchNonFatal(decodeProgressFields(row))
-      .leftMap(_ => malformedProgress)
+      .leftMap(error =>
+        AnalyticsError.InvalidConfiguration(
+          s"streaming batch journal stored field conversion failed: ${error.getClass.getSimpleName}"
+        )
+      )
       .flatMap(identity)
 
   private def decodeProgressFields(row: Row): Either[AnalyticsError, StreamingJournalState] = {
     val decoded = for {
       lineage <- StreamingLineage.from(row.getAs[String](LineageColumn)).leftMap(_ => malformedProgress)
-      batchId <- StreamingBatchId.from(row.getAs[Long](BatchIdColumn)).leftMap(_ => malformedProgress)
+      batchValue <- readRequiredLong(row, BatchIdColumn).toRight(malformedProgress)
+      batchId <- StreamingBatchId.from(batchValue).leftMap(_ => malformedProgress)
       observedAt <- readRequiredInstant(row, ObservedAtColumn).toRight(malformedProgress)
       priorWatermark <- readOptionalInstant(row, PriorWatermarkColumn).leftMap(_ => malformedProgress)
       inputFingerprint <- RangeFingerprint
         .from(row.getAs[String](InputFingerprintColumn))
         .leftMap(_ => malformedProgress)
-      sourceEndOffsets <- row.getAs[Seq[Row]](SourceEndOffsetsColumn).toVector.traverse(decodeEndOffset)
-      offsets <- row.getAs[Seq[Row]](DeliveredOffsetsColumn).toVector.traverse(decodeOffset)
+      sourceEndOffsets <- decodeRows(row, SourceEndOffsetsColumn)(decodeEndOffset)
+      offsets <- decodeRows(row, DeliveredOffsetsColumn)(decodeOffset)
       status <- Option(row.getAs[String](OutcomeColumn)).toRight(malformedProgress)
       state <- status match {
         case PreparedName           => Right((false, None))
@@ -354,35 +471,35 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
     decoded
   }
 
+  private def decodeRows[A](row: Row, column: String)(
+      decode: Row => Either[AnalyticsError, A]
+  ): Either[AnalyticsError, Vector[A]] =
+    Option(row.getAs[scala.collection.Seq[Row]](column))
+      .toRight(malformedProgress)
+      .flatMap(_.toVector.traverse { element =>
+        Option(element).toRight(malformedProgress).flatMap(decode)
+      })
+
   private def decodeOffset(row: Row): Either[AnalyticsError, StreamingPartitionSummary] =
-    Either
-      .catchNonFatal(
-        StreamingPartitionSummary
-          .from(
-            row.getAs[String]("topic"),
-            row.getAs[Int]("partition"),
-            row.getAs[Long]("minimumDeliveredOffset"),
-            row.getAs[Long]("maximumDeliveredOffset"),
-            row.getAs[Long]("deliveredRecordCount")
-          )
-          .toEither
-      )
-      .leftMap(_ => malformedProgress)
-      .flatMap(_.leftMap(_ => malformedProgress))
+    for {
+      topic <- Option(row.getAs[String]("topic")).toRight(malformedProgress)
+      partition <- readRequiredInt(row, "partition").toRight(malformedProgress)
+      minimum <- readRequiredLong(row, "minimumDeliveredOffset").toRight(malformedProgress)
+      maximum <- readRequiredLong(row, "maximumDeliveredOffset").toRight(malformedProgress)
+      count <- readRequiredLong(row, "deliveredRecordCount").toRight(malformedProgress)
+      summary <- StreamingPartitionSummary
+        .from(topic, partition, minimum, maximum, count)
+        .toEither
+        .leftMap(_ => malformedProgress)
+    } yield summary
 
   private def decodeEndOffset(row: Row): Either[AnalyticsError, StreamingPartitionEndOffset] =
-    Either
-      .catchNonFatal(
-        StreamingPartitionEndOffset
-          .from(
-            row.getAs[String]("topic"),
-            row.getAs[Int]("partition"),
-            row.getAs[Long]("endOffset")
-          )
-          .toEither
-      )
-      .leftMap(_ => malformedProgress)
-      .flatMap(_.leftMap(_ => malformedProgress))
+    for {
+      topic <- Option(row.getAs[String]("topic")).toRight(malformedProgress)
+      partition <- readRequiredInt(row, "partition").toRight(malformedProgress)
+      end <- readRequiredLong(row, "endOffset").toRight(malformedProgress)
+      offset <- StreamingPartitionEndOffset.from(topic, partition, end).toEither.leftMap(_ => malformedProgress)
+    } yield offset
 
   private def decodeDecision(row: Row): Either[AnalyticsError, StreamingDecisionRevision] =
     Either
@@ -393,19 +510,33 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
   private def decodeDecisionFields(row: Row): Either[AnalyticsError, StreamingDecisionRevision] =
     for {
       lineage <- StreamingLineage.from(row.getAs[String](LineageColumn)).leftMap(_ => malformedProgress)
-      batchId <- StreamingBatchId.from(row.getAs[Long](BatchIdColumn)).leftMap(_ => malformedProgress)
-      revision <- Either.cond(row.getAs[Long](RevisionColumn) >= 0L, row.getAs[Long](RevisionColumn), malformedProgress)
+      batchValue <- readRequiredLong(row, BatchIdColumn).toRight(malformedProgress)
+      batchId <- StreamingBatchId.from(batchValue).leftMap(_ => malformedProgress)
+      revision <- readRequiredLong(row, RevisionColumn).filter(_ >= 0L).toRight(malformedProgress)
       markerFingerprint <- Option(row.getAs[String](MarkerFingerprintColumn))
         .filter(_.matches("[0-9a-f]{64}"))
         .toRight(malformedProgress)
       candidate <- readOptionalInstant(row, CandidateWatermarkColumn).leftMap(_ => malformedProgress)
-    } yield StreamingDecisionRevision(StreamingBatchIdentity(lineage, batchId), revision, markerFingerprint, candidate)
+      runId <- RunId.from(row.getAs[String](PublicationRunIdColumn)).leftMap(_ => malformedProgress)
+      range <- RangeFingerprint
+        .from(row.getAs[String](PublicationRangeFingerprintColumn))
+        .leftMap(_ => malformedProgress)
+      generation <- readRequiredLong(row, PublicationGenerationColumn).filter(_ >= 0L).toRight(malformedProgress)
+      publicationRevision <- readRequiredLong(row, PublicationRevisionColumn).filter(_ >= 0L).toRight(malformedProgress)
+    } yield StreamingDecisionRevision(
+      StreamingBatchIdentity(lineage, batchId),
+      revision,
+      markerFingerprint,
+      candidate,
+      AnalyticsReportReservation(runId, range, generation, publicationRevision)
+    )
 
   private def validDecision(decision: StreamingDecisionRevision, progress: Row): Boolean =
     try {
       decision.identity.lineage.value == progress.getAs[String](LineageColumn) &&
       decision.identity.batchId.value == progress.getAs[Long](BatchIdColumn) &&
       decision.revision >= 0L && decision.deletionMarkerFingerprint.matches("[0-9a-f]{64}") &&
+      decision.publicationReservation.generation >= 0L && decision.publicationReservation.revision >= 0L &&
       readOptionalInstant(progress, PriorWatermarkColumn).exists(
         _.forall(prior => decision.candidateWatermark.forall(candidate => !candidate.isBefore(prior)))
       )
@@ -414,52 +545,20 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
   private def decisionMatches(row: Row, decision: StreamingDecisionRevision): Boolean =
     decodeDecision(row).contains(decision)
 
-  private def immutablePreparationMatches(row: Row, preparation: StreamingInputPreparation): Boolean =
-    try {
-      row.getAs[String](LineageColumn) == preparation.identity.lineage.value &&
-      row.getAs[Long](BatchIdColumn) == preparation.identity.batchId.value &&
-      readRequiredInstant(row, ObservedAtColumn).contains(nowMicros(preparation.observedAt)) &&
-      readOptionalInstant(row, PriorWatermarkColumn).toOption.flatten == preparation.priorWatermark.map(nowMicros) &&
-      row.getAs[String](InputFingerprintColumn) == preparation.inputFingerprint.value &&
-      row.getAs[Seq[Row]](SourceEndOffsetsColumn).toVector.map(endOffsetValues) == sortedEndOffsets(preparation).map(
-        endOffsetSummaryValues
-      ) &&
-      row.getAs[Seq[Row]](DeliveredOffsetsColumn).toVector.map(offsetValues) == sortedOffsets(preparation).map(
-        summaryValues
+  private def verifyPreparation(row: Row, preparation: StreamingInputPreparation): Either[AnalyticsError, Unit] =
+    decodeProgress(row).flatMap { stored =>
+      val expected = preparation.copy(
+        observedAt = nowMicros(preparation.observedAt),
+        priorWatermark = preparation.priorWatermark.map(nowMicros),
+        sourceEndOffsets = sortedEndOffsets(preparation),
+        deliveredOffsets = sortedOffsets(preparation)
       )
-    } catch { case NonFatal(_) => false }
-
-  private def offsetValues(row: Row): (String, Int, Long, Long, Long) =
-    (
-      row.getAs[String]("topic"),
-      row.getAs[Int]("partition"),
-      row.getAs[Long]("minimumDeliveredOffset"),
-      row.getAs[Long]("maximumDeliveredOffset"),
-      row.getAs[Long]("deliveredRecordCount")
-    )
-
-  private def summaryValues(summary: StreamingPartitionSummary): (String, Int, Long, Long, Long) =
-    (
-      AnalyticsTopic.unwrap(summary.topic),
-      AnalyticsPartition.unwrap(summary.partition),
-      AnalyticsOffset.unwrap(summary.minimumDeliveredOffset),
-      AnalyticsOffset.unwrap(summary.maximumDeliveredOffset),
-      summary.deliveredRecordCount
-    )
+      Either.cond(stored.preparation == expected, (), preparationConflict)
+    }
 
   private def sortedOffsets(preparation: StreamingInputPreparation): Vector[StreamingPartitionSummary] =
     preparation.deliveredOffsets.sortBy(summary =>
       (AnalyticsTopic.unwrap(summary.topic), AnalyticsPartition.unwrap(summary.partition))
-    )
-
-  private def endOffsetValues(row: Row): (String, Int, Long) =
-    (row.getAs[String]("topic"), row.getAs[Int]("partition"), row.getAs[Long]("endOffset"))
-
-  private def endOffsetSummaryValues(offset: StreamingPartitionEndOffset): (String, Int, Long) =
-    (
-      AnalyticsTopic.unwrap(offset.topic),
-      AnalyticsPartition.unwrap(offset.partition),
-      AnalyticsOffset.unwrap(offset.offset)
     )
 
   private def sortedEndOffsets(preparation: StreamingInputPreparation): Vector[StreamingPartitionEndOffset] =
@@ -501,7 +600,11 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       decision.identity.batchId.value,
       decision.revision,
       decision.deletionMarkerFingerprint,
-      decision.candidateWatermark.map(value => Timestamp.from(nowMicros(value))).orNull
+      decision.candidateWatermark.map(value => Timestamp.from(nowMicros(value))).orNull,
+      decision.publicationReservation.runId.value,
+      decision.publicationReservation.rangeFingerprint.value,
+      decision.publicationReservation.generation,
+      decision.publicationReservation.revision
     )
 
   private def updateProgress(
@@ -528,7 +631,7 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
     )
     val source = spark.createDataFrame(Vector(sourceRow).asJava, sourceSchema)
     DeltaTable
-      .forPath(spark, paths.streamingProgress)
+      .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingProgress))
       .as("target")
       .merge(
         source.as("source"),
@@ -550,21 +653,31 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
     AnalyticsTableSchemas.createOrValidate(spark, paths.streamingProgress, ProgressShape)
 
   private def ensureProgressSchema(): Unit =
-    if (!AnalyticsTableSchemas.matches(spark.read.format("delta").load(paths.streamingProgress).schema, ProgressShape))
+    if (
+      !AnalyticsTableSchemas.matches(
+        spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.streamingProgress)).schema,
+        ProgressShape
+      )
+    )
       throw malformedProgress
 
   private def ensureDecisionTable(): Unit =
     AnalyticsTableSchemas.createOrValidate(spark, paths.streamingDecisions, DecisionShape)
 
   private def ensureDecisionSchema(): Unit =
-    if (!AnalyticsTableSchemas.matches(spark.read.format("delta").load(paths.streamingDecisions).schema, DecisionShape))
+    if (
+      !AnalyticsTableSchemas.matches(
+        spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.streamingDecisions)).schema,
+        DecisionShape
+      )
+    )
       throw malformedProgress
 
   private def deltaTableExists(path: String): Boolean = {
-    val tablePath = new org.apache.hadoop.fs.Path(path)
+    val tablePath = new org.apache.hadoop.fs.Path(SparkPhysicalLocation.resolve(path))
     val fileSystem = tablePath.getFileSystem(spark.sparkContext.hadoopConfiguration)
     if (!fileSystem.exists(tablePath)) false
-    else if (DeltaTable.isDeltaTable(spark, path)) true
+    else if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) true
     else throw malformedProgress
   }
 
@@ -573,6 +686,12 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       .catchNonFatal(Option(row.getAs[Timestamp](name)).map(_.toInstant.truncatedTo(ChronoUnit.MICROS)))
       .toOption
       .flatten
+
+  private def readRequiredLong(row: Row, name: String): Option[Long] =
+    Option(row.getAs[java.lang.Long](name)).map(_.longValue())
+
+  private def readRequiredInt(row: Row, name: String): Option[Int] =
+    Option(row.getAs[java.lang.Integer](name)).map(_.intValue())
 
   private def readOptionalInstant(row: Row, name: String): Either[Unit, Option[Instant]] =
     Either
@@ -598,26 +717,31 @@ private object DeltaStreamingBatchJournal {
   private val CompletedAtColumn = "completedAt"
   private val RevisionColumn = "revision"
   private val MarkerFingerprintColumn = "deletionMarkerFingerprint"
+  private val PublicationRunIdColumn = "publicationRunId"
+  private val PublicationRangeFingerprintColumn = "publicationRangeFingerprint"
+  private val PublicationGenerationColumn = "publicationGeneration"
+  private val PublicationRevisionColumn = "publicationRevision"
   private val PreparedName = "Prepared"
   private val IngestionCommittedName = "IngestionCommitted"
   private val QualityBlockedName = "QualityBlocked"
   private val ErasurePendingName = "ErasurePending"
   private val PublishedName = "Published"
 
+  // Delta cannot enforce NOT NULL inside arrays. Required values are checked by the typed journal decoder.
   private val OffsetType = StructType(
     Vector(
-      StructField("topic", StringType, nullable = false),
-      StructField("partition", IntegerType, nullable = false),
-      StructField("minimumDeliveredOffset", LongType, nullable = false),
-      StructField("maximumDeliveredOffset", LongType, nullable = false),
-      StructField("deliveredRecordCount", LongType, nullable = false)
+      StructField("topic", StringType, nullable = true),
+      StructField("partition", IntegerType, nullable = true),
+      StructField("minimumDeliveredOffset", LongType, nullable = true),
+      StructField("maximumDeliveredOffset", LongType, nullable = true),
+      StructField("deliveredRecordCount", LongType, nullable = true)
     )
   )
   private val EndOffsetType = StructType(
     Vector(
-      StructField("topic", StringType, nullable = false),
-      StructField("partition", IntegerType, nullable = false),
-      StructField("endOffset", LongType, nullable = false)
+      StructField("topic", StringType, nullable = true),
+      StructField("partition", IntegerType, nullable = true),
+      StructField("endOffset", LongType, nullable = true)
     )
   )
   private val ProgressShape: AnalyticsTableSchemas.Shape = Vector(
@@ -626,8 +750,8 @@ private object DeltaStreamingBatchJournal {
     ObservedAtColumn -> TimestampType,
     PriorWatermarkColumn -> TimestampType,
     InputFingerprintColumn -> StringType,
-    SourceEndOffsetsColumn -> ArrayType(EndOffsetType, containsNull = false),
-    DeliveredOffsetsColumn -> ArrayType(OffsetType, containsNull = false),
+    SourceEndOffsetsColumn -> ArrayType(EndOffsetType, containsNull = true),
+    DeliveredOffsetsColumn -> ArrayType(OffsetType, containsNull = true),
     OutcomeColumn -> StringType,
     CandidateWatermarkColumn -> TimestampType,
     CompletedAtColumn -> TimestampType
@@ -637,7 +761,11 @@ private object DeltaStreamingBatchJournal {
     BatchIdColumn -> LongType,
     RevisionColumn -> LongType,
     MarkerFingerprintColumn -> StringType,
-    CandidateWatermarkColumn -> TimestampType
+    CandidateWatermarkColumn -> TimestampType,
+    PublicationRunIdColumn -> StringType,
+    PublicationRangeFingerprintColumn -> StringType,
+    PublicationGenerationColumn -> LongType,
+    PublicationRevisionColumn -> LongType
   )
   private val ProgressSchema = AnalyticsTableSchemas.struct(ProgressShape)
   private val DecisionSchema = AnalyticsTableSchemas.struct(DecisionShape)

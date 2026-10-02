@@ -60,35 +60,36 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
     )
 
     new SearchSessionWorkRepository {
-      override def enqueue(work: PendingSearchSessionWork, createdAt: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        IO.pure(Right(())) )
+      override def enqueue(work: PendingSearchSessionWork, createdAt: Instant): RepositoryIO[Unit] =
+        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(())))
 
-      override def findForActor(actor: UserId, search: UUID): RepositoryIO[Option[SearchSessionLookup]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        IO.pure(Right(None)) )
+      override def findForActor(actor: UserId, search: UUID): RepositoryIO[Option[SearchSessionLookup]] =
+        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(None)))
 
       override def claim(
           workerId: String,
           currentTime: Instant,
           leaseUntil: Instant
-      ): RepositoryIO[Option[ClaimedSearchSessionWork]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        claimed.modify { attempt =>
+      ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
+        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(claimed.modify { attempt =>
           val next = attempt + 1
           if (next <= 3) (next, Right(Some(ClaimedSearchSessionWork(work, next, s"lease-$next"))))
           else (attempt, Right(None))
-        } )
+        })
 
-      override def complete(claim: ClaimedSearchSessionWork, completedAt: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        IO.pure(Left(RepositoryError.Unavailable)) )
+      override def complete(claim: ClaimedSearchSessionWork, completedAt: Instant): RepositoryIO[Unit] =
+        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Left(RepositoryError.Unavailable)))
 
-      override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        retried.update(_ :+ claim.attempts).as(Right(())) )
+      override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
+        com.example.graphQL.cats.service.port.RepositoryIO
+          .fromIOEither(retried.update(_ :+ claim.attempts).as(Right(())))
 
       override def fail(
           claim: ClaimedSearchSessionWork,
           failure: SearchSessionWorkFailure,
           failedAt: Instant
-      ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        failed.update(_ :+ (claim.attempts -> failure)) *> terminal.complete(()).as(Right(())) )
+      ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO
+        .fromIOEither(failed.update(_ :+ (claim.attempts -> failure)) *> terminal.complete(()).as(Right(())))
     }
   }
 }

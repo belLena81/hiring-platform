@@ -10,6 +10,27 @@ data_parent="$repo_root/.local/data/hmac-key-retirement"
 log_dir="$repo_root/.local/logs/hmac-key-retirement"
 old_uid=20001
 new_uid=20002
+isolated_test=false
+isolated_test_resume=false
+if [[ "${1:-}" == isolated-test ]]; then
+  isolated_test=true
+  if [[ -n "${2:-}" ]]; then
+    [[ "$2" =~ ^[a-f0-9]{16}$ && $# -eq 2 ]] || { printf 'Resume requires exactly one 16-character lowercase hexadecimal nonce.\n' >&2; exit 2; }
+    nonce="$2"
+    isolated_test_resume=true
+  else
+    [[ $# -eq 1 ]] || exit 2
+    nonce="$(openssl rand -hex 8)"
+  fi
+  state_file="$repo_root/.local/config/hmac-key-retirement-isolated-$nonce.state"
+  log_dir="$repo_root/.local/logs/hmac-key-retirement-isolated-$nonce"
+  if [[ "$isolated_test_resume" == true && ( ! -f "$state_file" || -L "$state_file" ) ]]; then
+    printf 'The requested isolated rotation state does not exist.\n' >&2; exit 2
+  fi
+  export HIRING_HMAC_ROTATION_ISOLATED_TEST_NONCE="$nonce"
+  export ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY='60 seconds'
+  export ANALYTICS_RETENTION_DELTA_LOG_RETENTION='60 seconds'
+fi
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -87,6 +108,9 @@ load_state() {
       *) die 'Unknown rotation state key.' ;;
     esac
   done < "$state_file"
+  if [[ "$isolated_test" == true ]]; then
+    [[ "$nonce" == "$HIRING_HMAC_ROTATION_ISOLATED_TEST_NONCE" ]] || die 'Isolated state nonce differs from its requested fixture.'
+  fi
   [[ "$nonce" =~ ^[a-f0-9]{16}$ && "$mongo_port" =~ ^[0-9]{4,5}$ && "$kafka_port" =~ ^[0-9]{4,5}$ &&
     "$new_secret" =~ ^[A-Za-z0-9+/]{43}=$ ]] || die 'Invalid rotation state identifiers or secrets.'
   [[ "$old_secret" =~ ^[A-Za-z0-9+/]{43}=$ || ( -z "$old_secret" && -n "$restarted_at" ) ]] ||
@@ -108,6 +132,12 @@ configure_names() {
   database="hiring_hmac_rotation_$nonce"
   topic="hiring.hmac.rotation.$nonce"
   data_dir="$data_parent/$nonce"
+  if [[ "$isolated_test" == true ]]; then
+    project="hiring-hmac-rotation-test-$nonce"
+    database="hiring_hmac_rotation_test_$nonce"
+    topic="hiring.hmac.rotation.test.$nonce"
+    data_dir="$data_parent/isolated-$nonce"
+  fi
   volume_name="${project}_hmac-rotation-analytics"
   base_image="${project}-base"
   old_image="${project}-old"
@@ -117,14 +147,16 @@ configure_names() {
   export HIRING_HMAC_ROTATION_DATABASE="$database"
   export HIRING_HMAC_ROTATION_TOPIC="$topic"
   export HIRING_HMAC_ROTATION_DATA_DIR="$data_dir"
+  export HIRING_HMAC_ROTATION_LAKEHOUSE_URI="$(python3 "$repo_root/scripts/canonical-local-file-uri.py" "$data_dir/lakehouse")"
   export HIRING_HMAC_ROTATION_WRITER_IMAGE="$new_image"
   export KAFKA_TOPIC="$topic"
   export HIRING_ANALYTICS_HMAC_SECRET_BASE64="$new_secret"
 }
 
 compose() {
-  docker compose --profile analytics --profile analytics-erasure \
-    -f compose.yaml -f compose.hmac-key-rotation-proof.yaml -p "$project" "$@"
+  local -a profile_files=(-f compose.yaml -f compose.hmac-key-rotation-proof.yaml)
+  if [[ "$isolated_test" == true ]]; then profile_files+=(-f compose.hmac-key-rotation-calendar-proof.yaml); fi
+  docker compose --profile analytics --profile analytics-erasure "${profile_files[@]}" -p "$project" "$@"
 }
 
 capture() {
@@ -203,11 +235,18 @@ new_fixture() {
 
 host_authorization() {
   local action="$1"
+  local host_scratch="$repo_root/.local/data/analytics/spark-temp/hmac-key-retirement-$nonce"
+  if [[ "$isolated_test" == true ]]; then host_scratch="$repo_root/.local/data/analytics/spark-temp/hmac-key-retirement-isolated-$nonce"; fi
+  # This host-owned scratch root is separate from the writer volume's read-only host ACL.
+  local_directory "$host_scratch" true
+  [[ "$(stat -c '%u:%a' "$host_scratch")" == "$(id -u):700" ]] || die 'Host Spark scratch must be owned by this user with mode 700.'
+  [[ -z "$(find "$host_scratch" -mindepth 1 \( -type f -o -type l \) -print -quit)" ]] || die 'Prior host Spark spill files remain; preserve them for inspection.'
   verify_images
   (
     export MONGODB_URI="mongodb://127.0.0.1:$mongo_port/?directConnection=true"
     export MONGODB_DATABASE="$database" SPARK_MASTER='local[2]'
-    export ANALYTICS_LAKEHOUSE_ROOT="file://$data_dir/lakehouse"
+    export ANALYTICS_SPARK_LOCAL_DIRECTORY="$host_scratch"
+    export ANALYTICS_LAKEHOUSE_ROOT="$(python3 "$repo_root/scripts/canonical-local-file-uri.py" "$data_dir/lakehouse")"
     export ANALYTICS_BOOTSTRAP_SERVERS="127.0.0.1:$kafka_port"
     export ANALYTICS_KAFKA_USERNAME=analytics_reader ANALYTICS_KAFKA_PASSWORD="$KAFKA_READER_PASSWORD"
     export ANALYTICS_KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT ANALYTICS_KAFKA_ALLOW_PLAINTEXT=true
@@ -219,7 +258,9 @@ host_authorization() {
     cd "$repo_root/analytics"
     sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 \
       "Test / runMain com.example.hiring.analytics.cli.HmacKeyRetirementAuthorizationMain $action"
-  )
+  ) || return
+  [[ -z "$(find "$host_scratch" -mindepth 1 \( -type f -o -type l \) -print -quit)" ]] || die 'Host Spark spill files remain after the operator resource closed.'
+  printf 'Host operator Spark scratch is clean after resource release.\n'
 }
 
 assert_quiescent() {
@@ -342,7 +383,7 @@ start_proof() {
     local_directory "$repo_root/.local/logs" true
     local_directory "$data_parent" true
     git check-ignore -q "$data_parent/probe" || die 'Rotation data path is not ignored by Git.'
-    nonce="$(openssl rand -hex 8)"
+    if [[ "$isolated_test" != true ]]; then nonce="$(openssl rand -hex 8)"; fi
     mongo_port="$(free_port)"; kafka_port="$(free_port)"
     [[ "$mongo_port" != "$kafka_port" ]] || kafka_port="$(free_port)"
     old_secret="$(openssl rand -base64 32 | tr -d '\n')"
@@ -356,15 +397,20 @@ start_proof() {
     save_state
   fi
   # Before durable preparation, rebuild from the current reviewed source on resume.
-  if [[ -z "$staged_at" ]]; then build_images; else verify_images; fi
+  if [[ -z "$staged_at" && "$isolated_test_resume" != true ]]; then build_images; else verify_images; fi
   capture infrastructure.log compose up -d --wait mongodb kafka
   capture kafka-acl-init.log start_kafka_acl
-  capture empty-mongo-contract.log initialize_empty_mongo_contract
+  if [[ "$isolated_test" != true ]]; then
+    capture empty-mongo-contract.log initialize_empty_mongo_contract
+  fi
   local owner
   owner="$(volume_owner)"
   if [[ "$owner" == uncreated ]]; then
     capture old-writer-volume.log prepare_old_writer_volume
     owner="$old_uid"
+  fi
+  if [[ "$isolated_test" == true ]]; then
+    capture hiring-operational-bootstrap.log host_hiring_bootstrap
   fi
   if [[ "$owner" == "$old_uid" ]]; then
     if ! stage_flag old OLD_ROW_STAGED; then
@@ -382,8 +428,13 @@ start_proof() {
   stage_flag new OLD_ROW_STAGED || die 'Old Silver fixture is missing after writer exclusion.'
   stage_flag new OLD_EVENT_PUBLISHED || die 'Old Kafka fixture is missing after writer exclusion.'
   persist_preparation
-  printf 'Old-key fixture staged and writer excluded in %s. Keep its Kafka volume through the real 168-hour horizon.\n' "$project"
-  printf 'After the old Silver row reaches 30 days, run %s maintain.\n' "$0"
+  if [[ "$isolated_test" == true ]]; then
+    printf 'Old-key fixture staged and writer excluded in %s. Actual isolated Kafka/data retention is 60 seconds; calendar ages are simulated +32 days.\n' "$project"
+    printf 'The isolated runner continues through observed Kafka offsets, physical Delta cleanup and guarded retirement.\n'
+  else
+    printf 'Old-key fixture staged and writer excluded in %s. Keep its Kafka volume through the real 168-hour horizon.\n' "$project"
+    printf 'After the old Silver row reaches 30 days, run %s maintain.\n' "$0"
+  fi
 }
 
 retry_prepare_proof() {
@@ -550,7 +601,11 @@ maintain_proof() {
   capture maintain.log new_fixture maintain
   cutover_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   save_state
-  printf 'New-key control and elapsed old-row cleanup recorded. Preserve Kafka and Delta volumes for the real log horizon.\n'
+  if [[ "$isolated_test" == true ]]; then
+    printf 'New-key control and calendar-aged old-row cleanup recorded. Keep isolated volumes through the actual 60-second Delta data horizon; UTC log calendar is simulated +32 days.\n'
+  else
+    printf 'New-key control and elapsed old-row cleanup recorded. Preserve Kafka and Delta volumes for the real log horizon.\n'
+  fi
 }
 
 authorize_proof() {
@@ -564,12 +619,127 @@ authorize_proof() {
   printf 'Guarded retirement authorization persisted. Run restart to prove omission of the old key.\n'
 }
 
+host_hiring_bootstrap() {
+  [[ "$isolated_test" == true ]] || die 'Standard hiring bootstrap requires the isolated nonce fixture.'
+  verify_images
+  assert_quiescent
+  if [[ -n "${HIRING_HMAC_ROTATION_ROOT_CLASSPATH:-}" ]]; then
+    bash "$repo_root/scripts/bootstrap-isolated-hmac-hiring-runtime.sh" "$nonce" "$HIRING_HMAC_ROTATION_ROOT_CLASSPATH" || return
+  else
+    bash "$repo_root/scripts/bootstrap-isolated-hmac-hiring-runtime.sh" "$nonce" || return
+  fi
+  assert_quiescent
+}
+
+host_post_authorization_control() {
+  local partition="$1" start="$2" end="$3"
+  local host_scratch="$repo_root/.local/data/analytics/spark-temp/hmac-key-retirement-isolated-$nonce"
+  [[ "$isolated_test" == true && -n "$authorized_at" && -z "$restarted_at" ]] ||
+    die 'Host control refresh requires an authorized isolated fixture awaiting restart.'
+  verify_images
+  assert_quiescent
+  local_directory "$host_scratch"
+  [[ "$(stat -c '%u:%a' "$host_scratch")" == "$(id -u):700" ]] ||
+    die 'Host control configuration requires its existing private operator scratch directory.'
+  (
+    unset JAVA_TOOL_OPTIONS
+    export MONGODB_URI="mongodb://127.0.0.1:$mongo_port/?directConnection=true"
+    export MONGODB_DATABASE="$database"
+    export ANALYTICS_LAKEHOUSE_ROOT="$(python3 "$repo_root/scripts/canonical-local-file-uri.py" "$data_dir/lakehouse")"
+    export ANALYTICS_BOOTSTRAP_SERVERS="127.0.0.1:$kafka_port"
+    export ANALYTICS_KAFKA_USERNAME=hiring_publisher_v2 ANALYTICS_KAFKA_PASSWORD="$KAFKA_PUBLISHER_V2_PASSWORD"
+    export ANALYTICS_KAFKA_SECURITY_PROTOCOL=SASL_PLAINTEXT ANALYTICS_KAFKA_ALLOW_PLAINTEXT=true
+    export ANALYTICS_TOPIC="$topic" ANALYTICS_PARTITION="$partition"
+    export ANALYTICS_START_OFFSET="$start" ANALYTICS_END_OFFSET_EXCLUSIVE="$end"
+    export ANALYTICS_RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    export SPARK_MASTER='local[2]' ANALYTICS_SPARK_LOCAL_DIRECTORY="$host_scratch"
+    export HIRING_HMAC_ROTATION_OLD_KEY_ID="rotation-old-$nonce"
+    export HIRING_HMAC_ROTATION_NEW_KEY_ID="rotation-new-$nonce"
+    export HIRING_HMAC_ROTATION_OLD_SECRET_BASE64="$old_secret"
+    export HIRING_HMAC_ROTATION_NEW_SECRET_BASE64="$new_secret"
+    export HIRING_ANALYTICS_HMAC_KEY_ID="rotation-new-$nonce" HIRING_ANALYTICS_HMAC_SECRET_BASE64="$new_secret"
+    export HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID="rotation-old-$nonce"
+    export HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64="$old_secret"
+    export SPARK_LOCAL_IP=127.0.0.1
+    # This test CLI owns only Mongo control evidence and Kafka publication; it never starts Spark
+    # or writes Delta, and executes fresh test bytecode without rebinding the authorized images.
+    cd "$repo_root/analytics"
+    sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 \
+      'Test / runMain com.example.hiring.analytics.cli.PostAuthorizationHmacControlEventMain'
+  )
+}
+
+isolated_mount_equivalence() {
+  [[ "$isolated_test" == true ]] || die 'Mount equivalence probe requires the isolated fixture.'
+  verify_images
+  assert_quiescent
+  [[ "$(docker volume inspect --format '{{ index .Options "device" }}' "$volume_name")" == "$data_dir" ]] ||
+    die 'Isolated volume device does not match its nonce-owned root.'
+  # Read-only probe in the exact authorized new image: both aliases must resolve to the
+  # same physical parent/lakehouse, and the same scratch directory if present.
+  compose run --rm --no-deps --entrypoint /bin/sh analytics-batch -ec '
+    test "$ANALYTICS_SPARK_LOCAL_DIRECTORY" = /var/lib/hiring-analytics/spark-temp
+    host_root="$HIRING_HMAC_ROTATION_DATA_DIR/lakehouse"
+    host_volume="${host_root%/lakehouse}"
+    for directory in "$host_volume" /var/lib/hiring-analytics "$host_root" /var/lib/hiring-analytics/lakehouse; do
+      test -d "$directory"
+      test ! -L "$directory"
+    done
+    host_parent_id="$(stat -c "%d:%i" "$host_volume")"
+    alias_parent_id="$(stat -c "%d:%i" /var/lib/hiring-analytics)"
+    test -n "$host_parent_id"
+    test "$host_parent_id" = "$alias_parent_id"
+    host_lakehouse_id="$(stat -c "%d:%i" "$host_root")"
+    alias_lakehouse_id="$(stat -c "%d:%i" /var/lib/hiring-analytics/lakehouse)"
+    test -n "$host_lakehouse_id"
+    test "$host_lakehouse_id" = "$alias_lakehouse_id"
+    if test -e "$host_volume/spark-temp" || test -L "$host_volume/spark-temp" ||
+      test -e /var/lib/hiring-analytics/spark-temp || test -L /var/lib/hiring-analytics/spark-temp; then
+      for directory in "$host_volume/spark-temp" /var/lib/hiring-analytics/spark-temp; do
+        test -d "$directory"
+        test ! -L "$directory"
+      done
+      host_scratch_id="$(stat -c "%d:%i" "$host_volume/spark-temp")"
+      alias_scratch_id="$(stat -c "%d:%i" /var/lib/hiring-analytics/spark-temp)"
+      test -n "$host_scratch_id"
+      test "$host_scratch_id" = "$alias_scratch_id"
+      scratch_state=PRESENT
+    else
+      scratch_state=ABSENT
+    fi
+    printf "ISOLATED_MOUNT_EQUIVALENCE lakehouse=%s alias=/var/lib/hiring-analytics/lakehouse parentIdentity=%s lakehouseIdentity=%s scratch=%s/spark-temp alias=/var/lib/hiring-analytics/spark-temp scratchState=%s\n" "$host_root" "$host_parent_id" "$host_lakehouse_id" "$host_volume" "$scratch_state"
+  '
+  assert_quiescent
+}
+
 restart_proof() {
   load_credentials; load_state
   [[ -n "$authorized_at" && -z "$restarted_at" ]] || die 'Restart requires a persisted authorization.'
   verify_images
   assert_quiescent
+  if [[ "$isolated_test" == true ]]; then
+    capture hiring-operational-bootstrap-restart.log host_hiring_bootstrap
+    capture isolated-mount-equivalence.log isolated_mount_equivalence
+    # The captured old barrier already passed before durable authorization. This isolated-only
+    # window preserves the subsequent control event across fresh JVM compilation and startup.
+    capture new-control-retention.log kafka_admin kafka-configs.sh --entity-type topics --entity-name "$topic" \
+      --alter --add-config retention.ms=86400000
+    capture new-control-retention-verified.log kafka_admin kafka-configs.sh --entity-type topics --entity-name "$topic" \
+      --describe --all
+    rg -q '(^|[[:space:]])retention\.ms=86400000([[:space:]]|$)' "$log_dir/new-control-retention-verified.log" ||
+      die 'Isolated post-authorization control retention was not applied.'
+  fi
   if ! stage_flag new NEW_EVENT_PUBLISHED; then capture publish-new-event.log new_fixture publish-new-event; fi
+  if [[ "$isolated_test" == true ]]; then
+    [[ ! -L "$log_dir/original-new-event-range.log" && ! -L "$log_dir/new-event-range.log" ]] ||
+      die 'Refusing a symlink in the post-authorization control-range evidence.'
+  fi
+  if [[ "$isolated_test" == true && -e "$log_dir/new-event-range.log" &&
+    ! -e "$log_dir/original-new-event-range.log" ]]; then
+    [[ ! -L "$log_dir/new-event-range.log" && ! -L "$log_dir/original-new-event-range.log" ]] ||
+      die 'Refusing a symlink in the original control-range evidence.'
+    cp -- "$log_dir/new-event-range.log" "$log_dir/original-new-event-range.log"
+  fi
   capture new-event-range.log new_fixture new-event-range
   local reference event_topic partition start_offset end_offset remainder
   reference="$(sed -nE 's/^(\[info\] )?NEW_EVENT_RANGE=//p' "$log_dir/new-event-range.log" | tail -n 1)"
@@ -577,8 +747,49 @@ restart_proof() {
   [[ "$event_topic" == "$topic" && "$partition" =~ ^[0-9]+$ &&
     "$start_offset" =~ ^[0-9]+$ && "$end_offset" =~ ^[0-9]+$ &&
     "$end_offset" -eq $((start_offset + 1)) && -z "$remainder" ]] || die 'New event range is malformed.'
+  if [[ "$isolated_test" == true ]]; then
+    [[ "$partition" == 0 ]] || die 'Isolated control must remain in its captured partition zero.'
+    if [[ ! -e "$log_dir/original-new-event-range.log" && ! -L "$log_dir/original-new-event-range.log" ]]; then
+      cp -- "$log_dir/new-event-range.log" "$log_dir/original-new-event-range.log"
+    fi
+    local earliest latest refresh_log
+    earliest="$(kafka_offset earliest)"; latest="$(kafka_offset latest)"
+    (( end_offset <= latest )) || die 'Recorded control range exceeds the actual Kafka latest offset.'
+    if (( start_offset < earliest )); then
+      printf 'Original post-authorization control expired: start=%s end=%s earliest=%s latest=%s.\n' \
+        "$start_offset" "$end_offset" "$earliest" "$latest"
+      refresh_log="post-authorization-control-$(python3 -c 'import uuid; print(uuid.uuid4())').log"
+      capture "$refresh_log" host_post_authorization_control "$partition" "$start_offset" "$end_offset"
+      reference="$(sed -nE 's/^(\[info\] )?NEW_EVENT_RANGE=//p' "$log_dir/$refresh_log" | tail -n 1)"
+      IFS=: read -r event_topic partition start_offset end_offset remainder <<< "$reference"
+      [[ "$event_topic" == "$topic" && "$partition" == 0 &&
+        "$start_offset" =~ ^[0-9]+$ && "$end_offset" =~ ^[0-9]+$ &&
+        "$end_offset" -eq $((start_offset + 1)) && -z "$remainder" ]] || die 'Refreshed control range is malformed.'
+      earliest="$(kafka_offset earliest)"; latest="$(kafka_offset latest)"
+    fi
+    (( earliest <= start_offset && end_offset <= latest )) || die 'Post-authorization control is not currently available.'
+    printf 'Verified post-authorization control: start=%s end=%s earliest=%s latest=%s.\n' \
+      "$start_offset" "$end_offset" "$earliest" "$latest"
+  fi
   local run_id
   run_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  if [[ "$isolated_test" == true ]]; then
+    HIRING_ANALYTICS_HMAC_KEY_ID="rotation-old-$nonce" \
+       HIRING_ANALYTICS_HMAC_SECRET_BASE64="$old_secret" \
+       HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID="rotation-new-$nonce" \
+       HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64="$new_secret" \
+       ANALYTICS_RUN_ID="$run_id" ANALYTICS_PARTITION="$partition" \
+       ANALYTICS_START_OFFSET="$start_offset" ANALYTICS_END_OFFSET_EXCLUSIVE="$end_offset" \
+       compose run --rm --no-deps --entrypoint sbt analytics-batch \
+       'Test / runMain com.example.hiring.analytics.cli.RetiredHmacPrimaryStartupProofMain' > "$log_dir/retired-primary-rejected.log" 2>&1 ||
+      die 'Retired old-primary startup did not produce the required rejection.'
+    rg -q 'RETIRED_PRIMARY_STARTUP_REJECTED' "$log_dir/retired-primary-rejected.log" ||
+      die 'Old-primary startup failed without the required retirement rejection.'
+    run_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    earliest="$(kafka_offset earliest)"; latest="$(kafka_offset latest)"
+    (( earliest <= start_offset && end_offset <= latest )) ||
+      die 'Post-authorization control expired before the new-key-only batch restart.'
+  fi
   HIRING_ANALYTICS_HMAC_KEY_ID="rotation-new-$nonce" \
   HIRING_ANALYTICS_HMAC_SECRET_BASE64="$new_secret" \
   HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID='' \
@@ -593,9 +804,58 @@ restart_proof() {
   printf 'New-key-only batch restart completed; preserved proof volumes and state remain available.\n'
 }
 
+isolated_test_proof() {
+  printf 'Isolated fixture nonce=%s; actual Kafka and Delta data retention=60 seconds; calendar ages simulated +32 days.\n' "$nonce"
+  start_proof
+  verify_images
+  assert_quiescent
+  if [[ -z "$cutover_at" ]]; then
+    prepared_tail_barrier
+    capture isolated-topic-retention.log kafka_admin kafka-configs.sh --entity-type topics --entity-name "$topic" \
+      --alter --add-config retention.ms=60000,segment.ms=1000,segment.bytes=16384,file.delete.delay.ms=1000
+    capture isolated-topic-config.log kafka_admin kafka-configs.sh --entity-type topics --entity-name "$topic" --describe --all
+    rg -q 'retention.ms=60000([[:space:]]|$)' "$log_dir/isolated-topic-config.log" || die 'Isolated topic retention was not applied.'
+    local latest
+    latest="$(kafka_offset latest)"
+    if [[ -z "$tail_at" ]]; then
+      if (( latest == 1 )); then capture isolated-rollover.log publish_rollover_tail
+      elif (( latest != 33 )); then die 'Isolated rollover has an unexpected durable latest offset.'
+      fi
+      [[ "$(kafka_offset latest)" == 33 ]] || die 'Isolated rollover did not retain its exact latest offset.'
+      tail_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      save_state
+    fi
+    local earliest attempt
+    for ((attempt=0; attempt<40; attempt++)); do
+      earliest="$(kafka_offset earliest)"
+      if (( earliest >= 1 )); then break; fi
+      printf 'Waiting for actual isolated Kafka retention: earliest=%s, barrier=1.\n' "$earliest"
+      sleep 10
+    done
+    (( earliest >= 1 )) || die 'Actual Kafka earliest offset did not pass the captured barrier.'
+    printf 'Actual Kafka retention passed: earliest=%s barrier=1; preserved same broker/topic/volume lineage.\n' "$earliest"
+    maintain_proof
+  fi
+  # Delta VACUUM uses its real system clock, independently of the substituted calendar.
+  local deadline remaining
+  if [[ -z "$authorized_at" ]]; then
+    deadline=$(( $(date -u -d "$cutover_at" +%s) + 65 ))
+    while (( $(date -u +%s) < deadline )); do
+      remaining=$(( deadline - $(date -u +%s) ))
+      printf 'Waiting for actual Delta data-file retention: %s seconds remain.\n' "$remaining"
+      if (( remaining > 10 )); then sleep 10; else sleep "$remaining"; fi
+    done
+    authorize_proof
+  fi
+  if [[ -z "$restarted_at" ]]; then restart_proof; fi
+  printf 'ISOLATED_HMAC_RETIREMENT_PASS nonce=%s state=%s logs=%s\n' "$nonce" "$state_file" "$log_dir"
+  printf 'Actual: guarded writer access denial, broker offsets/lineage, physical Delta files/logs, durable authorization, old-primary rejection/new-only restart. Simulated: Silver/report calendar horizons and Delta log calendar.\n'
+}
+
 case "${1:-}" in
+  isolated-test) isolated_test_proof ;;
   start) start_proof ;; prepare) retry_prepare_proof ;; status) status_proof ;; tail) tail_proof ;;
   maintain) maintain_proof ;;
   authorize) authorize_proof ;; restart) restart_proof ;;
-  *) printf 'Usage: %s {start|prepare|status|tail|maintain|authorize|restart}\n' "$0" >&2; exit 2 ;;
+  *) printf 'Usage: %s {start|prepare|status|tail|maintain|authorize|restart|isolated-test [nonce]}\n' "$0" >&2; exit 2 ;;
 esac

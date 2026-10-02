@@ -12,6 +12,13 @@ object AnalyticsLakehouseIdentity {
         uri.getScheme != null && uri.getRawUserInfo == null && uri.getRawQuery == null && uri.getRawFragment == null
       )
       require(!uri.isOpaque)
+      if (uri.getScheme.equalsIgnoreCase("file")) {
+        require(uri.getAuthority == null && Option(uri.getPath).exists(_.startsWith("/")))
+        // Keep the established raw-path identity. Reject escaped aliases instead of
+        // silently assigning a different ownership hash to the same local directory.
+        val canonicalFile = new URI("file", null, uri.getPath, null, null).normalize().toASCIIString
+        require(uri.getRawPath == new URI(canonicalFile).getRawPath)
+      }
       val rawPath = Option(uri.getRawPath).getOrElse("")
       val authority = Option(uri.getRawAuthority).fold("")(value => s"//${value.toLowerCase(java.util.Locale.ROOT)}")
       val withRootSlash = if (authority.nonEmpty && rawPath.isEmpty) "/" else rawPath

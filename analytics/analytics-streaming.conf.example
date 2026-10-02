@@ -5,6 +5,8 @@ analytics.streaming {
   activation-grant-id = "replace-with-immutable-grant-id"
   checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-operational-events-v1"
   trigger-interval = 10 seconds
+    maintenance-interval = 60 seconds
+    progress-retention = 7 days
   max-offsets-per-trigger = 1000
   maximum-replay-records = 1000
 

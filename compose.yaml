@@ -59,7 +59,7 @@ services:
         sasl.mechanism=PLAIN
         sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="$${KAFKA_BROKER_PASSWORD}";
         EOF
-        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --create --if-not-exists --topic "$${KAFKA_TOPIC:-hiring.operational-events}" --partitions 1 --replication-factor 1 >/dev/null 2>&1; do sleep 2; done
+        until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --create --if-not-exists --topic "$${KAFKA_TOPIC:-hiring.operational-events}" --partitions "$${KAFKA_TOPIC_PARTITIONS:-1}" --replication-factor 1 >/dev/null 2>&1; do sleep 2; done
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:hiring_publisher_v2 --operation WRITE --operation DESCRIBE --topic "$${KAFKA_TOPIC:-hiring.operational-events}"
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:hiring_publisher_v2 --operation IdempotentWrite --cluster
         /opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config /tmp/admin.properties --add --allow-principal User:hiring_publisher_v2 --operation WRITE --operation DESCRIBE --transactional-id hiring-publisher- --resource-pattern-type prefixed

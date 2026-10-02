@@ -8,7 +8,8 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.{
   AnalyticsLakehousePaths,
   AnalyticsReportPublicationReceipt,
-  AnalyticsReportPublisher
+  AnalyticsReportPublisher,
+  AnalyticsReportReservation
 }
 import com.example.hiring.analytics.service.streaming.*
 import io.delta.tables.DeltaTable
@@ -107,17 +108,22 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       newlyAdmittedOpenFacts: DataFrame
   )
 
+  override def reservePublication(
+      preparation: StreamingInputPreparation,
+      revision: Long
+  ): F[AnalyticsReportReservation] =
+    for {
+      _ <- authorizePublication
+      runId <- F.fromEither(streamRunId(preparation.identity, revision))
+      rangeFingerprint <- F.fromEither(streamRangeFingerprint(preparation, revision))
+      reservation <- reportPublisher.reservePinned(runId, rangeFingerprint, preparation.observedAt)
+    } yield reservation
+
   override def publicationReceipt(
       preparation: StreamingInputPreparation,
       decision: StreamingDecisionRevision
   )(using cats.Applicative[F]): F[AnalyticsReportPublicationReceipt] =
-    for {
-      _ <- authorizePublication
-      runId <- F.fromEither(streamRunId(decision))
-      rangeFingerprint <- F.fromEither(streamRangeFingerprint(preparation, decision))
-      reservation <- reportPublisher.reserve(runId, rangeFingerprint, preparation.observedAt)
-      receipt <- reportPublisher.publicationReceipt(reservation)
-    } yield receipt
+    authorizePublication *> reportPublisher.publicationReceipt(decision.publicationReservation)
 
   override def assess(
       preparation: StreamingInputPreparation,
@@ -171,24 +177,26 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     if (activeTokens.nonEmpty) F.pure(StreamingPublicationResult.ErasurePending)
     else
       for {
+        _ <- validateDecision(preparation, activeTokens, decision)
         _ <- authorizePublication
-        report <- rebuildAndExtract(preparation.observedAt)
-        runId <- F.fromEither(streamRunId(decision))
-        rangeFingerprint <- F.fromEither(streamRangeFingerprint(preparation, decision))
-        reservation <- reportPublisher.reserve(
-          runId,
-          rangeFingerprint,
-          preparation.observedAt
-        )
-        expiresAt = preparation.observedAt.plusMillis(retention.publishedSnapshotDays.value.toLong * 86400000L)
-        result <- reportPublisher
-          .publish(reservation, report, expiresAt)
-          .as(StreamingPublicationResult.Published)
-          .handleErrorWith {
-            case AnalyticsError.GuardedErasurePublicationRejected =>
-              F.pure(StreamingPublicationResult.ErasurePending)
-            case error => F.raiseError(error)
-          }
+        receipt <- reportPublisher.publicationReceipt(decision.publicationReservation)
+        result <- receipt match {
+          case AnalyticsReportPublicationReceipt.Superseded        => F.pure(StreamingPublicationResult.Superseded)
+          case AnalyticsReportPublicationReceipt.CurrentGeneration => F.pure(StreamingPublicationResult.Published)
+          case AnalyticsReportPublicationReceipt.Absent            =>
+            for {
+              report <- rebuildAndExtract(preparation.observedAt)
+              _ <- authorizePublication
+              expiresAt = preparation.observedAt.plusMillis(retention.publishedSnapshotDays.value.toLong * 86400000L)
+              result <- reportPublisher
+                .publish(decision.publicationReservation, report, expiresAt)
+                .as(StreamingPublicationResult.Published)
+                .handleErrorWith {
+                  case AnalyticsError.GuardedErasurePublicationRejected => F.pure(StreamingPublicationResult.Superseded)
+                  case error                                            => F.raiseError(error)
+                }
+            } yield result
+        }
       } yield result
 
   private def analyze(
@@ -224,26 +232,23 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
           isRecoveryAttempt
         )
       )
-      result <- execution {
-        val malformed = parsedEvents.filter(!OperationalEventTransforms.isValidEvent).count()
-        val conflicts = facts.safeValidEvents
-          .select(Columns.EventId)
-          .join(facts.conflicts, Seq(Columns.EventId), "inner")
-          .distinct()
-          .count()
-        val future = facts.classifications
-          .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit("FUTURE"))
-          .join(facts.conflicts, Seq(Columns.EventId), "left_anti")
-          .count()
-        val deleted = tokenized.count() - safe.count()
-        facts.copy(
-          malformedCount = malformed,
-          conflictingEventCount = conflicts,
-          futureCount = future,
-          deletionSuppressedCount = deleted
-        )
-      }
+      result <- measureAdmissionFacts(facts)
     } yield result
+
+  /** Assess and ingest must compare the same measured quality evidence; unmeasured defaults are not outcomes. */
+  private def measureAdmissionFacts(facts: AdmissionFacts): F[AdmissionFacts] = execution {
+    val malformed = parsedEvents.filter(!OperationalEventTransforms.isValidEvent).count()
+    val conflicts = facts.safeValidEvents
+      .select(Columns.EventId)
+      .join(facts.conflicts, Seq(Columns.EventId), "inner")
+      .distinct()
+      .count()
+    val future = facts.classifications
+      .filter(col(s"$AdmissionColumn.$AdmissionStatusField") === lit("FUTURE"))
+      .join(facts.conflicts, Seq(Columns.EventId), "left_anti")
+      .count()
+    facts.copy(malformedCount = malformed, conflictingEventCount = conflicts, futureCount = future)
+  }
 
   private def buildAdmissionFacts(
       preparation: StreamingInputPreparation,
@@ -440,7 +445,8 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
           )
         )
       )
-    } yield facts.copy(conflicts = prepared.conflicts)
+      measured <- measureAdmissionFacts(facts.copy(conflicts = prepared.conflicts))
+    } yield measured
 
   private def persistFutureQuarantine(facts: AdmissionFacts, observedAt: Instant): F[Unit] =
     execution {
@@ -514,6 +520,8 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     prepared.incomingSilver
       .join(openPairs, Seq(Columns.EventId, Columns.EventFingerprint), "inner")
       .join(prepared.conflicts, Seq(Columns.EventId), "left_anti")
+      // Spark places join keys first. Restore the canonical Silver order before expiry and Delta validation.
+      .select(AnalyticsTableSchemas.silver.map { case (name, _) => col(name) }*)
   }
 
   private def withEventTimeAdmission(frame: DataFrame, preparation: StreamingInputPreparation): DataFrame = {
@@ -582,9 +590,9 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   }
 
   private def rebuildAndExtract(asOf: Instant): F[AnalyticsReportOutput] =
-    execution(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
+    execution(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.silver))).flatMap {
       case true =>
-        execution(spark.read.format("delta").load(paths.silver))
+        execution(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver)))
           .flatMap(AnalyticsGoldStage.rebuild(paths, _, execution)) *>
           AnalyticsGoldStage.extract(spark, paths, asOf, execution)
       case false =>
@@ -592,33 +600,28 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
           AnalyticsGoldStage.extract(spark, paths, asOf, execution)
     }
 
-  private def streamRunId(decision: StreamingDecisionRevision): Either[AnalyticsError, RunId] = {
-    val digest = identityDigest(decision)
+  private def streamRunId(identity: StreamingBatchIdentity, revision: Long): Either[AnalyticsError, RunId] = {
+    val digest = AnalyticsDigest.sha256Hex(
+      s"${identity.lineage.value}\n${identity.batchId.value}\n$revision".getBytes(StandardCharsets.UTF_8)
+    )
     RunId.from(s"stream-$digest").leftMap(AnalyticsError.InvalidConfiguration.apply)
   }
 
   private def streamRangeFingerprint(
       preparation: StreamingInputPreparation,
-      decision: StreamingDecisionRevision
+      revision: Long
   ): Either[AnalyticsError, RangeFingerprint] = {
     val canonical = Vector(
       preparation.identity.lineage.value,
       preparation.identity.batchId.value.toString,
       preparation.inputFingerprint.value,
-      decision.revision.toString,
-      decision.deletionMarkerFingerprint,
-      decision.candidateWatermark.fold("")(_.toString)
+      revision.toString
     ).mkString("\n")
     RangeFingerprint
       .from(AnalyticsDigest.sha256Hex(canonical.getBytes(StandardCharsets.UTF_8)))
       .leftMap(AnalyticsError.InvalidConfiguration.apply)
   }
 
-  private def identityDigest(decision: StreamingDecisionRevision): String =
-    AnalyticsDigest.sha256Hex(
-      s"${decision.identity.lineage.value}\n${decision.identity.batchId.value}\n${decision.revision}"
-        .getBytes(StandardCharsets.UTF_8)
-    )
 }
 
 private[analytics] object StreamingWatermarkAdmission {

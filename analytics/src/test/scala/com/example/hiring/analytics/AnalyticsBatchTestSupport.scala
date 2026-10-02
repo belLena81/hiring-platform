@@ -1,4 +1,5 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.domain.{RunId, RangeFingerprint}
 
 import com.example.hiring.analytics.adapter.spark.{
   AnalyticsKeyContinuityStage,
@@ -26,6 +27,13 @@ import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 private[analytics] object AnalyticsBatchTestSupport {
   val reportPublisher: AnalyticsReportPublisher[IO] = new AnalyticsReportPublisher[IO] {
+    override def reservePinned(
+        runId: RunId,
+        rangeFingerprint: RangeFingerprint,
+        now: Instant
+    ): IO[AnalyticsReportReservation] =
+      reserve(runId, rangeFingerprint, now)
+
     override def reserve(
         runId: com.example.hiring.analytics.domain.RunId,
         rangeFingerprint: com.example.hiring.analytics.domain.RangeFingerprint,

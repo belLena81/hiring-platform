@@ -5,6 +5,7 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 
 import cats.effect.{Async, Resource, Temporal}
+import cats.effect.kernel.Poll
 import cats.syntax.all.*
 import com.mongodb.MongoException
 import com.mongodb.WriteConcern
@@ -38,9 +39,9 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
     )
 
   override def resource(root: String): Resource[F, Unit] =
-    Resource.make(acquire(root))(owner => release(root, owner)).void
+    Resource.makeFull[F, String](poll => acquire(root, poll))(owner => release(root, owner)).void
 
-  private def acquire(root: String): F[String] =
+  private def acquire(root: String, poll: Poll[F]): F[String] =
     effect.fromEither(lockId(root)).flatMap { id =>
       effect.delay(UUID.randomUUID().toString).flatMap { owner =>
         monotonic.flatMap { startedAt =>
@@ -60,7 +61,7 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async](
                 monotonic.flatMap { current =>
                   if (current >= deadline) effect.raiseError(AnalyticsError.LakehouseLockTimeout)
                   else
-                    MongoAnalyticsLakehouseLock.jitter[F](retryDelay).flatMap(Temporal[F].sleep) *> attempt(
+                    poll(MongoAnalyticsLakehouseLock.jitter[F](retryDelay).flatMap(Temporal[F].sleep)) *> attempt(
                       (retryDelay * 2).min(MaximumRetryDelay)
                     )
                 }

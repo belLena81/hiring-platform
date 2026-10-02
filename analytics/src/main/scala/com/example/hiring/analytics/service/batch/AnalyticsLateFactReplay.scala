@@ -3,7 +3,14 @@ package com.example.hiring.analytics.service.batch
 import cats.effect.Async
 import cats.syntax.all.*
 import com.example.hiring.analytics.config.AnalyticsPositiveInt
-import com.example.hiring.analytics.domain.*
+import com.example.hiring.analytics.domain.{
+  AnalyticsLateFactReplayRequest,
+  AnalyticsReplayRequestId,
+  AnalyticsReportOutput,
+  RangeFingerprint,
+  RunId,
+  SubjectToken
+}
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import java.time.Instant
@@ -12,22 +19,31 @@ enum AnalyticsLateFactReplayProgress {
   case Prepared, FactsMerged, Published
 }
 
+/** A completed request may retain only its digest binding and publication receipt. */
 final case class AnalyticsLateFactReplayRecord(
-    request: AnalyticsLateFactReplayRequest,
+    selectionDigest: String,
     progress: AnalyticsLateFactReplayProgress,
-    publicationAttempt: Int
+    publicationAttempt: Int,
+    reservation: AnalyticsReportReservation
 )
 
-/** The implementation must bind request ID to the complete immutable selection and make transitions idempotent. */
 trait AnalyticsLateFactReplayJournal[F[_]] {
   def load(requestId: AnalyticsReplayRequestId): F[Option[AnalyticsLateFactReplayRecord]]
-  def prepare(request: AnalyticsLateFactReplayRequest, at: Instant): F[AnalyticsLateFactReplayRecord]
+  def prepare(
+      request: AnalyticsLateFactReplayRequest,
+      reservation: AnalyticsReportReservation,
+      at: Instant
+  ): F[AnalyticsLateFactReplayRecord]
   def markFactsMerged(request: AnalyticsLateFactReplayRequest, at: Instant): F[Unit]
-  def advancePublicationAttempt(request: AnalyticsLateFactReplayRequest): F[Int]
+  def advancePublicationAttempt(
+      request: AnalyticsLateFactReplayRequest,
+      expectedAttempt: Int,
+      reservation: AnalyticsReportReservation,
+      at: Instant
+  ): F[AnalyticsLateFactReplayRecord]
   def markPublished(request: AnalyticsLateFactReplayRequest, at: Instant): F[Unit]
 }
 
-/** Spark-backed validation and report work remains at the adapter boundary. */
 trait AnalyticsLateFactReplayStages[F[_]] {
   def validateHmacConfiguration: F[Unit]
   def validateSelectedFacts(
@@ -37,7 +53,7 @@ trait AnalyticsLateFactReplayStages[F[_]] {
   ): F[Unit]
   def applyActiveDeletions(activeTokens: Vector[SubjectToken]): F[Unit]
 
-  /** Merge only the selected eligible facts; preserve each source row's original ingestion and expiry timestamps. */
+  /** Merge selected eligible facts with their original ingestion and expiry timestamps. */
   def mergeSelectedFacts(
       request: AnalyticsLateFactReplayRequest,
       activeTokens: Vector[SubjectToken],
@@ -50,7 +66,7 @@ enum AnalyticsLateFactReplayOutcome {
   case Published, ErasurePending, AlreadyPublished
 }
 
-/** Replays one bounded explicit request without touching streaming progress or checkpoint acknowledgement. */
+/** One bounded explicit replay, independent of streaming progress and checkpoint acknowledgement. */
 final class AnalyticsLateFactReplayService[F[_]: Async](
     lakehouseRoot: String,
     journal: AnalyticsLateFactReplayJournal[F],
@@ -61,167 +77,156 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
     publishedSnapshotDays: AnalyticsPositiveInt,
     private[analytics] val nowOverride: Option[F[Instant]] = None
 ) {
+  import AnalyticsLateFactReplayService.*
   private val F = Async[F]
   private val now = nowOverride.getOrElse(F.realTimeInstant)
-  private val MaximumPublicationAttempts = 3
 
   def run(request: AnalyticsLateFactReplayRequest): F[AnalyticsLateFactReplayOutcome] =
-    lakehouseLock.resource(lakehouseRoot).use(_ => runLocked(request))
+    lakehouseLock.resource(lakehouseRoot).use { _ =>
+      for {
+        existing <- journal.load(request.requestId)
+        _ <- existing.traverse_(validateRecord(request, _))
+        outcome <- existing match {
+          case Some(record) if record.progress == AnalyticsLateFactReplayProgress.Published =>
+            F.pure(AnalyticsLateFactReplayOutcome.AlreadyPublished)
+          case Some(record) => processAttempt(request, record)
+          case None         =>
+            for {
+              observedAt <- now
+              reservation <- reserve(request, 0, observedAt)
+              // Pin generation before reading any subject-attributed fact.
+              _ <- validateSelection(request, observedAt)
+              record <- journal.prepare(request, reservation, observedAt)
+              _ <- validateRecord(request, record)
+              result <- processAttempt(request, record)
+            } yield result
+        }
+      } yield outcome
+    }
 
-  private def runLocked(request: AnalyticsLateFactReplayRequest): F[AnalyticsLateFactReplayOutcome] =
+  /** Resolve a committed publication before requiring source facts that may since have expired. */
+  private def processAttempt(
+      request: AnalyticsLateFactReplayRequest,
+      record: AnalyticsLateFactReplayRecord
+  ): F[AnalyticsLateFactReplayOutcome] =
+    reportPublisher.publicationReceipt(record.reservation).flatMap {
+      case AnalyticsReportPublicationReceipt.CurrentGeneration =>
+        now.flatMap(journal.markPublished(request, _)).as(AnalyticsLateFactReplayOutcome.Published)
+      case AnalyticsReportPublicationReceipt.Superseded => newAttempt(request, record)
+      case AnalyticsReportPublicationReceipt.Absent     => mergeAndPublish(request, record)
+    }
+
+  private def mergeAndPublish(
+      request: AnalyticsLateFactReplayRequest,
+      record: AnalyticsLateFactReplayRecord
+  ): F[AnalyticsLateFactReplayOutcome] =
     for {
       observedAt <- now
-      existing <- journal.load(request.requestId)
-      _ <- validateRequestIdentity(request, existing)
-      outcome <- existing match {
-        case Some(record) if record.progress == AnalyticsLateFactReplayProgress.Published =>
-          F.pure(AnalyticsLateFactReplayOutcome.AlreadyPublished)
-        case Some(record) if record.progress == AnalyticsLateFactReplayProgress.FactsMerged =>
-          reconcilePublication(request, record, observedAt).flatMap {
-            case Some(reconciled) => F.pure(reconciled)
-            case None             => processUnfinished(request, existing, observedAt)
-          }
-        case _ => processUnfinished(request, existing, observedAt)
-      }
-    } yield outcome
-
-  /** Resolve a prior publish before requiring late facts that may have reached expiry after that publish. */
-  private def reconcilePublication(
-      request: AnalyticsLateFactReplayRequest,
-      record: AnalyticsLateFactReplayRecord,
-      observedAt: Instant
-  ): F[Option[AnalyticsLateFactReplayOutcome]] =
-    for {
-      identity <- F.fromEither(reservationIdentityFor(request, record.publicationAttempt))
-      reservation <- reportPublisher.reserve(identity._1, identity._2, observedAt)
-      receipt <- reportPublisher.publicationReceipt(reservation)
-      reconciled <- receipt match {
-        case AnalyticsReportPublicationReceipt.CurrentGeneration =>
-          journal.markPublished(request, observedAt).as(Some(AnalyticsLateFactReplayOutcome.Published))
-        case AnalyticsReportPublicationReceipt.Superseded =>
-          advanceOrReject(request, observedAt, record.publicationAttempt).map(Some(_))
-        case AnalyticsReportPublicationReceipt.Absent => F.pure(None)
-      }
-    } yield reconciled
-
-  private def processUnfinished(
-      request: AnalyticsLateFactReplayRequest,
-      existing: Option[AnalyticsLateFactReplayRecord],
-      observedAt: Instant
-  ): F[AnalyticsLateFactReplayOutcome] =
-    for {
+      tokens <- deletionMarkers.activeSubjectTokens
       _ <- stages.validateHmacConfiguration
-      initialTokens <- deletionMarkers.activeSubjectTokens
-      _ <- stages.validateSelectedFacts(request, initialTokens, observedAt)
-      prepared <- existing.fold(journal.prepare(request, observedAt))(F.pure)
-      result <-
-        if (prepared.progress == AnalyticsLateFactReplayProgress.Published)
-          F.pure(AnalyticsLateFactReplayOutcome.AlreadyPublished)
-        else
-          for {
-            writeTokens <- deletionMarkers.activeSubjectTokens
-            _ <- stages.validateHmacConfiguration
-            _ <- stages.validateSelectedFacts(request, writeTokens, observedAt)
-            _ <- stages.applyActiveDeletions(writeTokens)
-            _ <- stages.mergeSelectedFacts(request, writeTokens, observedAt)
-            _ <- journal.markFactsMerged(request, observedAt)
-            outcome <- publishAfterFreshDeletionCheck(request, observedAt, prepared.publicationAttempt, 0)
-          } yield outcome
+      _ <- stages.validateSelectedFacts(request, tokens, observedAt)
+      _ <- stages.applyActiveDeletions(tokens)
+      // The adapter revalidates at the actual sink boundary without extending source expiry.
+      _ <- stages.mergeSelectedFacts(request, tokens, observedAt)
+      _ <- journal.markFactsMerged(request, observedAt)
+      result <- rebuildAndPublish(request, record, 0)
     } yield result
 
-  private def publishAfterFreshDeletionCheck(
+  private def rebuildAndPublish(
       request: AnalyticsLateFactReplayRequest,
-      observedAt: Instant,
-      publicationAttempt: Int,
-      deletionRefreshes: Int
+      record: AnalyticsLateFactReplayRecord,
+      refreshes: Int
   ): F[AnalyticsLateFactReplayOutcome] =
     for {
+      observedAt <- now
       beforeReport <- deletionMarkers.activeSubjectTokens
       _ <- stages.validateHmacConfiguration
-      _ <- stages.applyActiveDeletions(beforeReport)
       _ <- stages.validateSelectedFacts(request, beforeReport, observedAt)
+      _ <- stages.applyActiveDeletions(beforeReport)
       report <- stages.rebuildGoldAndExtractReport(observedAt)
       beforePublish <- deletionMarkers.activeSubjectTokens
       outcome <-
-        if (beforeReport.toSet != beforePublish.toSet && deletionRefreshes < MaximumPublicationAttempts)
-          publishAfterFreshDeletionCheck(request, observedAt, publicationAttempt, deletionRefreshes + 1)
+        if (beforeReport.toSet != beforePublish.toSet && refreshes + 1 < MaximumPublicationAttempts)
+          rebuildAndPublish(request, record, refreshes + 1)
         else if (beforeReport.toSet != beforePublish.toSet)
           F.raiseError[AnalyticsLateFactReplayOutcome](AnalyticsError.LateFactReplayRejected)
-        else publishWithReceipt(request, report, observedAt, publicationAttempt)
-    } yield outcome
-
-  private def publishWithReceipt(
-      request: AnalyticsLateFactReplayRequest,
-      report: AnalyticsReportOutput,
-      observedAt: Instant,
-      publicationAttempt: Int
-  ): F[AnalyticsLateFactReplayOutcome] =
-    for {
-      reservationIdentity <- F.fromEither(reservationIdentityFor(request, publicationAttempt))
-      reservation <- reportPublisher.reserve(reservationIdentity._1, reservationIdentity._2, observedAt)
-      receipt <- reportPublisher.publicationReceipt(reservation)
-      outcome <- receipt match {
-        case AnalyticsReportPublicationReceipt.CurrentGeneration =>
-          journal.markPublished(request, observedAt).as(AnalyticsLateFactReplayOutcome.Published)
-        case AnalyticsReportPublicationReceipt.Superseded =>
-          advanceOrReject(request, observedAt, publicationAttempt)
-        case AnalyticsReportPublicationReceipt.Absent =>
+        else if (beforePublish.nonEmpty) F.pure(AnalyticsLateFactReplayOutcome.ErasurePending)
+        else {
           val expiresAt = observedAt.plusSeconds(publishedSnapshotDays.toLong * 86400L)
           reportPublisher
-            .publish(reservation, report, expiresAt)
-            .attempt
-            .flatMap {
-              case Right(_) =>
-                journal.markPublished(request, observedAt).as(AnalyticsLateFactReplayOutcome.Published)
-              case Left(AnalyticsError.GuardedErasurePublicationRejected) =>
+            .publish(record.reservation, report, expiresAt)
+            .as(AnalyticsLateFactReplayOutcome.Published)
+            .handleErrorWith {
+              case AnalyticsError.GuardedErasurePublicationRejected =>
                 F.pure(AnalyticsLateFactReplayOutcome.ErasurePending)
-              case Left(error) => F.raiseError(error)
+              case error => F.raiseError(error)
             }
-      }
+            .flatTap {
+              case AnalyticsLateFactReplayOutcome.Published => now.flatMap(journal.markPublished(request, _))
+              case _                                        => F.unit
+            }
+        }
     } yield outcome
 
-  private def advanceOrReject(
+  private def newAttempt(
       request: AnalyticsLateFactReplayRequest,
-      observedAt: Instant,
-      publicationAttempt: Int
+      record: AnalyticsLateFactReplayRecord
   ): F[AnalyticsLateFactReplayOutcome] =
-    if (publicationAttempt + 1 >= MaximumPublicationAttempts)
+    if (record.publicationAttempt + 1 >= MaximumPublicationAttempts)
       F.raiseError(AnalyticsError.LateFactReplayRejected)
     else
       for {
-        nextAttempt <- journal.advancePublicationAttempt(request)
-        _ <-
-          if (nextAttempt == publicationAttempt + 1) F.unit
-          else F.raiseError[Unit](AnalyticsError.LateFactReplayRequestConflict)
-        markers <- deletionMarkers.activeSubjectTokens
-        _ <- stages.validateHmacConfiguration
-        _ <- stages.validateSelectedFacts(request, markers, observedAt)
-        _ <- stages.applyActiveDeletions(markers)
-        outcome <- publishAfterFreshDeletionCheck(request, observedAt, nextAttempt, 0)
+        observedAt <- now
+        reservation <- reserve(request, record.publicationAttempt + 1, observedAt)
+        _ <- validateSelection(request, observedAt)
+        next <- journal.advancePublicationAttempt(request, record.publicationAttempt, reservation, observedAt)
+        _ <- validateRecord(request, next)
+        _ <- F.raiseUnless(next.publicationAttempt == record.publicationAttempt + 1)(
+          AnalyticsError.LateFactReplayRequestConflict
+        )
+        outcome <- processAttempt(request, next)
       } yield outcome
 
-  private def reservationIdentityFor(
+  private def validateSelection(request: AnalyticsLateFactReplayRequest, observedAt: Instant): F[Unit] =
+    for {
+      _ <- stages.validateHmacConfiguration
+      tokens <- deletionMarkers.activeSubjectTokens
+      _ <- stages.validateSelectedFacts(request, tokens, observedAt)
+    } yield ()
+
+  private def reserve(
       request: AnalyticsLateFactReplayRequest,
-      publicationAttempt: Int
+      attempt: Int,
+      observedAt: Instant
+  ): F[AnalyticsReportReservation] =
+    F.fromEither(reservationIdentityFor(request, attempt)).flatMap { case (runId, fingerprint) =>
+      reportPublisher.reservePinned(runId, fingerprint, observedAt)
+    }
+
+  private def validateRecord(request: AnalyticsLateFactReplayRequest, record: AnalyticsLateFactReplayRecord): F[Unit] =
+    F.fromEither(reservationIdentityFor(request, record.publicationAttempt)).flatMap { case (runId, fingerprint) =>
+      F.raiseUnless(
+        record.selectionDigest == request.selectionDigest && record.publicationAttempt >= 0 &&
+          record.publicationAttempt < MaximumPublicationAttempts && record.reservation.runId == runId &&
+          record.reservation.rangeFingerprint == fingerprint && record.reservation.generation >= 0L &&
+          record.reservation.revision >= 0L
+      )(AnalyticsError.LateFactReplayRequestConflict)
+    }
+}
+
+private[analytics] object AnalyticsLateFactReplayService {
+  val MaximumPublicationAttempts: Int = 3
+
+  def reservationIdentityFor(
+      request: AnalyticsLateFactReplayRequest,
+      attempt: Int
   ): Either[AnalyticsError, (RunId, RangeFingerprint)] =
     for {
       runId <- RunId
-        .from(s"late-replay-${request.requestId.value}-$publicationAttempt")
+        .from(s"late-replay-${request.requestId.value}-$attempt")
         .leftMap(_ => AnalyticsError.InvalidConfiguration("late-fact replay request identity is invalid"))
       fingerprint <- RangeFingerprint
         .from(request.selectionDigest)
         .leftMap(_ => AnalyticsError.InvalidConfiguration("late-fact replay selection digest is invalid"))
     } yield runId -> fingerprint
-
-  private def validateRequestIdentity(
-      request: AnalyticsLateFactReplayRequest,
-      existing: Option[AnalyticsLateFactReplayRecord]
-  ): F[Unit] =
-    existing match {
-      case Some(record) if record.request.selectionDigest != request.selectionDigest =>
-        F.raiseError(AnalyticsError.LateFactReplayRequestConflict)
-      case Some(record) if record.publicationAttempt < 0 || record.publicationAttempt >= MaximumPublicationAttempts =>
-        F.raiseError(AnalyticsError.LateFactReplayRequestConflict)
-      case _ => F.unit
-    }
 }

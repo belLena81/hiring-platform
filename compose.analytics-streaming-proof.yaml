@@ -1,0 +1,38 @@
+services:
+  proof-mongo-key:
+    image: mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["cp /source/keyfile /auth/keyfile; chmod 400 /auth/keyfile; chown 999:999 /auth/keyfile"]
+    volumes:
+      - ${HIRING_STREAMING_PROOF_CONFIG:?Set private proof config directory}/mongo-keyfile:/source/keyfile:ro
+      - streaming-proof-mongo-key:/auth
+  mongodb:
+    depends_on:
+      proof-mongo-key:
+        condition: service_completed_successfully
+    command: ["mongod", "--bind_ip_all", "--replSet", "rs0", "--auth", "--keyFile", "/auth/keyfile"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: proof_operator
+      MONGO_INITDB_ROOT_PASSWORD: ${HIRING_STREAMING_PROOF_MONGO_PASSWORD:?Set private proof operator password}
+    ports: !override
+      - "127.0.0.1:${HIRING_STREAMING_PROOF_MONGO_PORT:?Set proof Mongo port}:27017"
+    volumes: !override
+      - streaming-proof-mongodb:/data/db
+      - streaming-proof-mongo-key:/auth:ro
+      - ${HIRING_STREAMING_PROOF_CONFIG:?Set private proof config directory}:/proof:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.getSiblingDB('admin').auth({user:'proof_operator',pwd:process.env.MONGO_INITDB_ROOT_PASSWORD}); const h=db.hello(); if(h.isWritablePrimary) quit(0); try { rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]}); } catch(e) { if(e.codeName!=='AlreadyInitialized') throw e; } quit(1)"]
+  kafka:
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: "INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:${HIRING_STREAMING_PROOF_KAFKA_PORT:?Set proof Kafka port}"
+    ports: !override
+      - "127.0.0.1:${HIRING_STREAMING_PROOF_KAFKA_PORT:?Set proof Kafka port}:29092"
+    volumes: !override
+      - streaming-proof-kafka:/var/lib/kafka/data
+  kafka-acl-init:
+    environment:
+      KAFKA_TOPIC_PARTITIONS: "3"
+volumes:
+  streaming-proof-mongodb:
+  streaming-proof-mongo-key:
+  streaming-proof-kafka:

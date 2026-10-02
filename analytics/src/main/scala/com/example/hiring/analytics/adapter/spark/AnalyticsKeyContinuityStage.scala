@@ -31,9 +31,9 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   private def ensurePrimaryTokenCompatibility(spark: SparkSession, at: Instant): F[Unit] = blocking.either {
     Vector(paths.silver, paths.lateFacts).foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
       result.flatMap { _ =>
-        if (!DeltaTable.isDeltaTable(spark, path)) Right(())
+        if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Right(())
         else {
-          val stored = spark.read.format("delta").load(path)
+          val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
           val columns = stored.columns.toSet
           if (stored.limit(1).count() > 0L && !columns.contains("subjectToken"))
             Left(AnalyticsError.InvalidConfiguration("retained analytical data has no versioned subject tokens"))
@@ -66,8 +66,8 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
       .foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
         result.flatMap { _ =>
-          if (DeltaTable.isDeltaTable(spark, path)) {
-            val frame = spark.read.format("delta").load(path)
+          if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
+            val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
             val tokenFrames = Vector(
               Option.when(frame.columns.contains("subjectTokens"))(
                 frame.select(explode(col("subjectTokens")).as("token"))
@@ -92,7 +92,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   def validateKeyMaterialContinuity(spark: SparkSession): F[Unit] =
     retirementAuthorizations.list(paths.root).flatMap { authorizations =>
       blocking.either {
-        val registryExists = DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)
+        val registryExists = DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
         val existingAnalyticsData = Vector(
           paths.bronze,
           paths.quarantine,
@@ -102,12 +102,12 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
           paths.timeToHireGold,
           paths.skillsGold,
           paths.manifests
-        ).exists(DeltaTable.isDeltaTable(spark, _))
+        ).exists(path => DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
         val existingRows =
           if (registryExists)
             spark.read
               .format("delta")
-              .load(paths.hmacKeyRegistry)
+              .load(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
               .select("keyId", "verifier")
               .collect()
               .toVector
@@ -140,9 +140,12 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
               createVerifierFrame(spark, pseudonymizer.keyVerifiers).write
                 .format("delta")
                 .mode("errorifexists")
-                .save(paths.hmacKeyRegistry)
+                .save(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
             } else if (added.nonEmpty)
-              createVerifierFrame(spark, added).write.format("delta").mode("append").save(paths.hmacKeyRegistry)
+              createVerifierFrame(spark, added).write
+                .format("delta")
+                .mode("append")
+                .save(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
           }
       }
     }
@@ -157,9 +160,9 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
 
   private def hasStoredTokenForKey(spark: SparkSession, keyId: String): Boolean =
     Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts).exists { path =>
-      if (!DeltaTable.isDeltaTable(spark, path)) false
+      if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) false
       else {
-        val frame = spark.read.format("delta").load(path)
+        val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
         val tokenFrames = Vector(
           Option.when(frame.columns.contains("subjectTokens"))(frame.select(explode(col("subjectTokens")).as("token"))),
           Option.when(frame.columns.contains("subjectToken"))(frame.select(col("subjectToken").as("token")))

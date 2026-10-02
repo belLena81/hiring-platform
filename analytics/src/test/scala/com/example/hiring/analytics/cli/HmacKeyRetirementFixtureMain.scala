@@ -33,7 +33,8 @@ import org.apache.kafka.common.serialization.StringSerializer
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
-/** Opt-in local fixture. It preserves the named-volume lakehouse and uses the real wall clock. */
+/** Opt-in local fixture. The real-horizon proof uses wall time; the isolated nonce fixture can substitute its calendar.
+  */
 object HmacKeyRetirementFixtureMain extends IOApp {
   private final case class RawFixture(
       lakehouseRoot: Option[String],
@@ -87,8 +88,9 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       StructField("newStatus", StringType),
       StructField("jobSkills", ArrayType(StringType)),
       StructField("subjectToken", StringType),
-      StructField("subjectTokens", ArrayType(StringType)),
+      StructField("subjectTokens", ArrayType(StringType, containsNull = false)),
       StructField("eventFingerprint", StringType),
+      StructField("ingestedAt", TimestampType),
       StructField("expiresAt", TimestampType)
     )
   )
@@ -128,6 +130,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       token,
       Seq(token).asJava,
       "0" * 64,
+      Timestamp.from(at),
       Timestamp.from(at.plus(java.time.Duration.ofDays(silverRetentionDays.toLong)))
     )
   }
@@ -475,7 +478,8 @@ object HmacKeyRetirementFixtureMain extends IOApp {
       pseudonymizer: SubjectPseudonymizer,
       oldKeyId: String,
       at: Instant,
-      retention: AnalyticsRetentionSettings
+      retention: AnalyticsRetentionSettings,
+      calendarShiftMillis: Long = 0L
   ): Either[AnalyticsError, Unit] =
     for {
       control <- stageTime(spark, paths, "new-primary-control-staged")
@@ -545,7 +549,11 @@ object HmacKeyRetirementFixtureMain extends IOApp {
             s"ALTER TABLE delta.`$tableIdentifier` SET TBLPROPERTIES " +
               s"('analytics.retirementCheckpointNonce' = '${UUID.randomUUID()}')"
           )
-          val log = DeltaLog.forTable(spark, paths.silver)
+          val log =
+            if (calendarShiftMillis == 0L) DeltaLog.forTable(spark, paths.silver)
+            else
+              org.apache.spark.sql.delta.HiringAnalyticsRetentionClock
+                .forTable(spark, paths.silver, calendarShiftMillis)
           log.checkpointAndCleanUpDeltaLog(log.update(), None)
           fixtureRecord(spark, paths, at, "old-primary-log-cleaned")
         }
@@ -567,6 +575,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
     } yield ()
 
   override def run(args: List[String]): IO[ExitCode] = args match {
+    case List("refresh-new-event") => PostAuthorizationHmacControlEventMain.run(Nil)
     case List(
           action @ ("stage-old" | "publish-old-event" | "seed-new-control" | "maintain" | "publish-new-event" |
           "new-event-range" | "stage-status")
@@ -601,7 +610,19 @@ object HmacKeyRetirementFixtureMain extends IOApp {
           if (action == "publish-new-event")
             requireRetirementAuthorization(root, raw.oldKeyId.getOrElse(""))
           else IO.unit
-        at <- Clock[IO].realTimeInstant
+        shift <- IO.fromEither(
+          HmacRetirementProofCalendar.shift(
+            root,
+            sys.env.getOrElse("MONGODB_DATABASE", ""),
+            raw.kafka.flatMap(_.topic).getOrElse(""),
+            raw.oldKeyId.getOrElse("")
+          )
+        )
+        at <- HmacRetirementProofCalendar
+          .clock(
+            if (action == "stage-old" || action == "publish-old-event" || action == "publish-new-event") 0L else shift
+          )
+          .realTimeInstant
         _ <- SparkBlockingExecution.resource[IO].use { sparkExecution =>
           Resource
             .make(
@@ -613,6 +634,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                   .config("spark.ui.enabled", "false")
                   .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
                   .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+                  .config("spark.databricks.delta.properties.defaults.dataSkippingNumIndexedCols", "0")
                   .config(
                     "spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
                     s"interval ${operational.retention.deltaVacuumSafety}"
@@ -640,7 +662,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
                   newEventRange(spark, paths).map(range => Vector("NEW_EVENT_RANGE=" + range))
                 else if (action == "stage-status") stageStatusOutput(spark, paths)
                 else
-                  maintain(spark, paths, pseudonymizer, raw.oldKeyId.getOrElse(""), at, operational.retention)
+                  maintain(spark, paths, pseudonymizer, raw.oldKeyId.getOrElse(""), at, operational.retention, shift)
                     .map(_ => Vector.empty)
               }.flatMap(IO.fromEither(_)).flatMap(_.traverse_(IO.println))
             }

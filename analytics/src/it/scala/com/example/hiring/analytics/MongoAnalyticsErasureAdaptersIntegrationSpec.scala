@@ -605,6 +605,13 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-fence-failure").toUri.toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8")),
         new AnalyticsReportPublisher[IO] {
+          override def reservePinned(
+              runId: RunId,
+              rangeFingerprint: RangeFingerprint,
+              now: Instant
+          ): IO[AnalyticsReportReservation] =
+            reserve(runId, rangeFingerprint, now)
+
           override def reserve(
               runId: RunId,
               rangeFingerprint: RangeFingerprint,

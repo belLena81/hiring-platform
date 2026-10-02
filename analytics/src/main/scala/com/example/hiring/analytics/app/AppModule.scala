@@ -11,7 +11,8 @@ import com.example.hiring.analytics.config.{
   AnalyticsErasureWorkerPolicy,
   AnalyticsWorkerSettings,
   AnalyticsStreamingRuntimeSettings,
-  AnalyticsNonBlank
+  AnalyticsNonBlank,
+  AnalyticsLateFactReplaySettings
 }
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -39,6 +40,7 @@ object AppModule {
   final case class BatchProgram[F[_]] private[app] (run: F[AnalyticsPublication])
   final case class WorkerProgram[F[_]] private[app] (run: F[Unit])
   final case class StreamingProgram[F[_]] private[app] (run: F[Unit])
+  final case class ReplayProgram[F[_]] private[app] (run: F[AnalyticsLateFactReplayOutcome])
 
   private final case class Shared[F[_]](
       paths: AnalyticsLakehousePaths,
@@ -219,11 +221,59 @@ object AppModule {
                     .void
                 )
             } yield (),
-          () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution)
+          () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
+          maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
+            new AnalyticsStreamingMaintenance[F](
+              common.lakehouseRoot,
+              shared.lock,
+              settings.streaming.maintenanceInterval,
+              at =>
+                maintainStreaming(
+                  shared,
+                  common,
+                  settings,
+                  publisher,
+                  journal,
+                  identity,
+                  lineage,
+                  retainedCheckpoint,
+                  authorize,
+                  at
+                )
+            ).resource
+          )
         )
-        Async[F].pure(StreamingProgram(stream.resource.use(_ => Async[F].unit)))
+        publisher.ensurePinnedRetentionIndex.as(StreamingProgram(stream.resource.use(_ => Async[F].unit)))
       }
     } yield program
+
+  def lateFactReplay[F[_]: Async](settings: AnalyticsLateFactReplaySettings): Resource[F, ReplayProgram[F]] =
+    for {
+      pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
+      shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-late-replay")
+    } yield {
+      val common = settings.common
+      val journal = new MongoAnalyticsLateFactReplayJournal[F](shared.database, shared.streams, common.lakehouseRoot)
+      val stages = new SparkAnalyticsLateFactReplayStages[F](
+        shared.spark,
+        shared.paths,
+        shared.lakehouseExecution,
+        new DeltaBatchReader[F](shared.lakehouseExecution),
+        new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution),
+        shared.maintenance
+      )
+      val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
+      val service = new AnalyticsLateFactReplayService[F](
+        common.lakehouseRoot,
+        journal,
+        shared.markers,
+        stages,
+        publisher,
+        shared.lock,
+        common.operational.retention.publishedSnapshotDays
+      )
+      ReplayProgram(journal.ensureIndexes *> service.run(settings.request))
+    }
 
   def repair[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, MongoAnalyticsErasureQueue[F]] =
     for {
@@ -285,6 +335,77 @@ object AppModule {
         .toEither
         .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toChain.toList.mkString("; ")))
     )
+
+  private def maintainStreaming[F[_]: Async](
+      shared: Shared[F],
+      common: AnalyticsCommonSettings,
+      settings: AnalyticsStreamingRuntimeSettings,
+      publisher: MongoAnalyticsReportPublisher[F],
+      journal: DeltaStreamingBatchJournal[F],
+      identity: StreamingActivationIdentity,
+      lineage: StreamingLineage,
+      retainedCheckpoint: () => F[Vector[StreamingCheckpointBatch]],
+      authorize: F[Unit],
+      at: java.time.Instant
+  ): F[Unit] =
+    for {
+      _ <- authorize
+      _ <- shared.maintenance.validateHmacConfigurationLocked
+      _ <- shared.maintenance.configureRawTables
+      runId <- Async[F]
+        .delay(java.util.UUID.randomUUID().toString)
+        .flatMap(value =>
+          Async[F]
+            .fromEither(RunId.from(s"stream-maintenance-$value").leftMap(AnalyticsError.InvalidConfiguration.apply))
+        )
+      fingerprint <- Async[F].fromEither(
+        RangeFingerprint
+          .from(AnalyticsDigest.sha256Hex(s"${identity.canonical}\n$at".getBytes(StandardCharsets.UTF_8)))
+          .leftMap(AnalyticsError.InvalidConfiguration.apply)
+      )
+      existingMarkers <- shared.markers.activeSubjectTokens
+      reservation <-
+        if (existingMarkers.nonEmpty) Async[F].pure(Option.empty[AnalyticsReportReservation])
+        else publisher.reservePinned(runId, fingerprint, at).map(Some(_))
+      markers <- shared.markers.activeSubjectTokens
+      _ <- if (markers.nonEmpty) shared.maintenance.applyActiveDeletions(markers) else Async[F].unit
+      _ <- shared.maintenance.expireStored(at)
+      _ <-
+        if (markers.nonEmpty || reservation.isEmpty) Async[F].unit
+        else
+          for {
+            reserved <- Async[F].fromOption(
+              reservation,
+              AnalyticsError.InvalidConfiguration("maintenance reservation is unavailable")
+            )
+            report <- shared.maintenance.rebuildGoldAndExtractReport(at)
+            currentMarkers <- shared.markers.activeSubjectTokens
+            _ <- authorize
+            _ <-
+              if (currentMarkers.nonEmpty) Async[F].unit
+              else
+                publisher
+                  .publish(
+                    reserved,
+                    report,
+                    at.plusSeconds(common.operational.retention.publishedSnapshotDays.asInstanceOf[Int].toLong * 86400L)
+                  )
+                  .handleErrorWith {
+                    case AnalyticsError.GuardedErasurePublicationRejected => Async[F].unit
+                    case error                                            => Async[F].raiseError[Unit](error)
+                  }
+          } yield ()
+      retained <- retainedCheckpoint()
+      _ <- journal.prune(lineage, retained.map(_.batchId).toSet, at, settings.streaming.progressRetention)
+      replayJournal = new MongoAnalyticsLateFactReplayJournal[F](shared.database, shared.streams, common.lakehouseRoot)
+      _ <- replayJournal.ensureIndexes
+      _ <- replayJournal.compactCompleted(at)
+      streamReceiptIds <- journal.allRetainedPublicationRunIds
+      replayReceiptIds <- replayJournal.activePublicationRunIds
+      _ <- publisher.compactPublished(streamReceiptIds ++ replayReceiptIds, at)
+      _ <- shared.maintenance.reclaimExpiredFiles
+      _ <- authorize
+    } yield ()
 
   private def prepareStreamingBatch[F[_]: Async](
       shared: Shared[F],

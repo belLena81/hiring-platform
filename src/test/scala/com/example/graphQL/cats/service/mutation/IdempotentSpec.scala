@@ -167,14 +167,15 @@ final class IdempotentSpec extends CatsEffectSuite {
             expiresAt: Instant
         )(
             write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
-        ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-          write(MutationWriteContext.directWrite).value.flatMap {
-            case Right(MutationWriteOutcome.Applied(value)) =>
-              observed.set(Some(Observed(key, fingerprint, currentTime, expiresAt, value.entity))) *>
-                IO.pure(Right(MutationReceiptExecution.Applied(value.value, value.entity)))
-            case other => IO.raiseError(new AssertionError(s"expected successful write, received $other"))
-          }
-        )
+        ): RepositoryIO[MutationReceiptExecution[A, E]] =
+          com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+            write(MutationWriteContext.directWrite).value.flatMap {
+              case Right(MutationWriteOutcome.Applied(value)) =>
+                observed.set(Some(Observed(key, fingerprint, currentTime, expiresAt, value.entity))) *>
+                  IO.pure(Right(MutationReceiptExecution.Applied(value.value, value.entity)))
+              case other => IO.raiseError(new AssertionError(s"expected successful write, received $other"))
+            }
+          )
       }
       result <- Idempotent
         .withClock(receipts, FixedTestClock.at(now))
@@ -216,18 +217,18 @@ final class IdempotentSpec extends CatsEffectSuite {
         write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
     ): RepositoryIO[MutationReceiptExecution[A, E]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       IO.defer {
-      val _ = (key, fingerprint, currentTime, expiresAt)
-      state.get.flatMap {
-        case Some(entity) => IO.pure(Right(MutationReceiptExecution.Replay(entity)))
-        case None         =>
-          write(MutationWriteContext.directWrite).value.flatMap {
-            case Left(error)                                 => IO.pure(Left(error))
-            case Right(MutationWriteOutcome.Rejected(error)) =>
-              IO.pure(Right(MutationReceiptExecution.Rejected(error)))
-            case Right(MutationWriteOutcome.Applied(value)) =>
-              state.set(Some(value.entity)).as(Right(MutationReceiptExecution.Applied(value.value, value.entity)))
-          }
-      }
+        val _ = (key, fingerprint, currentTime, expiresAt)
+        state.get.flatMap {
+          case Some(entity) => IO.pure(Right(MutationReceiptExecution.Replay(entity)))
+          case None         =>
+            write(MutationWriteContext.directWrite).value.flatMap {
+              case Left(error)                                 => IO.pure(Left(error))
+              case Right(MutationWriteOutcome.Rejected(error)) =>
+                IO.pure(Right(MutationReceiptExecution.Rejected(error)))
+              case Right(MutationWriteOutcome.Applied(value)) =>
+                state.set(Some(value.entity)).as(Right(MutationReceiptExecution.Applied(value.value, value.entity)))
+            }
+        }
       }
     )
   }

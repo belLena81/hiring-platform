@@ -46,10 +46,10 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
 
   override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
     for {
-      hasSilver <- lakehouse(DeltaTable.isDeltaTable(spark, paths.silver))
+      hasSilver <- lakehouse(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.silver)))
       _ <-
         if (hasSilver)
-          lakehouse(spark.read.format("delta").load(paths.silver))
+          lakehouse(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver)))
             .flatMap(AnalyticsGoldStage.rebuild(paths, _, execution))
         else AnalyticsGoldStage.clear(spark, paths, execution)
       report <- extractReport(spark, asOf)

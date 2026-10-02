@@ -112,10 +112,10 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
     } yield AnalyticsBronzeInput(parsed, observedAt, counts._1, counts._2, counts._3)
 
   private def validateRunIdentity(spark: SparkSession, manifest: AnalyticsRunManifest): F[Unit] = blocking.either {
-    if (DeltaTable.isDeltaTable(spark, paths.manifests)) {
+    if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.manifests))) {
       val existing = spark.read
         .format("delta")
-        .load(paths.manifests)
+        .load(SparkPhysicalLocation.resolve(paths.manifests))
         .filter(col("runId") === lit(manifest.runId.value))
         .select("topic", "partition", "startOffset", "endOffsetExclusive")
         .distinct()

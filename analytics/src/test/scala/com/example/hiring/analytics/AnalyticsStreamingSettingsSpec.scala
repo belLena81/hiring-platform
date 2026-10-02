@@ -15,6 +15,8 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     |  checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
     |  trigger-interval = 10 seconds
     |  max-offsets-per-trigger = 1000
+    |  maintenance-interval = 60 seconds
+    |  progress-retention = 7 days
     |  maximum-replay-records = 1000
     |  initial-offsets = [{ partition = 0, offset = 12 }, { partition = 1, offset = 0 }]
     |}
@@ -96,6 +98,16 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     assert(AnalyticsStreamingSettings.fromHocon(unowned).isLeft)
   }
 
+  test("checkpoint identity rejects escaped aliases and accepts canonical escaped physical names") {
+    val original = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
+    val canonical = "file:///var/lib/hiring-analytics/checkpoints/hiring+events%20with%25percent"
+    assert(AnalyticsStreamingSettings.fromHocon(valid.replace(original, canonical)).isRight)
+    Vector(
+      "file:///var/lib/hiring-analytics/checkpoints/hiring%2Bevents",
+      "file:///var/lib/hiring-analytics/checkpoints/%68iring-events"
+    ).foreach(alias => assert(AnalyticsStreamingSettings.fromHocon(valid.replace(original, alias)).isLeft))
+  }
+
   test("batch limits and trigger policy are bounded and invalid values are not echoed in diagnostics") {
     val excessiveOffsets = valid.replace("max-offsets-per-trigger = 1000", "max-offsets-per-trigger = 100001")
     val unsupportedTrigger = valid.replace("trigger-interval = 10 seconds", "trigger-interval = 11 seconds")
@@ -108,4 +120,24 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
       case _                                            => false
     })
   }
+  test("maintenance and progress retention settings are positive and identity-bound") {
+    val settings = AnalyticsStreamingSettings.fromHocon(valid).toOption.get
+    assertEquals(settings.maintenanceInterval, 60.seconds)
+    assertEquals(settings.progressRetention, 7.days)
+    List(
+      "maintenance-interval = 60 seconds" -> "maintenance-interval = 0 seconds",
+      "progress-retention = 7 days" -> "progress-retention = 0 days"
+    ).foreach { case (old, changed) =>
+      assert(AnalyticsStreamingSettings.fromHocon(valid.replace(old, changed)).isLeft)
+    }
+    val changed = AnalyticsStreamingSettings
+      .fromHocon(valid.replace("progress-retention = 7 days", "progress-retention = 8 days"))
+      .toOption
+      .get
+    assertNotEquals(
+      settings.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse"),
+      changed.activationIdentity("cluster", "topic", "hiring.events", "file:///tmp/lakehouse")
+    )
+  }
+
 }

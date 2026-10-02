@@ -23,6 +23,8 @@ final class HiringAnalyticsStreamingActivationSpec extends CatsEffectSuite {
     |  activation-grant-id = "grant-2026-09"
     |  checkpoint-location = "file:///var/lib/hiring-analytics/checkpoints/hiring-events"
     |  trigger-interval = 10 seconds
+    |  maintenance-interval = 60 seconds
+    |  progress-retention = 7 days
     |  max-offsets-per-trigger = 1000
     |  maximum-replay-records = 1000
     |  initial-offsets = [{ partition = 0, offset = 0 }]

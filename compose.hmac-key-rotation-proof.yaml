@@ -20,7 +20,8 @@ services:
       MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
       MONGODB_DATABASE: ${HIRING_HMAC_ROTATION_DATABASE:?Set the isolated Mongo database}
       ANALYTICS_TOPIC: ${HIRING_HMAC_ROTATION_TOPIC:?Set the isolated Kafka topic}
-      ANALYTICS_LAKEHOUSE_ROOT: file://${HIRING_HMAC_ROTATION_DATA_DIR:?Set the isolated lakehouse directory}/lakehouse
+      ANALYTICS_LAKEHOUSE_ROOT: ${HIRING_HMAC_ROTATION_LAKEHOUSE_URI:?Set the canonical isolated lakehouse URI}
+      HIRING_HMAC_ROTATION_DATA_DIR: ${HIRING_HMAC_ROTATION_DATA_DIR:?Set the isolated lakehouse directory}
     volumes: !override
       - hmac-rotation-analytics:${HIRING_HMAC_ROTATION_DATA_DIR:?Set the isolated lakehouse directory}
 
@@ -31,7 +32,8 @@ services:
       MONGODB_URI: mongodb://mongodb:27017/?replicaSet=rs0&directConnection=true
       MONGODB_DATABASE: ${HIRING_HMAC_ROTATION_DATABASE:?Set the isolated Mongo database}
       ANALYTICS_TOPIC: ${HIRING_HMAC_ROTATION_TOPIC:?Set the isolated Kafka topic}
-      ANALYTICS_LAKEHOUSE_ROOT: file://${HIRING_HMAC_ROTATION_DATA_DIR:?Set the isolated lakehouse directory}/lakehouse
+      ANALYTICS_LAKEHOUSE_ROOT: ${HIRING_HMAC_ROTATION_LAKEHOUSE_URI:?Set the canonical isolated lakehouse URI}
+      HIRING_HMAC_ROTATION_DATA_DIR: ${HIRING_HMAC_ROTATION_DATA_DIR:?Set the isolated lakehouse directory}
     volumes: !override
       - hmac-rotation-analytics:${HIRING_HMAC_ROTATION_DATA_DIR:?Set the isolated lakehouse directory}
     restart: "no"

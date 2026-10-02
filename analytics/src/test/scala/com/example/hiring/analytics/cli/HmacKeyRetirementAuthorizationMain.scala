@@ -22,7 +22,7 @@ import scala.util.control.NonFatal
 /** Host-only local retirement operator command. The diagnostic entry point never writes an authorization. */
 object HmacKeyRetirementAuthorizationMain extends IOApp {
   private final case class RawMongo(uri: Option[String], database: Option[String])
-  private final case class RawSpark(master: Option[String])
+  private final case class RawSpark(master: Option[String], localDirectory: Option[String])
   private final case class RawLakehouse(root: Option[String])
   private final case class RawKafka(
       bootstrapServers: Option[String],
@@ -53,6 +53,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       mongoUri: String,
       database: String,
       sparkMaster: String,
+      sparkLocalDirectory: String,
       paths: AnalyticsLakehousePaths,
       kafka: KafkaConnection,
       topic: String,
@@ -62,7 +63,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
   )
 
   private given ConfigReader[RawMongo] = ConfigReader.forProduct2("uri", "database")(RawMongo.apply)
-  private given ConfigReader[RawSpark] = ConfigReader.forProduct1("master")(RawSpark.apply)
+  private given ConfigReader[RawSpark] = ConfigReader.forProduct2("master", "local-directory")(RawSpark.apply)
   private given ConfigReader[RawLakehouse] = ConfigReader.forProduct1("root")(RawLakehouse.apply)
   private given ConfigReader[RawKafka] = ConfigReader.forProduct6(
     "bootstrap-servers",
@@ -103,6 +104,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       mongoUri <- required("retirement.mongo.uri", raw.mongo.uri)
       database <- required("retirement.mongo.database", raw.mongo.database)
       master <- required("retirement.spark.master", raw.spark.master)
+      localDirectory <- required("analytics.spark.local-directory", raw.spark.localDirectory)
       root <- required("retirement.lakehouse.root", raw.lakehouse.root)
       paths <- AnalyticsLakehousePaths
         .from(root)
@@ -134,6 +136,7 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
       mongoUri,
       database,
       master,
+      localDirectory,
       paths,
       connection,
       topic,
@@ -146,50 +149,74 @@ object HmacKeyRetirementAuthorizationMain extends IOApp {
     IO.blocking(ConfigSource.default.at("analytics.key-retirement-authorization").load[RawSettings])
       .flatMap {
         case Right(raw) =>
-          AnalyticsRuntimeConfig.loadOperational[IO].flatMap(value => IO.fromEither(decode(raw, value)))
+          IO.blocking(ConfigSource.default.at("analytics.spark").load[RawSpark]).flatMap {
+            case Right(sparkSettings) =>
+              AnalyticsRuntimeConfig
+                .loadOperational[IO]
+                .flatMap(value => IO.fromEither(decode(raw.copy(spark = sparkSettings), value)))
+            case Left(_) => IO.raiseError(AnalyticsError.InvalidConfiguration("analytics Spark HOCON is malformed"))
+          }
         case Left(_) =>
           IO.raiseError(
             AnalyticsError.InvalidConfiguration("key-retirement authorization HOCON is missing or malformed")
           )
       }
       .flatMap { settings =>
-        AppModule
-          .sparkMongo[IO](
-            settings.mongoUri,
-            settings.sparkMaster,
-            appName = "hiring-hmac-key-retirement",
-            sparkUiEnabled = Some(false)
-          )
-          .use { case (spark, mongo, sparkExecution) =>
-            mongo.getDatabase(settings.database).flatMap { database =>
-              val clock = Clock[IO]
-              val streams = new MongoPublisherStream(settings.operational)
-              val coordinator = new HmacKeyRetirementCoordinator[IO](
-                spark,
-                settings.paths,
-                database,
-                settings.kafka,
-                settings.topic,
-                settings.docker,
-                settings.operational,
-                streams,
-                clock,
-                new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+        IO.fromEither(
+          HmacRetirementProofCalendar.shift(settings.paths.root, settings.database, settings.topic, settings.keyId)
+        ).flatMap { shift =>
+          AppModule
+            .sparkMongo[IO](
+              settings.mongoUri,
+              settings.sparkMaster,
+              appName = "hiring-hmac-key-retirement",
+              sparkUiEnabled = Some(false),
+              sparkLocalDirectory = settings.sparkLocalDirectory
+            )
+            .use { case (spark, mongo, sparkExecution) =>
+              mongo.getDatabase(settings.database).flatMap { database =>
+                val clock = HmacRetirementProofCalendar.clock(if (action == "authorize") shift else 0L)
+                val streams = new MongoPublisherStream(settings.operational)
+                val coordinator = new HmacKeyRetirementCoordinator[IO](
+                  spark,
+                  settings.paths,
                   database,
+                  settings.kafka,
+                  settings.topic,
+                  settings.docker,
+                  settings.operational,
                   streams,
-                  Some(clock.realTimeInstant),
-                  Some(clock.monotonic)
-                ),
-                sparkExecution
-              )
-              action match {
-                case "prepare"   => coordinator.prepare(settings.keyId).void
-                case "authorize" => coordinator.authorize(settings.keyId).void
-                case _           =>
-                  IO.raiseError(AnalyticsError.InvalidConfiguration("retirement action must be prepare or authorize"))
+                  clock,
+                  new com.example.hiring.analytics.adapter.mongo.MongoAnalyticsLakehouseLock[IO](
+                    database,
+                    streams,
+                    Some(clock.realTimeInstant),
+                    Some(clock.monotonic)
+                  ),
+                  sparkExecution,
+                  storageInventory = Option.when(shift > 0L)(
+                    AnalyticsStorageInventory(
+                      settings.paths,
+                      spillDirectories = Vector(
+                        java.nio.file.Path
+                          .of(new java.net.URI(settings.paths.root))
+                          .getParent
+                          .resolve("spark-temp")
+                          .toUri
+                          .toString
+                      )
+                    )
+                  )
+                )
+                action match {
+                  case "prepare"   => coordinator.prepare(settings.keyId).void
+                  case "authorize" => coordinator.authorize(settings.keyId).void
+                  case _           =>
+                    IO.raiseError(AnalyticsError.InvalidConfiguration("retirement action must be prepare or authorize"))
+                }
               }
             }
-          }
+        }
       }
 
   override def run(args: List[String]): IO[ExitCode] = args match {

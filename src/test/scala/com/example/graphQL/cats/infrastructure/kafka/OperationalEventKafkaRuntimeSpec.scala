@@ -88,23 +88,25 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       quarantineState <- Ref.of[IO, Vector[EventQuarantineRecord]](Vector.empty)
     } yield {
       val receipts = new ConsumerReceiptRepository {
-        override def exists(group: String, id: UUID): RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-          receiptState.get.map(values => Right(values.contains(group -> id))) )
+        override def exists(group: String, id: UUID): RepositoryIO[Boolean] =
+          com.example.graphQL.cats.service.port.RepositoryIO
+            .fromIOEither(receiptState.get.map(values => Right(values.contains(group -> id))))
         override def record(
             group: String,
             value: OperationalEventEnvelope,
             createdAt: Instant,
             expiresAt: Instant
-        ): RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-          receiptState.modify { values =>
+        ): RepositoryIO[Boolean] =
+          com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(receiptState.modify { values =>
             val key = group -> value.eventId
             if (values.contains(key)) (values, Right(false))
             else (values.updated(key, value), Right(true))
-          } )
+          })
       }
       val quarantines = new EventQuarantineRepository {
-        override def save(record: EventQuarantineRecord): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-          quarantineState.update(_ :+ record).as(Right(())) )
+        override def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
+          com.example.graphQL.cats.service.port.RepositoryIO
+            .fromIOEither(quarantineState.update(_ :+ record).as(Right(())))
       }
       Fakes(receipts, quarantines, quarantineState)
     }
@@ -131,8 +133,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
 
   test("malformed records remain uncommitted when quarantine persistence fails") {
     val failedQuarantine = new EventQuarantineRepository {
-      override def save(record: EventQuarantineRecord): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        IO.pure(Left(RepositoryError.Unavailable)) )
+      override def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
+        com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Left(RepositoryError.Unavailable)))
     }
     fakes.flatMap { values =>
       OperationalEventKafkaRuntime

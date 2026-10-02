@@ -1,0 +1,9 @@
+# Short real retention is restricted to the isolated account deletion proof stack.
+services:
+  kafka:
+    environment:
+      KAFKA_LOG_RETENTION_CHECK_INTERVAL_MS: "1000"
+  analytics-erasure-worker:
+    environment:
+      ANALYTICS_RETENTION_DELTA_VACUUM_SAFETY: "60 seconds"
+      ANALYTICS_RETENTION_DELTA_LOG_RETENTION: "60 seconds"

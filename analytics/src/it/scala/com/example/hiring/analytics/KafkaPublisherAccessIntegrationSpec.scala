@@ -67,9 +67,23 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
   )
   private val topic = sys.env.getOrElse("ANALYTICS_TOPIC", "hiring.operational-events")
 
-  private def properties(username: String, password: String, transactionalId: Option[String] = None): Properties = {
+  private def localKafkaConnection(servers: String, username: String, password: String): KafkaConnection =
+    KafkaConnection(
+      servers,
+      saslUsername = Some(username),
+      saslPassword = Some(password),
+      securityProtocol = KafkaSecurityProtocol.SaslPlaintext,
+      allowPlaintext = true
+    )
+
+  private def properties(
+      username: String,
+      password: String,
+      transactionalId: Option[String] = None,
+      servers: String = bootstrapServers
+  ): Properties = {
     val result = new Properties()
-    result.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers)
+    result.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, servers)
     result.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
     result.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
     result.put(ProducerConfig.ACKS_CONFIG, "all")
@@ -147,8 +161,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         null,
         reactiveDatabase,
         store,
-        KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
-        KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
+        localKafkaConnection(bootstrapServers, "analytics_reader", sys.env("KAFKA_READER_PASSWORD")),
+        localKafkaConnection(bootstrapServers, "analytics_fencer", fencerPassword + "-invalid"),
         topic,
         IntegrationAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-fencer-auth-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("worker-auth-test-secret".padTo(32, 'x').getBytes("UTF-8")),
@@ -200,8 +214,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           null,
           reactiveDatabase,
           store,
-          KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
-          KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
+          localKafkaConnection(bootstrapServers, "analytics_reader", sys.env("KAFKA_READER_PASSWORD")),
+          localKafkaConnection(bootstrapServers, "analytics_fencer", fencerPassword),
           topic,
           IntegrationAnalyticsLakehousePaths.unsafe(
             "file:///tmp/analytics-fencer-auth-uncertain-" + UUID.randomUUID().toString
@@ -244,8 +258,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           null,
           reactiveDatabase,
           store,
-          KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(sys.env("KAFKA_READER_PASSWORD"))),
-          KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
+          localKafkaConnection(bootstrapServers, "analytics_reader", sys.env("KAFKA_READER_PASSWORD")),
+          localKafkaConnection(bootstrapServers, "analytics_fencer", fencerPassword),
           topic,
           IntegrationAnalyticsLakehousePaths.unsafe(
             "file:///tmp/analytics-fencer-auth-retry-" + UUID.randomUUID().toString
@@ -321,8 +335,10 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
       transportFailure: Boolean,
       workerBootstrapServers: String = bootstrapServers,
       interruptedBroker: Option[KafkaContainer] = None,
-      registeredTransactionalId: Option[String] = None
+      registeredTransactionalId: Option[String] = None,
+      readerPassword: String = sys.env.getOrElse("KAFKA_READER_PASSWORD", "")
   ): Unit = {
+    assert(fencerPassword.nonEmpty && readerPassword.nonEmpty, "authenticated local worker credentials required")
     val mongoUri = sys.env.getOrElse(
       "HIRING_ANALYTICS_COMPOSE_MONGO_URI",
       "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
@@ -429,6 +445,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         1L
       )
       val publisher = new AnalyticsReportPublisher[IO] {
+        override def reservePinned(
+            runId: RunId,
+            rangeFingerprint: RangeFingerprint,
+            now: Instant
+        ): IO[AnalyticsReportReservation] =
+          reserve(runId, rangeFingerprint, now)
+
         override def reserve(
             runId: RunId,
             rangeFingerprint: RangeFingerprint,
@@ -454,9 +477,8 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
         null,
         reactiveDatabase,
         store,
-        KafkaConnection(workerBootstrapServers, None, None),
-        if (fencerPassword.isEmpty) KafkaConnection(workerBootstrapServers, None, None)
-        else KafkaConnection(workerBootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
+        localKafkaConnection(workerBootstrapServers, "analytics_reader", readerPassword),
+        localKafkaConnection(workerBootstrapServers, "analytics_fencer", fencerPassword),
         topic,
         IntegrationAnalyticsLakehousePaths.unsafe("file:///tmp/analytics-poll-recovery-" + UUID.randomUUID().toString),
         AnalyticsTestSubjectPseudonymizer.fromSecret("poll-recovery-test-secret".padTo(32, 'x').getBytes("UTF-8")),
@@ -536,7 +558,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           .get(30, TimeUnit.SECONDS)
         KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
           .fence(
-            KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword)),
+            localKafkaConnection(bootstrapServers, "analytics_fencer", fencerPassword),
             Vector(transactionalId)
           )
           .unsafeRunSync()
@@ -551,7 +573,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
 
       val unauthorizedFence = KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
         .fence(
-          KafkaConnection(bootstrapServers, Some("analytics_reader"), Some(readerPassword)),
+          localKafkaConnection(bootstrapServers, "analytics_reader", readerPassword),
           Vector(transactionalId)
         )
         .attempt
@@ -560,7 +582,7 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
 
       val badFencerCredential = KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
         .fence(
-          KafkaConnection(bootstrapServers, Some("analytics_fencer"), Some(fencerPassword + "-invalid")),
+          localKafkaConnection(bootstrapServers, "analytics_fencer", fencerPassword + "-invalid"),
           Vector(transactionalId)
         )
         .attempt
@@ -626,18 +648,36 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
   ) {
     if (adminOutageRecoveryEnabled) {
       val image = DockerImageName.parse("apache/kafka:3.9.2").asCompatibleSubstituteFor("apache/kafka")
+      val brokerPassword = "outage-broker-test-secret"
+      val publisherPassword = "outage-publisher-test-secret"
+      val readerPassword = "outage-reader-test-secret"
+      val fencerPassword = "outage-fencer-test-secret"
+      val brokerJaasConfig =
+        s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"broker\" " +
+          s"password=\"$brokerPassword\" user_broker=\"$brokerPassword\" " +
+          s"user_hiring_publisher_v2=\"$publisherPassword\" user_analytics_reader=\"$readerPassword\" " +
+          s"user_analytics_fencer=\"$fencerPassword\";"
       val broker = new KafkaContainer(image)
+        .withEnv(
+          "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
+          "BROKER:SASL_PLAINTEXT,PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT"
+        )
+        .withEnv("KAFKA_SASL_ENABLED_MECHANISMS", "PLAIN")
+        .withEnv("KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL", "PLAIN")
+        .withEnv("KAFKA_SASL_JAAS_CONFIG", brokerJaasConfig)
+        .withEnv("KAFKA_LISTENER_NAME_BROKER_PLAIN_SASL_JAAS_CONFIG", brokerJaasConfig)
+        .withEnv("KAFKA_LISTENER_NAME_PLAINTEXT_PLAIN_SASL_JAAS_CONFIG", brokerJaasConfig)
       broker.start()
       val transactionalId = "hiring-publisher-admin-outage-" + UUID.randomUUID().toString
       val topicName = "admin-outage-" + UUID.randomUUID().toString
-      val adminProperties = new Properties()
-      adminProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBootstrapServers)
+      val adminProperties = properties("analytics_fencer", fencerPassword, servers = broker.getBootstrapServers)
       val admin = Admin.create(adminProperties)
-      val producerProperties = new Properties()
-      producerProperties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, broker.getBootstrapServers)
-      producerProperties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
-      producerProperties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
-      producerProperties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
+      val producerProperties = properties(
+        "hiring_publisher_v2",
+        publisherPassword,
+        Some(transactionalId),
+        servers = broker.getBootstrapServers
+      )
       val producer = new KafkaProducer[String, String](producerProperties)
       try {
         admin.createTopics(List(new NewTopic(topicName, 1, 1.toShort)).asJava).all().get(30, TimeUnit.SECONDS)
@@ -648,11 +688,12 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           .get(30, TimeUnit.SECONDS)
         broker.execInContainer("bash", "-ec", "kill -STOP $(pgrep -x java)")
         verifyAutomaticPollRecovery(
-          fencerPassword = "",
+          fencerPassword = fencerPassword,
           transportFailure = true,
           workerBootstrapServers = broker.getBootstrapServers,
           interruptedBroker = Some(broker),
-          registeredTransactionalId = Some(transactionalId)
+          registeredTransactionalId = Some(transactionalId),
+          readerPassword = readerPassword
         )
       } finally {
         producer.close(Duration.ofSeconds(5))

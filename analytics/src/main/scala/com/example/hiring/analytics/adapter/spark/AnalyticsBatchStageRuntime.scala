@@ -17,6 +17,7 @@ private[analytics] trait SparkExecution[F[_]] {
 
 private[analytics] trait DeltaWriter[F[_]] {
   def merge(source: DataFrame, path: String, condition: String): F[Unit]
+  def mergeWhenFresh(source: DataFrame, path: String, condition: String, at: () => Instant): F[Unit]
   def withExpiry(frame: DataFrame, now: Instant, days: Int): DataFrame
 }
 

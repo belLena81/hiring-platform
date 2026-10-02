@@ -13,185 +13,259 @@ import java.time.Instant
 final class AnalyticsLateFactReplayServiceSpec extends CatsEffectSuite {
   private val Now = Instant.parse("2026-09-30T12:00:00Z")
   private val Report = AnalyticsReportOutput(Now, Vector.empty, None, Vector.empty)
+  private val request = replayRequest("replay-selected")
 
-  test("selection rejection happens before journal preparation, merge, or publication") {
-    for {
-      calls <- Ref.of[IO, Vector[String]](Vector.empty)
-      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
-      service = replayService(calls, lock, rejectSelection = true)
-      request = replayRequest("replay-reject")
-      result <- service.run(request).attempt
-      observed <- calls.get
-      _ = assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRejected))
-      _ = assertEquals(observed, Vector("load", "hmac", "markers", "validate"))
-    } yield ()
+  test("invalid selection is rejected before journal preparation or fact/report writes") {
+    fixture(rejectSelection = true).flatMap { value =>
+      for {
+        result <- value.service.run(request).attempt
+        calls <- value.calls.get
+        _ = assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRejected))
+        _ = assertEquals(calls, Vector("load", "reserve", "hmac", "markers", "validate"))
+        record <- value.state.get
+        _ = assertEquals(record, None)
+      } yield ()
+    }
   }
 
-  test("successful replay merges facts before guarded publication and journals completion") {
-    for {
-      calls <- Ref.of[IO, Vector[String]](Vector.empty)
-      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
-      service = replayService(calls, lock)
-      result <- service.run(replayRequest("replay-success"))
-      observed <- calls.get
-      _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
-      _ = assertEquals(
-        observed,
-        Vector(
-          "load",
-          "hmac",
-          "markers",
-          "validate",
-          "prepare",
-          "markers",
-          "hmac",
-          "validate",
-          "deletions",
-          "merge",
-          "facts-merged",
-          "markers",
-          "hmac",
-          "deletions",
-          "validate",
-          "report",
-          "markers",
-          "reserve",
-          "receipt",
-          "publish",
-          "published"
-        )
-      )
-    } yield ()
+  test("reservation is pinned before selection, merge, and report construction") {
+    fixture().flatMap { value =>
+      for {
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
+        _ = assert(calls.indexOf("reserve") < calls.indexOf("validate"))
+        _ = assert(calls.indexOf("validate") < calls.indexOf("merge"))
+        _ = assert(calls.indexOf("merge") < calls.indexOf("report"))
+        _ = assertEquals(calls.count(_ == "reserve"), 1)
+        second <- value.service.run(request)
+        _ = assertEquals(second, AnalyticsLateFactReplayOutcome.AlreadyPublished)
+      } yield ()
+    }
   }
 
-  test("retry reconciles a durable publication before requiring retained selected facts") {
-    for {
-      calls <- Ref.of[IO, Vector[String]](Vector.empty)
-      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
-      service = replayService(calls, lock, reconcilePublished = true, rejectSelection = true)
-      result <- service.run(replayRequest("replay-reconcile"))
-      observed <- calls.get
-      _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
-      _ = assertEquals(observed, Vector("load", "reserve", "receipt", "published"))
-    } yield ()
+  test("publication committed before journal completion recovers without requiring expired source facts") {
+    fixture(rejectSelection = true, publishedReceipt = true).flatMap { value =>
+      for {
+        _ <- value.state.set(Some(record(0, AnalyticsLateFactReplayProgress.FactsMerged)))
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
+        _ = assertEquals(calls, Vector("load", "receipt", "published"))
+      } yield ()
+    }
   }
 
-  test("superseded publication retries under bounded fresh attempts") {
-    for {
-      calls <- Ref.of[IO, Vector[String]](Vector.empty)
-      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
-      service = replayService(calls, lock, reconcileSuperseded = true)
-      result <- service.run(replayRequest("replay-superseded")).attempt
-      observed <- calls.get
-      _ = assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRejected))
-      _ = assertEquals(observed.count(_ == "advance"), 2)
-      _ = assert(!observed.contains("published"))
-    } yield ()
+  test("new selection cannot reuse an existing request ID") {
+    fixture().flatMap { value =>
+      for {
+        _ <- value.state.set(Some(record(0, AnalyticsLateFactReplayProgress.Prepared)))
+        changed = AnalyticsLateFactReplayRequest
+          .from(request.requestId.value, Vector(("hiring-events", 0, 11L)))
+          .toOption
+          .get
+        result <- value.service.run(changed).attempt
+        calls <- value.calls.get
+        _ = assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRequestConflict))
+        _ = assertEquals(calls, Vector("load"))
+      } yield ()
+    }
   }
 
-  test("a superseded receipt rebuilds and publishes under a fresh reservation") {
-    for {
-      calls <- Ref.of[IO, Vector[String]](Vector.empty)
-      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
-      service = replayService(calls, lock, retrySupersededOnce = true)
-      result <- service.run(replayRequest("replay-republish"))
-      observed <- calls.get
-      _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
-      _ = assertEquals(observed.count(_ == "advance"), 1)
-      _ = assertEquals(observed.count(_ == "reserve"), 2)
-      _ = assertEquals(observed.count(_ == "publish"), 1)
-    } yield ()
+  test("superseded attempts allocate bounded new pinned reservations and stop after three attempts") {
+    fixture(alwaysSuperseded = true).flatMap { value =>
+      for {
+        _ <- value.state.set(Some(record(0, AnalyticsLateFactReplayProgress.FactsMerged)))
+        result <- value.service.run(request).attempt
+        calls <- value.calls.get
+        _ = assertEquals(result.left.toOption, Some(AnalyticsError.LateFactReplayRejected))
+        _ = assertEquals(calls.count(_ == "advance"), 2)
+        _ = assertEquals(calls.count(_ == "reserve"), 2)
+        _ = assert(!calls.contains("publish"))
+      } yield ()
+    }
   }
 
-  private def replayService(
+  test("a superseded receipt rebuilds under a new reservation and never refreshes the old attempt") {
+    fixture(supersedeFirstReceipt = true).flatMap { value =>
+      for {
+        _ <- value.state.set(Some(record(0, AnalyticsLateFactReplayProgress.FactsMerged)))
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        finalRecord <- value.state.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
+        _ = assertEquals(calls.count(_ == "advance"), 1)
+        _ = assertEquals(calls.count(_ == "reserve"), 1)
+        _ = assertEquals(finalRecord.map(_.publicationAttempt), Some(1))
+        _ = assert(calls.indexOf("reserve") < calls.indexOf("validate"))
+      } yield ()
+    }
+  }
+
+  test("deletion completes between report read and publication while markers are empty: pinned generation rejects") {
+    fixture(deleteDuringReport = true).flatMap { value =>
+      for {
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        finalRecord <- value.state.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.ErasurePending)
+        _ = assertEquals(calls.count(_ == "reserve"), 1)
+        _ = assert(!calls.contains("published"))
+        _ = assertEquals(finalRecord.map(_.progress), Some(AnalyticsLateFactReplayProgress.FactsMerged))
+        _ = assertEquals(finalRecord.map(_.reservation.generation), Some(0L))
+      } yield ()
+    }
+  }
+
+  test("an interrupted merge resumes using its persisted reservation") {
+    fixture().flatMap { value =>
+      for {
+        _ <- value.state.set(Some(record(0, AnalyticsLateFactReplayProgress.Prepared)))
+        result <- value.service.run(request)
+        calls <- value.calls.get
+        _ = assertEquals(result, AnalyticsLateFactReplayOutcome.Published)
+        _ = assert(!calls.contains("reserve"))
+        _ = assert(calls.contains("merge"))
+      } yield ()
+    }
+  }
+
+  private case class Fixture(
+      service: AnalyticsLateFactReplayService[IO],
       calls: Ref[IO, Vector[String]],
-      lock: AnalyticsLakehouseLock[IO],
+      state: Ref[IO, Option[AnalyticsLateFactReplayRecord]]
+  )
+
+  private def fixture(
       rejectSelection: Boolean = false,
-      reconcilePublished: Boolean = false,
-      reconcileSuperseded: Boolean = false,
-      retrySupersededOnce: Boolean = false
-  ): AnalyticsLateFactReplayService[IO] = {
-    def record(value: String): IO[Unit] = calls.update(_ :+ value)
-    val journal = new AnalyticsLateFactReplayJournal[IO] {
-      override def load(requestId: AnalyticsReplayRequestId): IO[Option[AnalyticsLateFactReplayRecord]] =
-        record("load").as(
-          Option.when(reconcilePublished || reconcileSuperseded)(
-            AnalyticsLateFactReplayRecord(
-              replayRequest(requestId.value),
-              AnalyticsLateFactReplayProgress.FactsMerged,
-              0
-            )
+      publishedReceipt: Boolean = false,
+      alwaysSuperseded: Boolean = false,
+      supersedeFirstReceipt: Boolean = false,
+      deleteDuringReport: Boolean = false
+  ): IO[Fixture] =
+    for {
+      calls <- Ref.of[IO, Vector[String]](Vector.empty)
+      state <- Ref.of[IO, Option[AnalyticsLateFactReplayRecord]](None)
+      generation <- Ref.of[IO, Long](0L)
+      lock <- AnalyticsLakehouseLock.processLocal[IO].allocated.map(_._1)
+    } yield {
+      def trace(name: String): IO[Unit] = calls.update(_ :+ name)
+      val journal = new AnalyticsLateFactReplayJournal[IO] {
+        override def load(requestId: AnalyticsReplayRequestId): IO[Option[AnalyticsLateFactReplayRecord]] =
+          trace("load") *> state.get
+        override def prepare(
+            request: AnalyticsLateFactReplayRequest,
+            reservation: AnalyticsReportReservation,
+            at: Instant
+        ): IO[AnalyticsLateFactReplayRecord] = {
+          val value = AnalyticsLateFactReplayRecord(
+            request.selectionDigest,
+            AnalyticsLateFactReplayProgress.Prepared,
+            0,
+            reservation
           )
-        )
-      override def prepare(
-          request: AnalyticsLateFactReplayRequest,
-          at: Instant
-      ): IO[AnalyticsLateFactReplayRecord] =
-        record("prepare").as(AnalyticsLateFactReplayRecord(request, AnalyticsLateFactReplayProgress.Prepared, 0))
-      override def markFactsMerged(request: AnalyticsLateFactReplayRequest, at: Instant): IO[Unit] =
-        record("facts-merged")
-      override def advancePublicationAttempt(request: AnalyticsLateFactReplayRequest): IO[Int] =
-        record("advance") *> calls.get.map(_.count(_ == "advance"))
-      override def markPublished(request: AnalyticsLateFactReplayRequest, at: Instant): IO[Unit] = record("published")
-    }
-    val markers = new ActiveDeletionMarkerSource[IO] {
-      override def activeSubjectTokens: IO[Vector[SubjectToken]] = record("markers").as(Vector.empty)
-    }
-    val stages = new AnalyticsLateFactReplayStages[IO] {
-      override def validateHmacConfiguration: IO[Unit] = record("hmac")
-      override def validateSelectedFacts(
-          request: AnalyticsLateFactReplayRequest,
-          activeTokens: Vector[SubjectToken],
-          observedAt: Instant
-      ): IO[Unit] =
-        record("validate") *> (if (rejectSelection) IO.raiseError(AnalyticsError.LateFactReplayRejected) else IO.unit)
-      override def applyActiveDeletions(activeTokens: Vector[SubjectToken]): IO[Unit] = record("deletions")
-      override def mergeSelectedFacts(
-          request: AnalyticsLateFactReplayRequest,
-          activeTokens: Vector[SubjectToken],
-          observedAt: Instant
-      ): IO[Unit] = record("merge")
-      override def rebuildGoldAndExtractReport(asOf: Instant): IO[AnalyticsReportOutput] = record("report").as(Report)
-    }
-    val publisher = new AnalyticsReportPublisher[IO] {
-      override def reserve(
-          runId: RunId,
-          rangeFingerprint: RangeFingerprint,
-          now: Instant
-      ): IO[AnalyticsReportReservation] =
-        record("reserve").as(AnalyticsReportReservation(runId, rangeFingerprint, 0L, 0L))
-      override def publish(
-          reservation: AnalyticsReportReservation,
-          report: AnalyticsReportOutput,
-          expiresAt: Instant
-      ): IO[Unit] = record("publish")
-      override def publicationReceipt(reservation: AnalyticsReportReservation)(using
-          cats.Applicative[IO]
-      ): IO[AnalyticsReportPublicationReceipt] =
-        record("receipt") *> calls.get.map { values =>
-          if (reconcilePublished) AnalyticsReportPublicationReceipt.CurrentGeneration
-          else if (retrySupersededOnce && values.count(_ == "receipt") == 1)
-            AnalyticsReportPublicationReceipt.Superseded
-          else if (reconcileSuperseded) AnalyticsReportPublicationReceipt.Superseded
-          else AnalyticsReportPublicationReceipt.Absent
+          trace("prepare") *> state.set(Some(value)).as(value)
         }
-      override def publishErasure(
-          reservation: AnalyticsReportReservation,
-          report: AnalyticsReportOutput,
-          expiresAt: Instant,
-          claim: com.example.hiring.analytics.service.erasure.ErasureClaim,
-          completedAt: Instant
-      ): IO[Unit] = IO.unit
+        override def markFactsMerged(request: AnalyticsLateFactReplayRequest, at: Instant): IO[Unit] =
+          trace("facts-merged") *> state.update(_.map(_.copy(progress = AnalyticsLateFactReplayProgress.FactsMerged)))
+        override def advancePublicationAttempt(
+            request: AnalyticsLateFactReplayRequest,
+            expectedAttempt: Int,
+            reservation: AnalyticsReportReservation,
+            at: Instant
+        ): IO[AnalyticsLateFactReplayRecord] = {
+          val value = AnalyticsLateFactReplayRecord(
+            request.selectionDigest,
+            AnalyticsLateFactReplayProgress.Prepared,
+            expectedAttempt + 1,
+            reservation
+          )
+          trace("advance") *> state.set(Some(value)).as(value)
+        }
+        override def markPublished(request: AnalyticsLateFactReplayRequest, at: Instant): IO[Unit] =
+          trace("published") *> state.update(_.map(_.copy(progress = AnalyticsLateFactReplayProgress.Published)))
+      }
+      val markers = new ActiveDeletionMarkerSource[IO] {
+        override def activeSubjectTokens: IO[Vector[SubjectToken]] = trace("markers").as(Vector.empty)
+      }
+      val stages = new AnalyticsLateFactReplayStages[IO] {
+        override def validateHmacConfiguration: IO[Unit] = trace("hmac")
+        override def validateSelectedFacts(
+            request: AnalyticsLateFactReplayRequest,
+            activeTokens: Vector[SubjectToken],
+            observedAt: Instant
+        ): IO[Unit] = trace("validate") *>
+          IO.raiseWhen(rejectSelection)(AnalyticsError.LateFactReplayRejected)
+        override def applyActiveDeletions(activeTokens: Vector[SubjectToken]): IO[Unit] = trace("deletions")
+        override def mergeSelectedFacts(
+            request: AnalyticsLateFactReplayRequest,
+            activeTokens: Vector[SubjectToken],
+            observedAt: Instant
+        ): IO[Unit] = trace("merge")
+        override def rebuildGoldAndExtractReport(asOf: Instant): IO[AnalyticsReportOutput] = trace("report") *>
+          (if (deleteDuringReport) generation.update(_ + 1L) else IO.unit).as(Report)
+      }
+      val publisher = new AnalyticsReportPublisher[IO] {
+        override def reserve(
+            runId: RunId,
+            fingerprint: RangeFingerprint,
+            now: Instant
+        ): IO[AnalyticsReportReservation] =
+          IO.raiseError(new AssertionError("replay must use reservePinned"))
+        override def reservePinned(
+            runId: RunId,
+            fingerprint: RangeFingerprint,
+            now: Instant
+        ): IO[AnalyticsReportReservation] =
+          trace("reserve") *> generation.get.map(current => AnalyticsReportReservation(runId, fingerprint, current, 1L))
+        override def publish(
+            reservation: AnalyticsReportReservation,
+            report: AnalyticsReportOutput,
+            expiresAt: Instant
+        ): IO[Unit] =
+          trace("publish") *> generation.get.flatMap(current =>
+            IO.raiseUnless(current == reservation.generation)(AnalyticsError.GuardedErasurePublicationRejected)
+          )
+        override def publicationReceipt(
+            reservation: AnalyticsReportReservation
+        )(using cats.Applicative[IO]): IO[AnalyticsReportPublicationReceipt] =
+          trace("receipt") *> calls.get.map { values =>
+            if (publishedReceipt) AnalyticsReportPublicationReceipt.CurrentGeneration
+            else if (alwaysSuperseded || (supersedeFirstReceipt && values.count(_ == "receipt") == 1))
+              AnalyticsReportPublicationReceipt.Superseded
+            else AnalyticsReportPublicationReceipt.Absent
+          }
+        override def publishErasure(
+            reservation: AnalyticsReportReservation,
+            report: AnalyticsReportOutput,
+            expiresAt: Instant,
+            claim: com.example.hiring.analytics.service.erasure.ErasureClaim,
+            completedAt: Instant
+        ): IO[Unit] = IO.unit
+      }
+      Fixture(
+        new AnalyticsLateFactReplayService[IO](
+          "test-lakehouse",
+          journal,
+          markers,
+          stages,
+          publisher,
+          lock,
+          30.asInstanceOf[AnalyticsPositiveInt],
+          Some(IO.pure(Now))
+        ),
+        calls,
+        state
+      )
     }
-    new AnalyticsLateFactReplayService[IO](
-      "test-lakehouse",
-      journal,
-      markers,
-      stages,
-      publisher,
-      lock,
-      30.asInstanceOf[AnalyticsPositiveInt],
-      Some(IO.pure(Now))
+
+  private def record(attempt: Int, progress: AnalyticsLateFactReplayProgress): AnalyticsLateFactReplayRecord = {
+    val identity = AnalyticsLateFactReplayService.reservationIdentityFor(request, attempt).toOption.get
+    AnalyticsLateFactReplayRecord(
+      request.selectionDigest,
+      progress,
+      attempt,
+      AnalyticsReportReservation(identity._1, identity._2, 0L, 1L)
     )
   }
 

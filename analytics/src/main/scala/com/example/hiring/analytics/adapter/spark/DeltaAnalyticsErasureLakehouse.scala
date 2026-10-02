@@ -30,7 +30,8 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     operational: AnalyticsOperationalSettings,
     execution: SparkExecution[F],
     logger: Logger[F],
-    private[analytics] val nowOverride: Option[F[Instant]] = None
+    private[analytics] val nowOverride: Option[F[Instant]] = None,
+    deltaLogFactory: DeltaLogFactory = DeltaLogFactory.system
 ) extends AnalyticsErasureLakehouse[F]
     with AnalyticsBatchMaintenance[F] {
   private val now = nowOverride.getOrElse(Async[F].realTimeInstant)
@@ -46,7 +47,8 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     paths,
     execution,
     retention.configureRawTablePrivacy,
-    MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles)
+    MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles),
+    deltaLogFactory
   )
 
   override def validateHmacConfigurationLocked: F[Unit] =
@@ -55,10 +57,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
   override def configureRawTables: F[Unit] = retention.configureRawTables(spark)
 
   override def expireStored(at: Instant): F[Unit] =
-    retention.expire(spark, paths.bronze, at) *>
-      retention.expire(spark, paths.quarantine, at) *>
-      retention.expire(spark, paths.silver, at) *>
-      retention.expire(spark, paths.lateFacts, at)
+    paths.inventory.subjectDelta.traverse_(surface => retention.expire(spark, surface.location, at))
 
   override def validateHmacConfiguration: F[Unit] =
     lakehouseLock.resource(paths.root).use(_ => validateHmacConfigurationLocked)
@@ -66,6 +65,11 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
   override def reclaimRetainedFiles: F[Long] =
     retention.configureRawTablePrivacy(spark) *>
       retention.vacuumExpiredFiles(spark).flatTap(_ => erasure.checkpointRawTableLogs(spark))
+
+  /** Idle streaming maintenance: reclaim only obsolete files, without creating replacement table snapshots. */
+  def reclaimExpiredFiles: F[Long] =
+    retention.configureRawTablePrivacy(spark) *>
+      retention.vacuumUnreferencedFiles(spark).flatTap(_ => erasure.checkpointRawTableLogs(spark))
 
   override def verifyMarkedSubjectsAbsent(markerTokens: Vector[SubjectToken]): F[Unit] =
     retention.recoverAbandonedRewrites(spark) *>
@@ -97,14 +101,10 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
   private def applyActiveDeletionsFrame(markerTokens: DataFrame): F[Unit] =
     for {
       deletionTime <- now
-      _ <- retention.expire(spark, paths.bronze, deletionTime)
-      _ <- retention.expire(spark, paths.quarantine, deletionTime)
-      _ <- retention.expire(spark, paths.silver, deletionTime)
-      _ <- retention.expire(spark, paths.lateFacts, deletionTime)
-      _ <- erasure.purgeMarkedSubjectRows(spark, paths.bronze, markerTokens)
-      _ <- erasure.purgeMarkedSubjectRows(spark, paths.quarantine, markerTokens)
-      _ <- erasure.purgeMarkedSubjectRows(spark, paths.silver, markerTokens)
-      _ <- erasure.purgeMarkedSubjectRows(spark, paths.lateFacts, markerTokens)
+      _ <- expireStored(deletionTime)
+      _ <- paths.inventory.subjectDelta.traverse_(surface =>
+        erasure.purgeMarkedSubjectRows(spark, surface.location, markerTokens)
+      )
       _ <- rebuildGoldFromStoredSilver(spark)
       _ <- retention.vacuumExpiredFiles(spark).void
     } yield ()
@@ -124,9 +124,9 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
     }.flatMap(use)
 
   private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
-    execution(DeltaTable.isDeltaTable(spark, paths.silver)).flatMap {
+    execution(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.silver))).flatMap {
       case true =>
-        execution(spark.read.format("delta").load(paths.silver)).flatMap(
+        execution(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver))).flatMap(
           AnalyticsGoldStage.rebuild(paths, _, execution)
         )
       case false => AnalyticsGoldStage.clear(spark, paths, execution)

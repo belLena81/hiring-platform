@@ -3,6 +3,7 @@ package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.service.batch.{AnalyticsStorageInventory, AnalyticsStorageKind}
 import com.example.hiring.analytics.service.erasure.ErasureRequestState
 
 import cats.data.{Chain, NonEmptyChain, ValidatedNec}
@@ -160,12 +161,24 @@ private[analytics] object AnalyticsKeyRetirement {
       now: Instant,
       lakehouseLock: AnalyticsLakehouseLock[F],
       streams: MongoPublisherStream,
-      sparkExecution: SparkExecution[F]
+      sparkExecution: SparkExecution[F],
+      storageInventory: Option[AnalyticsStorageInventory] = None
   ): F[Either[NonEmptyChain[String], AuditSummary]] =
     lakehouseLock
       .resource(paths.root)
       .use { _ =>
-        auditUnderLock(spark, paths, database, retiringKeyId, retention, writers, now, streams, sparkExecution)
+        auditUnderLock(
+          spark,
+          paths,
+          database,
+          retiringKeyId,
+          retention,
+          writers,
+          now,
+          streams,
+          sparkExecution,
+          storageInventory
+        )
       }
       .attempt
       .map {
@@ -185,7 +198,8 @@ private[analytics] object AnalyticsKeyRetirement {
       writers: WriterInventory,
       now: Instant,
       streams: MongoPublisherStream,
-      sparkExecution: SparkExecution[F]
+      sparkExecution: SparkExecution[F],
+      storageInventory: Option[AnalyticsStorageInventory] = None
   ): F[Either[NonEmptyChain[String], AuditSummary]] = {
     val keyBlockers =
       if (!RegistryIdPattern.matches(retiringKeyId))
@@ -201,15 +215,53 @@ private[analytics] object AnalyticsKeyRetirement {
       MaximumAuditedErasureSubjects,
       sparkExecution
     ) *> sparkExecution {
+      val inventory = storageInventory.getOrElse(paths.inventory)
       val delta = scanDelta(spark, paths, retiringKeyId)
+      val external = scanCheckpoints(spark, inventory, retiringKeyId)
+      val lineage = scanLineageControls(spark, paths)
+      val scratch = inventory.surfaces
+        .filter(surface => surface.kind == AnalyticsStorageKind.Scratch && !surface.location.endsWith("*"))
+        .foldLeft(ScanResult(0L)) { (total, surface) =>
+          val root = new Path(SparkPhysicalLocation.resolve(surface.location))
+          val fs = root.getFileSystem(spark.sparkContext.hadoopConfiguration)
+          val remaining = fs.exists(root) && fs.listFiles(root, true).hasNext
+          ScanResult(
+            total.count,
+            total.blockers ++ (if (remaining) Chain.one("inventoried Spark spill files remain")
+                               else Chain.empty[String])
+          )
+        }
+      val streamingPresent = Vector(paths.streamingProgress, paths.streamingDecisions, paths.streamingLineage).exists {
+        path =>
+          val value = new Path(SparkPhysicalLocation.resolve(path))
+          value.getFileSystem(spark.sparkContext.hadoopConfiguration).exists(value)
+      }
+      val missingCheckpoints =
+        if (streamingPresent && !inventory.surfaces.exists(_.kind == AnalyticsStorageKind.SparkCheckpoint))
+          Chain.one("streaming retirement requires an explicit checkpoint storage inventory")
+        else Chain.empty[String]
+      val missingSpill =
+        if (
+          streamingPresent && !inventory.surfaces
+            .exists(surface => surface.kind == AnalyticsStorageKind.Scratch && !surface.location.endsWith("*"))
+        )
+          Chain.one("streaming retirement requires an explicit Spark spill storage inventory")
+        else Chain.empty[String]
       val registry = validateRegistry(spark, paths, retiringKeyId)
-      (delta, registry)
+      (
+        ScanResult(
+          delta.count + external.count + lineage.count,
+          delta.blockers ++ external.blockers ++ lineage.blockers ++
+            scratch.blockers ++ missingCheckpoints ++ missingSpill
+        ),
+        registry
+      )
     }
       .adaptError { case NonFatal(_) =>
         AnalyticsError.InvalidConfiguration("key retirement audit could not verify every required surface")
       }
       .flatMap { case (delta, registryBlockers) =>
-        scanMongo[F](database, retiringKeyId, now, streams).map { mongo =>
+        scanMongo[F](database, retiringKeyId, now, streams, paths.inventory.mongo.map(_.location)).map { mongo =>
           val blockers = keyBlockers ++ evidenceBlockers ++ delta.blockers ++ mongo.blockers ++ registryBlockers
           val errors = blockers.toList.toVector
           if (errors.nonEmpty) Left(NonEmptyChain.fromSeq(errors).get)
@@ -287,19 +339,11 @@ private[analytics] object AnalyticsKeyRetirement {
     }
 
   private def scanDelta(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): ScanResult = {
-    val tables = Vector(
-      paths.bronze,
-      paths.quarantine,
-      paths.silver,
-      paths.lateFacts,
-      paths.funnelGold,
-      paths.timeToHireGold,
-      paths.skillsGold,
-      paths.manifests
-    )
+    // Permanent key verifiers intentionally retain the retiring key ID and are validated separately.
+    val tables = paths.inventory.delta.map(_.location).filterNot(_ == paths.hmacKeyRegistry)
     tables.foldLeft(ScanResult(0L)) { (total, tablePath) =>
       val tableResult = try {
-        val root = new Path(tablePath)
+        val root = new Path(SparkPhysicalLocation.resolve(tablePath))
         val fs = root.getFileSystem(spark.sparkContext.hadoopConfiguration)
         if (fs.exists(root)) {
           val files = visitFiles(fs, root) { file =>
@@ -309,7 +353,7 @@ private[analytics] object AnalyticsKeyRetirement {
             } else if (pathText.endsWith(".parquet")) {
               // Checkpoint Parquet stores add-file statistics and is scanned as checkpoint metadata,
               // separately from ordinary table data files.
-              val frame = spark.read.parquet(pathText)
+              val frame = spark.read.parquet(SparkPhysicalLocation.resolve(file.getPath.toUri.toASCIIString))
               deltaParquetVerdict(pathText, containsKeyReferenceInDataFrame(frame, keyId))
             } else if (pathText.endsWith(".json") && pathText.contains("_delta_log")) {
               val source = scala.io.Source.fromInputStream(fs.open(file.getPath), "UTF-8")
@@ -320,8 +364,8 @@ private[analytics] object AnalyticsKeyRetirement {
               } finally source.close()
             } else ScanResult(0L)
           }
-          if (io.delta.tables.DeltaTable.isDeltaTable(spark, tablePath)) {
-            val current = spark.read.format("delta").load(tablePath)
+          if (io.delta.tables.DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(tablePath))) {
+            val current = spark.read.format("delta").load(SparkPhysicalLocation.resolve(tablePath))
             if (containsKeyReferenceInDataFrame(current, keyId))
               files.copy(blockers = files.blockers.append("a current Delta snapshot references the retiring key"))
             else files
@@ -382,13 +426,84 @@ private[analytics] object AnalyticsKeyRetirement {
     AnalyticsCollections.OutboxSubjectFences
   )
 
+  private def scanCheckpoints(spark: SparkSession, inventory: AnalyticsStorageInventory, keyId: String): ScanResult =
+    inventory.surfaces.filter(_.kind == AnalyticsStorageKind.SparkCheckpoint).foldLeft(ScanResult(0L)) {
+      (total, surface) =>
+        val root = new Path(SparkPhysicalLocation.resolve(surface.location))
+        val fs = root.getFileSystem(spark.sparkContext.hadoopConfiguration)
+        val scanned =
+          if (!fs.exists(root)) ScanResult(0L, Chain.one("inventoried streaming checkpoint is unavailable"))
+          else
+            visitFiles(fs, root) { status =>
+              val name = status.getPath.getName
+              if (name.endsWith(".crc")) ScanResult(0L)
+              else {
+                val source = scala.io.Source.fromInputStream(fs.open(status.getPath), "UTF-8")
+                try {
+                  val unsafe = source.getLines().exists { line =>
+                    line.contains(keyId + "_") || ForbiddenCheckpointFields.exists(line.contains)
+                  }
+                  if (unsafe || status.getPath.toString.contains("/state/"))
+                    ScanResult(1L, Chain.one("streaming checkpoint contains subject material or unsupported state"))
+                  else ScanResult(1L)
+                } finally source.close()
+              }
+            }
+        ScanResult(total.count + scanned.count, total.blockers ++ scanned.blockers)
+    }
+
+  private[analytics] def validLineageControl(name: String, body: String): Boolean = {
+    val parts = body.split("\n", -1).toVector
+    val streamId = parts.dropRight(4).mkString("\n")
+    if (name.matches("[a-f0-9]{64}\\.query-id"))
+      scala.util.Try(java.util.UUID.fromString(body).toString == body).getOrElse(false)
+    else if (name.matches("[a-f0-9]{64}\\.(identity|established)"))
+      parts.size >= 5 && streamId.trim.nonEmpty && parts.takeRight(4).forall(_.matches("[a-f0-9]{64}")) &&
+      com.example.hiring.analytics.domain.AnalyticsDigest
+        .sha256Hex(streamId.getBytes(java.nio.charset.StandardCharsets.UTF_8)) == name.take(64)
+    else false
+  }
+
+  private val MaximumLineageControlBytes = 4096
+  private val ForbiddenCheckpointFields =
+    Vector("\"payload\"", "\"rawValue\"", "\"actorId\"", "\"candidateId\"", "\"subjectToken\"", "\"subjectTokens\"")
+
+  private def scanLineageControls(spark: SparkSession, paths: AnalyticsLakehousePaths): ScanResult = {
+    val root = new Path(SparkPhysicalLocation.resolve(paths.streamingLineage))
+    val fs = root.getFileSystem(spark.sparkContext.hadoopConfiguration)
+    if (!fs.exists(root)) ScanResult(0L)
+    else
+      visitFiles(fs, root) { status =>
+        val name = status.getPath.getName
+        if (name.endsWith(".crc")) ScanResult(0L)
+        else {
+          val input = fs.open(status.getPath)
+          val body = try
+            new String(input.readNBytes(MaximumLineageControlBytes + 1), java.nio.charset.StandardCharsets.UTF_8)
+          finally input.close()
+          val identity = new Path(root, name.take(64) + ".identity")
+          val query = new Path(root, name.take(64) + ".query-id")
+          val complete = !name.endsWith(".established") || (fs.exists(identity) && fs.exists(query))
+          val paired = !name.endsWith(".query-id") || fs.exists(identity)
+          if (
+            body
+              .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+              .length <= MaximumLineageControlBytes && validLineageControl(name, body) && complete && paired
+          )
+            ScanResult(1L)
+          else ScanResult(1L, Chain.one("permanent streaming lineage metadata is malformed or incomplete"))
+        }
+      }
+  }
+
   private val MaximumWriterEvidenceAge = java.time.Duration.ofHours(1)
 
   private def scanMongo[F[_]: Async](
       database: MongoDatabase,
       keyId: String,
       now: Instant,
-      streams: MongoPublisherStream
+      streams: MongoPublisherStream,
+      inventoriedCollections: Vector[String]
   ): F[ScanResult] = {
     streams.stream[F, String](database.listCollectionNames()).compile.toVector.map(_.toSet).flatMap { names =>
       val missing = MongoCollections.toSet -- names
@@ -397,8 +512,8 @@ private[analytics] object AnalyticsKeyRetirement {
           Chain.one("one or more required Mongo report, erasure, or replay collections are unavailable")
         else Chain.empty[String]
       val initial = MongoScanState(0L, Set.empty, missingBlockers)
-      MongoCollections
-        .filter(names.contains)
+      val optionalControls = inventoriedCollections.filterNot(MongoCollections.contains).filter(names.contains)
+      (MongoCollections.filter(names.contains) ++ optionalControls)
         .foldM(initial) { (state, collectionName) =>
           streams
             .stream {
@@ -492,10 +607,10 @@ private[analytics] object AnalyticsKeyRetirement {
 
   private def validateRegistry(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): Chain[String] =
     try {
-      if (!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.hmacKeyRegistry)) {
+      if (!io.delta.tables.DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))) {
         Chain.one("permanent HMAC continuity registry is missing")
       } else {
-        val registry = spark.read.format("delta").load(paths.hmacKeyRegistry)
+        val registry = spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
         if (!Set("keyId", "verifier").subsetOf(registry.columns.toSet))
           Chain.one("permanent HMAC continuity registry schema is malformed")
         else {

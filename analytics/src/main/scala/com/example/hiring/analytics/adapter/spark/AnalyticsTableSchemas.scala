@@ -6,9 +6,6 @@ import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.types.*
 
-import java.net.URI
-import java.nio.file.Paths
-
 /** Column order and types shared by projections, Delta initialization, and persisted-schema checks. */
 private[analytics] object AnalyticsTableSchemas {
   type Shape = Vector[(String, DataType)]
@@ -113,16 +110,7 @@ private[analytics] object AnalyticsTableSchemas {
       shape.map { case (name, dataType) => name -> dataType.simpleString }
 
   def createOrValidate(spark: SparkSession, path: String, shape: Shape, raw: Boolean = false): Unit = {
-    val location =
-      if (path.startsWith("file:")) {
-        val uri = new URI(path)
-        require(
-          uri.getScheme == "file" && !uri.isOpaque && uri.getAuthority == null && uri.getQuery == null &&
-            uri.getFragment == null && Option(uri.getPath).exists(_.startsWith("/")),
-          "Delta table location must be a local absolute file URI"
-        )
-        Paths.get(uri).toString
-      } else path
+    val location = SparkPhysicalLocation.resolve(path)
     val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(struct(shape))
     (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
     val actual = spark.read.format("delta").load(location).schema

@@ -53,7 +53,16 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
         Map[(String, Int), Long],
         F[Unit]
     ) => F[Unit],
-    resolveSourceIdentity: () => F[(String, String)]
+    resolveSourceIdentity: () => F[(String, String)],
+    maintenance: Option[
+      (
+          StreamingActivationIdentity,
+          com.example.hiring.analytics.domain.StreamingLineage,
+          () => F[Vector[com.example.hiring.analytics.service.streaming.StreamingCheckpointBatch]],
+          F[Unit]
+      ) => Resource[F, F[Unit]]
+    ] = None,
+    queryFactoryOverride: Option[StreamingQueryFactory[F]] = None
 ) {
   private val effect = Async[F]
   private val activeCallbackCancellation = new AtomicReference[Option[() => Future[Unit]]](None)
@@ -84,15 +93,22 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
               )
               .flatMap { grantExpiresAt =>
                 Dispatcher.parallel[F].flatMap { dispatcher =>
-                  Resource.make(start(dispatcher, identity))(stop).flatMap { query =>
-                    Resource.eval(
-                      effect
-                        .race(
-                          effect.interruptibleMany(query.awaitTermination()).void,
-                          failAtGrantExpiry(grantExpiresAt)
-                        )
-                        .void
+                  val factory = queryFactoryOverride.getOrElse(new StreamingQueryFactory[F] {
+                    override def start: F[StreamingQueryHandle[F]] =
+                      SparkHiringAnalyticsStream.this.start(dispatcher, identity).map { query =>
+                        new StreamingQueryHandle[F] {
+                          override def awaitTermination: F[Unit] =
+                            effect.interruptibleMany(query.awaitTermination()).void
+                          override def stop: F[Unit] = SparkHiringAnalyticsStream.this.stop(query)
+                        }
+                      }
+                  })
+                  Resource.eval(lineageFor(identity)).flatMap { lineage =>
+                    val authorize = activationGate.requireAuthorized(identity, settings.activationGrantId).void
+                    val background = maintenance.fold(Resource.pure[F, F[Unit]](effect.never[Unit]))(run =>
+                      run(identity, lineage, () => checkpointBatches, authorize)
                     )
+                    StreamingQueryLifecycle.resource(factory, failAtGrantExpiry(grantExpiresAt), background)
                   }
                 }
               }
@@ -101,11 +117,8 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
 
   private def streamOwnerResource: Resource[F, Unit] =
     Resource
-      .make(
-        effect
-          .fromEither(AnalyticsStreamingRegistry.ownerLockRoot(lakehouseRoot))
-          .flatMap(ownerRoot => lakehouseLock.resource(ownerRoot).allocated)
-      )(_._2)
+      .eval(effect.fromEither(AnalyticsStreamingRegistry.ownerLockRoot(lakehouseRoot)))
+      .flatMap(ownerRoot => lakehouseLock.resource(ownerRoot))
       .void
 
   private def start(dispatcher: Dispatcher[F], activationIdentity: StreamingActivationIdentity): F[StreamingQuery] =
@@ -139,7 +152,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           .load()
           .writeStream
           .queryName(settings.streamId)
-          .option("checkpointLocation", settings.checkpointLocation)
+          .option("checkpointLocation", SparkPhysicalLocation.resolve(settings.checkpointLocation))
           .trigger(Trigger.ProcessingTime(settings.triggerInterval))
           .foreachBatch((frame: DataFrame, batchNumber: Long) =>
             runCallback(dispatcher, frame, batchNumber, lineage, activationIdentity, queryIdentityReady)
@@ -188,11 +201,12 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   private def validateCheckpointIdentity(activationIdentity: StreamingActivationIdentity): F[Boolean] =
     execution
       .either {
-        val checkpoint = new Path(settings.checkpointLocation)
+        val checkpoint = new Path(SparkPhysicalLocation.resolve(settings.checkpointLocation))
         val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
         val identityFile = new Path(checkpoint, "_hiring_stream_identity")
         val expected = activationIdentity.canonical
-        val lineageDirectory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+        val lineageDirectory =
+          new Path(new Path(SparkPhysicalLocation.resolve(lakehouseRoot)), "control/streaming_lineage")
         val lineageFile = lineagePath(lineageDirectory, activationIdentity)
         val establishedFile = establishedPath(lineageDirectory, activationIdentity)
         val queryIdentityFile = queryIdentityPath(lineageDirectory, activationIdentity)
@@ -288,7 +302,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
 
   private def checkpointBatches: F[Vector[com.example.hiring.analytics.service.streaming.StreamingCheckpointBatch]] =
     execution.either {
-      val checkpoint = new Path(settings.checkpointLocation)
+      val checkpoint = new Path(SparkPhysicalLocation.resolve(settings.checkpointLocation))
       val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
       SparkCheckpointLogs.read(
         fileSystem,
@@ -301,7 +315,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   private def registerCheckpointLineage(identity: StreamingActivationIdentity): F[Unit] =
     execution
       .either {
-        val checkpoint = new Path(settings.checkpointLocation)
+        val checkpoint = new Path(SparkPhysicalLocation.resolve(settings.checkpointLocation))
         val fileSystem = checkpoint.getFileSystem(spark.sparkContext.hadoopConfiguration)
         val metadata = new Path(checkpoint, "metadata")
         val offsets = new Path(checkpoint, "offsets")
@@ -319,8 +333,9 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       .flatMap(_ => persistLineage(identity) *> persistEstablished(identity))
 
   private def persistEstablished(identity: StreamingActivationIdentity): F[Unit] = execution.either {
-    val fileSystem = new Path(lakehouseRoot).getFileSystem(spark.sparkContext.hadoopConfiguration)
-    val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+    val fileSystem =
+      new Path(SparkPhysicalLocation.resolve(lakehouseRoot)).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val directory = new Path(new Path(SparkPhysicalLocation.resolve(lakehouseRoot)), "control/streaming_lineage")
     val file = establishedPath(directory, identity)
     val expected = identity.canonical
     try {
@@ -354,8 +369,9 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   }
 
   private def persistQueryIdentity(identity: StreamingActivationIdentity, queryId: String): F[Unit] = execution.either {
-    val fileSystem = new Path(lakehouseRoot).getFileSystem(spark.sparkContext.hadoopConfiguration)
-    val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+    val fileSystem =
+      new Path(SparkPhysicalLocation.resolve(lakehouseRoot)).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val directory = new Path(new Path(SparkPhysicalLocation.resolve(lakehouseRoot)), "control/streaming_lineage")
     val file = queryIdentityPath(directory, identity)
     val expected = scala.util.Try(java.util.UUID.fromString(queryId).toString).toOption.toRight(invalidCheckpoint)
     expected.flatMap { normalized =>
@@ -391,9 +407,10 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   }
 
   private def persistLineage(identity: StreamingActivationIdentity): F[Unit] = execution.either {
-    val fileSystem = new Path(settings.checkpointLocation).getFileSystem(spark.sparkContext.hadoopConfiguration)
+    val fileSystem = new Path(SparkPhysicalLocation.resolve(settings.checkpointLocation))
+      .getFileSystem(spark.sparkContext.hadoopConfiguration)
     val expected = identity.canonical
-    val directory = new Path(new Path(lakehouseRoot), "control/streaming_lineage")
+    val directory = new Path(new Path(SparkPhysicalLocation.resolve(lakehouseRoot)), "control/streaming_lineage")
     val file = lineagePath(directory, identity)
     try {
       if (!fileSystem.mkdirs(directory) && !fileSystem.exists(directory)) Left(invalidCheckpoint)

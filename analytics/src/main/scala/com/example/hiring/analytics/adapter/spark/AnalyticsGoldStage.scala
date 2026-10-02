@@ -48,7 +48,8 @@ private[spark] object AnalyticsGoldStage {
   ): F[Unit] = lakehouse[F, Unit](
     {
       Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
-        if (DeltaTable.isDeltaTable(spark, path)) DeltaTable.forPath(spark, path).delete()
+        if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
+          DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).delete()
       }
     },
     sparkExecution
@@ -108,9 +109,9 @@ private[spark] object AnalyticsGoldStage {
   ): F[Vector[Row]] =
     lakehouseEither[F, Vector[Row]](
       {
-        if (!DeltaTable.isDeltaTable(spark, path)) Right(Vector.empty)
+        if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Right(Vector.empty)
         else {
-          val frame = spark.read.format("delta").load(path)
+          val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
           validateOutputSchema(frame.schema, expected).map(_ => frame.limit(MaximumReportRows + 1).collect().toVector)
         }
       },
@@ -126,7 +127,11 @@ private[spark] object AnalyticsGoldStage {
 
   private def write[F[_]: Async](frame: DataFrame, path: String, sparkExecution: SparkExecution[F]): F[Unit] =
     lakehouse[F, Unit](
-      frame.write.format("delta").mode("overwrite").option("overwriteSchema", "true").save(path),
+      frame.write
+        .format("delta")
+        .mode("overwrite")
+        .option("overwriteSchema", "true")
+        .save(SparkPhysicalLocation.resolve(path)),
       sparkExecution
     )
 

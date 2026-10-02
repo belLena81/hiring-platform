@@ -17,6 +17,7 @@ import com.example.hiring.analytics.domain.{AnalyticsOffset, AnalyticsPartition,
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
+import com.example.hiring.analytics.service.batch.AnalyticsStorageInventory
 import com.example.hiring.analytics.service.erasure.KafkaRetentionBarrier
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 
@@ -43,7 +44,8 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
     streams: MongoPublisherStream,
     clock: Clock[F],
     mutex: AnalyticsLakehouseLock[F],
-    sparkExecution: SparkBlockingExecution[F]
+    sparkExecution: SparkBlockingExecution[F],
+    storageInventory: Option[AnalyticsStorageInventory] = None
 ) {
   private val lakehouseExecution = new LakehouseOperation[F](sparkExecution)
   private val preparations = new MongoHmacKeyRetirementPreparationStore[F](database, streams)
@@ -260,7 +262,7 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       _ <- Async[F].raiseUnless(passed)(
         AnalyticsError.InvalidConfiguration("Kafka retention has not passed the captured retirement barrier")
       )
-      now <- clock.realTimeInstant
+      now <- clock.realTimeInstant.map(HmacKeyRetirementCoordinator.persistedAuthorizationTime)
       dataDeadline = preparation.capturedAt.plus(
         java.time.Duration.ofMillis(operational.retention.deltaVacuumSafety.toMillis)
       )
@@ -317,7 +319,8 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
         writers,
         now,
         streams,
-        sparkExecution
+        sparkExecution,
+        storageInventory
       )
       _ <- verifyCapturedPhysicalPaths(expectedPresent = false)
       summary <- Async[F].fromEither(
@@ -389,4 +392,11 @@ private[analytics] final class HmacKeyRetirementCoordinator[F[_]: Async](
       summary.deltaFilesScanned.toString,
       summary.mongoDocumentsScanned.toString
     ).mkString("\n")
+}
+
+private[analytics] object HmacKeyRetirementCoordinator {
+
+  /** Mongo BSON Date preserves milliseconds; normalize before constructing the immutable readback record. */
+  def persistedAuthorizationTime(at: java.time.Instant): java.time.Instant =
+    at.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
 }

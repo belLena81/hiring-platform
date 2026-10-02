@@ -281,6 +281,13 @@ final class AnalyticsErasureWorkerSpec extends CatsEffectSuite {
         IO.pure(AnalyticsReportOutput(asOf, Vector.empty, None, Vector.empty))
     }
     val publisher = new AnalyticsReportPublisher[IO] {
+      override def reservePinned(
+          runId: RunId,
+          rangeFingerprint: RangeFingerprint,
+          now: Instant
+      ): IO[AnalyticsReportReservation] =
+        reserve(runId, rangeFingerprint, now)
+
       override def reserve(
           runId: RunId,
           rangeFingerprint: RangeFingerprint,

@@ -121,7 +121,7 @@ final class MongoUserRepository(
       .repositoryGuard(diagnostics, "MongoUserRepository.initialized")(
         RepositoryIO
           .lift(registry.flatMap(_.find(Filters.eq(MongoFields.Id, "user-account-registry")).first))
-          .map(document => document.exists(_.getString(MongoFields.State, "") == "Initialized"))
+          .map(document => document.exists(value => Option(value.getString(MongoFields.State)).contains("Initialized")))
       )(_ => Left(RepositoryError.Unavailable))
 
   override def bootstrap(

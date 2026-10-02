@@ -342,26 +342,26 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       jobs: List[RankedJob] = Nil,
       candidates: List[RankedCandidate] = Nil
   ) extends SemanticSearchRepository {
-    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.pure(Right(jobs)) )
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
 
-    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.pure(Right(jobs)) )
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
 
-    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.pure(Right(candidates)) )
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(candidates)))
   }
 
   private final case class RecordingSearchRepository(
       queries: Ref[IO, Vector[VectorSearchQuery]]
   ) extends SemanticSearchRepository {
-    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      queries.update(_ :+ query).as(Right(Nil)) )
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(queries.update(_ :+ query).as(Right(Nil)))
 
-    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      queries.update(_ :+ query).as(Right(Nil)) )
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(queries.update(_ :+ query).as(Right(Nil)))
 
-    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      queries.update(_ :+ query).as(Right(Nil)) )
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(queries.update(_ :+ query).as(Right(Nil)))
   }
 }

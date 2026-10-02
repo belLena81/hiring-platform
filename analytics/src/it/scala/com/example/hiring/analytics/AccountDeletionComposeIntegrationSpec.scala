@@ -22,6 +22,9 @@ import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{array_contains, col}
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType, TimestampType}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
+import org.apache.kafka.clients.admin.{Admin, AlterConfigOp, ConfigEntry, OffsetSpec}
+import org.apache.kafka.common.TopicPartition
+import org.apache.kafka.common.config.ConfigResource
 import org.apache.kafka.common.errors.{InvalidProducerEpochException, ProducerFencedException}
 import org.apache.kafka.common.serialization.StringSerializer
 
@@ -42,8 +45,9 @@ import scala.util.Using
 
 /** Live API-to-Compose-worker proof on a disposable task-scoped Mongo/Kafka/Delta stack. */
 final class AccountDeletionComposeIntegrationSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 10.minutes
+  override val munitTimeout: FiniteDuration = 20.minutes
   private val enabled = sys.env.get("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_ENABLED").contains("true")
+  private val completionEnabled = sys.env.get("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_COMPLETE").contains("true")
 
   private def required(name: String): String =
     sys.env.get(name).filter(_.nonEmpty).getOrElse(fail(s"$name is required for Compose deletion proof"))
@@ -190,6 +194,105 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       case _: InvalidProducerEpochException => true
       case _                                => false
     }
+
+  private def passShortKafkaRetention(kafka: String, topic: String, barrier: Document, nonce: String): Unit = {
+    val settings = new Properties()
+    settings.put("bootstrap.servers", kafka)
+    KafkaClientProperties
+      .clientProperties(
+        KafkaConnection(
+          kafka,
+          Some("broker"),
+          Some(required("KAFKA_BROKER_PASSWORD")),
+          KafkaSecurityProtocol.SaslPlaintext,
+          true
+        )
+      )
+      .fold(error => fail(error.getMessage), _.foreach { case (key, value) => settings.put(key, value) })
+    val admin = Admin.create(settings)
+    try {
+      val resource = new ConfigResource(ConfigResource.Type.TOPIC, topic)
+      val changes = Vector(
+        "retention.ms" -> "60000",
+        "retention.bytes" -> "-1",
+        "cleanup.policy" -> "delete",
+        "segment.bytes" -> "16384",
+        "segment.ms" -> "1000"
+      )
+        .map { case (key, value) => new AlterConfigOp(new ConfigEntry(key, value), AlterConfigOp.OpType.SET) }
+      admin
+        .incrementalAlterConfigs(Map(resource -> changes.asJava).asJava)
+        .all()
+        .get(30, java.util.concurrent.TimeUnit.SECONDS)
+      val partitions = barrier.getList("partitions", classOf[Document]).asScala.toVector
+      Using.resource(heldPublisherTransaction(kafka, "hiring-publisher-deletion-tail-" + nonce)) { producer =>
+        partitions.foreach { partition =>
+          (0 until 4).foreach { index =>
+            val value = new Document("eventId", UUID.randomUUID().toString)
+              .append("eventType", "JOB_CREATED")
+              .append("occurredAt", Instant.now().toString)
+              .append("aggregateType", "Job")
+              .append("aggregateId", UUID.randomUUID().toString)
+              .append("actorId", UUID.randomUUID().toString)
+              .append("payload", new Document("padding", "t" * 12000))
+              .toJson
+            val metadata = producer
+              .send(
+                new ProducerRecord[String, String](
+                  topic,
+                  partition.getInteger("number"),
+                  "unrelated-retention-tail",
+                  value
+                )
+              )
+              .get(30, java.util.concurrent.TimeUnit.SECONDS)
+            assert(metadata.offset() >= partition.getLong("endOffsetExclusive"))
+            producer.commitTransaction()
+            if (index < 3 || partition != partitions.last) producer.beginTransaction()
+          }
+        }
+      }
+      eventually(
+        {
+          val offsets = admin
+            .listOffsets(
+              partitions
+                .map(partition => new TopicPartition(topic, partition.getInteger("number")) -> OffsetSpec.earliest())
+                .toMap
+                .asJava
+            )
+            .all()
+            .get(30, java.util.concurrent.TimeUnit.SECONDS)
+          partitions.forall(partition =>
+            offsets.get(new TopicPartition(topic, partition.getInteger("number"))).offset() >=
+              partition.getLong("endOffsetExclusive")
+          )
+        },
+        3.minutes
+      )(identity)
+      println("ACCOUNT_DELETION_ACTUAL_KAFKA_RETENTION_PASSED allCapturedPartitions=true retentionMillis=60000")
+    } finally admin.close()
+  }
+
+  private def coordinateCalendarRestart(subjectId: String): Unit = {
+    val path = Path.of(required("HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_STATE_FILE")).toAbsolutePath.normalize()
+    assert(
+      !Files.isSymbolicLink(path.getParent) && Files.isDirectory(path.getParent),
+      "coordination parent must be real"
+    )
+    assert(path.getParent.getFileName.toString == "config" && path.getParent.getParent.getFileName.toString == ".local")
+    assert(!Files.exists(path), "restart coordination must not overwrite prior state")
+    val temporary = Files.createTempFile(
+      path.getParent,
+      path.getFileName.toString,
+      ".tmp",
+      PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------"))
+    )
+    try {
+      Files.writeString(temporary, subjectId + "\n", StandardCharsets.UTF_8)
+      Files.move(temporary, path, java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+    } finally Files.deleteIfExists(temporary)
+  }
 
   private def seedAttributedDeltaRows(subjectId: String): (String, String) = {
     val nonce = UUID.randomUUID().toString
@@ -338,7 +441,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
             .map(_.asScala.toVector)
         )(_.exists(_.nonEmpty)).get
         val heldTransactionalId = registeredIds.last
-        val (purgedRequest, deletedFence) = Using.resource(
+        val (purgedRequest, deletedFence, receiptId) = Using.resource(
           heldPublisherTransaction(kafka, heldTransactionalId)
         ) { producer =>
           producer.send(new ProducerRecord(topic, s"held-deletion-proof-$claimEventId", "{}")).get()
@@ -374,7 +477,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
           )
           val deletedFence =
             database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first()
-          (purgedRequest, deletedFence)
+          (purgedRequest, deletedFence, receiptId)
         }
         assert(
           java.lang.Boolean.TRUE == deletedFence.getBoolean("deleted"),
@@ -425,12 +528,80 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
             "unrelated subject row must remain in current snapshot"
           )
         } finally spark.stop()
+        if (completionEnabled) {
+          passShortKafkaRetention(kafka, topic, barrier, nonce)
+          val purgedAt = purgedRequest.getDate("deltaPurgedAt").toInstant
+          eventually(Instant.now(), 2.minutes)(now => !now.isBefore(purgedAt.plusSeconds(60)))
+          coordinateCalendarRestart(subjectId)
+          eventually(deletionStatus(api, receiptId, token), 10.minutes)(_ == "COMPLETE")
+          val completed =
+            database.getCollection("analytics_erasure_requests").find(Filters.eq("_id", subjectId)).first()
+          assertEquals(completed.getString("state"), "Complete")
+          assertEquals(completed.getString("phase"), ErasurePhase.ReportPublished.toString)
+          assertEquals(
+            database.getCollection("analytics_erasure_completions").countDocuments(Filters.eq("_id", subjectId)),
+            1L
+          )
+          assertEquals(
+            database
+              .getCollection("analytics_report_control")
+              .find(Filters.eq("_id", "analytics-report"))
+              .first()
+              .getString("state"),
+            "Published"
+          )
+          deltaEvidence.foreach { entry =>
+            val containerPath = URI.create(entry.getString("filePath")).getPath
+            assert(
+              containerPath.startsWith("/var/lib/hiring-analytics/"),
+              "captured file must belong to isolated mount"
+            )
+            val local =
+              Path.of(analyticsDir).resolve(containerPath.stripPrefix("/var/lib/hiring-analytics/")).normalize()
+            assert(local.startsWith(Path.of(analyticsDir)), "captured file must stay within isolated data")
+            assert(!Files.exists(local), "captured Delta data/log path must be physically absent")
+          }
+          assert(
+            deltaEvidence.exists(_.getString("filePath").contains("/_delta_log/")),
+            "log evidence must be populated"
+          )
+          assert(
+            deltaEvidence.exists(!_.getString("filePath").contains("/_delta_log/")),
+            "data evidence must be populated"
+          )
+          val finalSpark = SparkSession
+            .builder()
+            .master("local[1]")
+            .appName("AccountDeletionCompletionVerification")
+            .config("spark.ui.enabled", "false")
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+            .getOrCreate()
+          try {
+            val finalPaths = IntegrationAnalyticsLakehousePaths.unsafe(
+              new File(analyticsDir).toURI.toString.stripSuffix("/") + "/lakehouse"
+            )
+            val surviving = finalSpark.read.format("delta").load(finalPaths.bronze)
+            assertEquals(surviving.filter(array_contains(col("subjectTokens"), subjectToken)).count(), 0L)
+            assertEquals(
+              surviving.filter(array_contains(col("subjectTokens"), controlToken)).count(),
+              1L,
+              "unrelated row must survive actual VACUUM and accelerated log cleanup"
+            )
+          } finally finalSpark.stop()
+          println(
+            s"ACCOUNT_DELETION_COMPLETE authenticatedOwnerReceipt=true completionCount=1 report=Published exactCapturedPathsAbsent=${deltaEvidence.size} deltaCalendar=simulated kafkaAndDataRetention=real"
+          )
+        }
         val phase = database
           .getCollection("analytics_erasure_requests")
           .find(Filters.eq("_id", subjectId))
           .first()
           .getString("phase")
-        assertEquals(phase, ErasurePhase.DeltaPurged.toString)
+        assertEquals(
+          phase,
+          if (completionEnabled) ErasurePhase.ReportPublished.toString else ErasurePhase.DeltaPurged.toString
+        )
       } finally client.close()
     }
   }

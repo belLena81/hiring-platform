@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.port.{
   MutationWriteOutcome,
   MutationWriteContext,
   RepositoryIO,
-  SearchSessionRepository,
+  SearchSessionRepository
 }
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
@@ -192,27 +192,28 @@ class OperationalTelemetryServiceSpec extends CatsEffectSuite {
       sessions: Ref[IO, Map[UUID, SearchSession]],
       storedEvents: Ref[IO, Vector[OperationalEventEnvelope]]
   ) extends SearchSessionRepository {
-    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      IO.defer {
-      val _ = event
-      sessions.update(_ + (session.id -> session)).as(Right(()))
-      }
-    )
+    override def save(session: SearchSession, event: OperationalEventEnvelope): RepositoryIO[Unit] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
+        IO.defer {
+          val _ = event
+          sessions.update(_ + (session.id -> session)).as(Right(()))
+        }
+      )
 
-    override def find(id: UUID): RepositoryIO[Option[SearchSession]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      sessions.get.map(values => Right(values.get(id))) )
+    override def find(id: UUID): RepositoryIO[Option[SearchSession]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(sessions.get.map(values => Right(values.get(id))))
 
     override def recordInteraction(
         event: OperationalEventEnvelope,
         context: MutationWriteContext
-    ): RepositoryIO[Boolean] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      storedEvents.modify { events =>
+    ): RepositoryIO[Boolean] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(storedEvents.modify { events =>
         events.find(_.eventId == event.eventId) match {
           case Some(existing) if sameLogicalEvent(existing, event) => events -> Right(false)
           case Some(_)                                             => events -> Left(RepositoryError.Conflict)
           case None                                                => (events :+ event) -> Right(true)
         }
-      } )
+      })
 
     def events: IO[Vector[OperationalEventEnvelope]] =
       storedEvents.get

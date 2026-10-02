@@ -37,10 +37,19 @@ for s in ss:s.close()')
 config="$repo_root/.local/config/$project.conf"
 log="$repo_root/.local/logs/account-deletion-compose-proof/$project.log"
 compose=(docker compose --profile analytics-erasure -f compose.yaml -f compose.analytics-account-deletion-proof.yaml -p "$project")
+completion="${HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_COMPLETE:-false}"
+[[ "$completion" == true || "$completion" == false ]] || { printf 'Completion switch must be true or false.\n' >&2; exit 2; }
+if [[ "$completion" == true ]]; then
+  compose=(docker compose --profile analytics-erasure -f compose.yaml -f compose.analytics-account-deletion-proof.yaml \
+    -f compose.analytics-account-deletion-completion.yaml -p "$project")
+fi
 api_pid=""
+proof_pid=""
+state_file="$repo_root/.local/config/$project.restart"
 cleanup() {
   local result=$?
   trap - EXIT
+  if [[ -n "$proof_pid" ]]; then kill -- "-$proof_pid" 2>/dev/null || true; wait "$proof_pid" 2>/dev/null || true; fi
   if [[ -n "$api_pid" ]]; then kill -- "-$api_pid" 2>/dev/null || true; wait "$api_pid" 2>/dev/null || true; fi
   if (( result == 0 )); then
     "${compose[@]}" down --remove-orphans >/dev/null 2>&1 || true
@@ -68,6 +77,7 @@ cleanup() {
     printf 'Proof failed; isolated containers and the task-scoped Delta directory for %s were stopped and retained for inspection.\n' "$project" >&2
   fi
   rm -f -- "$config"
+  rm -f -- "$state_file"
   exit "$result"
 }
 trap cleanup EXIT
@@ -83,6 +93,8 @@ export HIRING_ANALYTICS_HMAC_PREVIOUS_KEY_ID
 export HIRING_ANALYTICS_HMAC_PREVIOUS_SECRET_BASE64
 export KAFKA_TOPIC="$topic"
 export KAFKA_FENCER_PASSWORD
+export KAFKA_BROKER_PASSWORD
+"${compose[@]}" build analytics-erasure-worker
 "${compose[@]}" up -d --wait mongodb kafka kafka-acl-init
 
 cat > "$config" <<EOF
@@ -126,4 +138,35 @@ export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_API_URL="$api_url"
 export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_MONGO_URI="$MONGODB_URI"
 export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_KAFKA="127.0.0.1:$kafka_port"
 export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_ANALYTICS_DIR="$proof_data_dir"
-(cd analytics && unset JAVA_TOOL_OPTIONS && sbt 'IntegrationTest / testOnly *AccountDeletionComposeIntegrationSpec')
+export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_COMPLETE="$completion"
+export HIRING_ACCOUNT_DELETION_COMPOSE_PROOF_STATE_FILE="$state_file"
+if [[ "$completion" == false ]]; then
+  (cd analytics && unset JAVA_TOOL_OPTIONS && sbt 'IntegrationTest / testOnly *AccountDeletionComposeIntegrationSpec')
+else
+  [[ ! -e "$state_file" && ! -L "$state_file" ]] || { printf 'Restart coordination file already exists.\n' >&2; exit 1; }
+  git check-ignore -q "$state_file"
+  proof_log="$repo_root/.local/logs/account-deletion-compose-proof/$project-completion.log"
+  (cd analytics && unset JAVA_TOOL_OPTIONS && exec setsid sbt 'IntegrationTest / testOnly *AccountDeletionComposeIntegrationSpec') >"$proof_log" 2>&1 &
+  proof_pid=$!
+  coordinated=false
+  for _ in $(seq 1 600); do
+    if [[ -f "$state_file" && ! -L "$state_file" ]]; then coordinated=true; break; fi
+    kill -0 "$proof_pid" 2>/dev/null || { wait "$proof_pid"; printf 'Completion fixture exited before restart; inspect %s\n' "$proof_log" >&2; exit 1; }
+    sleep 1
+  done
+  [[ "$coordinated" == true && "$(stat -c '%u:%a' "$state_file")" == "$(id -u):600" ]] || {
+    printf 'No private restart coordination arrived; inspect %s\n' "$proof_log" >&2; exit 1;
+  }
+  read -r subject_id < "$state_file"
+  [[ "$subject_id" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || {
+    printf 'Restart identity is not a canonical synthetic UUID.\n' >&2; exit 1;
+  }
+  "${compose[@]}" stop analytics-erasure-worker
+  export HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID="$subject_id"
+  docker compose --profile analytics-erasure -f compose.yaml -f compose.analytics-account-deletion-proof.yaml \
+    -f compose.analytics-account-deletion-completion.yaml -f compose.analytics-erasure-calendar-proof.yaml \
+    -p "$project" up -d --no-deps analytics-erasure-worker
+  wait "$proof_pid"
+  proof_pid=""
+  printf 'Combined authenticated account deletion and physical completion proof passed; evidence: %s\n' "$proof_log"
+fi

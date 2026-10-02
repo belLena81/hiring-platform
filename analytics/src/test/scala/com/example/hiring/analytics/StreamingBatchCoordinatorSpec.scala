@@ -3,7 +3,11 @@ package com.example.hiring.analytics
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.hiring.analytics.domain.*
-import com.example.hiring.analytics.service.batch.{ActiveDeletionMarkerSource, AnalyticsReportPublicationReceipt}
+import com.example.hiring.analytics.service.batch.{
+  ActiveDeletionMarkerSource,
+  AnalyticsReportPublicationReceipt,
+  AnalyticsReportReservation
+}
 import com.example.hiring.analytics.service.streaming.*
 import munit.CatsEffectSuite
 
@@ -24,6 +28,7 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       )
     )
   )
+  private val reservation = AnalyticsReportReservation(right(RunId.from("stream-test")), prep.inputFingerprint, 0L, 1L)
   private val eventTime = Instant.parse("2026-09-29T12:00:00Z")
   private val expectedWatermark = eventTime.minusSeconds(24L * 60L * 60L)
 
@@ -72,12 +77,64 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     }
   }
 
+  test("recovery after a durable Silver write preserves the original eligible candidate under the same fence") {
+    val decision = StreamingDecisionRevision(
+      identity,
+      0L,
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      Some(expectedWatermark),
+      reservation
+    )
+    for {
+      state <- Ref.of[IO, FakeState](
+        FakeState(
+          journal = Map(identity -> JournalEntry(prep, decisions = Vector(decision))),
+          ingestionResult = StreamingIngestionResult.Ready(Vector.empty)
+        )
+      )
+      harness = new Harness(state)
+      result <- harness.coordinator.process(prep)
+      observed <- state.get
+    } yield {
+      assertEquals(result.candidateWatermark, Some(expectedWatermark))
+      assertEquals(observed.latestWatermark, Some(expectedWatermark))
+      assertEquals(observed.journal(identity).decisions, Vector(decision))
+    }
+  }
+
+  test("a superseded fence drops the original candidate when fresh assessment has no eligible contribution") {
+    val decision = StreamingDecisionRevision(
+      identity,
+      0L,
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      Some(expectedWatermark),
+      reservation
+    )
+    for {
+      state <- Ref.of[IO, FakeState](
+        FakeState(
+          journal = Map(identity -> JournalEntry(prep, ingestionCommitted = true, decisions = Vector(decision))),
+          publicationReceipt = AnalyticsReportPublicationReceipt.Superseded,
+          ingestionResult = StreamingIngestionResult.Ready(Vector.empty)
+        )
+      )
+      harness = new Harness(state)
+      result <- harness.coordinator.process(prep)
+      observed <- state.get
+    } yield {
+      assertEquals(result.candidateWatermark, None)
+      assertEquals(observed.latestWatermark, None)
+      assertEquals(observed.journal(identity).decisions.last.candidateWatermark, None)
+    }
+  }
+
   test("a current Mongo publication receipt completes Delta progress without rebuilding the report") {
     val decision = StreamingDecisionRevision(
       identity,
       0L,
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      Some(expectedWatermark)
+      Some(expectedWatermark),
+      reservation
     )
     val entry = JournalEntry(prep, ingestionCommitted = true, decisions = Vector(decision))
     for {
@@ -105,7 +162,8 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       identity,
       0L,
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      Some(expectedWatermark)
+      Some(expectedWatermark),
+      reservation
     )
     val entry = JournalEntry(prep, ingestionCommitted = true, decisions = Vector(decision))
     for {
@@ -210,6 +268,73 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     }
   }
 
+  test("generation drift with unchanged markers re-admits under a new pinned reservation") {
+    for {
+      state <- Ref.of[IO, FakeState](FakeState(supersedePublishCount = 1))
+      harness = new Harness(state)
+      result <- harness.coordinator.process(prep)
+      observed <- state.get
+    } yield {
+      assertEquals(result.outcome, StreamingTerminalOutcome.Published)
+      assertEquals(result.candidateWatermark, None)
+      assertEquals(observed.latestWatermark, None)
+      assertEquals(observed.journal(identity).decisions.map(_.revision), Vector(0L, 1L))
+      assertEquals(observed.journal(identity).decisions.map(_.publicationReservation.generation), Vector(0L, 1L))
+      assert(observed.events.indexOf("reserve-0") < observed.events.indexOf("assess-new"))
+    }
+  }
+
+  test("grant expiry after publication prevents watermark commit and checkpoint acknowledgement") {
+    for {
+      state <- Ref.of[IO, FakeState](FakeState(expireWhenPublished = true))
+      harness = new Harness(state)
+      authorization = state.get.flatMap(value =>
+        IO.raiseUnless(value.authorizationValid)(
+          com.example.hiring.analytics.errors.AnalyticsError.InvalidConfiguration("activation expired")
+        )
+      )
+      result <- harness.coordinator.process(prep, authorization).attempt
+      observed <- state.get
+    } yield {
+      assert(result.isLeft)
+      assertEquals(observed.latestWatermark, None)
+      assertEquals(observed.journal(identity).terminal, None)
+      assert(!observed.events.contains("callback-ack"))
+    }
+  }
+
+  test("grant expiry while reconciling a receipt prevents recovered watermark commit") {
+    val decision = StreamingDecisionRevision(
+      identity,
+      0L,
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      Some(expectedWatermark),
+      reservation
+    )
+    for {
+      state <- Ref.of[IO, FakeState](
+        FakeState(
+          journal = Map(identity -> JournalEntry(prep, ingestionCommitted = true, decisions = Vector(decision))),
+          publicationReceipt = AnalyticsReportPublicationReceipt.CurrentGeneration,
+          expireWhenMarkersRead = true
+        )
+      )
+      harness = new Harness(state)
+      authorization = state.get.flatMap(value =>
+        IO.raiseUnless(value.authorizationValid)(
+          com.example.hiring.analytics.errors.AnalyticsError.InvalidConfiguration("activation expired")
+        )
+      )
+      result <- harness.coordinator.process(prep, authorization).attempt
+      observed <- state.get
+    } yield {
+      assert(result.isLeft)
+      assertEquals(observed.latestWatermark, None)
+      assertEquals(observed.journal(identity).terminal, None)
+      assert(!observed.events.contains("callback-ack"))
+    }
+  }
+
   private final case class JournalEntry(
       preparation: StreamingInputPreparation,
       ingestionCommitted: Boolean = false,
@@ -229,7 +354,12 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
       markerReadCount: Int = 0,
       failIngestAfterWriteCount: Int = 0,
       ingestionResult: StreamingIngestionResult = StreamingIngestionResult.Ready(Vector(eventTime)),
-      publicationReceipt: AnalyticsReportPublicationReceipt = AnalyticsReportPublicationReceipt.Absent
+      publicationReceipt: AnalyticsReportPublicationReceipt = AnalyticsReportPublicationReceipt.Absent,
+      supersedePublishCount: Int = 0,
+      generation: Long = 0L,
+      authorizationValid: Boolean = true,
+      expireWhenMarkersRead: Boolean = false,
+      expireWhenPublished: Boolean = false
   )
 
   private final class Harness(state: Ref[IO, FakeState]) {
@@ -306,11 +436,23 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
     private val markers = new ActiveDeletionMarkerSource[IO] {
       override def activeSubjectTokens: IO[Vector[SubjectToken]] = state.modify { current =>
         val index = current.markerReadCount.min(current.markerSnapshots.size - 1)
-        current.copy(markerReadCount = current.markerReadCount + 1) -> current.markerSnapshots(index)
+        current.copy(
+          markerReadCount = current.markerReadCount + 1,
+          authorizationValid = current.authorizationValid && !current.expireWhenMarkersRead
+        ) -> current.markerSnapshots(index)
       }
     }
 
     private val stages = new StreamingBatchStages[IO] {
+      override def reservePublication(
+          preparation: StreamingInputPreparation,
+          revision: Long
+      ): IO[AnalyticsReportReservation] =
+        state.modify(s =>
+          s.copy(events = s.events :+ s"reserve-$revision") ->
+            reservation.copy(generation = s.generation, revision = revision + 1)
+        )
+
       override def publicationReceipt(
           preparation: StreamingInputPreparation,
           decision: StreamingDecisionRevision
@@ -355,7 +497,18 @@ final class StreamingBatchCoordinatorSpec extends CatsEffectSuite {
               s.copy(failPublishCount = s.failPublishCount - 1) -> Left(
                 new RuntimeException("injected publish interruption")
               )
-            else s.copy(events = s.events :+ "publish") -> Right(StreamingPublicationResult.Published)
+            else if (s.supersedePublishCount > 0)
+              s.copy(
+                supersedePublishCount = s.supersedePublishCount - 1,
+                generation = s.generation + 1,
+                ingestionResult = StreamingIngestionResult.Ready(Vector.empty)
+              ) -> Right(StreamingPublicationResult.Superseded)
+            else
+              s.copy(
+                events = s.events :+ "publish",
+                authorizationValid = s.authorizationValid && !s.expireWhenPublished
+              ) ->
+                Right(StreamingPublicationResult.Published)
           }
           .flatMap(_.liftTo[IO])
     }

@@ -18,7 +18,7 @@ import cats.data.EitherT
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
-import com.mongodb.client.model.{Filters, Projections, UpdateOptions, Updates}
+import com.mongodb.client.model.{Filters, Projections, UpdateOptions, Updates, Indexes, IndexOptions}
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
@@ -148,12 +148,20 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     } yield updatedValue.generation -> revision
 
   override def reserve(runId: RunId, rangeFingerprint: RangeFingerprint, now: Instant): F[AnalyticsReportReservation] =
-    rethrow(reserveResult(runId, rangeFingerprint, now))
+    rethrow(reserveResult(runId, rangeFingerprint, now, refresh = true))
+
+  override def reservePinned(
+      runId: RunId,
+      rangeFingerprint: RangeFingerprint,
+      now: Instant
+  ): F[AnalyticsReportReservation] =
+    rethrow(reserveResult(runId, rangeFingerprint, now, refresh = false))
 
   private def reserveResult(
       runId: RunId,
       rangeFingerprint: RangeFingerprint,
-      now: Instant
+      now: Instant,
+      refresh: Boolean
   ): Result[AnalyticsReportReservation] = withCollections { collections =>
     lift(
       collections.reservations
@@ -167,7 +175,10 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             val existing = record.reservation
             if (existing.rangeFingerprint != rangeFingerprint)
               reject(AnalyticsError.RunIdRangeConflict(runId.value))
-            else if (record.state != "Reserved") EitherT.pure[F, AnalyticsError](existing)
+            else if (!refresh && previous.expiresAt.nonEmpty)
+              reject(AnalyticsError.InvalidConfiguration("pinned publication reservation has an unsafe expiry"))
+            else if (!refresh || previous.expiresAt.isEmpty || record.state != "Reserved")
+              EitherT.pure[F, AnalyticsError](existing)
             else
               transactional { session =>
                 for {
@@ -243,7 +254,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                       value.revision,
                       "Reserved",
                       Some(now),
-                      Some(now.plusMillis(operational.reportReservationTtl.toMillis))
+                      if (refresh) Some(now.plusMillis(operational.reportReservationTtl.toMillis)) else None
                     )
                   )
                 )
@@ -284,8 +295,6 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             result(MongoAnalyticsReportRecords.decodeRun(record)).flatMap { decoded =>
               if (decoded.reservation != reservation)
                 reject(AnalyticsError.RunIdRangeConflict(reservation.runId.value))
-              else if (decoded.state != "Published")
-                EitherT.pure[F, AnalyticsError](AnalyticsReportPublicationReceipt.Absent)
               else
                 for {
                   controlRecord <- lift(
@@ -308,9 +317,15 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
                       value.lastPublishedRevision == reservation.revision &&
                       value.lastRunId.contains(reservation.runId.value)
                   ) && snapshot.exists(value => value.matches(reservation) && value.expiresAt.exists(_.isAfter(now)))
+                  superseded = control.forall(value =>
+                    value.generation != reservation.generation ||
+                      value.lastPublishedRevision >= reservation.revision ||
+                      !Set("Published", "Unpublished").contains(value.state)
+                  )
                 } yield
-                  if (isCurrent) AnalyticsReportPublicationReceipt.CurrentGeneration
-                  else AnalyticsReportPublicationReceipt.Superseded
+                  if (decoded.state == "Published" && isCurrent) AnalyticsReportPublicationReceipt.CurrentGeneration
+                  else if (decoded.state == "Published" || superseded) AnalyticsReportPublicationReceipt.Superseded
+                  else AnalyticsReportPublicationReceipt.Absent
             }
         }
       } yield receipt
@@ -361,7 +376,7 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
               decodedState.generation == reservation.generation &&
                 Set("Published", "Unpublished").contains(decodedState.state),
               (),
-              AnalyticsError.RunIdRangeConflict(reservation.runId.value)
+              AnalyticsError.GuardedErasurePublicationRejected
             )
           )
           currentTime <- lift(clock.realTimeInstant)
@@ -663,6 +678,92 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
         } yield ()
       }
   }
+
+  /** Repeatable provisioning for bounded pinned-receipt maintenance. */
+  private[analytics] def ensurePinnedRetentionIndex: F[Unit] = rethrow(withCollections { collections =>
+    lift(
+      streams
+        .one(
+          collections.reservations.underlying.createIndex(
+            Indexes.compoundIndex(
+              Indexes.ascending(AnalyticsCollections.Fields.State),
+              Indexes.ascending(AnalyticsCollections.Fields.CreatedAt)
+            ),
+            new IndexOptions().name("analytics_report_runs_retention_v1")
+          )
+        )
+        .void
+    )
+  })
+
+  /** Called under the shared lock after journal compaction. Durable unfinished receipts never expire. Maintenance
+    * intents carry no resumable input; abandoned intents age out with completed receipts.
+    */
+  private[analytics] def compactPublished(
+      requiredRunIds: Set[RunId],
+      observedAt: Instant
+  ): F[Long] = rethrow(withCollections { collections =>
+    transactional { session =>
+      val cutoff = observedAt.minusSeconds(operational.retention.deletionMarkerDays.value.toLong * 86400L)
+      val eligible = Filters.and(
+        Filters.or(
+          Filters.eq(AnalyticsCollections.Fields.State, "Published"),
+          Filters.and(
+            Filters.eq(AnalyticsCollections.Fields.State, "Reserved"),
+            Filters.regex(AnalyticsCollections.Fields.Id, "^stream-maintenance-")
+          )
+        ),
+        Filters.lt(AnalyticsCollections.Fields.CreatedAt, Date.from(cutoff)),
+        Filters.eq(AnalyticsCollections.Fields.ExpiresAt, null)
+      )
+      for {
+        rawControl <- lift(
+          streams.optional(
+            collections.control.underlying
+              .find(session.underlying, Filters.eq(AnalyticsCollections.Fields.Id, "analytics-report"))
+              .projection(controlProjection)
+              .first
+          )
+        )
+        control <- result(
+          rawControl
+            .toRight(AnalyticsError.InvalidConfiguration("analytics report control is unavailable"))
+            .flatMap(MongoAnalyticsReportRecords.decodeControl)
+        )
+        snapshot <- lift(readSnapshot(session, collections.snapshots))
+        currentSnapshot <- result(snapshot.traverse(MongoAnalyticsReportRecords.decodeSnapshot))
+        protectedIds = requiredRunIds
+          .map(_.value) ++ control.lastRunId.toSet ++ currentSnapshot.map(value => value.runId.value).toSet
+        removable <- lift(
+          streams
+            .stream(
+              collections.reservations.underlying
+                .find(session.underlying, eligible)
+                .projection(reservationProjection)
+            )
+            .evalMap(record => Async[F].fromEither(MongoAnalyticsReportRecords.decodeRun(record)))
+            .filterNot(record => protectedIds.contains(record.reservation.runId.value))
+            .take(1000)
+            .map(record => record.reservation.runId.value)
+            .compile
+            .toVector
+        )
+        deleted <-
+          if (removable.isEmpty) lift(Async[F].pure(0L))
+          else
+            lift(
+              streams
+                .one(
+                  collections.reservations.underlying.deleteMany(
+                    session.underlying,
+                    Filters.and(eligible, Filters.in(AnalyticsCollections.Fields.Id, removable.asJava))
+                  )
+                )
+                .map(_.getDeletedCount)
+            )
+      } yield deleted
+    }
+  })
 
   private def casUpdate(
       session: ClientSession[F],

@@ -9,6 +9,9 @@ import java.time.Instant
 /** Durable publication boundary shared with the operational report reader. */
 trait AnalyticsReportPublisher[F[_]] {
   def reserve(runId: RunId, rangeFingerprint: RangeFingerprint, now: Instant): F[AnalyticsReportReservation]
+
+  /** Allocates once per attempt; retries must return the exact reservation without generation refresh. */
+  def reservePinned(runId: RunId, rangeFingerprint: RangeFingerprint, now: Instant): F[AnalyticsReportReservation]
   def publish(reservation: AnalyticsReportReservation, report: AnalyticsReportOutput, expiresAt: Instant): F[Unit]
   def publicationReceipt(reservation: AnalyticsReportReservation)(using
       applicative: Applicative[F]
