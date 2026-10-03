@@ -64,4 +64,33 @@ final class StreamingProofIsolationSpec extends munit.FunSuite {
       )
     )
   }
+
+  test("active shutdown accepts only the exact workload database and state nonce") {
+    assertEquals(StreamingActiveTerminationProofMain.validateFixtureNonce(database, nonce, nonce), Right(()))
+  }
+
+  test("active shutdown rejects a different database before any native client or producer") {
+    assert(
+      StreamingActiveTerminationProofMain
+        .validateFixtureNonce("hiring_streaming_proof_fedcba9876543210", nonce, nonce)
+        .isLeft
+    )
+    assert(StreamingActiveTerminationProofMain.validateFixtureNonce("hiring", nonce, nonce).isLeft)
+  }
+
+  test("active shutdown rejects a different or missing state nonce") {
+    assert(StreamingActiveTerminationProofMain.validateFixtureNonce(database, nonce, "fedcba9876543210").isLeft)
+    assert(StreamingActiveTerminationProofMain.validateFixtureNonce(database, nonce, null).isLeft)
+  }
+
+  test("active shutdown rejects malformed workload nonces even when the other fields agree") {
+    Vector("", "0123456789abcde", "0123456789abcdef0", "0123456789abcdeF", "../fixture").foreach { invalid =>
+      assert(
+        StreamingActiveTerminationProofMain
+          .validateFixtureNonce("hiring_streaming_proof_" + invalid, invalid, invalid)
+          .isLeft
+      )
+    }
+    assert(StreamingActiveTerminationProofMain.validateFixtureNonce("hiring_streaming_proof_null", null, null).isLeft)
+  }
 }

@@ -1161,7 +1161,9 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
               IO.println("STREAMING_REPLAY_DELETION_RACE_REJECTED category=ERASURE_PENDING")
             case Left(AnalyticsError.LateFactReplayRejected) =>
               IO.println("STREAMING_REPLAY_DELETION_RACE_REJECTED category=DELETION_SELECTION_REJECTED")
-            case _ => IO.raiseError(new IllegalStateException("deletion race did not reject publication"))
+            case _ =>
+              IO.println(StreamingAdmissionProof.replayResult(result)) *>
+                IO.raiseError(new IllegalStateException("deletion race did not reject publication"))
           }
         } yield ()
       }
@@ -1215,6 +1217,25 @@ private[cli] object StreamingAdmissionProof {
   ): Boolean = expectedOffsets.nonEmpty && expectedOffsets.size <= 12 && expectedOffsets.forall(_ >= 0L) &&
     expectedOffsets.distinct.size == expectedOffsets.size && topic == expectedTopic && partition == 0 &&
     minimum == expectedOffsets.min && maximum == expectedOffsets.max && count == expectedOffsets.size.toLong
+
+  /** Fixed labels only: causes, runtime class names and exception messages are deliberately not inspected. */
+  def replayResult(result: Either[Throwable, AnalyticsLateFactReplayOutcome]): String = {
+    val category = result match {
+      case Right(AnalyticsLateFactReplayOutcome.Published)        => "RIGHT_PUBLISHED"
+      case Right(AnalyticsLateFactReplayOutcome.AlreadyPublished) => "RIGHT_ALREADY_PUBLISHED"
+      case Right(AnalyticsLateFactReplayOutcome.ErasurePending)   => "RIGHT_ERASURE_PENDING"
+      case Left(AnalyticsError.LakehouseLockTimeout)              => "LEFT_LOCK_TIMEOUT"
+      case Left(_: AnalyticsError.LakehouseFailure)               => "LEFT_LAKEHOUSE_FAILURE"
+      case Left(_: AnalyticsError.SourceReadFailure)              => "LEFT_SOURCE_READ_FAILURE"
+      case Left(_: AnalyticsError.InvalidConfiguration)           => "LEFT_INVALID_CONFIGURATION"
+      case Left(AnalyticsError.LateFactReplayRequestConflict)     => "LEFT_REPLAY_CONFLICT"
+      case Left(AnalyticsError.LateFactReplayRejected)            => "LEFT_REPLAY_REJECTED"
+      case Left(AnalyticsError.GuardedErasurePublicationRejected) => "LEFT_PUBLICATION_REJECTED"
+      case Left(_: AnalyticsError)                                => "LEFT_OTHER_ANALYTICS"
+      case Left(_)                                                => "LEFT_UNEXPECTED"
+    }
+    s"STREAMING_REPLAY_DELETION_RACE_RESULT category=$category"
+  }
 
   def failure(args: List[String], error: Throwable): String = {
     val allowed =

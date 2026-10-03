@@ -64,9 +64,7 @@ private[mongo] object MongoTransactionRunner {
           client.startSession(ClientSessionOptions()).use(use)
 
         def abort(session: ClientSession[IO]): IO[Unit] =
-          MongoRepositorySupport.guard(diagnostics, "transaction.abort")(
-            session.abortTransaction
-          )(_ => ())
+          abortActiveTransaction(diagnostics, IO.delay(session.hasActiveTransaction), session.abortTransaction)
 
         val transactionBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxTransactionAttempts)
         val commitBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxCommitAttempts)
@@ -105,9 +103,7 @@ private[mongo] object MongoTransactionRunner {
 
         def attemptOnce: IO[CommitOutcome[A]] = withSession { session =>
           Resource
-            .make(session.startTransaction.as(session)) { active =>
-              if (active.hasActiveTransaction) abort(active) else IO.unit
-            }
+            .make(session.startTransaction.as(session))(abort)
             .use { active =>
               // IO owns session finalization and distinguishes typed rejection from driver failures.
               operation(Some(active)).value.attempt.flatMap {
@@ -155,6 +151,16 @@ private[mongo] object MongoTransactionRunner {
         ).map(_.fold(toResult, toResult))
       }
     }
+
+  private[mongo] def abortActiveTransaction(
+      diagnostics: Diagnostics,
+      isActive: IO[Boolean],
+      abort: IO[Unit]
+  ): IO[Unit] =
+    // Resource constructs release effects at acquisition; inspect native state only when cleanup runs.
+    MongoRepositorySupport.guard(diagnostics, "transaction.abort")(
+      isActive.flatMap(active => if (active) abort else IO.unit)
+    )(_ => ())
 
   private def toResult[A](outcome: CommitOutcome[A]): Either[RepositoryError, A] = outcome match {
     case CommitOutcome.Completed(result)   => result

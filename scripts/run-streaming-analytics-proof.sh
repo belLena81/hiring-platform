@@ -14,7 +14,7 @@ nonce="${2:-$(openssl rand -hex 8)}"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 export PATH="$JAVA_HOME/bin:$PATH"
 export SPARK_LOCAL_IP=127.0.0.1
-unset JAVA_TOOL_OPTIONS
+unset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS
 project="hiring-streaming-proof-$nonce"
 config_dir="$repo_root/.local/config/$project"
 log_dir="$repo_root/.local/logs/$project"
@@ -285,6 +285,239 @@ for operator in (True,False):
  conf='include classpath("application.conf")\n'+f'analytics.mongo.uri={q(uri)}\nanalytics.mongo.database={q(database)}\nanalytics.spark.master="local[2]"\nanalytics.spark.local-directory={q(str(root/".local/data/analytics/spark-temp"/f"hiring-streaming-proof-{nonce}"/"driver"))}\nanalytics.kafka.bootstrap-servers={q("127.0.0.1:"+str(s["kafkaPort"]))}\nanalytics.kafka.username="analytics_reader"\nanalytics.kafka.password={q(os.environ["KAFKA_READER_PASSWORD"])}\nanalytics.kafka.security-protocol="SASL_PLAINTEXT"\nanalytics.kafka.allow-plaintext=true\nanalytics.kafka.topic={q("hiring.streaming.proof."+nonce)}\nanalytics.lakehouse.root={q(file_uri(root/".local/data"/f"hiring-streaming-proof-{nonce}"/"lakehouse"))}\nanalytics.hmac.secret-base64={q(os.environ["HIRING_ANALYTICS_HMAC_SECRET_BASE64"])}\nanalytics.streaming.stream-id={q("hiring-streaming-proof-"+nonce)}\nanalytics.streaming.activation-grant-id={q("local-reviewed-"+nonce)}\nanalytics.streaming.checkpoint-location={q(file_uri(root/".local/data/analytics/checkpoints"/f"hiring-streaming-proof-{nonce}"/"query"))}\nanalytics.streaming.trigger-interval=10 seconds\nanalytics.streaming.maintenance-interval=60 seconds\nanalytics.streaming.max-offsets-per-trigger=1000\nanalytics.streaming.maximum-replay-records=1000\nanalytics.streaming.initial-offsets=[{{partition=0,offset=0}},{{partition=1,offset=0}},{{partition=2,offset=0}}]\nanalytics.workload-producer.username="hiring_publisher_v2"\nanalytics.workload-producer.password={q(os.environ["KAFKA_PUBLISHER_V2_PASSWORD"])}\nanalytics.workload-api.url={q("http://127.0.0.1:"+str(s["apiPort"]))}\nanalytics.workload-api.nonce={q(nonce)}\nanalytics.workload-api.password={q("proof-password-"+nonce)}\n'
  (p/('analytics-operator.conf' if operator else 'analytics-runtime.conf')).write_text(conf)
 PY
+  # Native erasure worker is a required account-deletion dependency, not a fabricated readiness record.
+  export KAFKA_FENCER_PASSWORD
+  python3 - "$repo_root" "$nonce" <<'PYWORKER'
+import json, os, pathlib, re, secrets, sys, stat
+
+def safe(path, mode):
+    for parent in (path, *path.parents):
+        if parent.is_symlink(): raise RuntimeError('unsafe worker path')
+    info=path.stat()
+    if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=mode: raise RuntimeError('unsafe worker ownership')
+
+def create(path, content):
+    with path.open('x') as out:
+        os.fchmod(out.fileno(),0o600); out.write(content)
+
+def prepare(repo,nonce):
+    if not re.fullmatch('[a-f0-9]{16}',nonce): raise RuntimeError('invalid worker nonce')
+    repo=pathlib.Path(repo).absolute(); p=repo/'.local/config'/('hiring-streaming-proof-'+nonce)
+    safe(p,0o700)
+    for name in ('state.json','credentials.json','analytics-runtime.conf'):
+        safe(p/name,0o600)
+        if (p/name).stat().st_size>65536: raise RuntimeError('oversized worker input')
+    state=json.loads((p/'state.json').read_text()); assert state['nonce']==nonce
+    assert 1024<=state['mongoPort']<=65535
+    password=secrets.token_hex(32); create(p/'worker-credentials.json',json.dumps({'nonce':nonce,'workerPassword':password}))
+    database='hiring_streaming_proof_'+nonce
+    uri=f'mongodb://analytics_worker:{password}@127.0.0.1:{state["mongoPort"]}/?authSource={database}&replicaSet=rs0&directConnection=true'
+    fencer=os.environ['KAFKA_FENCER_PASSWORD']; assert fencer and len(fencer)<=4096
+    conf='include '+json.dumps(str(p/'analytics-runtime.conf'))+'\n'
+    conf+='analytics.mongo.uri='+json.dumps(uri)+'\n'
+    conf+='analytics.spark.local-directory='+json.dumps(str(repo/'.local/data/analytics/spark-temp'/('hiring-streaming-proof-'+nonce)/'worker'))+'\n'
+    conf+='analytics.kafka.fencer.username="analytics_fencer"\nanalytics.kafka.fencer.password='+json.dumps(fencer)+'\n'
+    create(p/'analytics-worker.conf',conf)
+    create(p/'worker-role.js',ROLE)
+    create(p/'worker-ready.js',READY)
+    print('STREAMING_WORKER_FIXTURE_PREPARED privateCredentials=true leastPrivilegeRole=true nativeReadyRequired=true')
+
+ROLE=r'''const fs=require('fs');
+const c=JSON.parse(fs.readFileSync('/proof/credentials.json','utf8'));
+const s=JSON.parse(fs.readFileSync('/proof/state.json','utf8'));
+const w=JSON.parse(fs.readFileSync('/proof/worker-credentials.json','utf8'));
+if(!/^[a-f0-9]{16}$/.test(s.nonce)||w.nonce!==s.nonce) throw new Error('worker nonce mismatch');
+db.getSiblingDB('admin').auth({user:'proof_operator',pwd:c.operatorPassword});
+const d=db.getSiblingDB('hiring_streaming_proof_'+s.nonce);
+if(d.getUser('analytics_worker')||d.getRole('analytics_worker')) throw new Error('worker role already exists');
+const actions={
+ analytics_erasure_requests:['find','update'],
+ analytics_worker_heartbeats:['find','insert','update'],
+ analytics_erasure_completions:['find','insert','update'],
+ analytics_erasure_delta_files:['find','insert','update'],
+ analytics_report_snapshots:['find','insert','update'],
+ analytics_report_runs:['find','insert','update'],
+ analytics_report_control:['find','update'],
+ analytics_lakehouse_mutexes:['find','insert','remove']
+};
+const privileges=Object.entries(actions).map(([n,a])=>({resource:{db:d.getName(),collection:n},actions:a}));
+for(const n of ['users','outbox_subject_fences','hiring_migration_ledger','analytics_hmac_key_retirements','analytics_late_fact_replay_requests']) privileges.push({resource:{db:d.getName(),collection:n},actions:['find']});
+privileges.push({resource:{db:d.getName(),collection:'event_outbox'},actions:['find','remove']});
+privileges.push({resource:{db:d.getName(),collection:''},actions:['listCollections']});
+d.createRole({role:'analytics_worker',privileges:privileges,roles:[]});
+d.createUser({user:'analytics_worker',pwd:w.workerPassword,roles:[{role:'analytics_worker',db:d.getName()}]});
+print('STREAMING_WORKER_ROLE_CREATED activationWrite=false registryWrite=false roleManagement=false outbox=find,remove');
+'''
+READY=r'''try {
+const fs=require('fs'); const s=JSON.parse(fs.readFileSync('/proof/state.json','utf8'));
+const w=JSON.parse(fs.readFileSync('/proof/worker-credentials.json','utf8'));
+const owner=JSON.parse(fs.readFileSync('/proof/erasure-worker-owner.json','utf8'));
+if(!/^[a-f0-9]{16}$/.test(s.nonce)||w.nonce!==s.nonce||owner.nonce!==s.nonce) throw new Error('nonce');
+const d=db.getSiblingDB('hiring_streaming_proof_'+s.nonce);
+if(!d.auth({user:'analytics_worker',pwd:w.workerPassword})) throw new Error('auth');
+const result=d.runCommand({find:'analytics_worker_heartbeats',filter:{_id:'analytics-erasure'},projection:{state:1,updatedAt:1,leaseUntil:1},limit:1,singleBatch:true,readConcern:{level:'majority'},maxTimeMS:5000});
+if(result.ok!==1) throw new Error('query');
+const row=result.cursor.firstBatch[0]; const now=new Date(); const start=new Date(owner.launchedAt);
+const ready=!!row && row.state==='Ready' && row.updatedAt instanceof Date && row.leaseUntil instanceof Date && row.updatedAt>=start && row.updatedAt<=now && row.leaseUntil>now;
+print(ready?'STREAMING_ERASURE_WORKER_READY nativeReady=true freshLease=true':'STREAMING_ERASURE_WORKER_WAIT');
+} catch (_) { print('STREAMING_ERASURE_WORKER_READINESS_FAILED'); quit(2); }
+'''
+
+prepare(sys.argv[1],sys.argv[2])
+create(pathlib.Path(sys.argv[1])/".local/config"/("hiring-streaming-proof-"+sys.argv[2])/"worker-supervisor.py", r'''
+import datetime, hashlib, json, os, pathlib, re, signal, stat, subprocess, sys, threading, time
+MAIN='com.example.hiring.analytics.cli.AnalyticsErasureWorkerMain'
+CAP=1048576
+
+def safe(path,mode):
+    for entry in (path,*path.parents):
+        if entry.is_symlink(): raise RuntimeError('unsafe path')
+    info=path.stat()
+    if info.st_uid!=os.getuid() or stat.S_IMODE(info.st_mode)!=mode: raise RuntimeError('unsafe owner')
+
+def read(path):
+    safe(path,0o600)
+    if path.stat().st_size>65536: raise RuntimeError('input bound')
+    return path.read_text()
+
+def write(path,value):
+    with path.open('x') as out:
+        os.fchmod(out.fileno(),0o600);out.write(json.dumps(value))
+
+def identity(pid):
+    path=pathlib.Path('/proc')/str(pid)
+    if path.stat().st_uid!=os.getuid(): raise RuntimeError('process owner')
+    raw=(path/'stat').read_text(); start=raw[raw.rfind(')')+2:].split()[19]
+    args=(path/'cmdline').read_bytes().split(b'\0')
+    return start,args
+
+def run(repo,nonce):
+    if not re.fullmatch('[a-f0-9]{16}',nonce): raise RuntimeError('nonce')
+    repo=pathlib.Path(repo).absolute(); config=repo/'.local/config'/('hiring-streaming-proof-'+nonce)
+    logs=repo/'.local/logs'/('hiring-streaming-proof-'+nonce)
+    safe(config,0o700);safe(logs,0o700)
+    state=json.loads(read(config/'state.json'));assert state['nonce']==nonce
+    names=('analytics-runtime.conf','analytics-worker.conf','worker-credentials.json','worker-ready.js','state.json')
+    inputs={name:read(config/name) for name in names}
+    hashes={name:hashlib.sha256(value.encode()).hexdigest() for name,value in inputs.items()}
+    credentials=json.loads(inputs['worker-credentials.json'])
+    if credentials['nonce']!=nonce or not re.fullmatch('[a-f0-9]{64}',credentials['workerPassword']):raise RuntimeError('worker credential binding')
+    worker_lines=inputs['analytics-worker.conf'].splitlines()
+    uri='mongodb://analytics_worker:'+credentials['workerPassword']+'@127.0.0.1:'+str(state['mongoPort'])+'/?authSource=hiring_streaming_proof_'+nonce+'&replicaSet=rs0&directConnection=true'
+    expected=['include '+json.dumps(str(config/'analytics-runtime.conf')),
+      'analytics.mongo.uri='+json.dumps(uri),
+      'analytics.spark.local-directory='+json.dumps(str(repo/'.local/data/analytics/spark-temp'/('hiring-streaming-proof-'+nonce)/'worker')),
+      'analytics.kafka.fencer.username="analytics_fencer"']
+    if len(worker_lines)!=5 or worker_lines[:4]!=expected or not worker_lines[4].startswith('analytics.kafka.fencer.password='):raise RuntimeError('worker config binding')
+    if not isinstance(json.loads(worker_lines[4].split('=',1)[1]),str):raise RuntimeError('fencer binding')
+    def unchanged():
+        if any(hashlib.sha256(read(config/name).encode()).hexdigest()!=value for name,value in hashes.items()):raise RuntimeError('worker input changed')
+    cp=read(config/'analytics.classpath').strip()
+    if not cp or '\n' in cp: raise RuntimeError('classpath')
+    cp_log=logs/'analytics-classpath.log';safe(cp_log,0o600)
+    if cp_log.stat().st_size>1048576 or cp not in cp_log.read_text().splitlines(): raise RuntimeError('staged classpath')
+    conf=config/'analytics-worker.conf'; target=logs/'erasure-worker.log'
+    stop=threading.Event();overflow=threading.Event();worker=None;started=None
+    def signal_stop(_signum,_frame):stop.set()
+    signal.signal(signal.SIGTERM,signal_stop);signal.signal(signal.SIGINT,signal_stop)
+    output=target.open('xb');os.fchmod(output.fileno(),0o600)
+    try:
+        launched=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        worker_env=os.environ.copy()
+        for name in ('JAVA_TOOL_OPTIONS','JDK_JAVA_OPTIONS','_JAVA_OPTIONS'):worker_env.pop(name,None)
+        worker_env['SPARK_LOCAL_IP']='127.0.0.1'
+        worker=subprocess.Popen(['/usr/lib/jvm/java-17-openjdk-amd64/bin/java','-Dspark.sql.shuffle.partitions=2','-Dspark.databricks.delta.snapshotPartitions=2','--add-opens=java.base/sun.security.action=ALL-UNNAMED','-Dconfig.file='+str(conf),'-cp',cp,MAIN],cwd=repo/'analytics',stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True,env=worker_env)
+        # The Popen handle is owned before every fallible identity/ledger check.
+        started,args=identity(worker.pid)
+        if MAIN.encode() not in args or ('-Dconfig.file='+str(conf)).encode() not in args:raise RuntimeError('process identity')
+        write(config/'erasure-worker-owner.json',{'nonce':nonce,'pid':worker.pid,'uid':os.getuid(),'startTicks':started,'main':MAIN,'config':str(conf),'launchedAt':launched,'supervisorPid':os.getpid(),'supervisorStartTicks':identity(os.getpid())[0],'pidNamespace':os.readlink('/proc/self/ns/pid')})
+        def pump():
+            total=0
+            while True:
+                chunk=worker.stdout.read(8192)
+                if not chunk:return
+                total+=len(chunk)
+                if total>CAP:overflow.set();return
+                output.write(chunk);output.flush()
+        pump_thread=threading.Thread(target=pump,daemon=True);pump_thread.start()
+        deadline=time.monotonic()+90;ready=False
+        compose=['docker','compose','-f','compose.yaml','-f','compose.analytics-streaming-proof.yaml','-p','hiring-streaming-proof-'+nonce]
+        while not stop.is_set() and time.monotonic()<deadline:
+            unchanged()
+            if worker.poll() is not None or overflow.is_set():raise RuntimeError('worker ended')
+            current,args=identity(worker.pid)
+            if current!=started or MAIN.encode() not in args or ('-Dconfig.file='+str(conf)).encode() not in args:raise RuntimeError('owner changed')
+            result=subprocess.run(compose+['exec','-T','mongodb','mongosh','--quiet','--file','/proof/worker-ready.js'],cwd=repo,capture_output=True,timeout=12)
+            if len(result.stdout)+len(result.stderr)>65536:raise RuntimeError('readiness output bound')
+            if result.returncode:raise RuntimeError('readiness failed')
+            if b'STREAMING_ERASURE_WORKER_READY nativeReady=true freshLease=true' in result.stdout.splitlines():
+                current,args=identity(worker.pid)
+                if current!=started or worker.poll() is not None:raise RuntimeError('owner ended')
+                write(logs/'erasure-worker-ready.json',{'nonce':nonce,'nativeReady':True,'freshLease':True,'pid':worker.pid,'startTicks':started})
+                print('STREAMING_ERASURE_WORKER_READY nativeReady=true freshLease=true',flush=True);ready=True;break
+            stop.wait(.5)
+        if not ready:raise RuntimeError('readiness deadline')
+        while not stop.wait(.2):
+            unchanged()
+            if worker.poll() is not None or overflow.is_set():raise RuntimeError('worker ended')
+            current,args=identity(worker.pid)
+            if current!=started:raise RuntimeError('owner changed')
+    finally:
+        if worker is not None and worker.poll() is None:
+            if started is None:worker.terminate()
+            else:
+                current,args=identity(worker.pid)
+                if current!=started or MAIN.encode() not in args or ('-Dconfig.file='+str(conf)).encode() not in args:raise RuntimeError('cleanup audit required')
+                worker.terminate()
+            try:worker.wait(timeout=120)
+            except subprocess.TimeoutExpired:raise RuntimeError('cleanup audit required')
+        if worker is not None and 'pump_thread' in locals():
+            pump_thread.join(timeout=5)
+            if pump_thread.is_alive():raise RuntimeError('log pump still alive')
+        output.close()
+        if worker is not None and worker.poll() is not None:
+            if target.stat().st_size>CAP:raise RuntimeError('worker log bound')
+            raw=target.read_bytes()
+            text=raw.decode('utf8',errors='strict')
+            clean=not re.search(r'\bERROR\b|Dropping event from queue|numDroppedEvents',text)
+            write(logs/'erasure-worker-stopped.json',{'nonce':nonce,'actualExit':worker.returncode,'joined':True,'cleanLog':clean,'logClassification':'CLEAN' if clean else 'ERROR_OR_LISTENER_DROP'})
+            if not clean:raise RuntimeError('worker error log')
+    if worker.returncode not in (0,143,-15) or overflow.is_set():raise RuntimeError('unclean worker closure')
+    print('STREAMING_ERASURE_WORKER_STOPPED joined=true',flush=True)
+
+def stop_existing(repo,nonce):
+    if not re.fullmatch('[a-f0-9]{16}',nonce):raise RuntimeError('nonce')
+    repo=pathlib.Path(repo).absolute();config=repo/'.local/config'/('hiring-streaming-proof-'+nonce)
+    safe(config,0o700);owner_path=config/'erasure-worker-owner.json'
+    if not owner_path.exists():return
+    owner=json.loads(read(owner_path));assert owner['nonce']==nonce and owner['uid']==os.getuid()
+    if owner.get('pidNamespace')!=os.readlink('/proc/self/ns/pid'):raise RuntimeError('process namespace mismatch')
+    pid=owner['supervisorPid'];worker=owner['pid'];conf=config/'analytics-worker.conf'
+    if pathlib.Path('/proc',str(pid)).exists():
+        ticks,args=identity(pid)
+        cwd=pathlib.Path(os.readlink('/proc/'+str(pid)+'/cwd'))
+        expected=config/'worker-supervisor.py'
+        scripts=[pathlib.Path(os.fsdecode(arg)) for arg in args if arg.endswith(b'worker-supervisor.py')]
+        canonical=[(path if path.is_absolute() else cwd/path).absolute() for path in scripts]
+        if ticks!=owner['supervisorStartTicks'] or cwd!=repo or expected not in canonical or nonce.encode() not in args:raise RuntimeError('supervisor identity changed')
+        os.kill(pid,signal.SIGTERM)
+    deadline=time.monotonic()+130
+    while time.monotonic()<deadline:
+        if not pathlib.Path('/proc',str(worker)).exists():return
+        ticks,args=identity(worker)
+        if ticks!=owner['startTicks'] or MAIN.encode() not in args or ('-Dconfig.file='+str(conf)).encode() not in args:raise RuntimeError('worker identity changed')
+        time.sleep(.2)
+    raise RuntimeError('cleanup audit required')
+
+if __name__=='__main__':
+    try:
+        if sys.argv[1]=='run':run(sys.argv[2],sys.argv[3])
+        elif sys.argv[1]=='stop':stop_existing(sys.argv[2],sys.argv[3])
+        else:raise RuntimeError('mode')
+    except BaseException:print('STREAMING_WORKER_FIXTURE_FAILED cleanupAuditRequired=true',file=sys.stderr);sys.exit(1)
+''')
+PYWORKER
+  "${compose[@]}" exec -T mongodb mongosh --quiet --file /proof/worker-role.js >"$log_dir/worker-permissions.log" 2>&1
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain fingerprint >"$log_dir/source-fingerprint.log" 2>&1
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain identity >"$log_dir/runtime-identity.log" 2>&1
   printf 'Isolated authenticated proof staged: %s. Runtime remains gated. Evidence metadata: %s\n' "$nonce" "$log_dir"
@@ -297,7 +530,19 @@ elif [[ "$mode" == run || "$mode" == scenarios ]]; then
   setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
     _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" >"$log_dir/stream.log" 2>&1 &
   stream_pid=$!
-  trap 'kill -- "-$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true' EXIT
+  worker_supervisor_pid="${worker_supervisor_pid:-}"
+  run_cleanup() {
+    local result=$?
+    trap - EXIT
+    kill -- "-$stream_pid" 2>/dev/null || true
+    wait "$stream_pid" 2>/dev/null || true
+    if [[ -n "$worker_supervisor_pid" ]]; then
+      python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce" || result=1
+      wait "$worker_supervisor_pid" || result=1
+    fi
+    exit "$result"
+  }
+  trap run_cleanup EXIT
   (while kill -0 "$stream_pid" 2>/dev/null; do
     date -u '+%Y-%m-%dT%H:%M:%SZ'
     ps -p "$stream_pid" -o pid=,pcpu=,pmem=,rss=,vsz=,etime=
@@ -441,10 +686,30 @@ PY
   setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
     _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" >>"$log_dir/stream.log" 2>&1 &
   stream_pid=$!
-  trap 'kill -- "-$stream_pid" 2>/dev/null || true; wait "$stream_pid" 2>/dev/null || true' EXIT
+  worker_supervisor_pid="${worker_supervisor_pid:-}"
+  run_cleanup() {
+    local result=$?
+    trap - EXIT
+    kill -- "-$stream_pid" 2>/dev/null || true
+    wait "$stream_pid" 2>/dev/null || true
+    if [[ -n "$worker_supervisor_pid" ]]; then
+      python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce" || result=1
+      wait "$worker_supervisor_pid" || result=1
+    fi
+    exit "$result"
+  }
+  trap run_cleanup EXIT
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain continuation >"$log_dir/checkpoint-restored-continuation.log" 2>&1
   rg -q '^STREAMING_CHECKPOINT_RESTORED_CONTINUATION_PASS actualNewRecords=12 adminVisible=true$' "$log_dir/checkpoint-restored-continuation.log"
   printf 'STREAMING_CHECKPOINT_FAULTS_VERIFIED missing=exactCheckpointIdentityRejection corruptedIdentity=exactCheckpointIdentityRejection foreignIdentity=exactCheckpointIdentityRejection originalCheckpointRestored=true exactCheckpointHashesRestored=true actualNewSourceAndAdminContinuation=true\n' >"$log_dir/checkpoint-faults.log"
+  python3 "$config_dir/worker-supervisor.py" run "$repo_root" "$nonce" >"$log_dir/worker-supervisor.log" 2>&1 &
+  worker_supervisor_pid=$!
+  worker_ready_deadline=$((SECONDS + 100))
+  until [[ -f "$log_dir/erasure-worker-ready.json" ]]; do
+    kill -0 "$worker_supervisor_pid" 2>/dev/null || { printf 'Native erasure worker readiness failed.\n' >&2; exit 1; }
+    (( SECONDS < worker_ready_deadline )) || { printf 'Native erasure worker readiness deadline exceeded.\n' >&2; exit 1; }
+    sleep 0.2
+  done
   # Owner deletion runs last: its durable pending marker deliberately fences later report publication.
   java_run "$config_dir/scenarios-race.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain race-replay >"$log_dir/live-replay-deletion-race.log" 2>&1
   rg -q '^STREAMING_REPLAY_HTTP_DELETION_BARRIER_PASSED actualMergeBeforeDelete=true oldReservationPinned=true$' "$log_dir/live-replay-deletion-race.log"
@@ -454,6 +719,8 @@ PY
   rg -q '^STREAMING_SUPPRESSED_ONLY_VERIFIED actualRecords=12 sourceAck=true terminal=ErasurePending bronzeAbsent=true silverAbsent=true lateAndQuarantineAbsent=true candidateWatermarkAbsent=true publishedWatermarkUnchanged=true reportPublicationUnchanged=true receiptReserved=true adminUnavailable=true$' "$log_dir/live-suppressed-only.log"
   kill -- "-$stream_pid"
   wait "$stream_pid" || true
+  python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce"
+  wait "$worker_supervisor_pid"
   trap - EXIT
   if [[ "$mode" == run ]]; then
     printf 'Real-clock healthy and bounded burst workload passed. State and resource evidence retained: %s\n' "$log_dir"
@@ -462,6 +729,9 @@ PY
   fi
 else
   read_state
+  if [[ -f "$config_dir/worker-supervisor.py" ]]; then
+    python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce"
+  fi
   api_pid="${values[3]}"
   [[ "$api_pid" =~ ^(0|[1-9][0-9]*)$ ]] || { printf 'Invalid task API process identity.\n' >&2; exit 1; }
   if [[ "$api_pid" != 0 && -r "/proc/$api_pid/cmdline" ]] && tr '\0' '\n' <"/proc/$api_pid/cmdline" | rg -Fq -- "$config_dir/api-runtime.conf"; then

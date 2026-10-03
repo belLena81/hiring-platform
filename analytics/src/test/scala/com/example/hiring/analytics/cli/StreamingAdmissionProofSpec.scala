@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.cli
 
+import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.service.batch.AnalyticsLateFactReplayOutcome
 import munit.FunSuite
 import org.bson.Document
 import scala.jdk.CollectionConverters.*
@@ -85,4 +87,49 @@ final class StreamingAdmissionProofSpec extends FunSuite {
       "STREAMING_LIVE_SCENARIO_FAILED mode=suppressed-only class=IllegalStateException ownLine=0"
     )
   }
+
+  test("replay result diagnostic distinguishes all native outcomes without accepting publication") {
+    Vector(
+      AnalyticsLateFactReplayOutcome.Published -> "RIGHT_PUBLISHED",
+      AnalyticsLateFactReplayOutcome.AlreadyPublished -> "RIGHT_ALREADY_PUBLISHED",
+      AnalyticsLateFactReplayOutcome.ErasurePending -> "RIGHT_ERASURE_PENDING"
+    ).foreach { case (outcome, category) =>
+      assertEquals(
+        StreamingAdmissionProof.replayResult(Right(outcome)),
+        s"STREAMING_REPLAY_DELETION_RACE_RESULT category=$category"
+      )
+    }
+  }
+
+  test("replay result diagnostic classifies typed failures without exposing their values or causes") {
+    val secret = new IllegalStateException("credential=secret payload=private")
+    Vector[(Throwable, String)](
+      AnalyticsError.LakehouseLockTimeout -> "LEFT_LOCK_TIMEOUT",
+      AnalyticsError.LakehouseFailure(secret) -> "LEFT_LAKEHOUSE_FAILURE",
+      AnalyticsError.SourceReadFailure(secret) -> "LEFT_SOURCE_READ_FAILURE",
+      AnalyticsError.InvalidConfiguration("credential=secret") -> "LEFT_INVALID_CONFIGURATION",
+      AnalyticsError.LateFactReplayRequestConflict -> "LEFT_REPLAY_CONFLICT",
+      AnalyticsError.LateFactReplayRejected -> "LEFT_REPLAY_REJECTED",
+      AnalyticsError.GuardedErasurePublicationRejected -> "LEFT_PUBLICATION_REJECTED",
+      AnalyticsError.EmptyRequestedRange("private-topic", 7, 123L) -> "LEFT_OTHER_ANALYTICS"
+    ).foreach { case (error, category) =>
+      assertEquals(
+        StreamingAdmissionProof.replayResult(Left(error)),
+        s"STREAMING_REPLAY_DELETION_RACE_RESULT category=$category"
+      )
+    }
+  }
+
+  test("unexpected replay errors cannot expose messages runtime classes or cyclic causes") {
+    val error = new RuntimeException("credential=secret payload=private") {
+      override def getMessage: String = throw new AssertionError("message inspected")
+      override def getCause: Throwable = this
+      override def toString: String = throw new AssertionError("error rendered")
+    }
+    assertEquals(
+      StreamingAdmissionProof.replayResult(Left(error)),
+      "STREAMING_REPLAY_DELETION_RACE_RESULT category=LEFT_UNEXPECTED"
+    )
+  }
+
 }

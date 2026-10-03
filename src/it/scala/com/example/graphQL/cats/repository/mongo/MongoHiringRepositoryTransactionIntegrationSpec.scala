@@ -1,7 +1,8 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.AccountValueFixtures.email
-import cats.effect.{Deferred, IO, Outcome, Resource}
+import cats.effect.{Deferred, IO, Outcome, Ref, Resource}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.mongo.MongoRepositoryTestSupport.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
@@ -107,6 +108,68 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
       actorId,
       Json.obj("jobId" -> Json.fromString(value.id.value.toString))
     )
+
+  test("native transaction cleanup observes committed rejected failed and cancelled sessions") {
+    replicaSet.use { instance =>
+      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        client.getDatabase(s"transaction_cleanup_${UUID.randomUUID()}").flatMap { database =>
+          for {
+            failures <- Ref.of[IO, Vector[Map[LogField, String]]](Vector.empty)
+            diagnostics = new Diagnostics {
+              override def event(
+                  event: LogEvent,
+                  requestId: Option[String],
+                  fields: => Map[LogField, String]
+              ): IO[Unit] =
+                if (event == LogEvent.MongoRepositoryFailed) failures.update(_ :+ fields) else IO.unit
+            }
+            _ <- database.createCollection("transaction_cleanup")
+            documents <- Mongo4catsCollections.documents(database, "transaction_cleanup")
+            runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics)
+            insert = (id: String, session: Option[mongo4cats.client.ClientSession[IO]]) =>
+              RepositoryIO
+                .lift(
+                  MongoSessionOperations.insertOne(IO.pure(documents), session, new Document("_id", id))
+                )
+                .void
+            first <- runner.run(session => insert("committed-1", session).as(1)).value
+            second <- runner.run(session => insert("committed-2", session).as(2)).value
+            rejected <- runner.run { session =>
+              insert("rejected", session) *> RepositoryIO.fromEither[Unit](Left(RepositoryError.Conflict))
+            }.value
+            failed <- runner.run { session =>
+              insert("failed", session) *> RepositoryIO.lift[Unit](
+                IO.raiseError(new IllegalStateException("injected operation failure"))
+              )
+            }.value
+            entered <- Deferred[IO, Unit]
+            fiber <- runner
+              .run { session =>
+                insert("cancelled", session) *> RepositoryIO.lift(entered.complete(()) *> IO.never[Unit])
+              }
+              .value
+              .start
+            _ <- entered.get.timeout(10.seconds)
+            _ <- fiber.cancel
+            outcome <- fiber.join
+            count <- documents.count
+            committed <- documents.find(Filters.in("_id", "committed-1", "committed-2")).all
+            logged <- failures.get
+          } yield {
+            assertEquals(first, Right(1))
+            assertEquals(second, Right(2))
+            assertEquals(rejected, Left(RepositoryError.Conflict))
+            assertEquals(failed, Left(RepositoryError.Unavailable))
+            assert(outcome.isCanceled)
+            assertEquals(count, 2L)
+            assertEquals(committed.size, 2)
+            assertEquals(logged.count(_.get(LogField.SpanName).contains("transaction.operation")), 1)
+            assert(!logged.exists(_.get(LogField.SpanName).contains("transaction.abort")))
+          }
+        }
+      }
+    }
+  }
 
   test("startup backfills revisions and skips scans after the migration is complete") {
     replicaSet.use { instance =>

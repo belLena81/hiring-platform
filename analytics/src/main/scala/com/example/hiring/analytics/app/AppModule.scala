@@ -520,17 +520,33 @@ object AppModule {
   ): Resource[F, (SparkSession, MongoClient[F], SparkBlockingExecution[F])] =
     for {
       sparkExecution <- SparkBlockingExecution.resource[F]
+      shutdown <- Resource.eval(Async[F].ref(Option.empty[SparkShutdownDrain]))
       spark <- Resource.make(
         acquireSpark(sparkExecution)
           .adaptError { case NonFatal(cause) =>
             AnalyticsError.SparkStartupFailure(cause)
           }
-          .flatTap(session => sparkExecution.attachSparkContext(session.sparkContext))
       )(session =>
-        sparkExecution(session.stop()).adaptError { case NonFatal(cause) =>
-          AnalyticsError.LakehouseFailure(cause)
+        shutdown.get.flatMap { owned =>
+          val stop = sparkExecution(session.stop()).adaptError {
+            case error: AnalyticsError => error
+            case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
+          }
+          owned.fold(stop)(drain =>
+            SparkShutdownDrain.close(
+              drain.await(sparkExecution),
+              stop,
+              sparkExecution.blocking(drain.remove())
+            )
+          )
         }
       )
+      _ <- Resource.eval(Async[F].uncancelable { _ =>
+        sparkExecution.attachSparkContext(spark.sparkContext) *>
+          sparkExecution
+            .blocking(SparkShutdownDrain.install(spark.sparkContext))
+            .flatMap(drain => shutdown.set(Some(drain)))
+      })
       mongo <- acquireMongo
     } yield (spark, mongo, sparkExecution)
 
