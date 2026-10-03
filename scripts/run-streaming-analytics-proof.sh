@@ -31,8 +31,27 @@ export KAFKA_TOPIC="hiring.streaming.proof.$nonce"
 compose=(docker compose -f compose.yaml -f compose.analytics-streaming-proof.yaml -p "$project")
 java_run() {
   local conf="$1" main="$2"; shift 2
+  local logging_options=()
+  if [[ "$main" == com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain ]]; then
+    local replay_logging="$config_dir/replay-outcome-log4j2.properties"
+    [[ -f "$replay_logging" && ! -L "$replay_logging" && "$(stat -c '%u:%a' "$replay_logging")" == "$(id -u):600" ]] || {
+      printf 'Private replay outcome logging configuration is absent or unsafe.\n' >&2
+      return 1
+    }
+    logging_options=("-Dlog4j.configurationFile=$replay_logging")
+  fi
   (cd analytics && java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED \
-    -Dconfig.file="$conf" -cp "$analytics_cp" "$main" "$@")
+    "${logging_options[@]}" -Dconfig.file="$conf" -cp "$analytics_cp" "$main" "$@")
+}
+replay_run() {
+  local conf="$1" output="$2" actual_exit
+  if java_run "$conf" com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain >"$output" 2>&1; then
+    actual_exit=0
+  else
+    actual_exit=$?
+  fi
+  printf 'STREAMING_REPLAY_CLI_EXIT actualExit=%d\n' "$actual_exit" >>"$output"
+  return "$actual_exit"
 }
 read_state() {
   [[ -d "$config_dir" && ! -L "$config_dir" && "$(stat -c '%u:%a' "$config_dir")" == "$(id -u):700" &&
@@ -103,6 +122,9 @@ def mongo_uri(operator): return f"mongodb://{'proof_operator' if operator else '
 for operator in (True,False):
  conf='include classpath("application.conf")\n'+f'mongo.uri={q(mongo_uri(operator))}\nmongo.database={q(database)}\nmongo.reset-on-start=false\nhttp.host="127.0.0.1"\nhttp.port={api}\nauth.jwt.hs256-secret={q(credentials["jwtSecret"])}\nkafka.enabled=true\nkafka.bootstrap-servers={q("127.0.0.1:"+str(kafka))}\nkafka.sasl-security-protocol="SASL_PLAINTEXT"\nkafka.topic={q(topic)}\nkafka.publisher.sasl-username="hiring_publisher_v2"\nkafka.publisher.sasl-password={q(os.environ["KAFKA_PUBLISHER_V2_PASSWORD"])}\n'
  (p/('api-operator.conf' if operator else 'api-runtime.conf')).write_text(conf)
+with (p/'replay-outcome-log4j2.properties').open('x',encoding='utf-8') as replay_logging:
+ os.fchmod(replay_logging.fileno(),0o600)
+ replay_logging.write('rootLogger.level = error\nrootLogger.appenderRef.stdout.ref = console\nappender.console.type = Console\nappender.console.name = console\nappender.console.target = SYSTEM_ERR\nappender.console.layout.type = PatternLayout\nappender.console.layout.pattern = %d{HH:mm:ss} %-5p %c{1}: %m%n\nlogger.replay.name = com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain\nlogger.replay.level = info\nlogger.replay.additivity = false\nlogger.replay.appenderRef.console.ref = console\nlogger.replayObject.name = com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain$\nlogger.replayObject.level = info\nlogger.replayObject.additivity = false\nlogger.replayObject.appenderRef.console.ref = console\n')
 for file in p.iterdir(): file.chmod(0o600)
 PY
   compose_started=true
@@ -337,9 +359,9 @@ print('STREAMING_PROCESS_RESTART_VERIFIED preservedCheckpoint=true priorVisibleF
 PY
   # Live admission/replay scenarios follow the separately measured healthy/burst runs.
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain prepare >"$log_dir/live-admission.log" 2>&1
-  java_run "$config_dir/scenarios-replay.conf" com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain >"$log_dir/live-replay-first.log" 2>&1
+  replay_run "$config_dir/scenarios-replay.conf" "$log_dir/live-replay-first.log"
   rg -q 'late replay outcome: Published' "$log_dir/live-replay-first.log"
-  java_run "$config_dir/scenarios-replay.conf" com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain >"$log_dir/live-replay-retry.log" 2>&1
+  replay_run "$config_dir/scenarios-replay.conf" "$log_dir/live-replay-retry.log"
   rg -q 'late replay outcome: AlreadyPublished' "$log_dir/live-replay-retry.log"
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain verify-replay >"$log_dir/live-replay-readback.log" 2>&1
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain contention >"$log_dir/live-contention.log" 2>&1
@@ -428,6 +450,8 @@ PY
   rg -q '^STREAMING_REPLAY_HTTP_DELETION_BARRIER_PASSED actualMergeBeforeDelete=true oldReservationPinned=true$' "$log_dir/live-replay-deletion-race.log"
   rg -q '^STREAMING_REPLAY_DELETION_RACE_REJECTED category=(ERASURE_PENDING|DELETION_SELECTION_REJECTED)$' "$log_dir/live-replay-deletion-race.log"
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain delete-race >"$log_dir/live-deletion-readback.log" 2>&1
+  java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain suppressed-only >"$log_dir/live-suppressed-only.log" 2>&1
+  rg -q '^STREAMING_SUPPRESSED_ONLY_VERIFIED actualRecords=12 sourceAck=true terminal=ErasurePending bronzeAbsent=true silverAbsent=true lateAndQuarantineAbsent=true candidateWatermarkAbsent=true publishedWatermarkUnchanged=true reportPublicationUnchanged=true receiptReserved=true adminUnavailable=true$' "$log_dir/live-suppressed-only.log"
   kill -- "-$stream_pid"
   wait "$stream_pid" || true
   trap - EXIT

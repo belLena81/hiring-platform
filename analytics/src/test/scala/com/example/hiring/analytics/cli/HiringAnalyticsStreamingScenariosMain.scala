@@ -125,7 +125,6 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
         .leftMap(_ => new IllegalArgumentException("scenario producer settings missing"))
     )
     directory <- IO.blocking(ownedConfiguration(api, settings.common.mongoDatabase, mode != "prepare"))
-    adminToken <- IO.blocking(HiringAnalyticsStreamingWorkloadMain.login(api, "Admin"))
     _ <- Resource.make(IO.blocking(MongoClients.create(settings.common.mongoUri)))(m => IO.blocking(m.close())).use {
       mongo =>
         AppModule
@@ -156,39 +155,44 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
                 .map(_.getAs[Timestamp]("candidateWatermark").toInstant)
             }
             def adminCount(skill: String): IO[Long] = IO.blocking {
-              val token = adminToken
+              val token = HiringAnalyticsStreamingWorkloadMain.login(api, "Admin")
               val day = Instant.now().truncatedTo(ChronoUnit.DAYS)
               val body = http(
                 api,
                 token,
                 s"{ analyticsReport(from: ${json(day.minusSeconds(7 * 86400L).toString)}, to: ${json(day.plusSeconds(86400).toString)}) { skillPostingActivity { skill postings } } }"
               )
-              require(!body.containsKey("errors"), "guarded Admin report unavailable")
-              body
-                .get("data", classOf[Document])
-                .get("analyticsReport", classOf[Document])
-                .getList("skillPostingActivity", classOf[Document])
-                .asScala
-                .filter(_.getString("skill") == skill)
-                .map(_.get("postings", classOf[java.lang.Number]).longValue())
-                .sum
+              StreamingAdmissionProof.report(body) match {
+                case Left(category)      => throw new IllegalStateException(category)
+                case Right(None)         => -1L
+                case Right(Some(report)) =>
+                  report
+                    .getList("skillPostingActivity", classOf[Document])
+                    .asScala
+                    .filter(_.getString("skill") == skill)
+                    .map(_.get("postings", classOf[java.lang.Number]).longValue())
+                    .sum
+              }
             }
             def hiredDistribution: IO[Boolean] = IO.blocking {
               val day = Instant.now().truncatedTo(ChronoUnit.DAYS)
               val body = http(
                 api,
-                adminToken,
+                HiringAnalyticsStreamingWorkloadMain.login(api, "Admin"),
                 s"{ analyticsReport(from: ${json(day.minusSeconds(7 * 86400L).toString)}, to: ${json(day.plusSeconds(86400).toString)}) { timeToHire { p50Hours p75Hours p90Hours p95Hours eligibleCount excludedCount } } }"
               )
-              require(!body.containsKey("errors"), "guarded time-to-hire report unavailable")
-              val report = body.get("data", classOf[Document]).get("analyticsReport", classOf[Document])
-              Option(report.get("timeToHire", classOf[Document])).exists(d =>
-                Vector("p50Hours", "p75Hours", "p90Hours", "p95Hours")
-                  .forall(key => d.get(key, classOf[java.lang.Number]).doubleValue() == 1.0) &&
-                  d.get("eligibleCount", classOf[java.lang.Number]).longValue() == 12 && d
-                    .get("excludedCount", classOf[java.lang.Number])
-                    .longValue() == 0
-              )
+              StreamingAdmissionProof.report(body) match {
+                case Left(category)      => throw new IllegalStateException(category)
+                case Right(None)         => false
+                case Right(Some(report)) =>
+                  Option(report.get("timeToHire", classOf[Document])).exists(d =>
+                    Vector("p50Hours", "p75Hours", "p90Hours", "p95Hours")
+                      .forall(key => d.get(key, classOf[java.lang.Number]).doubleValue() == 1.0) &&
+                      d.get("eligibleCount", classOf[java.lang.Number]).longValue() == 12 && d
+                        .get("excludedCount", classOf[java.lang.Number])
+                        .longValue() == 0
+                  )
+              }
             }
             def sendApplication(
                 producer: KafkaProducer[String, String],
@@ -253,6 +257,69 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
                   .make(IO.blocking(new KafkaProducer[String, String](config)))(p => IO.blocking(p.close()))
                   .evalTap(p => IO.blocking(p.initTransactions()))
               }
+            def nativeBatchAt(offset: Long, outcome: String): IO[Option[Long]] = execution {
+              val rows = dataset("control/streaming_progress").orderBy(col("batchId").desc).limit(8).collect().toVector
+              rows
+                .find { row =>
+                  row
+                    .getSeq[org.apache.spark.sql.Row](row.fieldIndex("deliveredOffsets"))
+                    .exists(d =>
+                      d.getAs[String]("topic") == topic && d.getAs[Int]("partition") == 0 &&
+                        d.getAs[Long]("minimumDeliveredOffset") <= offset && d
+                          .getAs[Long]("maximumDeliveredOffset") >= offset
+                    )
+                }
+                .flatMap { row =>
+                  if (row.getAs[String]("outcome") != outcome) None
+                  else {
+                    val batch = row.getAs[Long]("batchId")
+                    val lineage = row.getAs[String]("lineage")
+                    val decisions = dataset("control/streaming_decisions")
+                      .filter(col("lineage") === lineage && col("batchId") === batch)
+                      .orderBy(col("revision").desc)
+                      .limit(1)
+                      .collect()
+                    require(decisions.length == 1, "native batch decision absent")
+                    if (outcome == "QualityBlocked") {
+                      require(
+                        row.isNullAt(row.fieldIndex("candidateWatermark")) &&
+                          decisions.head.isNullAt(decisions.head.fieldIndex("candidateWatermark")),
+                        "quality blocked watermark advanced"
+                      )
+                      val delivered = row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("deliveredOffsets"))
+                      require(
+                        delivered.size == 1 && StreamingAdmissionProof.exactDelivered(
+                          delivered.head.getAs[String]("topic"),
+                          delivered.head.getAs[Int]("partition"),
+                          delivered.head.getAs[Long]("minimumDeliveredOffset"),
+                          delivered.head.getAs[Long]("maximumDeliveredOffset"),
+                          delivered.head.getAs[Long]("deliveredRecordCount"),
+                          topic,
+                          Vector(offset)
+                        ),
+                        "conflict batch contains other source data"
+                      )
+                    }
+                    val checkpoint = new org.apache.hadoop.fs.Path(settings.streaming.checkpointLocation)
+                    val fs = org.apache.hadoop.fs.FileSystem
+                      .newInstance(checkpoint.toUri, spark.sparkContext.hadoopConfiguration)
+                    try {
+                      val ends = row
+                        .getSeq[org.apache.spark.sql.Row](row.fieldIndex("sourceEndOffsets"))
+                        .map(e => (e.getAs[String]("topic") -> e.getAs[Int]("partition")) -> e.getAs[Long]("endOffset"))
+                        .toMap
+                      require(
+                        ends.size == 3 && ends.get(topic -> 0).exists(_ > offset),
+                        "native source-end evidence invalid"
+                      )
+                      val logs = SparkCheckpointLogs.read(fs, checkpoint, topic, Set(0, 1, 2)).fold(throw _, identity)
+                      if (logs.exists(log => log.batchId.value == batch && log.committed && log.endOffsets == ends))
+                        Some(batch)
+                      else None
+                    } finally fs.close()
+                  }
+                }
+            }
             mode match {
               case "prepare" =>
                 producerResource.use { producer =>
@@ -299,14 +366,36 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
                     })
                     duplicate = UUID.randomUUID().toString
                     _ <- send(producer, duplicate, actors(1), "retry", now)
-                    _ <- send(producer, duplicate, actors(1), "retry", now)
+                    duplicateOffset <- send(producer, duplicate, actors(1), "retry", now)
                     _ <- await("identical retry was not idempotent")(
                       count("bronze/operational_events", duplicate)
                         .map(_ == 2)
                         .flatMap(b => count("silver/operational_events", duplicate).map(s => b && s == 1))
                     )
+                    _ <- await("canonical duplicate batch not published and acknowledged")(
+                      nativeBatchAt(duplicateOffset, "Published").map(_.nonEmpty)
+                    )
+                    _ <- await("canonical report baseline not available")(adminCount("retry").map(_ >= 0))
+                    retryContributionBefore <- adminCount("retry")
+                    _ <- IO(require(retryContributionBefore >= 0, "actual report baseline missing"))
+                    canonicalBefore <- execution {
+                      val frame = dataset("silver/operational_events").filter(col("eventId") === duplicate)
+                      val rows = frame.select(frame.columns.sorted.map(col)*).toJSON.take(2).toVector
+                      require(rows.size == 1, "canonical Silver fixture must be singular")
+                      rows
+                    }
+                    generationBeforeConflict <- IO.blocking {
+                      database
+                        .getCollection("analytics_report_control")
+                        .find(new Document("_id", "analytics-report"))
+                        .first()
+                        .getLong("generation")
+                        .longValue()
+                    }
+                    watermarkBeforeConflict <- watermark
+                    _ <- IO(require(watermarkBeforeConflict.nonEmpty, "published conflict baseline watermark missing"))
                     conflictOffset <- send(producer, duplicate, actors(1), "conflicting-synthetic-skill", now)
-                    _ <- await("conflict was not quarantined and removed")(
+                    _ <- await("incoming conflict not quarantined or canonical fact changed")(
                       execution {
                         dataset("quarantine/operational_events")
                           .filter(
@@ -316,7 +405,67 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
                           )
                           .count() == 1
                       }
-                        .flatMap(q => count("silver/operational_events", duplicate).map(s => q && s == 0))
+                        .flatMap(q =>
+                          execution {
+                            val frame = dataset("silver/operational_events").filter(col("eventId") === duplicate)
+                            q && frame.select(frame.columns.sorted.map(col)*).toJSON.take(2).toVector == canonicalBefore
+                          }
+                        )
+                    )
+                    _ <- await("conflict batch not quality blocked and acknowledged")(
+                      nativeBatchAt(conflictOffset, "QualityBlocked").map(_.nonEmpty)
+                    )
+                    conflictBatch <- nativeBatchAt(conflictOffset, "QualityBlocked").flatMap(
+                      _.liftTo[IO](new IllegalStateException("captured conflict terminal missing"))
+                    )
+                    _ <- execution {
+                      val progress = dataset("control/streaming_progress")
+                        .filter(col("batchId") === conflictBatch)
+                        .limit(1)
+                        .collect()
+                        .head
+                      val decision = dataset("control/streaming_decisions")
+                        .filter(
+                          col("lineage") === progress.getAs[String]("lineage") &&
+                            col("batchId") === progress.getAs[Long]("batchId")
+                        )
+                        .orderBy(col("revision").desc)
+                        .limit(1)
+                        .collect()
+                        .head
+                      val receipt = database
+                        .getCollection("analytics_report_runs")
+                        .find(new Document("_id", decision.getAs[String]("publicationRunId")))
+                        .first()
+                      require(
+                        receipt != null && receipt.getString("state") == "Reserved",
+                        "conflict batch published receipt"
+                      )
+                    }
+                    _ <- IO.blocking {
+                      require(
+                        database
+                          .getCollection("analytics_report_control")
+                          .find(new Document("_id", "analytics-report"))
+                          .first()
+                          .getLong("generation")
+                          .longValue() == generationBeforeConflict,
+                        "conflict changed report generation"
+                      )
+                    }
+                    watermarkAfterConflict <- watermark
+                    _ <- IO(
+                      require(
+                        watermarkAfterConflict == watermarkBeforeConflict,
+                        "conflict advanced published watermark"
+                      )
+                    )
+                    _ <- await("canonical report contribution changed after conflict")(
+                      (adminCount("retry"), adminCount("conflicting-synthetic-skill"))
+                        .mapN((old, incoming) => old == retryContributionBefore && incoming == 0)
+                    )
+                    _ <- IO.println(
+                      "STREAMING_CONFLICT_CANONICAL_PRESERVED exactIncomingQuarantine=true canonicalSilverUnchanged=true terminal=QualityBlocked sourceAck=true publishedWatermarkUnchanged=true receiptReserved=true priorAdminContributionUnchanged=true"
                     )
                     lifecycleAt <- IO.realTimeInstant
                     applications <- IO.delay(Vector.fill(12)(UUID.randomUUID().toString))
@@ -538,6 +687,291 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
                     )
                   } yield ()
                 }
+              case "suppressed-only" =>
+                // Test-only proof. One transaction gives an exact, bounded suppressed cohort.
+                producerResource
+                  .use { producer =>
+                    for {
+                      state <- readState
+                      owner = state.getString("candidateId")
+                      _ <- IO(require(UUID.fromString(owner).toString == owner, "canonical deleted owner required"))
+                      paths <- IO.fromEither(
+                        AnalyticsLakehousePaths
+                          .from(settings.common.lakehouseRoot)
+                          .toEither
+                          .leftMap(_ => new IllegalArgumentException("isolated paths invalid"))
+                      )
+                      pseudonymizer <- IO.fromEither(
+                        SubjectPseudonymizer
+                          .validateFromBase64(
+                            Some(settings.common.hmac.secretBase64),
+                            settings.common.hmac.keyId,
+                            settings.common.hmac.previousKeyId,
+                            settings.common.hmac.previousSecretBase64
+                          )
+                          .toEither
+                          .leftMap(_ => new IllegalArgumentException("proof HMAC configuration invalid"))
+                      )
+                      ownerTokens <- IO.fromEither(
+                        pseudonymizer
+                          .matchingTokens(owner)
+                          .leftMap(_ => new IllegalArgumentException("deleted owner token invalid"))
+                      )
+                      typedDatabase <- client.getDatabase(settings.common.mongoDatabase)
+                      markerSource = new MongoActiveDeletionMarkerSource[IO](
+                        typedDatabase,
+                        pseudonymizer,
+                        new MongoPublisherStream(settings.common.operational)
+                      )
+                      _ <- markerSource.activeSubjectTokens.flatMap(tokens =>
+                        IO(require(ownerTokens.forall(tokens.contains), "deleted owner marker inactive"))
+                      )
+                      beforeWatermark <- watermark
+                      _ <- IO(require(beforeWatermark.nonEmpty, "prior published watermark required"))
+                      beforeProgress <- execution {
+                        val rows = dataset("control/streaming_progress").orderBy(col("batchId").desc).limit(1).collect()
+                        require(rows.length == 1, "native prior progress required")
+                        (rows.head.getAs[String]("lineage"), rows.head.getAs[Long]("batchId"))
+                      }
+                      // Only these publication fields must be unchanged; allocation revision may increase.
+                      beforePublication <- IO.blocking {
+                        val control = database
+                          .getCollection("analytics_report_control")
+                          .find(new Document("_id", "analytics-report"))
+                          .first()
+                        require(control != null && control.getString("state") == "Hidden", "report not hidden")
+                        (
+                          control.getLong("generation").longValue(),
+                          control.getLong("lastPublishedRevision").longValue(),
+                          Option(control.getString("lastRunId"))
+                        )
+                      }
+                      ids <- IO.delay(Vector.fill(12)(UUID.randomUUID().toString))
+                      offsets <- IO.blocking {
+                        val at = Instant.now()
+                        val skill = "suppressed" + UUID.randomUUID().toString.replace("-", "")
+                        producer.beginTransaction()
+                        val coordinates = ids.map { id =>
+                          val body = s"""{"eventId":${json(id)},"eventType":"JOB_CREATED","occurredAt":${json(
+                              at.toString
+                            )},"aggregateType":"Job","aggregateId":${json(id)},"actorId":${json(
+                              owner
+                            )},"payload":{"job":{"skills":[${json(skill)}]}}}"""
+                          producer
+                            .send(new ProducerRecord[String, String](topic, Int.box(0), id, body))
+                            .get(15, java.util.concurrent.TimeUnit.SECONDS)
+                            .offset()
+                        }
+                        producer.commitTransaction()
+                        require(
+                          coordinates.distinct.size == 12 && coordinates.sliding(2).forall {
+                            case Vector(a, b) => b == a + 1
+                            case _            => true
+                          },
+                          "exact transactional cohort required"
+                        )
+                        coordinates
+                      }
+                      // Read actual read_committed LSO, including transaction-control gaps, with reader credentials.
+                      clientProperties <- IO.fromEither(KafkaClientProperties.clientProperties(settings.common.kafka))
+                      _ <- Resource
+                        .make(IO.blocking {
+                          val props = new Properties()
+                          props.put("bootstrap.servers", settings.common.kafka.bootstrapServers)
+                          clientProperties.foreach { case (key, value) => props.put(key, value) }
+                          props.put("request.timeout.ms", "10000"); props.put("default.api.timeout.ms", "10000")
+                          org.apache.kafka.clients.admin.Admin.create(props)
+                        })(admin => IO.blocking(admin.close(java.time.Duration.ofSeconds(5))))
+                        .use { admin =>
+                          def brokerEnds: IO[Map[Int, Long]] = IO.blocking {
+                            val partitions = (0 until 3).map(p => new org.apache.kafka.common.TopicPartition(topic, p))
+                            val requests =
+                              partitions.map(_ -> org.apache.kafka.clients.admin.OffsetSpec.latest()).toMap.asJava
+                            val options = new org.apache.kafka.clients.admin.ListOffsetsOptions(
+                              org.apache.kafka.common.IsolationLevel.READ_COMMITTED
+                            )
+                            val values =
+                              admin.listOffsets(requests, options).all().get(10, java.util.concurrent.TimeUnit.SECONDS)
+                            require(values.size() == 3, "exact three-partition LSO required")
+                            values.asScala.map { case (partition, value) =>
+                              partition.partition() -> value.offset()
+                            }.toMap
+                          }
+                          for {
+                            expectedEnds <- brokerEnds
+                            _ <- IO(require(expectedEnds(0) > offsets.last, "transaction control not committed"))
+                            captured <- cats.effect.Ref.of[IO, Option[(Long, String)]](None)
+                            _ <- await("suppressed batch not durably acknowledged") {
+                              for {
+                                currentEnds <- brokerEnds
+                                _ <- IO(
+                                  require(currentEnds == expectedEnds, "source changed during suppressed-only proof")
+                                )
+                                candidate <- execution {
+                                  val rows = dataset("control/streaming_progress")
+                                    .filter(col("lineage") === beforeProgress._1 && col("batchId") > beforeProgress._2)
+                                    .orderBy(col("batchId").desc)
+                                    .limit(4)
+                                    .collect()
+                                    .toVector
+                                  require(rows.size < 4, "ambiguous suppressed batch search")
+                                  rows
+                                    .find { row =>
+                                      val ends =
+                                        row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("sourceEndOffsets"))
+                                      ends.size == 3 && ends.forall(e => e.getAs[String]("topic") == topic) &&
+                                      ends
+                                        .map(e => e.getAs[Int]("partition") -> e.getAs[Long]("endOffset"))
+                                        .toMap == expectedEnds
+                                    }
+                                    .flatMap { row =>
+                                      if (row.getAs[String]("outcome") != "ErasurePending") None
+                                      else {
+                                        require(
+                                          row.isNullAt(row.fieldIndex("candidateWatermark")),
+                                          "suppressed batch advanced watermark"
+                                        )
+                                        val delivered =
+                                          row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("deliveredOffsets"))
+                                        require(
+                                          delivered.size == 1 && delivered.head.getAs[String]("topic") == topic &&
+                                            StreamingAdmissionProof.exactDelivered(
+                                              delivered.head.getAs[String]("topic"),
+                                              delivered.head.getAs[Int]("partition"),
+                                              delivered.head.getAs[Long]("minimumDeliveredOffset"),
+                                              delivered.head.getAs[Long]("maximumDeliveredOffset"),
+                                              delivered.head.getAs[Long]("deliveredRecordCount"),
+                                              topic,
+                                              offsets
+                                            ),
+                                          "batch contains other delivered source records"
+                                        )
+                                        val batch = row.getAs[Long]("batchId")
+                                        val decisions = dataset("control/streaming_decisions")
+                                          .filter(col("lineage") === beforeProgress._1 && col("batchId") === batch)
+                                          .orderBy(col("revision").desc)
+                                          .limit(1)
+                                          .collect()
+                                        require(
+                                          decisions.length == 1 && decisions.head
+                                            .isNullAt(decisions.head.fieldIndex("candidateWatermark")),
+                                          "suppressed decision candidate not empty"
+                                        )
+                                        Some(batch -> decisions.head.getAs[String]("publicationRunId"))
+                                      }
+                                    }
+                                }
+                                committed <- candidate.traverse { value =>
+                                  execution {
+                                    val checkpoint =
+                                      new org.apache.hadoop.fs.Path(settings.streaming.checkpointLocation)
+                                    val fs = org.apache.hadoop.fs.FileSystem
+                                      .newInstance(checkpoint.toUri, spark.sparkContext.hadoopConfiguration)
+                                    try {
+                                      val logs = SparkCheckpointLogs
+                                        .read(fs, checkpoint, topic, Set(0, 1, 2))
+                                        .fold(error => throw error, identity)
+                                      logs.exists(log =>
+                                        log.batchId.value == value._1 && log.committed &&
+                                          log.endOffsets == expectedEnds.map { case (partition, end) =>
+                                            (topic -> partition) -> end
+                                          }
+                                      )
+                                    } finally fs.close()
+                                  }
+                                }
+                                done = committed.contains(true)
+                                _ <- if (done) captured.set(candidate) else IO.unit
+                              } yield done
+                            }
+                            selected <- captured.get.flatMap(
+                              _.liftTo[IO](new IllegalStateException("captured terminal missing"))
+                            )
+                            _ <- execution {
+                              Vector(
+                                "bronze" -> paths.bronze,
+                                "silver" -> paths.silver,
+                                "late" -> paths.lateFacts,
+                                "quarantine" -> paths.quarantine
+                              ).foreach { case (store, path) =>
+                                val physical = SparkPhysicalLocation.resolve(path)
+                                if (io.delta.tables.DeltaTable.isDeltaTable(spark, physical)) {
+                                  val frame = spark.read.format("delta").load(physical)
+                                  val required = StreamingAdmissionProof.evidenceColumns(store)
+                                  require(
+                                    required.forall(frame.columns.contains),
+                                    "suppression evidence schema invalid"
+                                  )
+                                  val idMatch =
+                                    if (required.contains("eventId")) col("eventId").isin(ids*) else lit(false)
+                                  val coordinateMatch =
+                                    if (required.contains("offset"))
+                                      col("topic") === topic && col("partition") === 0 && col("offset").isin(
+                                        offsets.map(Long.box)*
+                                      )
+                                    else lit(false)
+                                  require(
+                                    frame.filter(idMatch || coordinateMatch).limit(1).count() == 0,
+                                    "suppressed input persisted"
+                                  )
+                                }
+                              }
+                            }
+                            _ <- markerSource.activeSubjectTokens.flatMap(tokens =>
+                              IO(require(ownerTokens.forall(tokens.contains), "owner marker changed during proof"))
+                            )
+                            afterWatermark <- watermark
+                            _ <- IO(require(afterWatermark == beforeWatermark, "latest published watermark changed"))
+                            _ <- IO.blocking {
+                              val control = database
+                                .getCollection("analytics_report_control")
+                                .find(new Document("_id", "analytics-report"))
+                                .first()
+                              require(
+                                control != null && control.getString("state") == "Hidden" &&
+                                  (
+                                    control.getLong("generation").longValue(),
+                                    control.getLong("lastPublishedRevision").longValue(),
+                                    Option(control.getString("lastRunId"))
+                                  ) == beforePublication,
+                                "suppressed input changed publication identity"
+                              )
+                              val receipt = database
+                                .getCollection("analytics_report_runs")
+                                .find(new Document("_id", selected._2))
+                                .first()
+                              require(
+                                receipt != null && receipt.getString("state") == "Reserved",
+                                "suppressed input published receipt"
+                              )
+                              val token = HiringAnalyticsStreamingWorkloadMain.login(api, "Admin")
+                              val day = Instant.now().truncatedTo(ChronoUnit.DAYS)
+                              val body = http(
+                                api,
+                                token,
+                                s"{ analyticsReport(from: ${json(day.minusSeconds(7 * 86400L).toString)}, to: ${json(day.plusSeconds(86400).toString)}) { skillPostingActivity { skill postings } } }"
+                              )
+                              val errors = Option(body.getList("errors", classOf[Document]))
+                                .map(_.asScala.toVector)
+                                .getOrElse(Vector.empty)
+                              require(
+                                errors.size == 1 && Option(errors.head.get("extensions", classOf[Document]))
+                                  .exists(_.getString("code") == "ANALYTICS_UNAVAILABLE"),
+                                "Admin report did not fail with exact hidden category"
+                              )
+                              val data = Option(body.get("data", classOf[Document]))
+                              require(data.forall(d => d.get("analyticsReport") == null), "hidden report data returned")
+                            }
+                            afterEnds <- brokerEnds
+                            _ <- IO(require(afterEnds == expectedEnds, "source changed before final proof snapshot"))
+                            _ <- IO.println(
+                              "STREAMING_SUPPRESSED_ONLY_VERIFIED actualRecords=12 sourceAck=true terminal=ErasurePending bronzeAbsent=true silverAbsent=true lateAndQuarantineAbsent=true candidateWatermarkAbsent=true publishedWatermarkUnchanged=true reportPublicationUnchanged=true receiptReserved=true adminUnavailable=true"
+                            )
+                          } yield ()
+                        }
+                    } yield ()
+                  }
+                  .timeout(180.seconds)
               case "delete-race" =>
                 for {
                   state <- readState
@@ -741,8 +1175,65 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
     }
     program
       .as(ExitCode.Success)
-      .handleErrorWith(error =>
-        IO.println("STREAMING_LIVE_SCENARIO_FAILED class=" + error.getClass.getSimpleName).as(ExitCode.Error)
+      .handleErrorWith(error => IO.println(StreamingAdmissionProof.failure(args, error)).as(ExitCode.Error))
+  }
+}
+
+/** Pure classification at the test HTTP/log adapter; payloads and exception messages never enter diagnostics. */
+private[cli] object StreamingAdmissionProof {
+  def report(body: Document): Either[String, Option[Document]] =
+    try reportShape(body)
+    catch { case scala.util.control.NonFatal(_) => Left("REPORT_SHAPE_INVALID") }
+
+  private def reportShape(body: Document): Either[String, Option[Document]] = {
+    val errors = Option(body.getList("errors", classOf[Document])).map(_.asScala.toVector).getOrElse(Vector.empty)
+    val data = Option(body.get("data", classOf[Document]))
+    val value = data.flatMap(d => Option(d.get("analyticsReport", classOf[Document])))
+    if (errors.isEmpty) value.toRight("REPORT_SHAPE_INVALID").map(Some(_))
+    else if (
+      errors.size == 1 && value.isEmpty && Option(errors.head.get("extensions", classOf[Document]))
+        .exists(_.getString("code") == "ANALYTICS_UNAVAILABLE")
+    ) Right(None)
+    else Left("REPORT_OBSERVATION_REJECTED")
+  }
+
+  def evidenceColumns(store: String): Vector[String] = store match {
+    case "silver"                => Vector("eventId")
+    case "late"                  => Vector("eventId", "topic", "partition", "offset")
+    case "bronze" | "quarantine" => Vector("topic", "partition", "offset")
+    case _                       => throw new IllegalArgumentException("unknown evidence store")
+  }
+
+  def exactDelivered(
+      topic: String,
+      partition: Int,
+      minimum: Long,
+      maximum: Long,
+      count: Long,
+      expectedTopic: String,
+      expectedOffsets: Vector[Long]
+  ): Boolean = expectedOffsets.nonEmpty && expectedOffsets.size <= 12 && expectedOffsets.forall(_ >= 0L) &&
+    expectedOffsets.distinct.size == expectedOffsets.size && topic == expectedTopic && partition == 0 &&
+    minimum == expectedOffsets.min && maximum == expectedOffsets.max && count == expectedOffsets.size.toLong
+
+  def failure(args: List[String], error: Throwable): String = {
+    val allowed =
+      Set("prepare", "verify-replay", "contention", "continuation", "delete-race", "race-replay", "suppressed-only")
+    val mode = args match { case List(value) if allowed.contains(value) => value; case _ => "invalid" }
+    val category = error match {
+      case _: IllegalStateException                 => "IllegalStateException"
+      case _: IllegalArgumentException              => "IllegalArgumentException"
+      case _: java.util.concurrent.TimeoutException => "TimeoutException"
+      case _: AnalyticsError                        => "AnalyticsError"
+      case _                                        => "FrameworkFailure"
+    }
+    val line = error.getStackTrace.iterator
+      .find(frame =>
+        frame.getFileName == "HiringAnalyticsStreamingScenariosMain.scala" &&
+          frame.getClassName.startsWith("com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain") &&
+          frame.getLineNumber > 0 && frame.getLineNumber <= 10000
       )
+      .fold(0)(_.getLineNumber)
+    s"STREAMING_LIVE_SCENARIO_FAILED mode=$mode class=$category ownLine=$line"
   }
 }
