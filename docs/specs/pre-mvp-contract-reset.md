@@ -1,5 +1,11 @@
 # Pre-MVP Hiring Contract and Aggregate Revisions
 
+## Current state — 2026-10-05
+
+The revision migration, request viewer snapshot, and GraphQL document cache exist in source. `RequestContextSpec` and `GraphQLDocumentCacheSpec` provide focused checks; later [repository composition](hiring-repository-composition.md) records passing root unit and integration suites after the old compilation/runtime blockers. The original criterion-level evidence and review verdicts below remain historical; this documentation audit does not grant a new acceptance verdict. Phase 11 adds durable Kafka workflow/Saga contracts; current lifecycle state programs and operational outbox publication do not establish that future capability.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
 - Status: in progress
@@ -13,8 +19,8 @@
 - User and job documents carry a non-negative Long version. New documents start at 0; every user/job write increments it atomically, while guarded writes compare _id and expected version. This is storage concurrency metadata, not a schema/API/event version.
 - Concurrent writes use transactions and conditional identity/ownership/status predicates together with aggregate revisions where snapshots are written back.
 - Migration 001_user_job_revisions backfills missing user/job revisions in bounded _id batches, verifies BSON type and non-negative value, then records completion in hiring_migration_ledger. Startup skips backfill and verification when that ledger entry is already Complete. A partial or concurrent run is safe to repeat and cannot reset an advanced revision; failed verification aborts startup. The durable embedding worker waits for setup completion before claiming work. Old binaries must be stopped before migration because strict old codecs reject the added field.
-- Events use the unversioned topic and envelope; timestamp plus event ID is their only ordering key.
-- The existing uncommitted GraphQL restructuring is the target API and must be reconciled, not discarded. The operational contract remains the active compatibility boundary; the [Hiring Analytics Lakehouse](hiring-analytics-lakehouse.md) spec owns derived analytics behavior and evidence.
+- Events use the unversioned topic and envelope. Kafka publication uses the event partition key and serializes each claimed key group; `(occurredAt, eventId)` is the deterministic analytics projection order, not a global Kafka causal-order guarantee. Phase 11 must define workflow-specific ordering and sequence contracts.
+- The GraphQL restructuring is implemented as the active API. The operational contract remains the active compatibility boundary; the [Hiring Analytics Lakehouse](hiring-analytics-lakehouse.md) spec owns derived analytics behavior and evidence.
 - Authentication rate limits are enforced by the `login`, `signUp`, and `bootstrapAdmin` field resolvers for each executed field, including aliases and fragments. Exhaustion is a sanitized HTTP 200 GraphQL error with `RATE_LIMITED` and positive `retryAfter` seconds extensions.
 - Authenticated GraphQL execution resolves the stored viewer once per request and reuses that verified snapshot for service authorization and nested email visibility. There is no cross-request actor cache; a successful account deletion invalidates the request snapshot.
 - Parsed GraphQL documents use a process-local cache of at most 256 raw query texts for 60 seconds. A cache hit skips repeated static validation only; variables, authentication, rate limits, depth/complexity reducers, and field execution remain per request.

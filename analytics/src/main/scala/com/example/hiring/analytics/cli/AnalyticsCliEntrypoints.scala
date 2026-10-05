@@ -92,6 +92,6 @@ object AnalyticsErasureWorkerMain extends IOApp {
             "worker settings are loaded from HOCON; command-line arguments are not accepted"
           )
         )
-      else program
+      else StreamingProcessTermination.run(program)
     )
 }

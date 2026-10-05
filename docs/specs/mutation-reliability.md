@@ -1,5 +1,11 @@
 # Mutation Reliability
 
+## Current state — 2026-10-05
+
+Typed mutation outcomes, mutation receipts, and durable search-session work are implemented. The original table records incomplete task-level evidence, rather than absence of these features. Later [service composition](hiring-service-composition.md) and [repository composition](hiring-repository-composition.md) document receipt replay, rollback/cancellation, and full integration evidence. The task-specific review entries below are not retroactively approved. Phase 11 durable Saga/inbox work remains planned; mutation receipts alone are not a distributed Saga.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
 - Status: in progress

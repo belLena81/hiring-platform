@@ -45,8 +45,10 @@ Keep machine-specific files under the ignored root `.local/` directory:
 |---|---|
 | `.local/config/` | Application overrides and local service settings |
 | `.local/data/` | Database bind mounts, generated datasets, caches, and analytical checkpoints |
-| `_logs/` | Runtime logs and local diagnostic output at the project root |
+| `.local/logs/` | Runtime logs and local diagnostic output |
 | `.local/backups/` | Database dumps and migration recovery copies |
+
+The packaged application logger currently writes to ignored `_logs/` instead of `.local/logs/`; see [logging](logging.md). This implementation mismatch remains explicit until a scoped runtime change aligns the appender. New local diagnostic artifacts follow `.local/logs/`.
 
 The local environment may use ignored `.env`/`.env.*` files where tooling supports them; sanitized `.env.example` and `.env.<name>.example` files remain shareable. Keep local Codex preferences at the ignored `.codex/config.toml`; shared agent rules and skills remain versioned. IDE `.idea/` directories are ignored at every depth.
 
@@ -70,7 +72,7 @@ The command uses Python 3.9+ to validate project-local skills, checks Java 17+ (
 | Performance | Same reproducible before/after workload, query plans/counts, latency/resource/cost comparison |
 | Docs/skills | Local references, skill validation, and independent scenario review |
 
-Scala compiler warnings are checked by the build. Scalafmt is configured with standard Scalafmt rules for the Scala 3.9 application and separate Scala 3.7.4 analytics build. At the repository root, run `sbt scalafmtAll scalafmtSbt` to format the application and its build definitions, then `cd analytics && sbt scalafmtAll scalafmtSbt` to format analytics. Check them with `sbt scalafmtCheckAll scalafmtSbtCheck` in each build. Foundation adds the explicit `sbt 'IntegrationTest / test'` task for live HTTP and disposable MongoDB checks; run it separately from the Docker-independent local unit command. GraphQL SDL and operation fixtures are checked in the unit suite. Transactions and migrations require disposable MongoDB tests; connectivity tests cannot certify those guarantees. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
+Scala compiler warnings are checked by the build. Scalafmt is configured with standard Scalafmt rules for the Scala 3.9 application and separate Scala 3.7.4 analytics build. At the repository root, run `sbt scalafmtAll scalafmtSbt` to format the application and its build definitions, then `cd analytics && sbt scalafmtAll scalafmtSbt` to format analytics. Check them with `sbt scalafmtCheckAll scalafmtSbtCheck` in each build. The application has the explicit `sbt 'IntegrationTest / test'` task for live HTTP and disposable MongoDB checks; run it separately from the Docker-independent local unit command. GraphQL SDL and operation fixtures are checked in the unit suite. Transactions and migrations require disposable MongoDB tests; connectivity tests cannot certify those guarantees. Missing integration/migration/compatibility tests cannot be deferred to a future CI pipeline.
 
 ## Review before and after coding
 

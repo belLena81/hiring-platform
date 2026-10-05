@@ -1,5 +1,11 @@
 # Service Port Dependency Direction
 
+## Current state — 2026-10-05
+
+Operational ports now live in `service.port`; `RepositoryError` and reporting results remain service-owned, pagination lives in `domain.pagination`, and events/search contracts live in service packages. `service.port.DatabaseProbe` is the port; `service.DatabaseProbe` contains its result model. Later [repository composition](hiring-repository-composition.md) records passing compilation/unit/integration evidence after the historical Mongo migration blockers below. Independent task-specific review was not recorded here and is not inferred from later work.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
 - Status: in progress
@@ -7,7 +13,7 @@
 - Authorized scope: relocate operational ports and their error/result contracts, move domain-dependent event/pagination/search contracts out of `shared`, update references and canonical architecture docs, and verify compilation/tests.
 - Non-goals: behavior changes, GraphQL or persisted schema changes, Mongo migrations/indexes, dependency changes, or changes to runtime resource ownership.
 
-## Verified source facts and decisions
+## Original source baseline and decisions
 
 - Operational contracts are declared in `repository.protocol` and imported by service, API, runtime, infrastructure, and Mongo adapter code.
 - `DatabaseProbe` is currently declared in `service`; `MongoDatabaseProbe` implements it from the Mongo adapter package.

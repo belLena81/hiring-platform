@@ -24,6 +24,9 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
 
   private val F = Async[F]
 
+  /** Finish an acquired tick before shutdown releases its mutex and the shared Spark resources. */
+  private def maintainOwned: F[Unit] = F.uncancelable(_ => F.realTimeInstant.flatMap(maintain))
+
   private final case class State(
       started: FiniteDuration,
       lastSuccessMonotonic: Option[FiniteDuration],
@@ -77,7 +80,7 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
         .use {
           case Left(AnalyticsError.LakehouseLockTimeout) => F.pure(TickOutcome.Deferred)
           case Left(error)                               => F.raiseError[TickOutcome](error)
-          case Right(_) => F.realTimeInstant.flatMap(maintain).as(TickOutcome.Succeeded)
+          case Right(_)                                  => maintainOwned.as(TickOutcome.Succeeded)
         }
         .flatMap(record(state, _))).guaranteeCase {
       case Outcome.Canceled()   => record(state, TickOutcome.Cancelled)
@@ -99,7 +102,7 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
   def runOnce: F[Unit] = lakehouseLock.resource(lakehouseRoot).attempt.use {
     case Left(AnalyticsError.LakehouseLockTimeout) => F.unit
     case Left(error)                               => F.raiseError(error)
-    case Right(_)                                  => F.realTimeInstant.flatMap(maintain)
+    case Right(_)                                  => maintainOwned
   }
 
   def run: F[Unit] = (F.sleep(interval) *> runOnce).foreverM

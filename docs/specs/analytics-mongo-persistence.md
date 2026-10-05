@@ -2,7 +2,7 @@
 
 ## Identity and scope
 
-- Status: implementation present; acceptance blocked by failing Mongo integration tests.
+- Status: typed persistence is implemented; the historical integration failures below were followed by accepted local Phase 6 evidence. Current streaming/source qualification is tracked separately.
 - User outcome: analytics Mongo adapters use typed mongo4cats collections with mongo4cats-circe codecs instead of mixing case-class collections, raw `Document`, and generic `Json` collections.
 - Scope: analytics production Mongo repositories and their codec tests/fixtures. Keep the operational schema and analytics workflow behavior unchanged.
 - Non-goals: root application Mongo persistence, data migration, query/index changes, retention policy changes, or edits to unrelated working tree changes.
@@ -20,7 +20,13 @@
 - AM-03: Codec tests cover exact stored field names and BSON types, valid round trips, missing/null optionals, wrong types/numeric widths, malformed state/identity values, and report extension preservation. Mongo integration tests exercise the affected repositories against disposable MongoDB.
 - AM-04: Analytics Java 17 compile, unit, integration compile/test, formatter, and diff checks are run; unavailable infrastructure is recorded as unverified.
 
-## Evidence checkpoint
+## Current implementation and later evidence
+
+`analytics/build.sbt` includes mongo4cats-core/mongo4cats-circe 0.7.18 and Circe. Production adapters use typed `AnalyticsMongoRecords` and `MongoCollection` values; session-bound operations retain the underlying reactive driver where needed. The erasure boundary is split into queue, progress and barrier adapters. The earlier POJO/manual generic decoder design is superseded.
+
+The [October 3 local HAL completion](hiring-analytics-lakehouse.md#current-local-completion-evidence--october-3) records 389 analytics unit tests and 45 executed integrations, including five enabled HMAC tests, with six disabled bodies excluded and independent local acceptance. This supersedes the initial migration-failure checkpoint below; it does not certify later dirty streaming source. [Continuous analytics](continuous-hiring-analytics.md#current-evidence-summary--october-5) owns subsequent source-bound evidence and open final checks. No new Mongo runtime tests were executed for this documentation reconciliation.
+
+## Historical migration evidence checkpoint
 
 - Source review confirmed three production styles in analytics: mongo4cats `Document`, raw reactive `Document`, and mongo4cats `Json` plus a custom JSON BSON codec. The report publisher also preserves unknown BSON fields; the key-retirement audit scans dynamic collection shapes.
 - Fixed-shape production records now use typed mongo4cats collections and mongo4cats-circe derived codecs. `BsonDecoder.scala`, generic `BsonValueDecoder`, and the generic Json collection codec/read helpers are removed. Raw BSON remains for collection-wide key-retirement audit and query/update expressions; `.underlying` remains for session-bound driver operations and typed bulk writes that the wrapper does not expose.

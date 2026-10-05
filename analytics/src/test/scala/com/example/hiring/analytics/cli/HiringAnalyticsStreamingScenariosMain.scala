@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.cli
 
-import cats.effect.{ExitCode, IO, IOApp, Resource}
+import cats.effect.{Deferred, ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.app.AppModule
 import com.example.hiring.analytics.adapter.kafka.KafkaClientProperties
@@ -245,18 +245,7 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
             }
             val connection = settings.common.kafka
               .copy(saslUsername = Some(credentials.username), saslPassword = Some(credentials.password))
-            val producerResource =
-              Resource.eval(IO.fromEither(KafkaClientProperties.clientProperties(connection))).flatMap { props =>
-                val config = new Properties(); config.put("bootstrap.servers", connection.bootstrapServers)
-                props.foreach { case (key, value) => config.put(key, value) }
-                config.put("key.serializer", classOf[StringSerializer].getName);
-                config.put("value.serializer", classOf[StringSerializer].getName)
-                config.put("acks", "all"); config.put("enable.idempotence", "true")
-                config.put("transactional.id", "hiring-publisher-scenarios-" + UUID.randomUUID())
-                Resource
-                  .make(IO.blocking(new KafkaProducer[String, String](config)))(p => IO.blocking(p.close()))
-                  .evalTap(p => IO.blocking(p.initTransactions()))
-              }
+            val producerResource = transactionalProducer(connection)
             def nativeBatchAt(offset: Long, outcome: String): IO[Option[Long]] = execution {
               val rows = dataset("control/streaming_progress").orderBy(col("batchId").desc).limit(8).collect().toVector
               rows
@@ -688,290 +677,7 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
                   } yield ()
                 }
               case "suppressed-only" =>
-                // Test-only proof. One transaction gives an exact, bounded suppressed cohort.
-                producerResource
-                  .use { producer =>
-                    for {
-                      state <- readState
-                      owner = state.getString("candidateId")
-                      _ <- IO(require(UUID.fromString(owner).toString == owner, "canonical deleted owner required"))
-                      paths <- IO.fromEither(
-                        AnalyticsLakehousePaths
-                          .from(settings.common.lakehouseRoot)
-                          .toEither
-                          .leftMap(_ => new IllegalArgumentException("isolated paths invalid"))
-                      )
-                      pseudonymizer <- IO.fromEither(
-                        SubjectPseudonymizer
-                          .validateFromBase64(
-                            Some(settings.common.hmac.secretBase64),
-                            settings.common.hmac.keyId,
-                            settings.common.hmac.previousKeyId,
-                            settings.common.hmac.previousSecretBase64
-                          )
-                          .toEither
-                          .leftMap(_ => new IllegalArgumentException("proof HMAC configuration invalid"))
-                      )
-                      ownerTokens <- IO.fromEither(
-                        pseudonymizer
-                          .matchingTokens(owner)
-                          .leftMap(_ => new IllegalArgumentException("deleted owner token invalid"))
-                      )
-                      typedDatabase <- client.getDatabase(settings.common.mongoDatabase)
-                      markerSource = new MongoActiveDeletionMarkerSource[IO](
-                        typedDatabase,
-                        pseudonymizer,
-                        new MongoPublisherStream(settings.common.operational)
-                      )
-                      _ <- markerSource.activeSubjectTokens.flatMap(tokens =>
-                        IO(require(ownerTokens.forall(tokens.contains), "deleted owner marker inactive"))
-                      )
-                      beforeWatermark <- watermark
-                      _ <- IO(require(beforeWatermark.nonEmpty, "prior published watermark required"))
-                      beforeProgress <- execution {
-                        val rows = dataset("control/streaming_progress").orderBy(col("batchId").desc).limit(1).collect()
-                        require(rows.length == 1, "native prior progress required")
-                        (rows.head.getAs[String]("lineage"), rows.head.getAs[Long]("batchId"))
-                      }
-                      // Only these publication fields must be unchanged; allocation revision may increase.
-                      beforePublication <- IO.blocking {
-                        val control = database
-                          .getCollection("analytics_report_control")
-                          .find(new Document("_id", "analytics-report"))
-                          .first()
-                        require(control != null && control.getString("state") == "Hidden", "report not hidden")
-                        (
-                          control.getLong("generation").longValue(),
-                          control.getLong("lastPublishedRevision").longValue(),
-                          Option(control.getString("lastRunId"))
-                        )
-                      }
-                      ids <- IO.delay(Vector.fill(12)(UUID.randomUUID().toString))
-                      offsets <- IO.blocking {
-                        val at = Instant.now()
-                        val skill = "suppressed" + UUID.randomUUID().toString.replace("-", "")
-                        producer.beginTransaction()
-                        val coordinates = ids.map { id =>
-                          val body = s"""{"eventId":${json(id)},"eventType":"JOB_CREATED","occurredAt":${json(
-                              at.toString
-                            )},"aggregateType":"Job","aggregateId":${json(id)},"actorId":${json(
-                              owner
-                            )},"payload":{"job":{"skills":[${json(skill)}]}}}"""
-                          producer
-                            .send(new ProducerRecord[String, String](topic, Int.box(0), id, body))
-                            .get(15, java.util.concurrent.TimeUnit.SECONDS)
-                            .offset()
-                        }
-                        producer.commitTransaction()
-                        require(
-                          coordinates.distinct.size == 12 && coordinates.sliding(2).forall {
-                            case Vector(a, b) => b == a + 1
-                            case _            => true
-                          },
-                          "exact transactional cohort required"
-                        )
-                        coordinates
-                      }
-                      // Read actual read_committed LSO, including transaction-control gaps, with reader credentials.
-                      clientProperties <- IO.fromEither(KafkaClientProperties.clientProperties(settings.common.kafka))
-                      _ <- Resource
-                        .make(IO.blocking {
-                          val props = new Properties()
-                          props.put("bootstrap.servers", settings.common.kafka.bootstrapServers)
-                          clientProperties.foreach { case (key, value) => props.put(key, value) }
-                          props.put("request.timeout.ms", "10000"); props.put("default.api.timeout.ms", "10000")
-                          org.apache.kafka.clients.admin.Admin.create(props)
-                        })(admin => IO.blocking(admin.close(java.time.Duration.ofSeconds(5))))
-                        .use { admin =>
-                          def brokerEnds: IO[Map[Int, Long]] = IO.blocking {
-                            val partitions = (0 until 3).map(p => new org.apache.kafka.common.TopicPartition(topic, p))
-                            val requests =
-                              partitions.map(_ -> org.apache.kafka.clients.admin.OffsetSpec.latest()).toMap.asJava
-                            val options = new org.apache.kafka.clients.admin.ListOffsetsOptions(
-                              org.apache.kafka.common.IsolationLevel.READ_COMMITTED
-                            )
-                            val values =
-                              admin.listOffsets(requests, options).all().get(10, java.util.concurrent.TimeUnit.SECONDS)
-                            require(values.size() == 3, "exact three-partition LSO required")
-                            values.asScala.map { case (partition, value) =>
-                              partition.partition() -> value.offset()
-                            }.toMap
-                          }
-                          for {
-                            expectedEnds <- brokerEnds
-                            _ <- IO(require(expectedEnds(0) > offsets.last, "transaction control not committed"))
-                            captured <- cats.effect.Ref.of[IO, Option[(Long, String)]](None)
-                            _ <- await("suppressed batch not durably acknowledged") {
-                              for {
-                                currentEnds <- brokerEnds
-                                _ <- IO(
-                                  require(currentEnds == expectedEnds, "source changed during suppressed-only proof")
-                                )
-                                candidate <- execution {
-                                  val rows = dataset("control/streaming_progress")
-                                    .filter(col("lineage") === beforeProgress._1 && col("batchId") > beforeProgress._2)
-                                    .orderBy(col("batchId").desc)
-                                    .limit(4)
-                                    .collect()
-                                    .toVector
-                                  require(rows.size < 4, "ambiguous suppressed batch search")
-                                  rows
-                                    .find { row =>
-                                      val ends =
-                                        row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("sourceEndOffsets"))
-                                      ends.size == 3 && ends.forall(e => e.getAs[String]("topic") == topic) &&
-                                      ends
-                                        .map(e => e.getAs[Int]("partition") -> e.getAs[Long]("endOffset"))
-                                        .toMap == expectedEnds
-                                    }
-                                    .flatMap { row =>
-                                      if (row.getAs[String]("outcome") != "ErasurePending") None
-                                      else {
-                                        require(
-                                          row.isNullAt(row.fieldIndex("candidateWatermark")),
-                                          "suppressed batch advanced watermark"
-                                        )
-                                        val delivered =
-                                          row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("deliveredOffsets"))
-                                        require(
-                                          delivered.size == 1 && delivered.head.getAs[String]("topic") == topic &&
-                                            StreamingAdmissionProof.exactDelivered(
-                                              delivered.head.getAs[String]("topic"),
-                                              delivered.head.getAs[Int]("partition"),
-                                              delivered.head.getAs[Long]("minimumDeliveredOffset"),
-                                              delivered.head.getAs[Long]("maximumDeliveredOffset"),
-                                              delivered.head.getAs[Long]("deliveredRecordCount"),
-                                              topic,
-                                              offsets
-                                            ),
-                                          "batch contains other delivered source records"
-                                        )
-                                        val batch = row.getAs[Long]("batchId")
-                                        val decisions = dataset("control/streaming_decisions")
-                                          .filter(col("lineage") === beforeProgress._1 && col("batchId") === batch)
-                                          .orderBy(col("revision").desc)
-                                          .limit(1)
-                                          .collect()
-                                        require(
-                                          decisions.length == 1 && decisions.head
-                                            .isNullAt(decisions.head.fieldIndex("candidateWatermark")),
-                                          "suppressed decision candidate not empty"
-                                        )
-                                        Some(batch -> decisions.head.getAs[String]("publicationRunId"))
-                                      }
-                                    }
-                                }
-                                committed <- candidate.traverse { value =>
-                                  execution {
-                                    val checkpoint =
-                                      new org.apache.hadoop.fs.Path(settings.streaming.checkpointLocation)
-                                    val fs = org.apache.hadoop.fs.FileSystem
-                                      .newInstance(checkpoint.toUri, spark.sparkContext.hadoopConfiguration)
-                                    try {
-                                      val logs = SparkCheckpointLogs
-                                        .read(fs, checkpoint, topic, Set(0, 1, 2))
-                                        .fold(error => throw error, identity)
-                                      logs.exists(log =>
-                                        log.batchId.value == value._1 && log.committed &&
-                                          log.endOffsets == expectedEnds.map { case (partition, end) =>
-                                            (topic -> partition) -> end
-                                          }
-                                      )
-                                    } finally fs.close()
-                                  }
-                                }
-                                done = committed.contains(true)
-                                _ <- if (done) captured.set(candidate) else IO.unit
-                              } yield done
-                            }
-                            selected <- captured.get.flatMap(
-                              _.liftTo[IO](new IllegalStateException("captured terminal missing"))
-                            )
-                            _ <- execution {
-                              Vector(
-                                "bronze" -> paths.bronze,
-                                "silver" -> paths.silver,
-                                "late" -> paths.lateFacts,
-                                "quarantine" -> paths.quarantine
-                              ).foreach { case (store, path) =>
-                                val physical = SparkPhysicalLocation.resolve(path)
-                                if (io.delta.tables.DeltaTable.isDeltaTable(spark, physical)) {
-                                  val frame = spark.read.format("delta").load(physical)
-                                  val required = StreamingAdmissionProof.evidenceColumns(store)
-                                  require(
-                                    required.forall(frame.columns.contains),
-                                    "suppression evidence schema invalid"
-                                  )
-                                  val idMatch =
-                                    if (required.contains("eventId")) col("eventId").isin(ids*) else lit(false)
-                                  val coordinateMatch =
-                                    if (required.contains("offset"))
-                                      col("topic") === topic && col("partition") === 0 && col("offset").isin(
-                                        offsets.map(Long.box)*
-                                      )
-                                    else lit(false)
-                                  require(
-                                    frame.filter(idMatch || coordinateMatch).limit(1).count() == 0,
-                                    "suppressed input persisted"
-                                  )
-                                }
-                              }
-                            }
-                            _ <- markerSource.activeSubjectTokens.flatMap(tokens =>
-                              IO(require(ownerTokens.forall(tokens.contains), "owner marker changed during proof"))
-                            )
-                            afterWatermark <- watermark
-                            _ <- IO(require(afterWatermark == beforeWatermark, "latest published watermark changed"))
-                            _ <- IO.blocking {
-                              val control = database
-                                .getCollection("analytics_report_control")
-                                .find(new Document("_id", "analytics-report"))
-                                .first()
-                              require(
-                                control != null && control.getString("state") == "Hidden" &&
-                                  (
-                                    control.getLong("generation").longValue(),
-                                    control.getLong("lastPublishedRevision").longValue(),
-                                    Option(control.getString("lastRunId"))
-                                  ) == beforePublication,
-                                "suppressed input changed publication identity"
-                              )
-                              val receipt = database
-                                .getCollection("analytics_report_runs")
-                                .find(new Document("_id", selected._2))
-                                .first()
-                              require(
-                                receipt != null && receipt.getString("state") == "Reserved",
-                                "suppressed input published receipt"
-                              )
-                              val token = HiringAnalyticsStreamingWorkloadMain.login(api, "Admin")
-                              val day = Instant.now().truncatedTo(ChronoUnit.DAYS)
-                              val body = http(
-                                api,
-                                token,
-                                s"{ analyticsReport(from: ${json(day.minusSeconds(7 * 86400L).toString)}, to: ${json(day.plusSeconds(86400).toString)}) { skillPostingActivity { skill postings } } }"
-                              )
-                              val errors = Option(body.getList("errors", classOf[Document]))
-                                .map(_.asScala.toVector)
-                                .getOrElse(Vector.empty)
-                              require(
-                                errors.size == 1 && Option(errors.head.get("extensions", classOf[Document]))
-                                  .exists(_.getString("code") == "ANALYTICS_UNAVAILABLE"),
-                                "Admin report did not fail with exact hidden category"
-                              )
-                              val data = Option(body.get("data", classOf[Document]))
-                              require(data.forall(d => d.get("analyticsReport") == null), "hidden report data returned")
-                            }
-                            afterEnds <- brokerEnds
-                            _ <- IO(require(afterEnds == expectedEnds, "source changed before final proof snapshot"))
-                            _ <- IO.println(
-                              "STREAMING_SUPPRESSED_ONLY_VERIFIED actualRecords=12 sourceAck=true terminal=ErasurePending bronzeAbsent=true silverAbsent=true lateAndQuarantineAbsent=true candidateWatermarkAbsent=true publishedWatermarkUnchanged=true reportPublicationUnchanged=true receiptReserved=true adminUnavailable=true"
-                            )
-                          } yield ()
-                        }
-                    } yield ()
-                  }
-                  .timeout(180.seconds)
+                suppressionProof(settings, api, directory, spark, client, execution, database, producerResource, None)
               case "delete-race" =>
                 for {
                   state <- readState
@@ -1018,6 +724,527 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
     }
   } yield ()
 
+  private def transactionalProducer(
+      connection: com.example.hiring.analytics.config.KafkaConnection
+  ): Resource[IO, KafkaProducer[String, String]] =
+    Resource.eval(IO.fromEither(KafkaClientProperties.clientProperties(connection))).flatMap { props =>
+      val config = new Properties(); config.put("bootstrap.servers", connection.bootstrapServers)
+      props.foreach { case (key, value) => config.put(key, value) }
+      config.put("key.serializer", classOf[StringSerializer].getName);
+      config.put("value.serializer", classOf[StringSerializer].getName)
+      config.put("acks", "all"); config.put("enable.idempotence", "true")
+      config.put("transactional.id", "hiring-publisher-scenarios-" + UUID.randomUUID())
+      Resource
+        .make(IO.blocking(new KafkaProducer[String, String](config)))(p => IO.blocking(p.close()))
+        .evalTap(p => IO.blocking(p.initTransactions()))
+    }
+
+  /** Resource.use retains the producer across preparation, verification and cancellation. */
+  private[cli] def ownedSuppressionProof[A, B](owner: Resource[IO, A], prepare: IO[B])(
+      verify: (A, B) => IO[Unit]
+  ): IO[Unit] =
+    for {
+      started <- IO.monotonic
+      prepared <- Deferred[IO, Unit]
+      acquisitionDeadline = IO.sleep(120.seconds) *> prepared.tryGet.flatMap {
+        case Some(_) => IO.never[Unit]
+        case None    =>
+          IO.raiseError[Unit](
+            new java.util.concurrent.TimeoutException("suppression preparation deadline exceeded")
+          )
+      }
+      flow = owner.use { owned =>
+        IO.monotonic.flatMap { acquired =>
+          val remaining = 120.seconds - (acquired - started)
+          if (remaining <= Duration.Zero)
+            IO.raiseError(new java.util.concurrent.TimeoutException("suppression preparation deadline exceeded"))
+          else
+            prepare.timeout(remaining).flatMap { value =>
+              IO.monotonic.flatMap { readyAt =>
+                if (readyAt - started >= 120.seconds)
+                  IO.raiseError(new java.util.concurrent.TimeoutException("suppression preparation deadline exceeded"))
+                else prepared.complete(()).void *> verify(owned, value).timeout(300.seconds)
+              }
+            }
+        }
+      }
+      _ <- flow.race(acquisitionDeadline).void.timeout(420.seconds)
+    } yield ()
+
+  private final case class SuppressionBaseline(
+      owner: String,
+      paths: AnalyticsLakehousePaths,
+      ownerTokens: Vector[SubjectToken],
+      markerSource: MongoActiveDeletionMarkerSource[IO],
+      beforeWatermark: Option[Instant],
+      beforeProgress: (String, Long),
+      beforePublication: (Long, Long, Option[String])
+  )
+
+  /** One already-owned Spark context captures the baseline before the real replay/deletion barrier. */
+  private def suppressionProof(
+      settings: com.example.hiring.analytics.config.AnalyticsStreamingRuntimeSettings,
+      api: ApiSettings,
+      directory: java.nio.file.Path,
+      spark: org.apache.spark.sql.SparkSession,
+      client: mongo4cats.client.MongoClient[IO],
+      execution: SparkBlockingExecution[IO],
+      database: com.mongodb.client.MongoDatabase,
+      producerResource: Resource[IO, KafkaProducer[String, String]],
+      beforeDeletion: Option[IO[Unit]]
+  ): IO[Unit] = {
+    val coexistence = beforeDeletion.nonEmpty
+    val mode = if (coexistence) "worker-coexistence" else "suppressed-only"
+    val topic = AnalyticsTopic.unwrap(settings.topic)
+    val statePath = directory.resolve("scenarios.json")
+    def readState: IO[Document] = IO.blocking {
+      require(Files.isRegularFile(statePath) && !Files.isSymbolicLink(statePath), "scenario state missing")
+      val state = Document.parse(Files.readString(statePath))
+      require(state.getString("nonce") == api.nonce, "scenario nonce differs")
+      state
+    }
+    def dataset(name: String) = spark.read
+      .format("delta")
+      .load(SparkPhysicalLocation.resolve(settings.common.lakehouseRoot + "/" + name))
+    def watermark: IO[Option[Instant]] = execution {
+      dataset("control/streaming_progress")
+        .filter(col("outcome") === "Published" && col("candidateWatermark").isNotNull)
+        .orderBy(col("batchId").desc)
+        .limit(1)
+        .collect()
+        .headOption
+        .map(_.getAs[Timestamp]("candidateWatermark").toInstant)
+    }
+    // Test-only proof. One transaction gives an exact, bounded suppressed cohort.
+    val logsDirectory = directory.getParent.getParent.resolve("logs/hiring-streaming-proof-" + api.nonce)
+    def stage(label: String): IO[Unit] =
+      IO.println(s"STREAMING_SUPPRESSION_STAGE mode=$mode stage=$label")
+    def privateFile(path: java.nio.file.Path, maximum: Long): String = {
+      var ancestor = path
+      while (ancestor != null) {
+        require(!Files.isSymbolicLink(ancestor), "proof file traverses symlink")
+        ancestor = ancestor.getParent
+      }
+      require(
+        Files.isRegularFile(path) && Files.size(path) <= maximum &&
+          Files.getOwner(path).getName == System.getProperty("user.name") &&
+          Files.getPosixFilePermissions(path).asScala.map(_.name()).toSet ==
+          Set("OWNER_READ", "OWNER_WRITE"),
+        "private bounded proof file required"
+      )
+      Files.readString(path)
+    }
+    def workerLive: IO[Unit] = IO.blocking {
+      val owner = Document.parse(privateFile(directory.resolve("erasure-worker-owner.json"), 65536L))
+      require(owner.getString("nonce") == api.nonce, "worker owner nonce differs")
+      val pid = owner.get("pid", classOf[java.lang.Number]).longValue()
+      val process = Paths.get("/proc", pid.toString)
+      val stat = Files.readString(process.resolve("stat"))
+      val fields = stat.substring(stat.lastIndexOf(')') + 2).split(" ")
+      val command = new String(Files.readAllBytes(process.resolve("cmdline")), StandardCharsets.UTF_8)
+        .split("\u0000")
+        .toVector
+      require(
+        fields(0) != "Z" && StreamingAdmissionProof.workerStartTicks(owner).contains(fields(19).toLong) &&
+          Files.getAttribute(process, "unix:uid").asInstanceOf[Int].toLong ==
+          owner.get("uid", classOf[java.lang.Number]).longValue() &&
+          command.contains("com.example.hiring.analytics.cli.AnalyticsErasureWorkerMain") &&
+          command.contains("-Dconfig.file=" + directory.resolve("analytics-worker.conf")) &&
+          owner.getString("main") == "com.example.hiring.analytics.cli.AnalyticsErasureWorkerMain" &&
+          owner.getString("config") == directory.resolve("analytics-worker.conf").toString,
+        "owned native worker must remain live"
+      )
+    }
+    val rootId = MongoAnalyticsLakehouseLock
+      .lockId(settings.common.lakehouseRoot)
+      .fold(error => throw error, identity)
+    def rootOwner: Option[(String, Instant)] = Option(
+      database
+        .getCollection(MongoAnalyticsLakehouseLock.CollectionName)
+        .find(new Document("_id", rootId))
+        .first()
+    ).map(row => row.getString("ownerToken") -> row.getDate("acquiredAt").toInstant)
+    def ownedRevision(owner: String): IO[Option[StreamingAdmissionProof.OwnedRevision]] =
+      workerLive *> IO.blocking {
+        val before = rootOwner
+        val request = database
+          .getCollection("analytics_erasure_requests")
+          .find(new Document("_id", owner))
+          .first()
+        require(request != null, "owned erasure request missing")
+        val revision = Option(request.get("deltaEvidenceRevision", classOf[java.lang.Number]))
+          .fold(0L)(_.longValue())
+        val after = rootOwner
+        before.filter(value => after.contains(value)).map { case (token, acquiredAt) =>
+          StreamingAdmissionProof.OwnedRevision(token, acquiredAt, revision, afterCommit = true)
+        }
+      } <* workerLive
+    def observeWorkerOwnership(owner: String): IO[String] = {
+      def loop(previous: Option[StreamingAdmissionProof.OwnedRevision]): IO[String] =
+        ownedRevision(owner).flatMap { current =>
+          if (StreamingAdmissionProof.workerOwnedAfterCommit(previous, current))
+            current.map(_.ownerToken).liftTo[IO](new IllegalStateException("worker owner missing"))
+          else IO.sleep(100.millis) *> IO.defer(loop(current))
+        }
+      loop(None)
+    }
+    def awaitProgress(condition: IO[Boolean]): IO[Unit] = {
+      def loop: IO[Unit] =
+        condition.flatMap(done => if (done) IO.unit else IO.sleep(1.second) *> IO.defer(loop))
+      IO.defer(loop)
+    }
+    def maintenanceLines: IO[Vector[String]] = IO.blocking {
+      privateFile(logsDirectory.resolve("stream.log"), 67108864L).linesIterator
+        .filter(_.contains("STREAMING_MAINTENANCE "))
+        .toVector
+    }
+    val preparation = for {
+      _ <- stage("BaselineStarted")
+      _ <- if (coexistence) workerLive else IO.unit
+      state <- readState
+      owner = state.getString("candidateId")
+      _ <- IO(require(UUID.fromString(owner).toString == owner, "canonical deleted owner required"))
+      paths <- IO.fromEither(
+        AnalyticsLakehousePaths
+          .from(settings.common.lakehouseRoot)
+          .toEither
+          .leftMap(_ => new IllegalArgumentException("isolated paths invalid"))
+      )
+      pseudonymizer <- IO.fromEither(
+        SubjectPseudonymizer
+          .validateFromBase64(
+            Some(settings.common.hmac.secretBase64),
+            settings.common.hmac.keyId,
+            settings.common.hmac.previousKeyId,
+            settings.common.hmac.previousSecretBase64
+          )
+          .toEither
+          .leftMap(_ => new IllegalArgumentException("proof HMAC configuration invalid"))
+      )
+      ownerTokens <- IO.fromEither(
+        pseudonymizer
+          .matchingTokens(owner)
+          .leftMap(_ => new IllegalArgumentException("deleted owner token invalid"))
+      )
+      typedDatabase <- client.getDatabase(settings.common.mongoDatabase)
+      markerSource = new MongoActiveDeletionMarkerSource[IO](
+        typedDatabase,
+        pseudonymizer,
+        new MongoPublisherStream(settings.common.operational)
+      )
+      _ <-
+        if (coexistence) IO.unit
+        else
+          markerSource.activeSubjectTokens
+            .flatMap(tokens => IO(require(ownerTokens.forall(tokens.contains), "deleted owner marker inactive")))
+      beforeWatermark <- watermark
+      _ <- IO(require(beforeWatermark.nonEmpty, "prior published watermark required"))
+      beforeProgress <- execution {
+        val rows = dataset("control/streaming_progress").orderBy(col("batchId").desc).limit(1).collect()
+        require(rows.length == 1, "native prior progress required")
+        (rows.head.getAs[String]("lineage"), rows.head.getAs[Long]("batchId"))
+      }
+      _ <- if (coexistence) stage("PreparedBeforeDeletion") else IO.unit
+      _ <- beforeDeletion.traverse_(identity)
+      _ <-
+        if (coexistence)
+          awaitProgress(markerSource.activeSubjectTokens.map(tokens => ownerTokens.forall(tokens.contains)))
+        else IO.unit
+      // Only these publication fields must be unchanged; allocation revision may increase.
+      beforePublication <- IO.blocking {
+        val control = database
+          .getCollection("analytics_report_control")
+          .find(new Document("_id", "analytics-report"))
+          .first()
+        require(control != null && control.getString("state") == "Hidden", "report not hidden")
+        (
+          control.getLong("generation").longValue(),
+          control.getLong("lastPublishedRevision").longValue(),
+          Option(control.getString("lastRunId"))
+        )
+      }
+    } yield SuppressionBaseline(
+      owner,
+      paths,
+      ownerTokens,
+      markerSource,
+      beforeWatermark,
+      beforeProgress,
+      beforePublication
+    )
+    def verify(producer: KafkaProducer[String, String], baseline: SuppressionBaseline): IO[Unit] = {
+      import baseline.*
+      val operation = for {
+        _ <- stage("BaselineVerified")
+        ids <- IO.delay(Vector.fill(12)(UUID.randomUUID().toString))
+        offsets <- IO.blocking {
+          val at = Instant.now()
+          val skill = "suppressed" + UUID.randomUUID().toString.replace("-", "")
+          producer.beginTransaction()
+          val coordinates = ids.map { id =>
+            val body = s"""{"eventId":${json(id)},"eventType":"JOB_CREATED","occurredAt":${json(
+                at.toString
+              )},"aggregateType":"Job","aggregateId":${json(id)},"actorId":${json(
+                owner
+              )},"payload":{"job":{"skills":[${json(skill)}]}}}"""
+            producer
+              .send(new ProducerRecord[String, String](topic, Int.box(0), id, body))
+              .get(15, java.util.concurrent.TimeUnit.SECONDS)
+              .offset()
+          }
+          producer.commitTransaction()
+          require(
+            coordinates.distinct.size == 12 && coordinates.sliding(2).forall {
+              case Vector(a, b) => b == a + 1
+              case _            => true
+            },
+            "exact transactional cohort required"
+          )
+          coordinates
+        }
+        _ <- stage("SourceCommitted")
+        workerToken <- if (coexistence) observeWorkerOwnership(owner).map(Some(_)) else IO.pure(None)
+        _ <- if (coexistence) stage("WorkerRootOwned") else IO.unit
+        _ <- workerToken.traverse_(token =>
+          awaitProgress(workerLive *> IO.blocking(rootOwner.forall(_._1 != token))) *>
+            stage("WorkerRootReleased")
+        )
+        maintenanceBefore <- if (coexistence) maintenanceLines.map(_.size) else IO.pure(0)
+        // Read actual read_committed LSO, including transaction-control gaps, with reader credentials.
+        clientProperties <- IO.fromEither(KafkaClientProperties.clientProperties(settings.common.kafka))
+        _ <- Resource
+          .make(IO.blocking {
+            val props = new Properties()
+            props.put("bootstrap.servers", settings.common.kafka.bootstrapServers)
+            clientProperties.foreach { case (key, value) => props.put(key, value) }
+            props.put("request.timeout.ms", "10000"); props.put("default.api.timeout.ms", "10000")
+            org.apache.kafka.clients.admin.Admin.create(props)
+          })(admin => IO.blocking(admin.close(java.time.Duration.ofSeconds(5))))
+          .use { admin =>
+            def brokerEnds: IO[Map[Int, Long]] = IO.blocking {
+              val partitions = (0 until 3).map(p => new org.apache.kafka.common.TopicPartition(topic, p))
+              val requests =
+                partitions.map(_ -> org.apache.kafka.clients.admin.OffsetSpec.latest()).toMap.asJava
+              val options = new org.apache.kafka.clients.admin.ListOffsetsOptions(
+                org.apache.kafka.common.IsolationLevel.READ_COMMITTED
+              )
+              val values =
+                admin.listOffsets(requests, options).all().get(10, java.util.concurrent.TimeUnit.SECONDS)
+              require(values.size() == 3, "exact three-partition LSO required")
+              values.asScala.map { case (partition, value) =>
+                partition.partition() -> value.offset()
+              }.toMap
+            }
+            for {
+              expectedEnds <- brokerEnds
+              _ <- IO(require(expectedEnds(0) > offsets.last, "transaction control not committed"))
+              captured <- cats.effect.Ref.of[IO, Option[(Long, String)]](None)
+              _ <- stage("AwaitingAcknowledgement")
+              acknowledgement = {
+                for {
+                  currentEnds <- brokerEnds
+                  _ <- IO(
+                    require(currentEnds == expectedEnds, "source changed during suppressed-only proof")
+                  )
+                  candidate <- execution {
+                    val rows = dataset("control/streaming_progress")
+                      .filter(col("lineage") === beforeProgress._1 && col("batchId") > beforeProgress._2)
+                      .orderBy(col("batchId").desc)
+                      .limit(4)
+                      .collect()
+                      .toVector
+                    require(rows.size < 4, "ambiguous suppressed batch search")
+                    rows
+                      .find { row =>
+                        val ends =
+                          row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("sourceEndOffsets"))
+                        ends.size == 3 && ends.forall(e => e.getAs[String]("topic") == topic) &&
+                        ends
+                          .map(e => e.getAs[Int]("partition") -> e.getAs[Long]("endOffset"))
+                          .toMap == expectedEnds
+                      }
+                      .flatMap { row =>
+                        if (row.getAs[String]("outcome") != "ErasurePending") None
+                        else {
+                          require(
+                            row.isNullAt(row.fieldIndex("candidateWatermark")),
+                            "suppressed batch advanced watermark"
+                          )
+                          val delivered =
+                            row.getSeq[org.apache.spark.sql.Row](row.fieldIndex("deliveredOffsets"))
+                          require(
+                            delivered.size == 1 && delivered.head.getAs[String]("topic") == topic &&
+                              StreamingAdmissionProof.exactDelivered(
+                                delivered.head.getAs[String]("topic"),
+                                delivered.head.getAs[Int]("partition"),
+                                delivered.head.getAs[Long]("minimumDeliveredOffset"),
+                                delivered.head.getAs[Long]("maximumDeliveredOffset"),
+                                delivered.head.getAs[Long]("deliveredRecordCount"),
+                                topic,
+                                offsets
+                              ),
+                            "batch contains other delivered source records"
+                          )
+                          val batch = row.getAs[Long]("batchId")
+                          val decisions = dataset("control/streaming_decisions")
+                            .filter(col("lineage") === beforeProgress._1 && col("batchId") === batch)
+                            .orderBy(col("revision").desc)
+                            .limit(1)
+                            .collect()
+                          require(
+                            decisions.length == 1 && decisions.head
+                              .isNullAt(decisions.head.fieldIndex("candidateWatermark")),
+                            "suppressed decision candidate not empty"
+                          )
+                          Some(batch -> decisions.head.getAs[String]("publicationRunId"))
+                        }
+                      }
+                  }
+                  committed <- candidate.traverse { value =>
+                    execution {
+                      val checkpoint =
+                        new org.apache.hadoop.fs.Path(settings.streaming.checkpointLocation)
+                      val fs = org.apache.hadoop.fs.FileSystem
+                        .newInstance(checkpoint.toUri, spark.sparkContext.hadoopConfiguration)
+                      try {
+                        val logs = SparkCheckpointLogs
+                          .read(fs, checkpoint, topic, Set(0, 1, 2))
+                          .fold(error => throw error, identity)
+                        logs.exists(log =>
+                          log.batchId.value == value._1 && log.committed &&
+                            log.endOffsets == expectedEnds.map { case (partition, end) =>
+                              (topic -> partition) -> end
+                            }
+                        )
+                      } finally fs.close()
+                    }
+                  }
+                  done = committed.contains(true)
+                  _ <- if (done) captured.set(candidate) else IO.unit
+                } yield done
+              }
+              _ <-
+                if (coexistence) awaitProgress(acknowledgement)
+                else await("suppressed batch not durably acknowledged")(acknowledgement)
+              _ <- stage("Acknowledged")
+              selected <- captured.get.flatMap(
+                _.liftTo[IO](new IllegalStateException("captured terminal missing"))
+              )
+              _ <-
+                if (coexistence) IO.unit
+                else
+                  execution {
+                    Vector(
+                      "bronze" -> paths.bronze,
+                      "silver" -> paths.silver,
+                      "late" -> paths.lateFacts,
+                      "quarantine" -> paths.quarantine
+                    ).foreach { case (store, path) =>
+                      val physical = SparkPhysicalLocation.resolve(path)
+                      if (io.delta.tables.DeltaTable.isDeltaTable(spark, physical)) {
+                        val frame = spark.read.format("delta").load(physical)
+                        val required = StreamingAdmissionProof.evidenceColumns(store)
+                        require(
+                          required.forall(frame.columns.contains),
+                          "suppression evidence schema invalid"
+                        )
+                        val idMatch =
+                          if (required.contains("eventId")) col("eventId").isin(ids*) else lit(false)
+                        val coordinateMatch =
+                          if (required.contains("offset"))
+                            col("topic") === topic && col("partition") === 0 && col("offset").isin(
+                              offsets.map(Long.box)*
+                            )
+                          else lit(false)
+                        require(
+                          frame.filter(idMatch || coordinateMatch).limit(1).count() == 0,
+                          "suppressed input persisted"
+                        )
+                      }
+                    }
+                  }
+              _ <- if (coexistence) IO.unit else stage("AbsenceVerified")
+              _ <- markerSource.activeSubjectTokens.flatMap(tokens =>
+                IO(require(ownerTokens.forall(tokens.contains), "owner marker changed during proof"))
+              )
+              afterWatermark <- watermark
+              _ <- IO(require(afterWatermark == beforeWatermark, "latest published watermark changed"))
+              _ <- IO.blocking {
+                val control = database
+                  .getCollection("analytics_report_control")
+                  .find(new Document("_id", "analytics-report"))
+                  .first()
+                require(
+                  control != null && control.getString("state") == "Hidden" &&
+                    (
+                      control.getLong("generation").longValue(),
+                      control.getLong("lastPublishedRevision").longValue(),
+                      Option(control.getString("lastRunId"))
+                    ) == beforePublication,
+                  "suppressed input changed publication identity"
+                )
+                val receipt = database
+                  .getCollection("analytics_report_runs")
+                  .find(new Document("_id", selected._2))
+                  .first()
+                require(
+                  receipt != null && receipt.getString("state") == "Reserved",
+                  "suppressed input published receipt"
+                )
+                if (!coexistence) {
+                  val token = HiringAnalyticsStreamingWorkloadMain.login(api, "Admin")
+                  val day = Instant.now().truncatedTo(ChronoUnit.DAYS)
+                  val body = http(
+                    api,
+                    token,
+                    s"{ analyticsReport(from: ${json(day.minusSeconds(7 * 86400L).toString)}, to: ${json(day.plusSeconds(86400).toString)}) { skillPostingActivity { skill postings } } }"
+                  )
+                  val errors = Option(body.getList("errors", classOf[Document]))
+                    .map(_.asScala.toVector)
+                    .getOrElse(Vector.empty)
+                  require(
+                    errors.size == 1 && Option(errors.head.get("extensions", classOf[Document]))
+                      .exists(_.getString("code") == "ANALYTICS_UNAVAILABLE"),
+                    "Admin report did not fail with exact hidden category"
+                  )
+                  val data = Option(body.get("data", classOf[Document]))
+                  require(
+                    data.forall(d => d.get("analyticsReport") == null),
+                    "hidden report data returned"
+                  )
+                }
+              }
+              _ <- stage("PublicationGuardVerified")
+              _ <- workerToken.traverse_ { _ =>
+                awaitProgress(
+                  workerLive *> maintenanceLines.map(lines =>
+                    lines
+                      .drop(maintenanceBefore)
+                      .exists(StreamingAdmissionProof.boundedMaintenanceSuccess)
+                  )
+                ) *> workerLive *> stage("MaintenanceVerified")
+              }
+              afterEnds <- brokerEnds
+              _ <- IO(require(afterEnds == expectedEnds, "source changed before final proof snapshot"))
+              _ <-
+                if (coexistence)
+                  IO.println(
+                    "STREAMING_WORKER_COEXISTENCE_VERIFIED actualRecords=12 workerRootOwnedAfterCommit=true workerLive=true ownerNaturallyReleased=true sourceAck=true terminal=ErasurePending maintenanceSucceeded=true maximumDelayMillis=300000 publicationHiddenUnchanged=true"
+                  )
+                else
+                  IO.println(
+                    "STREAMING_SUPPRESSED_ONLY_VERIFIED actualRecords=12 sourceAck=true terminal=ErasurePending bronzeAbsent=true silverAbsent=true lateAndQuarantineAbsent=true candidateWatermarkAbsent=true publishedWatermarkUnchanged=true reportPublicationUnchanged=true receiptReserved=true adminUnavailable=true"
+                  )
+            } yield ()
+          }
+      } yield ()
+      operation
+    }
+    if (coexistence) ownedSuppressionProof(producerResource, preparation)(verify)
+    else
+      producerResource.use(producer => preparation.flatMap(baseline => verify(producer, baseline))).timeout(180.seconds)
+  }
+
   /** Test-only barrier after the real selected-fact merge: owner deletion happens while the production replay still
     * owns its shared mutex and old reservation.
     */
@@ -1039,6 +1266,13 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
       )
     )
     streaming <- AnalyticsRuntimeConfig.loadStreaming[IO]
+    _ <- IO(require(streaming.common == settings.common, "race and stream common configuration differs"))
+    credentials <- IO.fromEither(
+      ConfigSource.default
+        .at("analytics.workload-producer")
+        .load[ProducerCredentials]
+        .leftMap(_ => new IllegalArgumentException("race producer settings missing"))
+    )
     _ <- IO.fromEither(
       StreamingProofIsolation
         .validate(
@@ -1147,24 +1381,45 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
               }
           }
           _ <- journal.ensureIndexes
-          result <- new AnalyticsLateFactReplayService[IO](
-            settings.common.lakehouseRoot,
-            journal,
-            markers,
-            barrier,
-            publisher,
-            lock,
-            settings.common.operational.retention.publishedSnapshotDays
-          ).run(settings.request).attempt
-          _ <- result match {
-            case Right(AnalyticsLateFactReplayOutcome.ErasurePending) =>
-              IO.println("STREAMING_REPLAY_DELETION_RACE_REJECTED category=ERASURE_PENDING")
-            case Left(AnalyticsError.LateFactReplayRejected) =>
-              IO.println("STREAMING_REPLAY_DELETION_RACE_REJECTED category=DELETION_SELECTION_REJECTED")
-            case _ =>
-              IO.println(StreamingAdmissionProof.replayResult(result)) *>
-                IO.raiseError(new IllegalStateException("deletion race did not reject publication"))
-          }
+          deletion =
+            for {
+              result <- new AnalyticsLateFactReplayService[IO](
+                settings.common.lakehouseRoot,
+                journal,
+                markers,
+                barrier,
+                publisher,
+                lock,
+                settings.common.operational.retention.publishedSnapshotDays
+              ).run(settings.request).attempt
+              _ <- result match {
+                case Right(AnalyticsLateFactReplayOutcome.ErasurePending) =>
+                  IO.println("STREAMING_REPLAY_DELETION_RACE_REJECTED category=ERASURE_PENDING")
+                case Left(AnalyticsError.LateFactReplayRejected) =>
+                  IO.println("STREAMING_REPLAY_DELETION_RACE_REJECTED category=DELETION_SELECTION_REJECTED")
+                case _ =>
+                  IO.println(StreamingAdmissionProof.replayResult(result)) *>
+                    IO.raiseError(new IllegalStateException("deletion race did not reject publication"))
+              }
+            } yield ()
+          _ <- Resource
+            .make(IO.blocking(MongoClients.create(settings.common.mongoUri)))(m => IO.blocking(m.close()))
+            .use { mongo =>
+              suppressionProof(
+                streaming,
+                api,
+                directory,
+                spark,
+                client,
+                driver,
+                mongo.getDatabase(settings.common.mongoDatabase).withReadConcern(ReadConcern.MAJORITY),
+                transactionalProducer(
+                  streaming.common.kafka
+                    .copy(saslUsername = Some(credentials.username), saslPassword = Some(credentials.password))
+                ),
+                Some(deletion)
+              )
+            }
         } yield ()
       }
   } yield ()
@@ -1183,6 +1438,40 @@ object HiringAnalyticsStreamingScenariosMain extends IOApp {
 
 /** Pure classification at the test HTTP/log adapter; payloads and exception messages never enter diagnostics. */
 private[cli] object StreamingAdmissionProof {
+
+  /** The Python supervisor writes /proc start ticks as a canonical decimal string, not a BSON number. */
+  def workerStartTicks(owner: Document): Option[Long] =
+    Option(owner.get("startTicks"))
+      .collect { case value: String if value.matches("[1-9][0-9]{0,18}") => value }
+      .flatMap(_.toLongOption)
+
+  final case class OwnedRevision(ownerToken: String, acquiredAt: Instant, revision: Long, afterCommit: Boolean)
+
+  /** Only worker purge writes this revision; both majority observations must belong to the same held mutex. */
+  def workerOwnedAfterCommit(before: Option[OwnedRevision], after: Option[OwnedRevision]): Boolean =
+    (before, after) match {
+      case (Some(a), Some(b)) =>
+        a.afterCommit && b.afterCommit && a.ownerToken.nonEmpty && a.ownerToken == b.ownerToken &&
+        a.acquiredAt == b.acquiredAt && a.revision >= 0L && b.revision > a.revision
+      case _ => false
+    }
+
+  def boundedMaintenanceSuccess(line: String): Boolean = {
+    val pattern =
+      "STREAMING_MAINTENANCE outcome=Succeeded elapsedSinceSuccessMillis=([0-9]+) maximumElapsedSinceSuccessMillis=([0-9]+) consecutiveDeferrals=([0-9]+) lastSuccess=([^ ]+)".r
+    pattern.findFirstMatchIn(line).exists { value =>
+      scala.util
+        .Try {
+          val elapsed = value.group(1).toLong
+          val maximum = value.group(2).toLong
+          val deferrals = value.group(3).toLong
+          Instant.parse(value.group(4))
+          maximum >= elapsed && maximum <= 300000L && deferrals == 0L
+        }
+        .getOrElse(false)
+    }
+  }
+
   def report(body: Document): Either[String, Option[Document]] =
     try reportShape(body)
     catch { case scala.util.control.NonFatal(_) => Left("REPORT_SHAPE_INVALID") }
@@ -1239,7 +1528,16 @@ private[cli] object StreamingAdmissionProof {
 
   def failure(args: List[String], error: Throwable): String = {
     val allowed =
-      Set("prepare", "verify-replay", "contention", "continuation", "delete-race", "race-replay", "suppressed-only")
+      Set(
+        "prepare",
+        "verify-replay",
+        "contention",
+        "continuation",
+        "delete-race",
+        "race-replay",
+        "suppressed-only",
+        "worker-coexistence"
+      )
     val mode = args match { case List(value) if allowed.contains(value) => value; case _ => "invalid" }
     val category = error match {
       case _: IllegalStateException                 => "IllegalStateException"

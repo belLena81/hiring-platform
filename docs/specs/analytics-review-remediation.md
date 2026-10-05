@@ -3,14 +3,20 @@
 ## Identity and scope
 
 - Task / use case / roadmap phase: Analytics correctness, effect boundaries, and internal architecture cleanup.
-- Status: in progress.
+- Status: historical remediation record; later local Phase 6 completion supersedes the earlier suite blockers below. Current streaming acceptance remains open in its own specification.
 - Coordinator / implementation owner: Product Manager / Codex.
 - User outcome: analytics collaborators are mandatory and narrowly scoped, service/workflow effects are generic, and identifiers, validation, JSON, and credential encoding have explicit safe boundaries.
 - Authorized scope: address the user's review points 5–11 across the dedicated `analytics/` build, including production wiring, adapters, tests, dependency declaration, and canonical analytics documentation. Keep one SBT project.
 - Non-goals: persisted schema or wire-contract changes, analytics workflow behavior changes, root application changes, new SBT subprojects, and local/live infrastructure proof unrelated to these findings.
 - Dependencies: add Circe for Kafka connector JSON encoding; use the existing Typesafe Config and Kafka APIs for JAAS value rendering/validation.
 
-## Source context and decisions
+## Current implementation and evidence ownership
+
+The analytics build now includes Circe and mongo4cats 0.7.18. Production packages use `domain`, `errors`, `config`, `service`, `adapter`, `app` and `cli`; typed Mongo records/codecs replace the earlier POJO and manual decoder approaches. See [Mongo persistence](analytics-mongo-persistence.md) and [analytics architecture](../big-data-architecture.md) for the active design. [Local HAL completion](hiring-analytics-lakehouse.md#current-local-completion-evidence--october-3) records the later accepted Phase 6 evidence. [Continuous analytics](continuous-hiring-analytics.md#current-evidence-summary--october-5) owns current source applicability, functional acceptance and remaining gates.
+
+The sections below retain the sequence of review decisions and their evidence. References to then-current packages, absent dependencies, incomplete suites and Phase 6 blockers are historical and do not override these later checkpoints.
+
+## Historical source context and decisions
 
 - Verified implementation: the dedicated analytics build is Scala 3.7.4/Spark 4.0.1/Delta 4.0.0; run Spark checks with Java 17. Current packages are root, `batch`, `erasure`, and `mongo`. `AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers` throws on missing columns; `withSubjectToken` has no explicit `InvalidSourceSchema` throw in the current source. The event input requires `subjectToken` and `subjectTokens`; marker input requires `subjectToken`. `OperationalEventTransforms.silver` directly calls marker exclusion and is lifted by `AnalyticsBatchSilverStage`. The analytics build has no Circe or mongo4cats dependency. Six entry points are referenced by Dockerfiles, scripts, the analytics spec, and tests.
 - Target requirements: user review points 1–9 and the selected plan: package namespaces within the current SBT project; layered packages for domain/errors, service, adapters, config, and CLI; `timeToHireAction`; one shared error ADT; mongo4cats deferred.

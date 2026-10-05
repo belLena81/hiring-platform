@@ -82,6 +82,62 @@ final class BronzeArrivalSelectionSpec extends CatsEffectSuite {
   }
 
   import HiringAnalyticsStreamingWorkloadMain.{Sample, Observations, pendingBronzeMinima, observeBronze}
+
+  test("workload modes preserve healthy and burst profiles with a separate functional cohort") {
+    import HiringAnalyticsStreamingWorkloadMain.{WorkloadMode, workloadMode}
+    assertEquals(workloadMode(Nil), Right(WorkloadMode.Healthy))
+    assertEquals(workloadMode(List("burst")), Right(WorkloadMode.Burst))
+    assertEquals(workloadMode(List("functional")), Right(WorkloadMode.Functional))
+    assertEquals(
+      (WorkloadMode.Healthy.records, WorkloadMode.Healthy.cadence, WorkloadMode.Healthy.maxBacklog),
+      (7500, 120.millis, 500)
+    )
+    assertEquals(
+      (WorkloadMode.Burst.records, WorkloadMode.Burst.cadence, WorkloadMode.Burst.maxBacklog),
+      (1000, Duration.Zero, 1000)
+    )
+    assertEquals(
+      (WorkloadMode.Functional.records, WorkloadMode.Functional.cadence, WorkloadMode.Functional.maxBacklog),
+      (12, Duration.Zero, 12)
+    )
+  }
+
+  test("workload modes reject unknown and combined arguments before effects") {
+    import HiringAnalyticsStreamingWorkloadMain.workloadMode
+    Vector(List("healthy"), List("unknown"), List("functional", "burst"), List("burst", "extra"), List("FUNCTIONAL"))
+      .foreach(args => assert(workloadMode(args).isLeft))
+  }
+
+  test("functional workload requires complete Bronze and Admin observations without benchmark qualification") {
+    import HiringAnalyticsStreamingWorkloadMain.{WorkloadMode, completeWorkload}
+    assert(completeWorkload(WorkloadMode.Functional, 12, 12, 1.second, 300000L, 300000L))
+    Vector((11, 12), (12, 11), (13, 12), (12, 13), (0, 0)).foreach { case (bronze, report) =>
+      assert(!completeWorkload(WorkloadMode.Functional, bronze, report, 1.second, 1L, 1L))
+    }
+  }
+
+  test("workload healthy latency and burst completion acceptance remain unchanged") {
+    import HiringAnalyticsStreamingWorkloadMain.{WorkloadMode, completeWorkload}
+    assert(completeWorkload(WorkloadMode.Healthy, 7500, 7500, 900.seconds, 29999L, 120000L))
+    assert(completeWorkload(WorkloadMode.Healthy, 7500, 7500, 905.seconds, 29999L, 120000L))
+    assert(!completeWorkload(WorkloadMode.Healthy, 7500, 7500, 899.seconds, 29999L, 120000L))
+    assert(!completeWorkload(WorkloadMode.Healthy, 7500, 7500, 906.seconds, 29999L, 120000L))
+    assert(!completeWorkload(WorkloadMode.Healthy, 7500, 7500, 900.seconds, 30000L, 120000L))
+    assert(!completeWorkload(WorkloadMode.Healthy, 7500, 7500, 900.seconds, 29999L, 120001L))
+    assert(!completeWorkload(WorkloadMode.Healthy, 7499, 7500, 900.seconds, 29999L, 120000L))
+    assert(completeWorkload(WorkloadMode.Burst, 1000, 1000, 1.second, 300000L, 300000L))
+    assert(!completeWorkload(WorkloadMode.Burst, 1000, 999, 1.second, 1L, 1L))
+  }
+
+  test("workload resource limits preserve storage and reject excess functional backlog") {
+    import HiringAnalyticsStreamingWorkloadMain.{WorkloadMode, resourceBounds}
+    Vector(WorkloadMode.Healthy, WorkloadMode.Burst, WorkloadMode.Functional).foreach { mode =>
+      assert(resourceBounds(mode, mode.maxBacklog, 10000L, 1073741824L))
+      assert(!resourceBounds(mode, mode.maxBacklog + 1, 10000L, 1073741824L))
+      assert(!resourceBounds(mode, mode.maxBacklog, 10001L, 1073741824L))
+      assert(!resourceBounds(mode, mode.maxBacklog, 10000L, 1073741825L))
+    }
+  }
   private val topic = "hiring.bronze.arrival"
   private val samples = (0 until 7500).map { index =>
     Sample(s"event-$index", index % 3, (index / 3).toLong * 2L, 10L, Some(20L))

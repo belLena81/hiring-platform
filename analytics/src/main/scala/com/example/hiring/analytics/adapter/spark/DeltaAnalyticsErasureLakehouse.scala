@@ -98,16 +98,22 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async](
   override def applyActiveDeletions(markerTokens: Vector[SubjectToken]): F[Unit] =
     withMarkerTokens(markerTokens)(applyActiveDeletionsFrame)
 
+  /** Remove marked rows and rebuild derived data; physical erasure remains owned by the erasure worker. */
+  def purgeMarkedSubjects(markerTokens: Vector[SubjectToken]): F[Unit] =
+    retention.configureRawTablePrivacy(spark) *> withMarkerTokens(markerTokens)(purgeMarkedSubjectsFrame)
+
   private def applyActiveDeletionsFrame(markerTokens: DataFrame): F[Unit] =
     for {
       deletionTime <- now
       _ <- expireStored(deletionTime)
-      _ <- paths.inventory.subjectDelta.traverse_(surface =>
-        erasure.purgeMarkedSubjectRows(spark, surface.location, markerTokens)
-      )
-      _ <- rebuildGoldFromStoredSilver(spark)
+      _ <- purgeMarkedSubjectsFrame(markerTokens)
       _ <- retention.vacuumExpiredFiles(spark).void
     } yield ()
+
+  private def purgeMarkedSubjectsFrame(markerTokens: DataFrame): F[Unit] =
+    paths.inventory.subjectDelta.traverse_(surface =>
+      erasure.purgeMarkedSubjectRows(spark, surface.location, markerTokens)
+    ) *> rebuildGoldFromStoredSilver(spark)
 
   override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
     rebuildGoldFromStoredSilver(spark) *> AnalyticsGoldStage.extract(spark, paths, asOf, execution)

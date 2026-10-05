@@ -1,10 +1,16 @@
 # Hiring Mongo Persistence Boundary
 
+## Current state — 2026-10-05
+
+Mongo adapters now use mongo4cats; `MongoHiringSetup` delegates to migration, validation, ordinary-index, and Atlas-index owners. The Java `Document` codec bridge in `MongoHiringPersistenceCodecs` and grouped `MongoHiringMigrations` still leave HM-02/HM-04 open. The original compilation blockers below are historical: later [repository composition](hiring-repository-composition.md) records passing root unit and Mongo integration suites. Those later checks do not close the remaining design criteria. Phase 8 owns subsequent Mongo/vector optimization and measured adapter refinement.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Status
 
-Implementation is in place with two acceptance gaps documented below. Compile passed. Test-source compilation is currently blocked by unrelated pre-existing worktree changes in the GraphQL/service-port test boundary; Mongo integration behavior remains unverified.
+Implementation is in place with HM-02 and HM-04 still partial. Original verification blockers are preserved below; later root integration evidence is linked in the current-state section.
 
-## Source Facts and Goal
+## Original source baseline and goal
 
 - The root build currently uses the MongoDB Reactive Streams driver directly, with hand-written `PublisherBridge` conversion and Mongo access spread across repositories, runtime, setup, and integration fixtures.
 - Persistence records already have generated BSON codecs, but encoding and decoding pass through Java `Document` using `BsonDocumentReader`/`BsonDocumentWriter`.

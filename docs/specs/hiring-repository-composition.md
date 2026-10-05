@@ -1,12 +1,18 @@
 # Hiring repository and use-case composition
 
+## Current state — 2026-10-05
+
+The transformer composition refactor is implemented. The verification section below records the task run and its then-existing formatting limitation; those counts and limitations are historical, not a fresh whole-checkout gate. Current planning and validation state are tracked in [development milestones](../development-milestones.md).
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 Status: complete for the scoped composition refactor; existing repository-wide formatting limitation recorded. Owner: Product Manager / Scala implementation.
 
 ## Outcome and contracts
 
 Keep expected failures in `RepositoryIO` / `UseCaseIO` throughout main-backend repository and service composition. Preserve existing error mappings, authorization, transactional identity, retry and cleanup behavior. `UserAuthenticator` changes its Scala return type to `RepositoryIO`; GraphQL, HTTP, Mongo, event and embedding wire contracts do not change.
 
-The current ports already expose transformer aliases. Private Mongo helpers, transaction callbacks, account/job helpers and idempotency/telemetry contain raw `IO[Either]` composition. Transaction `Resource` and retry handling must observe the underlying result once to select abort, commit or retry. Driver lifts, external adapters, startup migration failures and effect-only worker outcome handling remain deliberate boundaries.
+At the original baseline, ports already exposed transformer aliases, while private Mongo helpers, transaction callbacks, account/job helpers and idempotency/telemetry still contained raw `IO[Either]` composition. Transaction `Resource` and retry handling must observe the underlying result once to select abort, commit or retry. Driver lifts, external adapters, startup migration failures and effect-only worker outcome handling remain deliberate boundaries.
 
 ## Acceptance
 

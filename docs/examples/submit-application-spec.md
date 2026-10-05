@@ -8,16 +8,16 @@ This demonstrates the [spec workflow](../spec-driven-development.md) using [UC04
 
 An authenticated Candidate submits an application to an open job and receives its initial status. The application and initial history event must be consistent.
 
-Current source facts: `build.sbt` configures Scala 3.9 LTS/Java 17+ with a transitional Doobie/PostgreSQL dependency group; `src/main/scala/com/example/graphQL/cats/Main.scala` has unfinished startup and scaffold models; `src/main/scala/com/example/graphQL/cats/daos/Dao.scala` exposes the user repository. These are not a working application-submission service. Recheck them before using this example for a real task.
+Current source facts: `build.sbt` configures Scala 3.9/Java 17+ without Doobie/PostgreSQL. `src/main/scala/com/example/graphQL/cats/service/application/ApplicationService.scala` implements Candidate submission through typed use-case and repository ports. `repository/mongo/MongoApplicationRepository.scala` implements transactional persistence; pure submission policy lives in `domain/policy/ApplicationSubmission.scala` (paths relative to the same Scala package). Hiring GraphQL and MongoDB transaction tests already exist. This example is a teaching draft, not a claim that UC04 is missing.
 
-The target roadmap uses MongoDB; a configured driver dependency is not an implemented adapter. The coordinator must first place this feature after its required Foundation/domain/auth work, or explicitly scope prerequisite slices. Do not quietly include a store/language migration. Kafka, Spark, real notifications, embedding calls, and paid services are outside this illustrative slice.
+Any real follow-up must inspect those implementations and scope only the requested change. MongoDB remains operational truth; Kafka, Spark, real notifications, embedding calls, and paid services are outside this illustrative slice.
 
 ## Contract and open decisions
 
 - Use the canonical `submitApplication` mutation with an input type and typed application/error payload. Actor identity comes from authenticated context, not a client-provided candidate identity.
-- UC04 requires initial `Created` status, open-job validation, duplicate protection, and atomic application/history writes. The GraphQL enum representation must follow the actual schema chosen in the prerequisite slice.
-- Before readiness, specify the exact input fields, error codes, authenticated-context contract, and relevant persistence/migration approach. Do not infer these from nonexistent implementations.
-- Preserve Admin's full authorized access. How Admin submits on behalf of a Candidate is a separate unresolved contract; this example specifies the Candidate route and ordinary Recruiter denial only.
+- UC04 requires initial `Created` status, open-job validation, duplicate protection, and atomic application/history writes. The active GraphQL enum is `CREATED`; the domain value is `Created`.
+- Before readiness, bind exact input fields, idempotency requirements, error codes, authenticated context and persistence guarantees to the existing SDL and implementation.
+- The current submission service requires the actor to be a Candidate. Admin submission on behalf of another user is not implemented; introducing it would be a separate explicitly specified contract.
 - Data Engineer must define the concurrent job-close/submission guarantee and transaction ordering. Proposed criterion AC-05 requires rejection when closure commits before submission's authoritative open-state check; the overlapping-operation order must be specified and tested before readiness.
 
 ## Proposed acceptance criteria
@@ -40,4 +40,4 @@ UC04's p95 target is below 200 ms. Workload, environment, and cost ceiling are n
 
 Product Manager resolves scope/dependencies. Architect handles prerequisite structural changes. Data Engineer defines persistence guarantees and tests; Scala Developer implements the assigned slice; Security Engineer reviews actor/ownership/error handling; Code Reviewer checks implementation; independent QA verifies the final criteria.
 
-No implementation paths, feature test executions, benchmark results, or review verdicts exist for this example. The existing RoleSpec tests do not verify UC04. The next step for an actual UC04 request is to inspect the current prerequisites and turn this draft into a concrete scoped spec; the example itself remains documentation.
+This example records no new test executions, benchmark results, or review verdicts. Existing evidence can be located in `src/test/scala/com/example/graphQL/cats/service/application/ApplicationServiceSpec.scala`, `src/test/scala/com/example/graphQL/cats/domain/ApplicationSubmissionSpec.scala`, and `src/it/scala/com/example/graphQL/cats/repository/mongo/MongoHiringRepositoryTransactionIntegrationSpec.scala`; inspect their coverage before reusing it. For a requested UC04 change, turn this teaching draft into a concrete scoped spec; the example itself remains documentation.

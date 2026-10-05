@@ -1,5 +1,11 @@
 # Repository Write-Path Consistency
 
+## Current state — 2026-10-05
+
+The write-path consolidation is implemented. Active operational ports live in `service.port` and Mongo uses mongo4cats; the source context below describes the pre-refactor baseline. Later [repository composition](hiring-repository-composition.md) records passing full integration evidence after the historical runtime diagnostic failure. The final review verdicts below supersede the intermediate open-gate sentence.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
 - Status: complete
@@ -10,7 +16,7 @@
 - Non-goals: GraphQL SDL or response changes, Mongo schema/index changes, migrations, dependency changes, service/domain redesign, or refactoring unrelated repositories and already accepted functional/security mechanisms.
 - Dependencies: Scala 3.9 on Java 17+, Cats Effect, Sangria, Mongo reactive streams, MUnit, and replica-set MongoDB for transaction evidence.
 
-## Source context and decisions
+## Original source baseline and decisions
 
 - Production services use context-bearing account and job writes, while integration tests also exercise concrete no-context Mongo methods. `MutationWriteContext.noop` is currently rejected by the Mongo context decoder, so deleting overloads without restoring repository-owned transaction semantics would be a regression.
 - Job writes have parallel direct, event, embedding, and session implementations. User account creation mirrors that duplication, and several methods bypass local session helpers.
@@ -52,7 +58,7 @@
 
 ## Checkpoint and review
 
-- Completed criteria: RWC-01 through RWC-07 are implemented with focused evidence; final review gates remain open.
+- Completed criteria: RWC-01 through RWC-07 are implemented with focused evidence; final scoped review verdicts are recorded below.
 - Latest evidence: final `sbt test` passed 326/326; focused Mongo unit tests passed 9/9 and replica-set transaction integration passed 3/3. The earlier complete IntegrationTest run passed all 15 repository/server tests but failed one unrelated `MainProcessSpec` assertion (9/10 in that suite) because 17 repeated `RUNTIME_FAILED` records were emitted instead of one; the isolated rerun reproduced that runtime-reporting failure. `git diff --check` and skill validation passed. Security review: PASS. Code rereview after closing two evidence gaps: PASS with no findings.
 - Next action: none; implementation and required review gates are complete.
 - Code Reviewer verdict: PASS

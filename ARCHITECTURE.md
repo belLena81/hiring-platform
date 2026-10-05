@@ -1,14 +1,14 @@
 # Architecture
 
-This document describes the active architecture. See [README](README.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for its contract and verification evidence.
+This document describes the active architecture and explicitly planned refinements. Collection snippets and diagrams are abbreviated design illustrations, not complete BSON validators or executable API fixtures. The [current GraphQL SDL](src/test/resources/graphql/hiring.graphql), [Mongo codecs](src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringPersistenceCodecs.scala), and [index definitions](src/main/scala/com/example/graphQL/cats/repository/mongo/MongoHiringIndexSetup.scala) define exact implemented shapes. See [README](README.md) and the [current reset specification](docs/specs/pre-mvp-contract-reset.md) for its contract and verification evidence.
 
-The runtime uses one sbt project with constructor-injected application, API, and infrastructure packages. It serves the hiring API through a resource-managed MongoDB client.
+The hiring API is one sbt build with constructor-injected application, API and infrastructure packages. A separate `analytics/` sbt build owns Spark/Delta batch, erasure and streaming runtimes. MongoDB remains operational truth; API transactions do not wait for analytics. See the [analytics boundary](docs/big-data-architecture.md) and [roadmap](docs/development-milestones.md) for current acceptance and planned work.
 
 Supporting design: [use cases](docs/use-cases.md).
 
 ## 1. Goals
 
-The Hiring Management Platform is designed around four primary engineering goals:
+The Hiring Management Platform is designed around the following engineering goals:
 
 - Clean separation between domain, application, API, and infrastructure code
 - Functional effect management using Cats Effect
@@ -36,7 +36,7 @@ The project follows **Clean Architecture / Ports and Adapters**.
                     │ Services / Use Cases │
                     └──────────┬───────────┘
                                │
-                         Domain Ports
+                         Service-owned Ports
                                │
               ┌────────────────┼────────────────┐
               ▼                ▼                ▼
@@ -49,7 +49,7 @@ The project follows **Clean Architecture / Ports and Adapters**.
        ┌────────────────────────────────────────────┐
        │              Infrastructure                │
        │                                            │
-       │ MongoDB   Vector Search   LLM/Embedding API│
+       │ MongoDB   Vector Search   Embedding API│
        └────────────────────────────────────────────┘
 ```
 
@@ -73,10 +73,10 @@ The domain must not depend on:
 
 ---
 
-# 3. Suggested Modules
+# 3. Current Package Boundaries
 
 ```text
-src/main/scala/
+src/main/scala/com/example/graphQL/cats/
 │
 ├── api/
 │   ├── graphql/
@@ -108,6 +108,7 @@ src/main/scala/
 │
 ├── infrastructure/
 │   ├── embedding/
+│   ├── kafka/
 │   └── logging/
 │
 ├── config/
@@ -123,7 +124,7 @@ The API owns GraphQL, HTTP, and authentication adapters. It talks to service use
 
 Domain objects must not represent MongoDB documents or GraphQL types directly.
 
-Example:
+Abbreviated example (the current `Job` also carries optional `closedAt` and `embedding`):
 
 ```scala
 final case class Job(
@@ -168,9 +169,17 @@ Job transitions over an existing aggregate (publish/update/close and later lifec
 
 Use functional forms of patterns where they clarify an existing boundary; do not introduce generic pattern frameworks. Adapter is the established ports-and-adapters boundary. Resource-based Factory composition owns clients, workers, and other long-lived resources. Facade belongs at a capability-specific application boundary, immutable Command data represents requested work, and lifecycle State programs keep aggregate decisions pure. These approaches are existing architecture choices, not a mandate to add layers.
 
-Planned refinements follow the [development milestones](docs/development-milestones.md). In Phase 8, a functional Template Method/Pipeline for job and candidate embedding shares pure preparation (including one source-hash calculation) and accepts an effectful persistence callback; adapters retain version-guarded writes and workers retain retries, document limits, and resource ownership. Search ranking stays a deterministic pure application function, with Mongo execution in adapters; evaluate current alternatives before adding an abstraction for another concrete algorithm. This embedding cleanup is maintainability work and provides no search-quality or performance result.
+Planned refinements follow the [development milestones](docs/development-milestones.md). In Phase 9, a functional Template Method/Pipeline for job and candidate embedding shares pure preparation (including one source-hash calculation) and accepts an effectful persistence callback; adapters retain version-guarded writes and workers retain retries, document limits, and resource ownership. Search ranking stays a deterministic pure application function, with Mongo execution in adapters; evaluate current alternatives before adding an abstraction for another concrete algorithm. This embedding cleanup is maintainability work and provides no search-quality or performance result.
 
-In Phase 10, streaming recovery/revision decisions may be extracted as pure functions over immutable observations, while the coordinator executes effects. Existing Phase 7 authorization, journal ordering, deletion checks, publication fencing, watermark commits, and acknowledgement rules remain acceptance requirements. Any extraction must preserve them and be checked against restart, deletion, and publication races.
+In Phase 13, streaming recovery/revision decisions may be extracted as pure functions over immutable observations, while the coordinator executes effects. Existing Phase 7 authorization, journal ordering, deletion checks, publication fencing, watermark commits, and acknowledgement rules remain acceptance requirements. Any extraction must preserve them and be checked against restart, deletion, and publication races.
+
+Phase 7 local functional closure passes final independent Code, Security and QA review on source `8c01e`, with 470 analytics unit tests, 45 executed integrations and formatting passing. Local root 431-test evidence retains unchanged-source applicability.
+
+The October 5 user decision schedules analytics latency and burst drain-time qualification and optimization in the final phase after deployment to the real environment. Local Phase 7 closure retains correctness, authorization, recovery, retention, bounded backlog/storage and maintenance requirements; the recorded 40,084-ms Bronze p95 failure remains a deferred SLO result. Genuine deployed retention and operational activation prerequisites still apply before production streaming. See the [final deployed optimization milestone](docs/development-milestones.md#deployed-analytics-optimization-phase-15-final-phase).
+
+Phase 8 first establishes MongoDB/vector access baselines, Phase 10 completes evaluated AI discovery, and Phase 11 applies durable Saga and pure State decisions to operational workflows. Further Spark refinement follows in Phase 13. See the planned Kafka contracts below; their proposed topics are not currently provisioned.
+
+The [remaining capability specifications](docs/development-milestones.md#remaining-delivery-order-and-acceptance) define concrete behavior and boundaries for Phases 8–15. They retain the application's service-owned `IO`/`EitherT` ports, analytics' `F[_]` ports, and resource-owned adapters. Proposed contracts and provider/deployment alternatives are labelled separately from current source facts; an unresolved choice blocks its dependent implementation. Specification readiness does not replace implementation, privacy, recovery or deployed acceptance evidence.
 
 Other pattern use remains conditional: Decorator for shared instrumentation across multiple provider adapters (preserving error and cancellation behavior without duplicate retries); Observer as managed streams for new local notifications while restart-recoverable work keeps durable handoffs; Bridge only for integrations with two independently varying dimensions; typed Filter criteria as discovery requirements grow; recursive Composite only for accepted nested Boolean criteria; and additional ranking strategies only when evaluation demonstrates benefit. See [development milestones](docs/development-milestones.md) for phase placement and acceptance conditions.
 
@@ -279,7 +288,7 @@ The default rule is:
 {
   _id: UUID,
 
-  role: "CANDIDATE",
+  role: "Candidate",
 
   name: "Alice Smith",
   email: "alice@example.com",
@@ -319,9 +328,10 @@ Benefits:
 Indexes:
 
 ```javascript
-{ email: 1 } UNIQUE
-
-{ role: 1 }
+{ emailCanonical: 1 } UNIQUE SPARSE
+{ nameCanonical: 1 } UNIQUE
+{ role: 1, accountStatus: 1, createdAt: -1, _id: -1 }
+{ adminSingletonKey: 1 } UNIQUE WHERE role = "Admin"
 ```
 
 Do not create indexes for fields merely because they exist.
@@ -357,7 +367,7 @@ Do not create indexes for fields merely because they exist.
     remote: true
   },
 
-  status: "OPEN",
+  status: "Open",
 
   createdAt: ISODate(...),
   updatedAt: ISODate(...),
@@ -394,15 +404,15 @@ which creates unnecessary write amplification.
 
 # 10. Job Indexes
 
-Expected GraphQL query:
+Current GraphQL query (candidate visibility is enforced by the service):
 
 ```graphql
-jobs(
-  status: OPEN
-  location: "Kyiv"
-  first: 20
-  after: "..."
-)
+query {
+  jobs(city: "Kyiv", first: 20) {
+    edges { node { id title } }
+    pageInfo { hasNextPage endCursor }
+  }
+}
 ```
 
 Primary index:
@@ -419,8 +429,8 @@ Primary index:
 Recruiter jobs:
 
 ```graphql
-recruiter {
-  jobs(...)
+query {
+  myJobs(first: 20) { edges { node { id title } } }
 }
 ```
 
@@ -463,7 +473,7 @@ Do not embed applications inside either user or job documents.
   candidateId: UUID,
   jobId: UUID,
 
-  status: "INTERVIEW",
+  status: "Interview",
 
   feedback: null,
 
@@ -518,8 +528,10 @@ This simultaneously supports candidate/job existence checks.
 GraphQL:
 
 ```graphql
-candidate {
-  applications(status: INTERVIEW)
+query {
+  myApplications(first: 20, status: INTERVIEW) {
+    edges { node { id status } }
+  }
 }
 ```
 
@@ -541,8 +553,10 @@ Index:
 GraphQL:
 
 ```graphql
-job {
-  applications(status: CREATED)
+query ReviewApplications($jobId: JobID!) {
+  jobApplications(jobId: $jobId, first: 20, status: CREATED) {
+    edges { node { id status } }
+  }
 }
 ```
 
@@ -593,17 +607,15 @@ Document:
 
   applicationId: UUID,
 
-  type: "STATUS_CHANGED",
+  previousStatus: "Accepted",
+  newStatus: "Interview",
 
-  previousStatus: "ACCEPTED",
-  newStatus: "INTERVIEW",
-
-  changedBy: UUID,
+  actorId: "<user-uuid>",
 
   reason: null,
   feedback: null,
 
-  createdAt: ISODate(...)
+  occurredAt: ISODate(...)
 }
 ```
 
@@ -612,7 +624,8 @@ Index:
 ```javascript
 {
   applicationId: 1,
-  createdAt: -1
+  occurredAt: -1,
+  _id: -1
 }
 ```
 
@@ -654,7 +667,7 @@ The database transaction protects consistency between current state and history.
 
 # 15. Saga Pattern for Cross-Boundary Workflows
 
-The Saga pattern is mandatory for future workflows that span multiple durable systems or external side effects that cannot participate in one MongoDB transaction.
+The Saga pattern is mandatory for multi-step business workflows that coordinate durable changes or external side effects across transaction boundaries and need explicit recovery or compensation. A single outbox publication or derived projection update can use its existing durable idempotent worker without a separate saga engine.
 
 Do not use Saga for the Phase 2 core hiring write path when MongoDB can protect the invariant directly. Submitting an application and changing an application status remain local transactional operations:
 
@@ -709,7 +722,7 @@ Each Saga step must define:
 - terminal failure state and operator-visible repair path
 - safe audit fields such as `sagaId`, `step`, `applicationId`, `jobId`, `eventId`, and timestamps
 
-The most useful Saga showcases for this application are:
+Cross-boundary workflows and supporting durable workers for this application include:
 
 - application submission enrichment: submit application, then parse resume, generate embeddings, update Vector Search metadata, and notify recruiter
 - interview scheduling: reserve a slot, commit the guarded move to `INTERVIEW`, then notify candidate and recruiter; release the reservation if the status change fails and retry or reconcile uncertain notification delivery
@@ -727,6 +740,29 @@ Saga is not a substitute for:
 
 Future implementation should add Saga in the smallest vertical slice that includes one real external boundary, durable state, retry and compensation tests, and observability. Do not add a generic Saga framework before there is a concrete workflow that needs it.
 
+
+### Planned Kafka workflow contracts
+
+Phase 11 must produce a reviewed topic/stream catalog before changing routing. Current implementation uses `hiring.operational-events`, a seven-field unversioned envelope, transactional outbox publication and idempotent consumption. The following is a target logical split, not a declaration of existing topics or new infrastructure. Keep a stream together when ownership, ordering, retention and access rules match; split only when these requirements differ. Resolve exact topic names, partitions, replication/minimum ISR, size limits and retention from the bounded workload and recovery/privacy requirements before implementation.
+
+| Stream | Owner and key | Delivery, retention and access contract |
+|---|---|---|
+| Operational facts (`hiring.operational-events`, existing) | Domain outbox producer; audit the existing aggregate partition key before any change | Immutable facts, finite delete retention, consumer group per independent capability; preserve analytics/deletion contracts |
+| Workflow commands (proposed capability-specific topic) | Application saga orchestrator; workflow ID | One command owner/worker group; persisted deadline and step idempotency key; least-privilege producer/consumer ACLs |
+| Workflow results (proposed) | Owning worker; same workflow ID | Correlate command/step/revision; orchestrator consumes durably; reject stale or unrelated replies |
+| Discovery telemetry (split only if justified) | Authorized telemetry producer; documented session/query key | Best-effort product telemetry must not delay domain commands; bounded retention and minimized payload; never a source of hiring truth |
+| Retry/quarantine (capability-specific when required) | Owning consumer/operator | Bounded attempts, restricted access, sanitized failure codes, explicit replay authorization and expiry; no automatic replay of deleted subjects |
+
+Preserve the current active envelope until a scoped change updates all producers, consumers, analytics parsers and fixtures. Proposed workflow messages require typed command/event ID, correlation/workflow ID, causation ID, step ID, expected workflow revision and UTC occurrence/deadline values. IDs/revisions are distinct from any future schema version. Before full MVP use one active contract, with no dual readers/writers or speculative compatibility layer. An existing incompatible local lakehouse stays preserved and fails closed unless its exact reset is authorized.
+
+Ordering exists only within a partition, and the same key on separate topics does not create cross-topic order. Preserve outbox aggregate order, process each ordered key sequentially with bounded parallelism across independent keys, and advance offsets only through the contiguous durable completion frontier. Partition-count/key changes require explicit routing/replay analysis. Delayed results and retries are checked against durable workflow revisions and allowed transitions, not arrival order. Retry topics may reorder records; block later commands for that workflow or validate them against the durable state before applying them.
+
+For a consumed message, atomically record its inbox deduplication identity, guarded next workflow state and outgoing outbox commands in MongoDB, then acknowledge Kafka. A crash before acknowledgement causes a safe duplicate; never acknowledge first. Retain deduplication records through the permitted replay horizon or refuse older replay. Persist deadlines, attempts and repair status; fence stale worker completions through expected revisions/claim tokens. External operations use stable step idempotency keys and reconciliation for uncertain outcomes; Kafka transactions cannot atomically commit MongoDB state or a calendar/email side effect. Use `read_committed` for transactional records. The [Kafka design documentation](https://kafka.apache.org/41/design/design/) describes partition ordering and the limits of exactly-once processing across external systems.
+
+State is a pure ADT transition with immutable Command outputs; Saga is the durable orchestration and recovery policy around that transition. Keep local aggregate lifecycle State programs separate from saga progress. Represent compensating, retryable, awaiting-result, completed and operator-repair outcomes explicitly where the workflow requires them. Reversible reservations can be compensated; sent notifications, deletion and elapsed retention need forward recovery/reconciliation. Do not invent business status transitions to fit a generic workflow engine.
+
+Kafka Streams is optional for a demonstrated stream join/window/state-store workload. Compare it with the existing FS2/fs2-kafka consumers, including extra state-store/changelog restoration, repartitioning, operational cost and deletion obligations. A compacted derived-state topic cannot replace durable saga state or an immutable event history; compaction/tombstones alone do not prove timed erasure. Every new stream, retry copy, state store and backup must be included in retention, deletion barriers and replay-denial analysis before activation. Keep raw resumes, vectors, credentials and private search filters out of workflow messages and diagnostics.
+
 ---
 
 # 16. Duplication Strategy
@@ -742,7 +778,7 @@ Application ─► candidateId
 Application ─► jobId
 
 Event ───────► applicationId
-Event ───────► changedBy
+Event ───────► actorId
 ```
 
 Embed:
@@ -801,7 +837,7 @@ Rule:
 
 # 18. GraphQL N+1 Strategy
 
-Consider:
+Conceptual relationship traversal (use `myApplications` or `jobApplications` connections in the current API):
 
 ```graphql
 query {
@@ -881,7 +917,7 @@ Query conceptually becomes:
 
 ```javascript
 {
-  status: "OPEN",
+  status: "Open",
 
   $or: [
     { createdAt: { $lt: cursor.createdAt } },
@@ -965,7 +1001,7 @@ Candidate profiles can similarly contain:
 {
   _id: UUID,
 
-  role: "CANDIDATE",
+  role: "Candidate",
 
   profile: {
     skills: [...],
@@ -1007,7 +1043,6 @@ Store enough metadata to determine whether an embedding is stale.
 
   embeddingMeta: {
     model: "...",
-    version: 1,
     sourceHash: "...",
     updatedAt: ISODate(...)
   }
@@ -1019,12 +1054,12 @@ Store enough metadata to determine whether an embedding is stale.
 If:
 
 ```text
-newSourceHash == storedSourceHash
+newSourceHash == storedSourceHash && configuredModel == storedModel
 ```
 
 the embedding does not need regeneration.
 
-This prevents unnecessary embedding API calls.
+The current embedding metadata contains `model`, `sourceHash` and `updatedAt`; it has no separate embedding-version field. The Mongo user/job `version` is an internal concurrency revision used to guard writes, not an embedding schema version. This freshness check avoids unnecessary embedding API calls.
 
 ---
 
@@ -1036,13 +1071,13 @@ Do not generate embeddings synchronously inside normal mutations unless immediat
 updateJob
     │
     ▼
-MongoDB
+MongoDB transaction: entity update + durable embedding_work
     │
     ▼
-EmbeddingRequested
+Bounded wake-up Queue + periodic durable-work polling
     │
     ▼
-FS2 Queue / Stream
+Claim / lease / retry through FS2 Stream
     │
     ▼
 parEvalMap(N)
@@ -1074,12 +1109,11 @@ Semantic search should not replace structured filtering.
 Example:
 
 ```graphql
-searchJobs(
-  query: "functional Scala distributed systems"
-  location: "Remote"
-  status: OPEN
-  first: 20
-)
+query {
+  semanticJobSearch(query: "functional Scala distributed systems", first: 20) {
+    results { job { id title } score }
+  }
+}
 ```
 
 Execution:

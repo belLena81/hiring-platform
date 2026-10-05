@@ -230,7 +230,7 @@ object AppModule {
                   publisher,
                   common.operational.retention,
                   shared.maintenance.configureRawTables,
-                  shared.maintenance.applyActiveDeletions,
+                  shared.maintenance.purgeMarkedSubjects,
                   authorize
                 )
                 .use(stages =>
@@ -410,8 +410,8 @@ object AppModule {
         if (existingMarkers.nonEmpty) Async[F].pure(Option.empty[AnalyticsReportReservation])
         else publisher.reservePinned(runId, fingerprint, at).map(Some(_))
       markers <- shared.markers.activeSubjectTokens
-      _ <- if (markers.nonEmpty) shared.maintenance.applyActiveDeletions(markers) else Async[F].unit
       _ <- shared.maintenance.expireStored(at)
+      _ <- if (markers.nonEmpty) shared.maintenance.purgeMarkedSubjects(markers) else Async[F].unit
       _ <-
         if (markers.nonEmpty || reservation.isEmpty) Async[F].unit
         else

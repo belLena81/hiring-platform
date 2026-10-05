@@ -1,14 +1,20 @@
 # Hiring Lifecycle State Programs
 
+## Current state — 2026-10-05
+
+The lifecycle slice is complete according to its recorded independent review and focused QA evidence. `domain.policy.LifecycleProgram` is `StateT` over `Either[DomainError, *]`; Application and Job transitions use it while services own effects and Mongo owns atomicity. This existing local State design is the baseline for Phase 11, whose durable Saga orchestration is still planned.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
-- Status: in progress
+- Status: done for the scoped lifecycle refactor
 - Coordinator and implementation owner: Product Manager / Scala Developer
 - User outcome: lifecycle transitions remain pure and typed while supporting safe sequencing over an in-memory aggregate.
 - Scope: Application status changes, Job update/publish/close transitions, lifecycle unit tests, service adaptation, and architecture guidance.
 - Non-goals: GraphQL or MongoDB contract changes, changes to authorization/idempotency, new multi-step business mutations, and replacing repository concurrency control or atomic writes.
 
-## Source context and decisions
+## Original source baseline and decisions
 
 - `ApplicationLifecycle.changeStatus` returns a pure lifecycle program whose successful run yields the updated Application separately from `StatusChange` metadata; `ApplicationService` supplies actor/time/IDs and persists the Application with its event atomically.
 - `JobLifecycle` has pure create/update/publish/close functions; `JobService` supplies time and persists job changes with operational events. Architecture currently requires `cats.data.State` for Job aggregate changes.

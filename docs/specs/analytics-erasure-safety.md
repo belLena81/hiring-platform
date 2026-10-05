@@ -28,7 +28,9 @@ The existing domain/service/adapter architecture remains. Internal analytics por
 - Independent Code Reviewer and Security Engineer verdicts precede final independent QA. Authors do not approve their own code.
 - Run Java 17 root and analytics unit suites, analytics integration suites, configured formatting checks, and affected physical/recovery evidence. Serialize SBT invocations. Preserve generated output in ignored locations.
 
-## Evidence and remaining gates
+## Historical repair evidence — September 30
+
+The results below certify the scoped repair at that checkpoint. Later local HAL completion is recorded in [Hiring Analytics Lakehouse](hiring-analytics-lakehouse.md#current-local-completion-evidence--october-3); current streaming obligations belong to [Continuous Hiring Analytics](continuous-hiring-analytics.md#current-evidence-summary--october-5). Earlier formatting failures and Phase 6 recommendations below are not current checkout verdicts.
 
 The earlier local smoke verified 43 captured paths absent; this is historical evidence, not a rerun on these changes. The earlier root 425/425, analytics 174/174, and analytics integration 25 passing results likewise do not certify this checkout. The review found a current streaming wildcard-import failure and insufficient isolated retention-edge coverage.
 
@@ -50,4 +52,4 @@ Executed checks:
 - That proof's wrapper exited 1 during cleanup of container-owned Spark scratch files, after the test passed. Cleanup now mounts the already validated nonce directory, covering both lakehouse and scratch files. `bash -n` passed; the corrected guarded cleanup succeeded against the actual leftovers and verified directory absence. The whole wrapper was not rerun after this shell-only correction. Named proof volumes remain preserved.
 - Independent Code Reviewer: PASS. Security Engineer: PASS. Final independent QA: PASS for AES-01–07, including the fresh Compose result, actual cleanup directory absence, unchanged scoped source hashes, and the evidence distinctions above. External formatting issues and evolving streaming work remain outside this acceptance. Final `git diff --check` passed; no task files were staged or committed.
 
-Phase 7 recommendation: do not advance on the basis of this repair. Complete the real operational retention and rollout gates above before declaring Phase 6 closed.
+Current planning boundary: Phase 6 local implementation subsequently closed on October 3. This repair alone did not establish that closure. Phase 7 local functional acceptance remains open in its own specification; genuine production retention and rollout gates remain prerequisites for production activation, not prerequisites for recognizing the later accepted local Phase 6 completion.

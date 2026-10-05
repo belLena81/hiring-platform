@@ -1,5 +1,11 @@
 # Hiring Service Composition
 
+## Current state — 2026-10-05
+
+The service composition refactor is implemented. Later [repository composition](hiring-repository-composition.md) records a passing full integration run, superseding the old repeated-runtime-diagnostic failure below. Recorded test counts and review verdicts describe their task checkpoints, not a new run on today's checkout.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
 - Status: complete

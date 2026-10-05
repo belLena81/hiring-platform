@@ -1920,6 +1920,97 @@ class AnalyticsTransformsSpec extends FunSuite {
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, paths.manifests))
   }
 
+  test("logical subject maintenance preserves retained files across repeated ticks") {
+    val root = Files.createTempDirectory("analytics-subject-maintenance")
+    val paths = TestAnalyticsLakehousePaths.unsafe(root.toString)
+    val at = Instant.parse("2026-09-22T12:00:00Z")
+    val deletedToken = pseudonymizer.typedToken("candidate-deleted").toOption.get
+    val retainedToken = pseudonymizer.typedToken("candidate-retained").toOption.get
+    val rawSchema = StructType(
+      Seq(
+        StructField("rawValue", StringType, nullable = false),
+        StructField("subjectTokens", ArrayType(StringType), nullable = true),
+        StructField("expiresAt", TimestampType, nullable = false)
+      )
+    )
+    val rawPaths = Vector(paths.bronze, paths.quarantine, paths.lateFacts)
+    rawPaths.foreach { path =>
+      spark
+        .createDataFrame(
+          Vector(
+            Row("deleted", Seq(deletedToken.value), Timestamp.from(at.plusSeconds(86400))),
+            Row("retained", Seq(retainedToken.value), Timestamp.from(at.plusSeconds(86400))),
+            Row("expired", Seq(retainedToken.value), Timestamp.from(at)),
+            Row("unattributed", Seq.empty[String], Timestamp.from(at.plusSeconds(86400)))
+          ).asJava,
+          rawSchema
+        )
+        .coalesce(1)
+        .write
+        .format("delta")
+        .save(path)
+    }
+    val retainedNames = (1 to 10).map(index => s"retained-$index")
+    val input = records((Seq("deleted", "expired") ++ retainedNames).zipWithIndex.map { case (name, index) =>
+      (
+        "hiring.operational-events",
+        0,
+        index.toLong,
+        event(
+          s"maintenance-$name",
+          "APPLICATION_CREATED",
+          aggregateId = s"application-$name",
+          payload = Some(s"""{"applicationId":"application-$name","candidateId":"candidate-$name"}""")
+        )
+      )
+    })
+    val silver = silverFrame(
+      OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(input)),
+      pseudonymizer,
+      emptyMarkers
+    )
+      .withColumn("ingestedAt", lit(Timestamp.from(at)))
+      .withColumn(
+        "expiresAt",
+        org.apache.spark.sql.functions
+          .when(col("eventId") === "maintenance-expired", lit(Timestamp.from(at)))
+          .otherwise(lit(Timestamp.from(at.plusSeconds(86400))))
+      )
+    silver.coalesce(1).write.format("delta").save(paths.silver)
+    HiringGoldTransforms.wideFunnelDay(silver).toOption.get.write.format("delta").save(paths.funnelGold)
+    assertEquals(spark.read.format("delta").load(paths.funnelGold).select("created").first().getLong(0), 12L)
+    val maintenance = AnalyticsBatchTestSupport.newMaintenance(spark, paths, pseudonymizer, fixedClock(at))
+    val markers = Vector(deletedToken)
+    def tick(): Unit = {
+      maintenance.expireStored(at).unsafeRunSync()
+      maintenance.purgeMarkedSubjects(markers).unsafeRunSync()
+    }
+    def currentFiles: Map[String, Set[String]] =
+      (rawPaths :+ paths.silver)
+        .map(path =>
+          path ->
+            org.apache.spark.sql.delta.DeltaLog.forTable(spark, path).update().allFiles.collect().map(_.path).toSet
+        )
+        .toMap
+
+    tick()
+    rawPaths.foreach(path =>
+      assertEquals(
+        spark.read.format("delta").load(path).select("rawValue").collect().map(_.getString(0)).toVector,
+        Vector("retained")
+      )
+    )
+    assertEquals(
+      spark.read.format("delta").load(paths.silver).select("eventId").collect().map(_.getString(0)).toVector.sorted,
+      retainedNames.map(name => s"maintenance-$name").toVector.sorted
+    )
+    assertEquals(spark.read.format("delta").load(paths.funnelGold).select("created").first().getLong(0), 10L)
+    val before = currentFiles
+    tick()
+    assertEquals(currentFiles, before, "a repeated logical purge must preserve retained subject data files")
+    assertEquals(maintenance.countMarkedRows(markers).unsafeRunSync(), 0L)
+  }
+
   test("physical erasure verification is tied to captured Delta file paths") {
     val root = Files.createTempDirectory("analytics-erasure-files")
     val paths = TestAnalyticsLakehousePaths.unsafe(root.toString)

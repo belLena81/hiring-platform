@@ -26,6 +26,43 @@ import scala.jdk.CollectionConverters.*
 
 /** Synthetic Kafka-to-publication workload. Availability is measured when readers observe durable output. */
 object HiringAnalyticsStreamingWorkloadMain extends IOApp {
+  private[cli] sealed abstract class WorkloadMode(
+      val name: String,
+      val records: Int,
+      val cadence: FiniteDuration,
+      val maxBacklog: Int
+  )
+  private[cli] object WorkloadMode {
+    case object Healthy extends WorkloadMode("healthy", 7500, 120.millis, 500)
+    case object Burst extends WorkloadMode("burst", 1000, Duration.Zero, 1000)
+    case object Functional extends WorkloadMode("functional", 12, Duration.Zero, 12)
+  }
+
+  private[cli] def workloadMode(args: List[String]): Either[String, WorkloadMode] = args match {
+    case Nil                => Right(WorkloadMode.Healthy)
+    case List("burst")      => Right(WorkloadMode.Burst)
+    case List("functional") => Right(WorkloadMode.Functional)
+    case _                  => Left("workload accepts optional burst or functional mode and reads validated HOCON")
+  }
+
+  private[cli] def completeWorkload(
+      mode: WorkloadMode,
+      bronzeSamples: Int,
+      reportSamples: Int,
+      productionElapsed: FiniteDuration,
+      bronzeP95: Long,
+      reportP95: Long
+  ): Boolean =
+    bronzeSamples == mode.records && reportSamples == mode.records &&
+      (mode != WorkloadMode.Healthy || (productionElapsed >= 900.seconds && productionElapsed <= 905.seconds && bronzeP95 < 30000 && reportP95 <= 120000))
+
+  private[cli] def resourceBounds(
+      mode: WorkloadMode,
+      maxBacklog: Int,
+      filesGrowth: Long,
+      bytesGrowth: Long
+  ): Boolean = maxBacklog <= mode.maxBacklog && filesGrowth <= 10000L && bytesGrowth <= 1073741824L
+
   private[cli] case class ProducerCredentials(username: String, password: String) {
     override def toString: String = "ProducerCredentials([REDACTED])"
   }
@@ -189,13 +226,11 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
     sorted(math.ceil(values.size * quantile).toInt - 1)
   }
 
-  override def run(args: List[String]): IO[ExitCode] = {
-    val burst = args == List("burst")
-    val records = if (burst) 1000 else 7500
-    val cadence = if (burst) Duration.Zero else 120.millis
-    if (args.nonEmpty && !burst)
-      IO.println("workload accepts optional burst mode and reads validated HOCON").as(ExitCode.Error)
-    else
+  override def run(args: List[String]): IO[ExitCode] = workloadMode(args) match {
+    case Left(problem) => IO.println(problem).as(ExitCode.Error)
+    case Right(mode)   =>
+      val records = mode.records
+      val cadence = mode.cadence
       (for {
         settings <- AnalyticsRuntimeConfig.loadStreaming[IO]
         _ <- IO.fromEither(
@@ -471,28 +506,33 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
         bronzeP95 <- IO(percentile(bronzeValues, 0.95))
         reportP95 <- IO(percentile(reportValues, 0.95))
         _ <- IO.println(
-          s"STREAMING_WORKLOAD mode=${
-              if (burst) "burst" else "healthy"
-            } records=$records untimedControlRecords=1 partitions=3 targetRecordsPerMinute=${
-              if (burst) "unpaced" else "500"
+          s"STREAMING_WORKLOAD mode=${mode.name} records=$records untimedControlRecords=1 partitions=3 targetRecordsPerMinute=${
+              if (mode == WorkloadMode.Healthy) "500" else "unpaced"
             } productionSeconds=${productionElapsed.toSeconds} elapsedSeconds=${elapsed.toSeconds} bronzeSamples=${bronzeValues.size} reportSamples=${reportValues.size} bronzeP95Millis=$bronzeP95 reportP95Millis=$reportP95 observerSpark=local[1] streamSpark=local[2] clock=real"
         )
         _ <- IO.println(
           s"STREAMING_WORKLOAD_OBSERVATIONS maxObservedUnmaterializedRecords=${observation.maxBacklog} maxObserverHeapBytes=${observation.maxObserverHeapBytes} storageFilesBefore=${storageBefore._1} storageFilesAfter=${storageAfter._1} storageBytesBefore=${storageBefore._2} storageBytesAfter=${storageAfter._2} streamProcessResources=externalMeasurementRequired"
         )
         _ <- IO.raiseUnless(
-          observation.maxBacklog <= (if (burst) 1000 else 500) &&
-            storageAfter._1 - storageBefore._1 <= 10000L &&
-            storageAfter._2 - storageBefore._2 <= 1073741824L
+          resourceBounds(
+            mode,
+            observation.maxBacklog,
+            storageAfter._1 - storageBefore._1,
+            storageAfter._2 - storageBefore._2
+          )
         )(new IllegalStateException("streaming lag or storage growth bound exceeded"))
         _ <- IO.println(
-          "STREAMING_WORKLOAD_BOUNDS unmaterializedRecordsMax=" + (if (burst) 1000
-                                                                   else 500) + " storageGrowthBytesMax=1073741824 storageGrowthFilesMax=10000"
+          "STREAMING_WORKLOAD_BOUNDS unmaterializedRecordsMax=" + mode.maxBacklog + " storageGrowthBytesMax=1073741824 storageGrowthFilesMax=10000"
         )
         _ <- IO.raiseUnless(
-          bronzeValues.size == records && reportValues.size == records &&
-            (burst || (productionElapsed >= 900.seconds && productionElapsed <= 905.seconds && bronzeP95 < 30000 && reportP95 <= 120000))
+          completeWorkload(mode, bronzeValues.size, reportValues.size, productionElapsed, bronzeP95, reportP95)
         )(new IllegalStateException("streaming freshness acceptance failed"))
+        _ <-
+          if (mode == WorkloadMode.Functional)
+            IO.println(
+              "STREAMING_FUNCTIONAL_COHORT_VERIFIED records=12 partitions=3 bronzeSamples=12 reportSamples=12 privacyDenials=true latencyQualification=DEFERRED burstDrainQualification=DEFERRED"
+            )
+          else IO.unit
       } yield ExitCode.Success).handleErrorWith(error =>
         IO.println(s"streaming workload failed (${error.getClass.getSimpleName})").as(ExitCode.Error)
       )

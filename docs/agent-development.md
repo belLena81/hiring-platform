@@ -20,7 +20,7 @@ Startup preserves hiring-owned MongoDB data by default. Set `mongo.reset-on-star
 Start a task with:
 
 ```text
-Use $product-manager to deliver the next Foundation slice. Inspect the current
+Use $product-manager to deliver the next scoped roadmap slice. Inspect the current
 code and decisions, define acceptance criteria, delegate relevant specialists,
 and finish with independent code/security reviews as applicable and final QA.
 ```
@@ -68,12 +68,12 @@ Optimize for the smallest operating footprint that meets the agreed workload and
 
 For infrastructure proposals, estimate compute hours, idle capacity, storage/retention, I/O and egress, embeddings/provider calls, and operational burden. State units, assumptions, and price source/date if pricing is used. Compare scheduled batch with streaming and local execution with managed infrastructure. Use bounded local synthetic data by default; million-row experiments and paid resources are separate scoped work. Do not sacrifice authorization, durability, or correctness for cost.
 
-An optimization needs a baseline, a demonstrated bottleneck, a measured improvement without unacceptable regressions, and a revisit/rollback trigger. Kafka, Spark, Databricks, caches, and denormalization are introduced only when the relevant roadmap workload warrants them.
+An optimization needs a baseline, a demonstrated bottleneck, a measured improvement without unacceptable regressions, and a revisit/rollback trigger. Kafka publication and Spark/Delta analytics already exist; additional distributed infrastructure, Databricks, caches, and denormalization require a relevant measured workload. Follow the [current milestone order](development-milestones.md): MongoDB, search/AI, and Kafka workflow refinements precede further Spark/Delta development.
 
 ## Validation
 
 Use [local engineering quality](engineering-quality.md) for pure FP, debugging, review, and the `bash scripts/check-local.sh` command. There is no CI/CD pipeline; integration and [migration/contract checks](schema-evolution.md) must be run locally when required.
 
-Run `sbt test` for the configured unit suite and `sbt 'IntegrationTest / test'` for live HTTP/disposable MongoDB checks when relevant. Missing Docker is blocked infrastructure, not a passing gate. Run formatting/linting when configured. `sbt run` now starts the long-running Foundation server; use its probe endpoints and the [runbook](foundation.md), not process exit, to check health.
+Run `sbt test` for the configured unit suite and `sbt 'IntegrationTest / test'` for live HTTP/disposable MongoDB checks when relevant. Missing Docker is blocked infrastructure, not a passing gate. Run formatting/linting when configured. `sbt run` starts the long-running hiring server; use its probe endpoints and the [startup instructions](../README.md), not process exit, to check health.
 
 For skill edits, run the project-owned `python3 scripts/check-skills.py`, check local references, and request independent scenario review. Frontmatter validation alone does not prove orchestration behavior or native discovery. No database migration or runtime deployment is needed for documentation-only changes.

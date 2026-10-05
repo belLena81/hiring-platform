@@ -420,6 +420,13 @@ def identity(pid):
     args=(path/'cmdline').read_bytes().split(b'\0')
     return start,args
 
+def owned_zombie(pid,expected_start):
+    path=pathlib.Path('/proc')/str(pid)
+    if path.stat().st_uid!=os.getuid():raise RuntimeError('process owner')
+    raw=(path/'stat').read_text();fields=raw[raw.rfind(')')+2:].split()
+    if fields[19]!=expected_start:raise RuntimeError('process identity changed')
+    return fields[0]=='Z'
+
 def run(repo,nonce):
     if not re.fullmatch('[a-f0-9]{16}',nonce): raise RuntimeError('nonce')
     repo=pathlib.Path(repo).absolute(); config=repo/'.local/config'/('hiring-streaming-proof-'+nonce)
@@ -508,10 +515,10 @@ def run(repo,nonce):
             if target.stat().st_size>CAP:raise RuntimeError('worker log bound')
             raw=target.read_bytes()
             text=raw.decode('utf8',errors='strict')
-            clean=not re.search(r'\bERROR\b|Dropping event from queue|numDroppedEvents',text)
+            clean=not re.search(r'\bERROR\b|Exception|Caused by:|Dropping event from queue|numDroppedEvents',text)
             write(logs/'erasure-worker-stopped.json',{'nonce':nonce,'actualExit':worker.returncode,'joined':True,'cleanLog':clean,'logClassification':'CLEAN' if clean else 'ERROR_OR_LISTENER_DROP'})
             if not clean:raise RuntimeError('worker error log')
-    if worker.returncode not in (0,143,-15) or overflow.is_set():raise RuntimeError('unclean worker closure')
+    if worker.returncode!=0 or overflow.is_set():raise RuntimeError('unclean worker closure')
     print('STREAMING_ERASURE_WORKER_STOPPED joined=true',flush=True)
 
 def stop_existing(repo,nonce):
@@ -523,18 +530,34 @@ def stop_existing(repo,nonce):
     if owner.get('pidNamespace')!=os.readlink('/proc/self/ns/pid'):raise RuntimeError('process namespace mismatch')
     pid=owner['supervisorPid'];worker=owner['pid'];conf=config/'analytics-worker.conf'
     if pathlib.Path('/proc',str(pid)).exists():
-        ticks,args=identity(pid)
-        cwd=pathlib.Path(os.readlink('/proc/'+str(pid)+'/cwd'))
-        expected=config/'worker-supervisor.py'
-        scripts=[pathlib.Path(os.fsdecode(arg)) for arg in args if arg.endswith(b'worker-supervisor.py')]
-        canonical=[(path if path.is_absolute() else cwd/path).absolute() for path in scripts]
-        if ticks!=owner['supervisorStartTicks'] or cwd!=repo or expected not in canonical or nonce.encode() not in args:raise RuntimeError('supervisor identity changed')
-        os.kill(pid,signal.SIGTERM)
+        try:
+            if not owned_zombie(pid,owner['supervisorStartTicks']):
+                ticks,args=identity(pid)
+                cwd=pathlib.Path(os.readlink('/proc/'+str(pid)+'/cwd'))
+                expected=config/'worker-supervisor.py'
+                scripts=[pathlib.Path(os.fsdecode(arg)) for arg in args if arg.endswith(b'worker-supervisor.py')]
+                canonical=[(path if path.is_absolute() else cwd/path).absolute() for path in scripts]
+                if ticks!=owner['supervisorStartTicks'] or cwd!=repo or expected not in canonical or nonce.encode() not in args:raise RuntimeError('supervisor identity changed')
+                os.kill(pid,signal.SIGTERM)
+        except (FileNotFoundError, ProcessLookupError):
+            if pathlib.Path('/proc',str(pid)).exists() and not owned_zombie(pid,owner['supervisorStartTicks']):raise
+            # The supervisor may have joined naturally. Still audit the worker below.
     deadline=time.monotonic()+130
     while time.monotonic()<deadline:
         if not pathlib.Path('/proc',str(worker)).exists():return
-        ticks,args=identity(worker)
-        if ticks!=owner['startTicks'] or MAIN.encode() not in args or ('-Dconfig.file='+str(conf)).encode() not in args:raise RuntimeError('worker identity changed')
+        try:
+            if owned_zombie(worker,owner['startTicks']):
+                time.sleep(.2);continue
+            ticks,args=identity(worker)
+        except FileNotFoundError:
+            if not pathlib.Path('/proc',str(worker)).exists():return
+            if owned_zombie(worker,owner['startTicks']):
+                time.sleep(.2);continue
+            raise
+        if ticks!=owner['startTicks'] or MAIN.encode() not in args or ('-Dconfig.file='+str(conf)).encode() not in args:
+            if owned_zombie(worker,owner['startTicks']):
+                time.sleep(.2);continue
+            raise RuntimeError('worker identity changed')
         time.sleep(.2)
     raise RuntimeError('cleanup audit required')
 
@@ -600,8 +623,14 @@ elif [[ "$mode" == run || "$mode" == scenarios || "$mode" == diagnose || "$mode"
   if [[ "$mode" == run ]]; then
     java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain >"$log_dir/healthy-workload.log" 2>&1
   else
-    printf 'STREAMING_SCENARIO_SCOPE healthyFreshness=NOT_MEASURED healthyCadence=NOT_MEASURED overallAcceptance=OPEN\n' >"$log_dir/scenario-scope.log"
-    java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain burst >"$log_dir/scenario-seed-burst.log" 2>&1
+    if [[ "$mode" == scenarios ]]; then
+      printf 'STREAMING_SCENARIO_SCOPE healthyFreshness=DEFERRED_BY_USER_AFTER_DEPLOYMENT healthyCadence=NOT_MEASURED burstDrainQualification=DEFERRED_BY_USER_AFTER_DEPLOYMENT functionalSeedRecords=12 functionalRestartRecords=12 overallAcceptance=OPEN\n' >"$log_dir/scenario-scope.log"
+      java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain functional >"$log_dir/scenario-seed-functional.log" 2>&1
+      rg -q '^STREAMING_FUNCTIONAL_COHORT_VERIFIED records=12 partitions=3 bronzeSamples=12 reportSamples=12 privacyDenials=true latencyQualification=DEFERRED burstDrainQualification=DEFERRED$' "$log_dir/scenario-seed-functional.log"
+    else
+      printf 'STREAMING_SCENARIO_SCOPE healthyFreshness=NOT_MEASURED healthyCadence=NOT_MEASURED overallAcceptance=OPEN\n' >"$log_dir/scenario-scope.log"
+      java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain burst >"$log_dir/scenario-seed-burst.log" 2>&1
+    fi
   fi
   if [[ "$mode" == diagnose ]]; then
     kill -- "-$stream_pid"
@@ -629,7 +658,7 @@ pathlib.Path(sys.argv[2]).write_text(json.dumps(counts))
 PY
   # Graceful process reconstruction preserves the exact checkpoint and permanent registration.
   kill -- "-$stream_pid"
-  wait "$stream_pid" || true
+  wait "$stream_pid"
   wait "$resource_pid" || true
   setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -Dlog4j.configurationFile="$4" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
     _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" "$config_dir/streaming-progress-log4j2.properties" >>"$log_dir/stream.log" 2>&1 &
@@ -640,8 +669,13 @@ PY
     sleep 5
   done) >>"$log_dir/stream-resources.log" &
   resource_pid=$!
-  java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain burst >"$log_dir/burst-workload.log" 2>&1
-  python3 - "$config_dir" "$log_dir/restart-baseline.json" <<'PY'
+  if [[ "$mode" == scenarios ]]; then
+    java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain functional >"$log_dir/restart-functional-workload.log" 2>&1
+    rg -q '^STREAMING_FUNCTIONAL_COHORT_VERIFIED records=12 partitions=3 bronzeSamples=12 reportSamples=12 privacyDenials=true latencyQualification=DEFERRED burstDrainQualification=DEFERRED$' "$log_dir/restart-functional-workload.log"
+  else
+    java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain burst >"$log_dir/burst-workload.log" 2>&1
+  fi
+  python3 - "$config_dir" "$log_dir/restart-baseline.json" "$mode" <<'PY'
 import datetime, json, pathlib, sys, urllib.request, uuid
 p=pathlib.Path(sys.argv[1]); s=json.loads((p/'state.json').read_text()); url=f'http://127.0.0.1:{s["apiPort"]}/graphql'; login={'query':'mutation($input: LoginInput!) { login(input: $input) { __typename ... on AuthSuccess { accessToken } } }','variables':{'input':{'idempotencyKey':str(uuid.uuid4()),'name':'Proof Admin '+s['nonce'],'password':'proof-password-'+s['nonce']}}}; request=urllib.request.Request(url,data=json.dumps(login).encode(),headers={'Content-Type':'application/json'})
 with urllib.request.urlopen(request,timeout=15) as response: session=json.load(response)
@@ -656,9 +690,12 @@ counts={}
 for row in body['data']['analyticsReport']['skillPostingActivity']: counts[row['skill']]=counts.get(row['skill'],0)+row['postings']
 baseline=json.loads(pathlib.Path(sys.argv[2]).read_text())
 if not baseline or any(counts.get(skill)!=count for skill,count in baseline.items()): raise RuntimeError('restart changed prior aggregate facts')
-print('STREAMING_PROCESS_RESTART_VERIFIED preservedCheckpoint=true priorVisibleFactsUnchanged=true newBurstPublished=true')
+if sys.argv[3]=='scenarios':
+ print('STREAMING_PROCESS_RESTART_VERIFIED preservedCheckpoint=true priorVisibleFactsUnchanged=true newFunctionalCohortPublished=true actualNewRecords=12 benchmarkQualification=DEFERRED')
+else:
+ print('STREAMING_PROCESS_RESTART_VERIFIED preservedCheckpoint=true priorVisibleFactsUnchanged=true newBurstPublished=true')
 PY
-  # Live admission/replay scenarios follow the separately measured healthy/burst runs.
+  # Live admission/replay follows verified functional cohorts or the measured healthy/burst runs.
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain prepare >"$log_dir/live-admission.log" 2>&1
   replay_run "$config_dir/scenarios-replay.conf" "$log_dir/live-replay-first.log"
   rg -q 'late replay outcome: Published' "$log_dir/live-replay-first.log"
@@ -667,7 +704,7 @@ PY
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain verify-replay >"$log_dir/live-replay-readback.log" 2>&1
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain contention >"$log_dir/live-contention.log" 2>&1
   kill -- "-$stream_pid"
-  wait "$stream_pid" || true
+  wait "$stream_pid"
   wait "$resource_pid" || true
   trap - EXIT
   [[ $(( $(date -u +%s) - run_started )) -lt 3000 ]] || {
@@ -767,16 +804,22 @@ PY
     sleep 0.2
   done
   # Owner deletion runs last: its durable pending marker deliberately fences later report publication.
-  java_run "$config_dir/scenarios-race.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain race-replay >"$log_dir/live-replay-deletion-race.log" 2>&1
+  race_result=0
+  java_run "$config_dir/scenarios-race.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain race-replay >"$log_dir/live-replay-deletion-race.log" 2>&1 || race_result=$?
+  rg '^STREAMING_SUPPRESSION_STAGE mode=worker-coexistence|^STREAMING_WORKER_COEXISTENCE_VERIFIED' "$log_dir/live-replay-deletion-race.log" >"$log_dir/live-worker-coexistence.log" || true
+  printf 'STREAMING_REPLAY_COEXISTENCE_PROCESS_EXIT actualExit=%s\n' "$race_result" >>"$log_dir/live-worker-coexistence.log"
+  [[ "$race_result" -eq 0 ]] || { printf 'Warm replay/deletion coexistence proof failed.\n' >&2; exit 1; }
   rg -q '^STREAMING_REPLAY_HTTP_DELETION_BARRIER_PASSED actualMergeBeforeDelete=true oldReservationPinned=true$' "$log_dir/live-replay-deletion-race.log"
   rg -q '^STREAMING_REPLAY_DELETION_RACE_REJECTED category=(ERASURE_PENDING|DELETION_SELECTION_REJECTED)$' "$log_dir/live-replay-deletion-race.log"
+  rg -q '^STREAMING_WORKER_COEXISTENCE_VERIFIED actualRecords=12 workerRootOwnedAfterCommit=true workerLive=true ownerNaturallyReleased=true sourceAck=true terminal=ErasurePending maintenanceSucceeded=true maximumDelayMillis=300000 publicationHiddenUnchanged=true$' "$log_dir/live-worker-coexistence.log"
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain delete-race >"$log_dir/live-deletion-readback.log" 2>&1
+  python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce"
+  wait "$worker_supervisor_pid"
+  worker_supervisor_pid=""
   java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingScenariosMain suppressed-only >"$log_dir/live-suppressed-only.log" 2>&1
   rg -q '^STREAMING_SUPPRESSED_ONLY_VERIFIED actualRecords=12 sourceAck=true terminal=ErasurePending bronzeAbsent=true silverAbsent=true lateAndQuarantineAbsent=true candidateWatermarkAbsent=true publishedWatermarkUnchanged=true reportPublicationUnchanged=true receiptReserved=true adminUnavailable=true$' "$log_dir/live-suppressed-only.log"
   kill -- "-$stream_pid"
-  wait "$stream_pid" || true
-  python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce"
-  wait "$worker_supervisor_pid"
+  wait "$stream_pid"
   trap - EXIT
   if rg -q '\bERROR\b|Exception|Caused by:|Dropping event from queue|numDroppedEvents' "$log_dir/stream.log"; then
     printf 'Continuous proof has an unclean runtime log.\n' >&2; exit 1;
@@ -785,7 +828,7 @@ PY
   if [[ "$mode" == run ]]; then
     printf 'Real-clock healthy and bounded burst workload passed. State and resource evidence retained: %s\n' "$log_dir"
   else
-    printf 'Isolated continuous scenarios passed; healthy-load acceptance was NOT MEASURED. Evidence retained: %s\n' "$log_dir"
+    printf 'Isolated continuous functional scenarios passed; healthy and burst-drain qualification remain deferred until after deployment. Evidence retained: %s\n' "$log_dir"
   fi
 else
   read_state

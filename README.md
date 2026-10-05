@@ -1,6 +1,6 @@
 # Hiring Management Platform
 
-Backend-first hiring management platform built with **Scala 3, Sangria GraphQL, Cats Effect, and MongoDB**.
+Backend-only hiring management platform built with **Scala 3, Sangria GraphQL, Cats Effect, and MongoDB**.
 
 A practical playground for functional Scala, GraphQL API design, MongoDB data modeling/query optimization, and AI-powered semantic search & candidate/job matching via MongoDB Vector Search.
 
@@ -48,11 +48,11 @@ ANALYTICS_RUN_ID=local-001 \
 
 The batch reads up to 100,000 pending account-erasure markers before it mutates Delta data. With active markers it purges marked Delta rows, rebuilds Gold, and leaves the report hidden until the erasure worker completes the full lifecycle.
 
-Continuous Hiring Analytics implementation is underway with an opt-in `analytics-streaming` Compose profile and a fail-closed resource-managed query runtime. The runtime requires an explicitly selected immutable, time-bounded Mongo activation grant; it stops when that grant expires. Production activation requires Phase 6 real-horizon retention, writer exclusion, guarded HMAC retirement, audit, and independent signoff. The isolated synthetic test environment can use independently reviewed accelerated physical retention and explicitly simulated calendar boundaries. See [the Phase 7 specification](docs/specs/continuous-hiring-analytics.md). Default application startup never provisions a grant; an authorized isolated proof run explicitly provisions one immutable grant after independent readiness validation.
+Continuous Hiring Analytics is locally complete with an opt-in `analytics-streaming` Compose profile and a fail-closed resource-managed query runtime. The runtime requires an explicitly selected immutable, time-bounded Mongo activation grant; it stops when that grant expires. Production activation requires Phase 6 real-horizon retention, writer exclusion, guarded HMAC retirement, audit, and independent signoff. The isolated synthetic test environment can use independently reviewed accelerated physical retention and explicitly simulated calendar boundaries. See [the Phase 7 specification](docs/specs/continuous-hiring-analytics.md). Default application startup never provisions a grant; an authorized isolated proof run explicitly provisions one immutable grant after independent readiness validation.
 
 The streaming profile reads `.local/config/analytics-streaming.conf`, selects its grant with `activation-grant-id`, and requires explicit starting offsets for every Kafka partition. Its trigger defaults to 10 seconds. Start it only with a valid selected grant and the applicable independently reviewed Phase 6 evidence. Production requires genuine deployed horizons; test activation must bind unused nonce-scoped resources. A durable lakehouse registration keeps ordinary batch ingestion disabled after stream shutdown. The checked-in [sanitized configuration example](analytics/analytics-streaming.conf.example) intentionally uses a single example partition and must be adjusted to the broker's actual partition set.
 
-The local proof launcher supports `diagnose` for optional bounded Spark cost measurements and `run` for the unchanged healthy-load acceptance workload. Both require a fresh staged nonce and independently reviewed activation evidence. `stage-maintenance` stages a separate test fixture with 60-second progress retention; its `maintenance` execution checks natural checkpoint/journal pruning and continuation, without claiming production elapsed retention or healthy-load freshness. Successful maintenance must occur within five minutes under the accepted local load; sanitized observations include deferrals and monotonic maximum age. Each new proof uses a small non-overlapping task network and preserves existing proof data.
+The local proof launcher supports `scenarios` for continuous functional acceptance, `diagnose` for optional bounded Spark cost measurements, and `run` for the historical healthy-load workload. Each requires a fresh staged nonce and independently reviewed activation evidence. Latency and burst drain-time qualification are deferred to Phase 15; a functional scenario pass is not an SLO pass. `stage-maintenance` stages a separate test fixture with 60-second progress retention; its `maintenance` execution checks natural checkpoint/journal pruning and continuation, without claiming production elapsed retention or healthy-load freshness. Successful maintenance must occur within five minutes under the accepted local load; sanitized observations include deferrals and monotonic maximum age. Each new proof uses a small non-overlapping task network and preserves existing proof data.
 
 ### Local analytics erasure worker
 
@@ -77,7 +77,7 @@ See the [API reference](docs/api.md) and the [current reset specification](docs/
 
 See [diagnostic logging](docs/logging.md) for searchable markers, request tracing, masked defaults, and explicitly gated local payload capture.
 
-For project-only sbt JDK selection, create an ignored `.sbtopts` file in this root with `-java-home /path/to/jdk-17` (this machine: `/usr/lib/jvm/java-17-openjdk-amd64`). The installed sbt launcher reads it for commands such as `sbt compile` and `sbt test`; it does not change your shell's Java or other projects. Keep machine-specific paths out of Git. IntelliJ's JDK settings remain separate. The local-check script's Java prerequisite check still uses `JAVA_HOME`, so set that variable for the script as described below.
+For project-only sbt JDK selection, create an ignored `.sbtopts` file in this root with `-java-home /path/to/jdk-17` (use the path installed on your machine). The installed sbt launcher reads it for commands such as `sbt compile` and `sbt test`; it does not change your shell's Java or other projects. Keep machine-specific paths out of Git. IntelliJ's JDK settings remain separate. The local-check script's Java prerequisite check still uses `JAVA_HOME`, so set that variable for the script as described below.
 
 Use Java 17+ and sbt 1.11.1. Set `JAVA_HOME` to your installed JDK when the default Java is older, then run:
 
@@ -93,6 +93,8 @@ JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repo
 
 ## Documentation
 
+- [Current roadmap and acceptance gates](docs/development-milestones.md)
+- [Detailed specifications for remaining phases](docs/development-milestones.md#remaining-delivery-order-and-acceptance), including behavior, code style, boundaries, alternatives and verification requirements
 - [Architecture](ARCHITECTURE.md), [MongoDB design](docs/mongodb-design.md), and [use cases](docs/use-cases.md)
 - [Agent workflow](docs/agent-development.md) and [project rules](AGENTS.md)
 - [Spec-driven development](docs/spec-driven-development.md), [spec template](docs/templates/feature-spec.md), and [worked draft](docs/examples/submit-application-spec.md)
@@ -106,20 +108,20 @@ JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repo
 - High read performance with minimal unnecessary data duplication
 - Simple enough for an MVP, but swappable infrastructure components
 
-## Planned Features
+## Implemented capabilities and planned extensions
 
 ### Hiring
 - Candidate, Recruiter, and Admin roles (RBAC)
 - Job posting creation/management, filtering, search, cursor-based pagination
 - Candidate application submission & tracking
 - Recruiter application management
-- Application lifecycle: `Created → Accepted → Interview → Hired / Rejected / Declined`
+- Application lifecycle: `Created → Accepted / Declined / Rejected`, `Accepted → Interview`, `Interview → Hired / Rejected`; terminal states have no outgoing transitions.
 - Application status history & recruiter feedback
-- GraphQL subscriptions for live application updates
+- Live GraphQL subscriptions remain a future extension; the current schema exposes queries and mutations.
 - Admin statistics & hiring analytics
 
 ### GraphQL
-- Sangria API with queries, mutations, subscriptions
+- Sangria API with queries and mutations; subscriptions are not implemented.
 - Typed inputs/enums, nested resolvers, cursor-based pagination
 - Batched relationship loading (N+1 prevention)
 - Typed domain/API errors, query depth & complexity limits
@@ -152,7 +154,7 @@ Collections modeled around GraphQL access patterns, not relational normalization
 | Testing | MUnit + Cats Effect, Testcontainers |
 | Infra | Docker Compose |
 | Logging | SLF4J + Logback |
-| AI Integration | Embedding/LLM API behind service interfaces |
+| AI Integration | Embedding provider behind service ports; optional search experiments |
 
 ## High-Level Architecture
 
@@ -162,14 +164,14 @@ Collections modeled around GraphQL access patterns, not relational normalization
                             ▼
                  Application Layer (Services)
                             │
-                       Domain Ports
+                       Service-owned Ports
                             │
            ┌────────────────┼────────────────┐
            ▼                ▼                 ▼
      Repository Ports   Search Port     Embedding Port
            │                │                 │
            ▼                ▼                 ▼
-              Infrastructure: MongoDB · Vector Search · LLM API
+              Infrastructure: MongoDB · Vector Search · Embedding API
 ```
 
 Dependencies point inward (`transport → service → domain`); the domain layer stays free of Sangria, MongoDB, http4s, Circe, JWT, and AI-SDK dependencies.
@@ -178,7 +180,7 @@ Current package layout: `api/` (GraphQL, HTTP, auth adapters) → `service/` (us
 
 ## MVP Use Cases (13)
 
-Structured & semantic job search, job details, application submission/tracking, candidate application recommendations, job management, recruiter application review & status changes, semantic candidate search, domain event publishing, hiring funnel analytics, time-to-hire analytics.
+Structured & semantic job search, job details, application submission/tracking, candidate job recommendations, job management, recruiter application review & status changes, semantic candidate search, domain event publishing, hiring funnel analytics, time-to-hire analytics.
 
 ## Roadmap
 
@@ -193,21 +195,25 @@ Vector / Hybrid Search
    ↓
 Event Architecture
    ↓
-Lakehouse
+Lakehouse + Spark Batch Analytics (6)
    ↓
-Spark Batch Analytics
+Structured Streaming (7)
    ↓
-Structured Streaming
+MongoDB Access + Vector Retrieval Optimization (8)
    ↓
-Search Evaluation
+Search Evaluation + Embedding Architecture (9)
    ↓
-Scale
+AI Discovery + Search Quality (10)
    ↓
-Observability & Resilience
+Kafka Workflow Contracts + Saga + State (11)
    ↓
-Production Hardening
+Operational Observability + Resilience (12)
    ↓
-Discovery Intelligence & Search Quality
+Analytics Architecture + Reconciliation + Scale Planning (13)
+   ↓
+Production Hardening (14)
+   ↓
+Deployed Analytics Optimization (15, final)
 ```
 
 Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means the capability is implemented in the local application; it does not claim production rollout or external-service certification.
@@ -218,17 +224,20 @@ Status markers: `[x]` complete, `[~]` in progress, `[ ]` planned. Complete means
 - `[x] Phase 4 — Vector / Hybrid Search:` semantic and hybrid job/candidate search with MongoDB Vector Search integration.
 - `[x] Phase 5 — Event Architecture:` operational events, transactional outbox, Kafka publication, idempotent consumption, and quarantine.
 - `[x] Phase 6 — Lakehouse + Spark Batch Analytics:` all HAL-01–HAL-14 pass final independent local QA, covering batch/Admin, account deletion, recovery and shortened physical retention with explicitly simulated calendar boundaries. Genuine deployed retention, writer exclusion, guarded key retirement and operational signoff remain production gates in the [lakehouse specification](docs/specs/hiring-analytics-lakehouse.md).
-- `[~] Phase 7 — Structured Streaming:` seven process-loss boundaries and native maintenance pruning pass on their recorded sources. Restored source `1d997` passes 440 unit tests, 45 executed integrations and formatting (six ignored bodies excluded), including recovery, cancellation and guarded key retirement. Independent final functional QA passes on exact `1d997`. A bounded native journal UPDATE candidate passes ten focused parity/regression tests; eight fresh native recovery/cancellation checks pass. The current quality-count fusion passes 14 focused tests and eight native recovery/cancellation checks. The assessment simplification and first-processing-only cache reuse pass scoped reviews; latest Silver selection candidate `37dc8c` passes 455 unit tests, 45 executed integrations and formatting, including seven recovery, one cancellation and five key-retirement tests (six disabled bodies excluded). Independent final functional QA passes on this latest candidate; fresh unchanged-profile healthy/runtime gates remain pending. The latest unprofiled healthy workload fails Bronze latency (40,085 ms); report p95 51,123 ms, backlog 464, storage and maintenance pass their individual bounds. A fresh complete instrumented diagnostic also fails Bronze latency. Unsuccessful watermark-cache experiments were reverted. Pending-only Bronze observation passes native parity/cost checks. AQE-off and empty-marker experiments are rejected; the existing two-thread profile and all acceptance limits remain unchanged. Current-source workload, lifecycle, continuous scenarios and final independent QA remain open. Runtime acceptance and production activation remain gated by the [streaming specification](docs/specs/continuous-hiring-analytics.md).
-- `[ ] Phase 8 — Search Evaluation:` reproducible relevance datasets and measured keyword/vector/hybrid search quality; planned embedding-pipeline maintainability and ranking-alternative evaluation.
-- `[ ] Phase 9 — Scale:` workload-backed capacity, latency, throughput, and storage tuning beyond the required Phase 7 acceptance workload; adopt incremental recomputation or layout changes only with measured benefit.
-- `[~] Phase 10 — Observability & Resilience:` structured diagnostics and runtime telemetry exist; planned pure streaming recovery-policy refinement, bounded independent report reconciliation, and actionable alerts; add interview scheduling as a scoped feature with durable saga coordination when an external calendar is introduced. End-to-end failure, recovery, and operational evidence remain open.
-- `[ ] Phase 11 — Production Hardening:` deployment controls, security review, deployed retention/writer/key evidence, and deletion-safe recovery drills. Existing production activation prerequisites apply before this milestone whenever production streaming is proposed.
-- `[ ] Phase 12 — Discovery Intelligence & Search Quality (Post-MVP):` radius discovery, richer Atlas search/facets, and evidence-backed ranking extensions.
+- `[x] Phase 7 — Structured Streaming:` full continuous functional scenarios on recorded source `8c01e` and separate grant-expiry, active-callback TERM/INT, seven abrupt-loss boundaries and accelerated pruning proofs have source-qualified QA PASS evidence. Current-source validation passes 470 analytics units, 45 executed integrations and formatting (six disabled integration bodies excluded); independent final Code, Security and QA closure verdicts PASS. The historical `37dc8c` baseline passed 455 analytics units and 45 integrations (six disabled bodies excluded); it is not current-checkout certification. Its Bronze p95 **40,084 ms FAIL** remains recorded. Latency and burst drain-time qualification move to Phase 15 after deployment. See the [streaming specification](docs/specs/continuous-hiring-analytics.md) for exact evidence and production prerequisites.
+- `[ ] Phase 8 — MongoDB Access and Vector Retrieval Optimization:` [query/index and retrieval specification](docs/specs/mongodb-vector-retrieval-optimization.md), preserving authorization and measuring index costs.
+- `[ ] Phase 9 — Search Evaluation and Embedding Architecture:` [evaluation and embedding specification](docs/specs/hiring-search-enhancements.md#search-evaluation-and-embedding-architecture), including reproducible relevance and durable freshness/recovery evidence.
+- `[ ] Phase 10 — AI Discovery and Search Quality:` [discovery specification](docs/specs/hiring-discovery-search-quality.md) for radius search, Atlas search/facets and evaluated ranking; promoted from the former post-MVP Phase 12.
+- `[ ] Phase 11 — Kafka Workflow Contracts, Saga and State:` [durable workflow specification](docs/specs/durable-hiring-workflows.md) for stream contracts, pure decisions, recovery and conditional interview scheduling.
+- `[~] Phase 12 — Operational Observability and Resilience:` [observability and resilience specification](docs/specs/hiring-observability-resilience.md), extending existing telemetry with actionable diagnostics and recovery drills.
+- `[ ] Phase 13 — Analytics Architecture, Reconciliation and Scale Planning:` [reconciliation and recovery specification](docs/specs/analytics-reconciliation-recovery.md); further Spark/Delta work follows Mongo/AI/workflow acceptance.
+- `[ ] Phase 14 — Production Hardening:` [production readiness specification](docs/specs/production-readiness.md); genuine retention, writer/key and recovery prerequisites apply whenever production streaming is proposed.
+- `[ ] Phase 15 — Deployed Analytics Optimization (final):` [deployed performance specification](docs/specs/deployed-analytics-performance.md), qualifying latency and burst drain time after authorized deployment.
 
-The roadmap also schedules a functional embedding pipeline and reproducible ranking-alternative evaluation in Phase 8, then pure streaming recovery-policy decisions in Phase 10 while retaining Phase 7 correctness gates. Conditional Decorator, Observer, Bridge, Filter, Composite, and ranking extensions remain tied to concrete requirements. See [development milestones](docs/development-milestones.md) for adoption conditions and acceptance expectations.
+Phases 1–7 retain their existing scope and acceptance gates. The revised order prioritizes MongoDB and AI features before further Spark tools; it does not declare full MVP complete. Each capability includes pure FP architecture refinement using immutable ADTs, existing lifecycle State programs, typed errors and resource-owned interpreters. See [development milestones](docs/development-milestones.md) for dependencies, pattern adoption conditions and acceptance criteria.
 
 ## Future: Big Data & Analytics
-Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept separate. The local batch [analytics design](docs/big-data-architecture.md) and [implementation specification](docs/specs/hiring-analytics-lakehouse.md) describe the current Kafka-to-Delta path, retained data limits, recovery, and data-quality boundaries. Structured Streaming is in progress; Search Evaluation, Scale, Production Hardening, and Discovery Intelligence & Search Quality remain later milestones. The [development milestones](docs/development-milestones.md) place DDIA-informed performance, recovery, maintenance, and audit refinements in their owning phases. The final discovery stage requires Atlas for Atlas Search and Vector Search; local MongoDB Community remains suitable for core workflows and transaction tests. This roadmap does not provision Atlas or include its cost.
+Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept separate. The local batch [analytics design](docs/big-data-architecture.md) and [implementation specification](docs/specs/hiring-analytics-lakehouse.md) describe the current Kafka-to-Delta path, retained data limits, recovery, and data-quality boundaries. Structured Streaming is locally complete; MongoDB optimization, search evaluation, AI discovery and Kafka workflows come next, before further analytics refinement and production hardening. The [development milestones](docs/development-milestones.md) place DDIA-informed performance, recovery, maintenance, and audit refinements in their owning phases. The discovery stage requires Atlas for Atlas Search and Vector Search; local MongoDB Community remains suitable for core workflows and transaction tests. This roadmap does not provision Atlas or include its cost.
 
 ## Engineering Focus
 

@@ -1,5 +1,11 @@
 # Repository Error Observability
 
+## Current state — 2026-10-05
+
+The diagnostics/error classification change remains implemented. Subsequent [repository composition](hiring-repository-composition.md) moved repository ports and internal helpers to `RepositoryIO`; the raw `IO[Either]` port descriptions below describe this earlier task baseline, not the active API. Unwrapping now belongs at driver/effect-control boundaries, as described in [engineering quality](../engineering-quality.md).
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Task and outcome
 
 - Status: complete
@@ -7,7 +13,7 @@
 - Scope: repository error protocol, Mongo repository adapters/support/runtime wiring, repository-facing test doubles and callers, focused diagnostics/error tests, and this specification.
 - Non-goals: Mongo schema/index or migration changes, GraphQL wire changes, service/domain redesign, and changes to the pre-existing analytics worktree edit.
 
-## Source facts and decisions
+## Original source baseline and decisions
 
 - Repository ports currently use `IO[Either[RepositoryError, A]]`; services compose these through `UseCaseIO`.
 - Mongo adapters map many thrown failures directly to `Unavailable`, and stored-document decoding also loses its specific failure category.

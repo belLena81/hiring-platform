@@ -1,10 +1,26 @@
 # MVP Use Cases
 
-These use cases and SLOs describe target behavior; see [current implementation](../README.md).
+These use cases and SLOs describe product intent; see [current implementation](../README.md) and the [current roadmap](development-milestones.md). Query/event sketches below are design examples and may omit active fields or use conceptual names. Use the [API reference](api.md) and [checked schema](../src/test/resources/graphql/hiring.graphql) for executable contracts; the sketches do not authorize new operations or lifecycle transitions.
 
-## Post-MVP Discovery Extensions
+## Current capability mapping
 
-The following are later extensions to structured, semantic, and hybrid discovery; they do not alter the MVP use cases above. They are sequenced after Search Evaluation & Scale. Establish relevance measures and a bounded, representative baseline before evaluating personalized ranking.
+| Use cases | Implemented API or boundary | Acceptance boundary |
+|---|---|---|
+| UC01–UC03 | `jobs`, `semanticJobSearch`, `job`, explicit `recordJobView` | Visibility, bounded retrieval and search-provider evidence |
+| UC04–UC05 | `submitApplication`, `myApplications` | Atomic submission/history and candidate ownership |
+| UC06 | `recommendedJobs` | Model/source freshness and relevance validation |
+| UC07–UC09 | Job lifecycle mutations, `myJobs`, `jobApplications`, action-specific application mutations | Mongo transactions, role/ownership and explicit transition matrix |
+| UC10 | `candidateMatches` | Owned open job; minimized candidate results and private-filter consent semantics |
+| UC11 | Mongo transactional outbox → Kafka; explicit search/click telemetry | Durable at-least-once publication and idempotent consumption |
+| UC12–UC13 | Admin `analyticsReport` over guarded projections | Phase 6 local acceptance; Phase 7 functional closure and production/SLO gates remain separately tracked |
+
+Current transitions are `Created → Accepted / Declined / Rejected`, `Accepted → Interview`, and `Interview → Hired / Rejected`. `Declined`, `Hired` and `Rejected` are terminal. Action-specific mutations enforce these rules; no generic status-change operation or GraphQL subscription is implemented. The current analytics report is systemwide transition activity, time-to-hire and skill posting activity; recruiter/job/location dimensions described as goals require separate event-time enrichment design.
+
+## Planned Discovery Extensions (Phase 10)
+
+The following are later extensions to structured, semantic, and hybrid discovery; they preserve the core hiring invariants described below. They are sequenced in Phase 10 after MongoDB optimization (Phase 8) and Search Evaluation (Phase 9), before further Spark work. This promotes the formerly post-MVP discovery stage without declaring full MVP complete. Establish relevance measures and a bounded, representative baseline before evaluating personalized ranking.
+
+The [hiring discovery specification](specs/hiring-discovery-search-quality.md) owns detailed desired behavior, public-contract alternatives, boundaries and acceptance criteria. [Durable hiring workflows](specs/durable-hiring-workflows.md) separately defines conditional interview scheduling; it does not change the current `moveApplicationToInterview` contract or add application-status transitions. See the [remaining specification index](development-milestones.md#remaining-delivery-order-and-acceptance) for operational resilience and analytics delivery.
 
 - Radius-based job search combines distance with existing filters, candidate visibility, and deterministic cursor pagination. Inputs include structured coordinates; geocoding is out of scope.
 - Richer lexical search and facets use Atlas Search alongside existing vector and hybrid search. Validate lexical, vector, and hybrid behavior in an Atlas-capable environment.
@@ -921,7 +937,9 @@ Consumers
 eventId
 eventType
 occurredAt
+aggregateType
 aggregateId
+actorId
 payload
 ```
 

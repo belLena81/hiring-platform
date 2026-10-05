@@ -141,25 +141,40 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  test("cancelling owned maintenance releases the real local mutex before another owner enters") {
-    AnalyticsLakehouseLock.processLocal[IO].use { underlying =>
-      for {
-        entered <- Deferred[IO, Unit]
-        held <- Ref.of[IO, Boolean](false)
-        lock = new AnalyticsLakehouseLock[IO] {
-          override def resource(root: String): Resource[IO, Unit] =
-            underlying.resource(root) *> Resource.make(held.set(true))(_ => held.set(false))
-        }
-        maintenance = new AnalyticsStreamingMaintenance[IO](
-          "hiring",
-          lock,
-          60.seconds,
-          _ => entered.complete(()).void *> IO.never
-        )
-        _ <- maintenance.runOnce.background.use { _ => entered.get }
-        owned <- held.get
-        _ <- underlying.resource("hiring").use(_ => IO(assertEquals(owned, false))).timeout(1.second)
-      } yield ()
+  test("cancelling an acquired maintenance tick joins its body before releasing the real mutex") {
+    TestControl.executeEmbed {
+      AnalyticsLakehouseLock.processLocal[IO].use { underlying =>
+        for {
+          entered <- Deferred[IO, Unit]
+          finish <- Deferred[IO, Unit]
+          held <- Ref.of[IO, Boolean](false)
+          completed <- Ref.of[IO, Boolean](false)
+          interrupted <- Ref.of[IO, Boolean](false)
+          lock = new AnalyticsLakehouseLock[IO] {
+            override def resource(root: String): Resource[IO, Unit] =
+              underlying.resource(root) *> Resource.make(held.set(true))(_ => held.set(false))
+          }
+          maintenance = new AnalyticsStreamingMaintenance[IO](
+            "hiring",
+            lock,
+            60.seconds,
+            _ => (entered.complete(()).void *> finish.get *> completed.set(true)).onCancel(interrupted.set(true))
+          )
+          tick <- maintenance.runOnce.start
+          _ <- entered.get
+          cancelling <- tick.cancel.start
+          _ <- IO.sleep(1.second)
+          ownedWhileFinishing <- held.get
+          _ <- finish.complete(())
+          _ <- cancelling.joinWithNever
+          observed <- (held.get, completed.get, interrupted.get).tupled
+          _ <- underlying.resource("hiring").use(_ => IO.unit)
+          _ <- IO {
+            assert(ownedWhileFinishing, "shutdown must retain ownership until the acquired tick finishes")
+            assertEquals(observed, (false, true, false))
+          }
+        } yield ()
+      }
     }
   }
 
@@ -274,12 +289,16 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
     }
   }
 
-  test("resource shutdown reports cancellation and releases owned maintenance") {
+  test("resource shutdown joins acquired maintenance and records cancellation only after body completion") {
     import AnalyticsStreamingMaintenance.TickOutcome
     TestControl.executeEmbed {
       for {
         entered <- Deferred[IO, Unit]
+        finish <- Deferred[IO, Unit]
+        close <- Deferred[IO, Unit]
         held <- Ref.of[IO, Boolean](false)
+        completed <- Ref.of[IO, Boolean](false)
+        interrupted <- Ref.of[IO, Boolean](false)
         observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
         lock = new AnalyticsLakehouseLock[IO] {
           override def resource(root: String): Resource[IO, Unit] = Resource.make(held.set(true))(_ => held.set(false))
@@ -288,19 +307,25 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
           "hiring",
           lock,
           60.seconds,
-          _ => entered.complete(()).void *> IO.never,
+          _ => (entered.complete(()).void *> finish.get *> completed.set(true)).onCancel(interrupted.set(true)),
           Some(value => observations.update(_ :+ value))
         )
-        _ <- maintenance.observedResource.use(_ => entered.get)
-        released <- held.get
+        owner <- maintenance.observedResource.use(_ => entered.get *> close.get).start
+        _ <- IO.sleep(60.seconds) *> entered.get
+        _ <- close.complete(())
+        _ <- IO.sleep(1.second)
+        ownedWhileFinishing <- held.get
+        _ <- finish.complete(())
+        _ <- owner.joinWithNever
+        observed <- (held.get, completed.get, interrupted.get).tupled
         recorded <- observations.get
         _ <- IO {
-          assertEquals(released, false)
+          assert(ownedWhileFinishing, "resource shutdown cannot interrupt the acquired tick")
+          assertEquals(observed, (false, true, false))
           assertEquals(
             recorded.map(_.outcome).takeRight(2),
             Vector(Some(TickOutcome.Cancelled), Some(TickOutcome.Stopped))
           )
-          assert(recorded.forall(_.lastSuccess.isEmpty))
         }
       } yield ()
     }

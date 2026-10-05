@@ -1,5 +1,11 @@
 # Hiring Runtime Safety
 
+## Current state — 2026-10-05
+
+The scoped runtime safety implementation is present. The later [repository composition](hiring-repository-composition.md) checkpoint records repair of integration consumers and passing integration tests, superseding the compilation blocker recorded below. Its evidence does not retroactively replace this task's BLOCKED QA verdict; current whole-checkout validation belongs to the [development milestones](../development-milestones.md).
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Identity and scope
 
 - Status: in progress
@@ -8,7 +14,7 @@
 - Non-goals: GraphQL or stored Mongo shape changes, a second effect runtime, a repository-wide codec or `EitherT` migration, and changes to the separate analytics build.
 - Existing unrelated edits: preserve concurrent work in the separate `analytics/` build.
 
-## Source facts and decisions
+## Original source baseline and decisions
 
 - Root `build.sbt` already has MUnit Cats Effect and Testcontainers; `src/test` and `src/it` contain coverage for lifecycle policies, transaction retries, codecs, and reporting. The review's missing-build/missing-tests claim does not apply to this checkout.
 - Main hiring records already use stored case classes and codecs. Mongo commands, filters, updates, validators, and Atlas pipelines remain BSON adapter documents. Stable report reservation/control records are the targeted typed-persistence slice; BSON names and values stay identical.

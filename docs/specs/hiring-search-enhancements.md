@@ -1,14 +1,20 @@
 # Hiring Search Enhancements
 
+## Current state — 2026-10-05
+
+The candidate profile fields, consent-aware filters, recruiter query branches, match evidence, and opt-in fusion/reranking adapters are implemented. The task is in review: the checkpoint still lacks final QA and live Atlas acceptance. This is an existing implementation, not a new Phase 8 feature proposal. Phase 8 owns measured Mongo/vector optimization; Phase 9 owns evaluation and embedding refinement; Phase 10 owns later AI discovery. Native Atlas and Automated Embedding results remain unverified.
+
+The remaining task evidence is retained as a historical record unless explicitly identified as a current source fact. Roadmap sequencing follows [development milestones](../development-milestones.md).
+
 ## Status and outcome
 
-- Status: ready for specialist review
+- Status: in review; implemented locally, final QA and live Atlas gates remain open
 - Actor: candidates searching open jobs; recruiters matching candidates against jobs they own
 - Outcome: expose deterministic match evidence, support recruiter-entered natural language plus structured candidate filters, and provide selectable MongoDB hybrid-ranking and embedding-evaluation paths without changing the default search behavior.
 - Authorized scope: additive candidate search-profile fields and GraphQL inputs/outputs, Mongo persistence and setup, semantic search adapters/services, local search evaluation, docs, and focused tests.
 - Non-goals: LLM-generated explanations or decisions, resume parsing/storage, account/job lifecycle changes, new paid services or provisioning, automatic rollout to live Atlas, replacing the durable manual embedding worker, or adding candidate availability/location to job-search ranking.
 
-## Verified source facts
+## Original source baseline
 
 - `SemanticSearchService` embeds candidate job-search text and uses `MongoSemanticSearchRepository` for vector and hybrid retrieval. Candidate recommendations and recruiter candidate matches are currently vector-only.
 - Job hybrid retrieval runs Atlas `$vectorSearch` and `$search` as parallel queries and fuses results in application code with reciprocal-rank fusion. The existing fusion is the default and remains available.
@@ -26,7 +32,7 @@
 - Candidate profile schema evolution is additive. Missing optional fields decode as absent and default opt-in to false; do not backfill or infer location, availability, or consent. Add a versioned, restart-safe verification migration that scans bounded `_id` batches, permits absent fields, rejects malformed present residence/status/consent values, derives only the non-sensitive canonical skill sidecar from existing skills, and records completion only after verification. All older application binaries must be stopped before migration/new writes because profile replacement by an old binary can drop new fields. New writes validate the same invariants. Add new non-destructive Atlas Search indexes under new names; do not drop existing indexes.
 - Candidate residence/availability/opt-in can be read in the authenticated candidate's own profile only. Recruiter result DTOs and search-session telemetry exclude raw values. Explicit residence/availability filters change only opted-in candidates' results; opted-out candidates retain baseline inclusion independent of private-field values.
 - Candidate lexical retrieval searches only the fixed fields `profile.skills` and `profile.experienceSummary` through the configured `candidateLexical` index (default `candidates_text_search`). Candidate matches require `role = Candidate` and `accountStatus = Active`. Apply active-account, required-skill, and opted-in private-filter predicates inside each vector and lexical retrieval branch before its `numCandidates` limit.
-- Use a new `candidateMatchVector` index (default `candidates_embedding_vector_match_v1`) separate from the existing recommendation index. Declare every filter path: `role`, `accountStatus`, `embeddingMeta.model`, `profile.skillsCanonical`, `profile.recruiterSearchOptIn`, `profile.currentResidence.countryCanonical`, `profile.currentResidence.cityCanonical`, and `profile.availabilityStatus`. Put structured candidate filters inside `$vectorSearch.filter` before top-K; use an OR branch so opted-out/missing-consent profiles bypass only residence/availability predicates while opted-in profiles must satisfy all supplied private predicates. Trim/case-fold residence into canonical sidecar values and retain original spelling only in the candidate's own profile. Wait for the configured Atlas readiness timeout and require each new index to be queryable before using it.
+- Use the configured candidate vector index (`vector-search.indexes.candidates`, default `candidates_embedding_vector_match_v1`). The active configuration has one candidate vector index; earlier index names do not create a second active recommendation path. Declare every filter path: `role`, `accountStatus`, `embeddingMeta.model`, `profile.skillsCanonical`, `profile.recruiterSearchOptIn`, `profile.currentResidence.countryCanonical`, `profile.currentResidence.cityCanonical`, and `profile.availabilityStatus`. Put structured candidate filters inside `$vectorSearch.filter` before top-K; use an OR branch so opted-out/missing-consent profiles bypass only residence/availability predicates while opted-in profiles must satisfy all supplied private predicates. Trim/case-fold residence into canonical sidecar values and retain original spelling only in the candidate's own profile. Wait for the configured Atlas readiness timeout and require each new index to be queryable before using it.
 - Candidate search repositories return a minimal DTO (`id`, `name`, skills, experience summary, embedding metadata, score), never full candidate account/persistence documents.
 - `matchedSkills` is the case-insensitive trimmed intersection of the authenticated candidate's skills with each job's skills, or the owned job's skills with each matched candidate's skills; preserve spelling from the job and sort case-insensitively with a stable tie-breaker.
 - Natural-language recruiter queries are trimmed and capped at `SearchableText.QueryMaxChars` (2048) before provider/search work. Required skills are capped at 100 values of at most 256 characters each; residence country/city are nonblank and at most 256 characters each. All filter values use fixed-path typed BSON.
@@ -62,3 +68,94 @@
 - Data and security reviews pass statically. The migration uses a version/source guarded sidecar update, rejects explicitly present null and malformed private fields, and verifies vector filter and lexical mapping types. Native fusion tests exercise production job/candidate branch builders, filter constraints, branch limits, rerank ordering, score preservation, and no-rerank behavior. Result tests assert job/candidate retrieval-score mapping and sanitized malformed-result errors. Actual Atlas execution remains unverified.
 - HSE-06 now includes an executable `IntegrationTest` Atlas runner: it seeds deterministic bounded synthetic vectors, checks a disposable vector index, captures paired ANN/ENN results under explicit concurrency and temperature settings, and writes a JSON run record through the tested report builder. The runner compiled but was not executed because no Atlas test URI is configured or authorized; Atlas CPU/memory/query metrics remain null unless supplied from Atlas metrics export. HSE-07 remains a documented, unrun disposable Automated Embedding procedure. Candidate filter branch execution and Atlas score extraction remain unverified.
 - Final independent review: Code Reviewer PASS after production branch/result mapping tests were added; Security Engineer PASS on the final pipeline extraction and outbox decoder; QA final re-review pending. Atlas runner compiled but was not executed because no Atlas test URI is configured or authorized; Atlas CPU/memory/query metrics remain unavailable unless supplied through Atlas metrics export. HSE-07 remains a documented, unrun disposable Automated Embedding procedure. Atlas candidate-filter execution, score extraction, live fusion/reranking, and measured performance remain unverified.
+
+## Search evaluation and embedding architecture
+
+### Identity, status and ownership
+
+This section is the current Phase 9 extension of the same specification. All HSE-01–HSE-07 IDs, contracts and historical evidence above remain intact. Phase 8 owns measured access/retrieval optimization in [MongoDB Access and Vector Retrieval Optimization](mongodb-vector-retrieval-optimization.md); Phase 10 owns new discovery behavior in [Hiring Discovery and Search Quality](hiring-discovery-search-quality.md). Neither a refactor nor this document closes outstanding HSE Atlas or QA gates.
+
+- Extension status: draft; implementation is not started by this documentation update. Local embedding preparation work is independent of Atlas access; quality/adoption decisions require the missing evaluation inputs below.
+- Outcome: reproducible evidence distinguishes retrieval fidelity from hiring relevance, and the job/candidate embedding workflow shares pure preparation without weakening durable repair.
+- Coordinator: Product Manager. Scala Developer implements application/evaluation changes; Data Engineer owns Mongo persistence evidence, Big Data Engineer advises reproducible evaluation, and Architect owns boundaries. Independent Code Reviewer, Security Engineer and QA review the final implementation.
+- Non-goals: new providers, automatic hiring decisions, real resumes or production query export, model migration, replacing the durable worker, generic workflow engine, or automated rollout of ranking alternatives.
+
+### Source baseline for this extension
+
+Verified on October 5, 2026; these observations supersede no historical results above.
+
+- [SearchEvaluationMetrics](../../src/main/scala/com/example/graphQL/cats/service/search/SearchEvaluationMetrics.scala) exposes pure `recallAtK`/`ndcgAtK` using binary relevant-ID sets. Its existing zero-denominator/nonpositive-K conventions return zero; preserve or explicitly document a reviewed contract change.
+- [SearchEvaluationHarness](../../src/main/scala/com/example/graphQL/cats/service/search/SearchEvaluationHarness.scala) calculates report values and constructs Circe JSON. Keep numerical metric computation separate from JSON report rendering when extending it; JSON is an adapter concern, not a dependency of the metric core.
+- [SearchEvaluationAtlasRunner](../../src/it/scala/com/example/graphQL/cats/repository/mongo/SearchEvaluationAtlasRunner.scala) supplies deterministic synthetic vectors, paired ANN/ENN execution and isolated collection cleanup. Its synthetic topic labels are independent of ENN but are not human relevance judgments.
+- [EmbeddingPipeline](../../src/main/scala/com/example/graphQL/cats/service/search/EmbeddingPipeline.scala) owns queue wakeups, polling, bounded parallelism, durable claims and configured retries. `processJob`/`processCandidate` each compute text/hash, while `embedDocument` computes the same hash again. `writeOutcome` treats a guarded conflict as completed for that stale claim; preserve newer durable work through existing generation guards.
+- `MongoEmbeddingWorkRepository`, `MongoJobRepository.updateEmbedding` and `MongoUserRepository.updateEmbedding` own durable claims and guarded writes. A preparation refactor cannot move those guards into a preflight-only check.
+- Existing unit seams: `SearchEvaluationMetricsSpec`, `SearchEvaluationHarnessSpec`, `EmbeddingPipelineSpec` and `SemanticSearchServiceSpec`. [Search evaluation procedure](../search-evaluation.md) owns current runner invocation and disposal requirements.
+
+### Desired evaluation behavior
+
+Evaluation proceeds in two explicitly reported stages. First run deterministic synthetic evaluation to test runner isolation, numerical behavior, reproducibility and retrieval fidelity. Then build a small curated corpus of realistic **fabricated** jobs, candidate summaries and queries with human-authored relevance judgments. Synthetic labels and human labels remain distinguishable in every report; neither real personal data nor an embedding model's own nearest neighbors may silently supply the human truth set.
+
+Each corpus records seed/identity, fixture digest, relevance rubric, query identity, use case and filter-selectivity group, eligible entity IDs and labels. Separate tuning queries from held-out queries before tuning. Record who owns the judgment rubric and how ambiguous judgments are adjudicated; hold-out labels are not adjusted to make a selected algorithm win. Binary relevance is the default supported shape; graded judgments require an explicit metric/type extension, not reinterpretation of the current set-based implementation.
+
+Compare lexical, vector and hybrid retrieval on the same eligible corpus. Include candidate job search, recommendations and recruiter matching where supported. Report unsupported mode/use-case combinations as unavailable rather than synthesizing results. Keep query filters, model/index identity, K and ranking tie rules fixed within a comparison; report intentional changes as separate experiments. Native fusion/rerank and Automated Embedding remain optional HSE experiments with explicit capability/cost gates.
+
+Report ANN-versus-exact Recall@K as retrieval fidelity. Report Recall@K/NDCG@K against human labels as relevance. Include per-query values and aggregate groups so a better average cannot conceal broken selective filters or privacy behavior. Record empty eligible sets, queries with no relevant judgments and failed requests separately; explain the existing zero metric convention and denominators. Do not drop failed queries to inflate quality or throughput. Invalid K, malformed labels, duplicate fixture identities or inconsistent run coordinates must be rejected by typed validation before comparison; deduplicate result identities or reject malformed rankings according to the captured runner contract rather than double-crediting repeated hits.
+
+A run artifact records source revision, corpus/judgment identity, model/dimensions, index definition, strategy, filters by synthetic fixture identity, budgets, query count, concurrency, warmup, duration, temperature, timestamp and observed resource/provider measurements. Missing CPU/index/billing telemetry stays absent with an explanation; calculated cost remains labeled an estimate. Render a typed immutable report at the boundary into JSON. Store generated reports under ignored `.local/data/search-evaluation/` and logs under `.local/logs/`; keep only small intentional fabricated fixtures in tests.
+
+Authorization precedes evaluation execution in live tools, and corpus construction must include forbidden actor/job combinations, opted-in/out/missing consent, missing private attributes, stale embeddings and closed/deleted entities. An algorithm that improves relevance but leaks private data or widens eligibility fails acceptance. Opted-out candidates continue bypassing private filters only, as specified above; no relevance criterion silently introduces consent-based exclusion.
+
+### Shared embedding preparation and guarded effects
+
+Extract a small functional template shared by the two existing entity flows, not inheritance or a general workflow framework. The pure preparation takes the observed entity's searchable source, existing embedding metadata, configured model and size bound. It returns an immutable ADT representing no work/current data, too-large source, or prepared text/source hash. Compute the hash once per prepared observed revision; use exactly that hash both for freshness comparison and the eventual `EmbeddingMeta`. Preserve current searchable-text canonicalization and exclusion of private location/availability/consent fields.
+
+The owning service supplies effectful fetch, provider invocation, time and persistence. The persistence callback closes over the original typed versioned entity and invokes the existing `RepositoryIO` guarded write. It may not reload and write unconditionally, reuse a stale vector against newer source, or add a second revision counter. Document absence or a candidate without a profile remains completed/no work. Oversized source is terminal `DocumentTooLarge` without a provider call. Current model/hash skips provider and write work.
+
+On provider success, construct metadata using the prepared hash and the injected completion time; preserve dimension/vector validation at the provider boundary. A concurrent profile/job edit or deletion must prevent stale persistence through the existing observed-revision/source checks. A stale claim's completion cannot remove a newer durable generation. Verify this with synchronized races and actual persisted state. Keep repository errors typed through helper composition and interpret processing outcomes only at the worker boundary.
+
+The durable claim loop remains the single owner of its configured bounded processing retries and claim completion/failure. Preserve actual current retry classifications and timing in this refactor; a retry-policy change needs a separate reviewed criterion. Transport timeouts/cancellation stay with the embedding adapter/request lifetime, and no new nested retry loop is introduced. Lease expiry and process interruption permit durable replay; cancellation must not mark unpersisted work completed. After an acknowledged write but before completion, replay observes current metadata and avoids another provider call. Keep startup migration/readiness gating and `Resource` cancellation ownership unchanged.
+
+### Code style and contract boundaries
+
+- Metric and ranking functions accept immutable typed data and return values or typed errors; no Circe, BSON, provider, clocks, file I/O or mutable global state in the numerical core.
+- Preserve existing application `IO`, `UseCaseIO` and `RepositoryIO` ports. Do not generalize the application to another effect system to share two flows. Use a concrete prepared value and effectful callback at the real persistence boundary.
+- Use exhaustive ADTs, `Option` and `Either`; accumulate independent fixture/config errors with `ValidatedNec`. Avoid partial indexing, `.get`, sentinel strings and thrown business failures.
+- Provider/Atlas/filesystem adapters own resource cleanup and sanitize failures. Use `Resource`, FS2 and bounded concurrency; tests use controlled clocks/signals instead of sleeps.
+- No public GraphQL, event, embedding metadata or Mongo shape change is required for the preparation refactor. If a report contract changes, update its one active pre-MVP shape and readers/fixtures together. Operational Mongo changes still require migration/restart verification; none is authorized merely by extracting preparation.
+- Keep the existing ranking selector. Add a new Strategy only for a concrete second algorithm that needs selection; do not build generic metric/plugin/repository frameworks.
+
+### Decisions and cost gates
+
+| Decision | Options and evidence | Owner / dependent work blocked |
+|---|---|---|
+| Curated relevance rubric | Binary relevant/not-relevant using current metrics; or explicitly justified graded labels plus a new metric contract. Define fabricated scenarios, adjudication and held-out allocation before tuning. | Product Manager with domain reviewers; blocks human-quality acceptance and personalization adoption. Binary fixtures can be prepared first. |
+| Quality and latency thresholds | Set per-use-case minima and allowed regression/cost bounds from Phase 8 baseline; retain default if alternatives cannot meet them. No numerical improvement is assumed. | Product Manager + Architect; blocks adopting experimental ranking, not metrics/worker refactor. |
+| Live environment/provider budget | Authorized disposable Atlas/manual embedding comparison versus local fixture-only evidence; Automated Embedding stays an isolated unrun alternative until explicitly authorized. | Deployment owner + Product Manager; blocks live results and provider-cost comparison. |
+
+The HSE limits of up to 10,000 entities, 100 queries and concurrency 1/8 remain ceilings. A human-curated first corpus should be much smaller. Workload size, warmup, duration, paid request ceiling and storage cleanup owner must be recorded before a run. Do not infer spending permission from a configured credential.
+
+### Extension acceptance and evidence
+
+SEB IDs are new and do not rename, replace or close HSE IDs.
+
+| ID | Given / When / Then | Verification target/method | Actual outcome |
+|---|---|---|---|
+| SEB-01 | Given deterministic inputs, when evaluation repeats, then typed metric values and corpus/judgment coordinates match; rendering differences cannot change scores. | Extend `SearchEvaluationMetricsSpec` and `SearchEvaluationHarnessSpec`; boundary rendering tests. | Not run |
+| SEB-02 | Given fabricated human judgments and held-out queries, when lexical/vector/hybrid runs are compared, then results separate fidelity, relevance, use cases and filter groups. | Curated fixture/rubric review and reproducible runner artifacts. | Not run |
+| SEB-03 | Given no relevant labels, failures, duplicate IDs or malformed coordinates, when evaluated, then denominators/errors are explicit and invalid comparisons fail typed validation. | Metric/input tests with hand-calculated expectations. | Not run |
+| SEB-04 | Given forbidden actors, private filters or stale/deleted data, when each strategy runs, then eligibility and minimized outputs remain correct. | Service and Mongo tests plus actual Atlas execution; reuse HSE/MVR evidence only with source applicability. | Not run |
+| SEB-05 | Given a job or candidate revision, when preparation runs, then source/hash are computed once and current/absent/oversized cases avoid inappropriate provider work. | Extend `EmbeddingPipelineSpec` and pure preparation tests. | Not run |
+| SEB-06 | Given mutation/deletion during a provider call, when its result returns, then no stale write persists and newer durable work survives old-claim completion. | Controlled worker races plus disposable Mongo guarded-write tests. | Not run |
+| SEB-07 | Given provider failure, timeout, cancellation or process restart, when work resumes, then configured retries/terminal outcomes remain unchanged and acknowledged writes replay without duplicate embedding work. | Worker resource/retry tests and Mongo lease/generation integration scenarios. | Not run |
+| SEB-08 | Given a candidate ranking change, when measured against fixed held-out baseline, then pre-agreed relevance/latency/privacy/cost conditions determine explicit adopt/defer. | Paired reports and independent product/architecture/security assessment. | Not run |
+
+### Handoff and current checkpoint
+
+1. Capture existing worker behavior in focused tests and extract pure preparation/callback composition (SEB-05/06/07). Scala Developer owns production services and tests; Data Engineer reviews guarded persistence without overlapping edits.
+2. Separate typed metric results from rendering; validate deterministic fixture/run identity and error accounting (SEB-01/03). Reuse existing runner and `Resource` disposal rather than creating another harness.
+3. Product Manager finalizes human rubric and thresholds; curate fabricated fixtures and hold-out split. Execute authorized comparisons with privacy cases (SEB-02/04), then record adopt/defer (SEB-08).
+4. Run root `sbt test`, configured formatting checks, affected Mongo integration tests and independent reviews. Atlas live behavior, provider spending and human-quality acceptance remain separate gates.
+
+Documentation checkpoint: this extension supplies desired behavior and boundaries; no SEB criteria completed and no new benchmark or feature tests run by this documentation task. Historical HSE evidence above remains historical. Next action is independent spec review and the bounded worker/metric slice; only dependent quality/live work awaits unresolved choices.
+
+Feature implementation Code Reviewer, Security Engineer and final QA verdicts: pending. Documentation-delivery review/check results belong to the [roadmap checkpoint](../development-milestones.md#specification-ownership-and-readiness), not these future implementation gates.
