@@ -2,17 +2,24 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
 import cats.syntax.all.*
+import fs2.interop.reactivestreams.*
+import com.mongodb.{MongoClientSettings, MongoCommandException}
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
 import mongo4cats.database.MongoDatabase
 import mongo4cats.codecs.CodecRegistry
+import org.bson.{BsonDocument, Document}
 import org.bson.conversions.Bson
 import java.util.concurrent.TimeUnit
+import scala.jdk.CollectionConverters.*
 
 private[mongo] final case class IndexSpec(collection: String, keys: Bson, options: IndexOptions)
 
 /** Ordinary Mongo indexes grouped as declarative collection specifications. */
 private[mongo] object MongoHiringIndexSetup {
   import MongoHiringSetup.*
+
+  private val publisherBufferSize = 32
+  private val bsonRegistry = MongoClientSettings.getDefaultCodecRegistry
 
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
@@ -282,10 +289,72 @@ private[mongo] object MongoHiringIndexSetup {
     )
   )
 
-  def create(database: MongoDatabase[IO]): IO[Unit] = indexSpecs.traverse_ { spec =>
-    database
-      .getCollection[org.bson.Document](spec.collection, CodecRegistry.Default)
-      .flatMap(_.createIndex(spec.keys, spec.options))
-      .void
+  def create(database: MongoDatabase[IO]): IO[Unit] =
+    indexSpecs
+      .groupBy(_.collection)
+      .toList
+      .traverse { case (collectionName, specs) =>
+        listIndexes(database, collectionName).map(indexes => (collectionName, specs, indexes))
+      }
+      .flatMap { snapshots =>
+        snapshots.traverse_ { case (_, specs, existing) =>
+          specs.traverse_ { spec =>
+            existing
+              .find(_.getString("name") == spec.options.getName)
+              .traverse_(index =>
+                definitionMismatch(spec, index).traverse_(reason => IO.raiseError(indexMismatch(spec, reason)))
+              )
+          }
+        } *> snapshots.traverse_ { case (_, specs, existing) =>
+          specs.filterNot(spec => existing.exists(_.getString("name") == spec.options.getName)).traverse_ { spec =>
+            database
+              .getCollection[Document](spec.collection, CodecRegistry.Default)
+              .flatMap(_.createIndex(spec.keys, spec.options))
+              .void
+          }
+        } *> snapshots.traverse_ { case (collectionName, specs, _) =>
+          listIndexes(database, collectionName).flatMap { created =>
+            specs.traverse_ { spec =>
+              created
+                .find(_.getString("name") == spec.options.getName)
+                .fold(IO.raiseError[Unit](indexMismatch(spec, "missing after setup"))) { index =>
+                  definitionMismatch(spec, index).traverse_(reason => IO.raiseError(indexMismatch(spec, reason)))
+                }
+            }
+          }
+        }
+      }
+
+  private def listIndexes(database: MongoDatabase[IO], collectionName: String): IO[List[Document]] =
+    IO.delay(database.underlying.getCollection(collectionName, classOf[Document]).listIndexes())
+      .flatMap(_.toStreamBuffered[IO](bufferSize = publisherBufferSize).compile.toList)
+      .recoverWith { case error: MongoCommandException if error.getErrorCode == 26 => IO.pure(Nil) }
+
+  private def indexMismatch(spec: IndexSpec, reason: String): IllegalStateException =
+    new IllegalStateException(
+      s"Mongo index definition mismatch for collection '${spec.collection}' index '${spec.options.getName}': $reason"
+    )
+
+  /** Returns only the mismatched definition field, never the potentially sensitive index predicate. */
+  private[mongo] def definitionMismatch(spec: IndexSpec, actual: Document): Option[String] = {
+    val expectedKeys = asBsonDocument(spec.keys)
+    val actualKeys = asBsonDocument(actual.get("key", classOf[Document]))
+    val expectedPartial = Option(spec.options.getPartialFilterExpression).map(asBsonDocument)
+    val actualPartial = Option(actual.get("partialFilterExpression", classOf[Document])).map(asBsonDocument)
+    val expectedExpireAfter = Option(spec.options.getExpireAfter(TimeUnit.SECONDS)).map(_.longValue())
+    val actualExpireAfter = Option(actual.get("expireAfterSeconds")).map(_.asInstanceOf[Number].longValue())
+
+    Option
+      .when(orderedEntries(expectedKeys) != orderedEntries(actualKeys))("ordered keys")
+      .orElse(Option.when(spec.options.isUnique != actual.getBoolean("unique", false))("unique"))
+      .orElse(Option.when(spec.options.isSparse != actual.getBoolean("sparse", false))("sparse"))
+      .orElse(Option.when(expectedPartial != actualPartial)("partial filter"))
+      .orElse(Option.when(expectedExpireAfter != actualExpireAfter)("TTL seconds"))
   }
+
+  private def asBsonDocument(value: Bson): BsonDocument =
+    value.toBsonDocument(classOf[Document], bsonRegistry)
+
+  private def orderedEntries(document: BsonDocument): List[(String, org.bson.BsonValue)] =
+    document.entrySet().asScala.toList.map(entry => entry.getKey -> entry.getValue)
 }

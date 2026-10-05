@@ -13,6 +13,7 @@ private[config] final case class RawVectorSearchConfig(
     embedding: RawEmbeddingConfig,
     indexes: RawVectorIndexesConfig,
     numCandidates: Int,
+    branchResultLimit: Option[Int],
     fusionStrategy: String,
     rerank: RawRerankConfig
 ) derives ConfigReader

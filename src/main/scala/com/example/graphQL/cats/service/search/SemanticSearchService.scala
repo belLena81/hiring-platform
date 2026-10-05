@@ -5,7 +5,16 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
-import com.example.graphQL.cats.domain.model.{JobStatus, SearchMode, SearchableText, User, UserRole}
+import com.example.graphQL.cats.domain.model.{
+  AccountStatus,
+  CandidateAvailabilityStatus,
+  EntityEmbedding,
+  JobStatus,
+  SearchMode,
+  SearchableText,
+  User,
+  UserRole
+}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.shared.crypto.SourceHash
@@ -59,11 +68,14 @@ final class SemanticSearchService(
           )
         )
       )
-    } yield results.map(value =>
-      value.copy(matchedSkills =
-        SkillMatching.matched(candidate.candidateProfile.fold(Set.empty[String])(_.skills), value.job.skills)
+      eligible <- validateJobHits(actor, filter, results)
+    } yield eligible
+      .take(first.value)
+      .map(value =>
+        value.copy(matchedSkills =
+          SkillMatching.matched(candidate.candidateProfile.fold(Set.empty[String])(_.skills), value.job.skills)
+        )
       )
-    )
 
   def recommendedJobs(
       actor: ActorContext,
@@ -84,8 +96,17 @@ final class SemanticSearchService(
             embedding.meta.model,
             searchId
           )
-          vectorSearch(search.recommendedJobs(query)).map(values =>
-            values.map(value => value.copy(matchedSkills = SkillMatching.matched(profile.skills, value.job.skills)))
+          vectorSearch(search.recommendedJobs(query)).flatMap(values =>
+            validateJobHits(
+              actor,
+              JobSearchFilter(None, Set.empty, None),
+              values,
+              Some(embedding)
+            ).map(values =>
+              values
+                .take(first.value)
+                .map(value => value.copy(matchedSkills = SkillMatching.matched(profile.skills, value.job.skills)))
+            )
           )
         case (Some(_), Some(_)) => UseCase.left(UseCaseError.Search(SearchError.StaleEmbedding("candidate")))
         case _                  => UseCase.left(UseCaseError.Search(SearchError.MissingEmbedding("candidate")))
@@ -158,20 +179,28 @@ final class SemanticSearchService(
                       candidateQueryVector = Some(vector.values)
                     )
                   )
-                ).map(values =>
-                  values.map(value =>
-                    value.copy(
-                      matchedSkills = SkillMatching.matched(value.candidate.skills, job.skills)
-                    )
+                ).flatMap(values =>
+                  validateCandidateHits(actor, jobId, embedding.meta, filters, values).map(values =>
+                    values
+                      .take(first.value)
+                      .map(value =>
+                        value.copy(
+                          matchedSkills = SkillMatching.matched(value.candidate.skills, job.skills)
+                        )
+                      )
                   )
                 )
               )
             case None =>
-              vectorSearch(search.candidateMatches(query)).map(values =>
-                values.map(value =>
-                  value.copy(
-                    matchedSkills = SkillMatching.matched(value.candidate.skills, job.skills)
-                  )
+              vectorSearch(search.candidateMatches(query)).flatMap(values =>
+                validateCandidateHits(actor, jobId, embedding.meta, filters, values).map(values =>
+                  values
+                    .take(first.value)
+                    .map(value =>
+                      value.copy(
+                        matchedSkills = SkillMatching.matched(value.candidate.skills, job.skills)
+                      )
+                    )
                 )
               )
           }
@@ -180,6 +209,115 @@ final class SemanticSearchService(
       }
     } yield results
 
+  private def validateJobHits(
+      actor: ActorContext,
+      filter: JobSearchFilter,
+      hits: List[RankedJob],
+      expectedActorEmbedding: Option[EntityEmbedding] = None
+  ): UseCaseIO[List[RankedJob]] =
+    resolveCurrentCandidate(actor).flatMap { currentActor =>
+      val queryEmbeddingIsCurrent = expectedActorEmbedding.forall { expected =>
+        currentActor.candidateProfile.exists(profile =>
+          currentActor.embedding.contains(expected) &&
+            expected.meta.model == embeddingModel &&
+            expected.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
+        )
+      }
+      UseCase
+        .fromEither(
+          Either.cond(
+            queryEmbeddingIsCurrent,
+            (),
+            UseCaseError.Search(SearchError.StaleEmbedding("candidate"))
+          )
+        )
+        .flatMap { _ =>
+          val ids = hits.map(_.job.id).distinct
+          searchRead(jobs.findMany(ids)).map { currentJobs =>
+            val byId = currentJobs.iterator.map(job => job.id -> job).toMap
+            hits.flatMap { hit =>
+              byId
+                .get(hit.job.id)
+                .filter { job =>
+                  job.status == JobStatus.Open &&
+                  job.embedding.exists(embedding =>
+                    embedding.meta == hit.meta &&
+                      embedding.meta.model == embeddingModel &&
+                      embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job))
+                  ) &&
+                  filter.city.forall(_ == job.location.city) &&
+                  filter.skills.subsetOf(job.skills) &&
+                  filter.createdAfter.forall(after => !job.createdAt.isBefore(after))
+                }
+                .map(job => hit.copy(job = job))
+            }
+          }
+        }
+    }
+
+  private def validateCandidateHits(
+      actor: ActorContext,
+      jobId: JobId,
+      queryMeta: com.example.graphQL.cats.domain.model.EmbeddingMeta,
+      filters: CandidateMatchFilters,
+      hits: List[RankedCandidate]
+  ): UseCaseIO[List[RankedCandidate]] =
+    for {
+      currentActor <- currentActor(actor)
+      _ <- UseCase.fromEither(
+        Either.cond(currentActor.role != UserRole.Candidate, (), UseCaseError.Domain(DomainError.RecruiterRequired))
+      )
+      currentJob <- searchRead(jobs.find(jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+      _ <- UseCase.fromEither(
+        Either.cond(
+          currentActor.role != UserRole.Recruiter || currentJob.recruiterId == currentActor.id,
+          (),
+          UseCaseError.Domain(DomainError.Forbidden)
+        )
+      )
+      _ <- UseCase.fromEither(
+        Either.cond(currentJob.status == JobStatus.Open, (), UseCaseError.Domain(DomainError.JobMustBeOpen))
+      )
+      _ <- UseCase.fromEither(
+        Either.cond(
+          currentJob.embedding.exists(embedding =>
+            embedding.meta == queryMeta && embedding.meta.model == embeddingModel &&
+              embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(currentJob))
+          ),
+          (),
+          UseCaseError.Search(SearchError.StaleEmbedding("job"))
+        )
+      )
+      currentUsers <- searchRead(users.findMany(hits.map(_.candidate.id).distinct))
+    } yield {
+      val byId = currentUsers.iterator.map(user => user.id -> user).toMap
+      hits.flatMap { hit =>
+        byId
+          .get(hit.candidate.id)
+          .filter { user =>
+            user.role == UserRole.Candidate && user.accountStatus == AccountStatus.Active &&
+            user.candidateProfile.exists { profile =>
+              val metadataIsCurrent = user.embedding.exists(embedding =>
+                embedding.meta == hit.meta && embedding.meta.model == embeddingModel &&
+                  embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
+              )
+              val publicMatch =
+                filters.requiredSkills.forall(required => profile.skills.exists(_.trim.equalsIgnoreCase(required.trim)))
+              val privateMatch = !profile.recruiterSearchOptIn || (
+                filters.countryCanonical
+                  .forall(value => profile.currentResidence.exists(_.country.trim.equalsIgnoreCase(value.trim))) &&
+                  filters.cityCanonical.forall(value =>
+                    profile.currentResidence.flatMap(_.city).exists(_.trim.equalsIgnoreCase(value.trim))
+                  ) &&
+                  filters.availabilityStatus.forall(value => profile.availabilityStatus.exists(_.toString == value))
+              )
+              metadataIsCurrent && publicMatch && privateMatch
+            }
+          }
+          .map(_ => hit)
+      }
+    }
+
   private def validateCandidateFilters(filters: CandidateMatchFilters): Either[UseCaseError, Unit] =
     val validSkills = filters.requiredSkills.size <= 100 && filters.requiredSkills.forall(skill =>
       skill.trim.nonEmpty && skill.trim.length <= 256
@@ -187,14 +325,31 @@ final class SemanticSearchService(
     val validLocations = List(filters.countryCanonical, filters.cityCanonical).flatten.forall(value =>
       value.trim.nonEmpty && value.trim.length <= 256
     ) && (filters.cityCanonical.isEmpty || filters.countryCanonical.nonEmpty)
+    val validAvailability =
+      filters.availabilityStatus.forall(value => CandidateAvailabilityStatus.values.exists(_.toString == value))
     if (!validSkills)
       Left(UseCaseError.Search(SearchError.InvalidFilter("requiredSkills")))
     else if (!validLocations)
       Left(UseCaseError.Search(SearchError.InvalidFilter("residence")))
+    else if (!validAvailability)
+      Left(UseCaseError.Search(SearchError.InvalidFilter("availabilityStatus")))
     else Right(())
 
   private def resolveCandidate(actor: ActorContext): UseCaseIO[User] =
     authorization.resolve(actor).subflatMap { user =>
+      if (user.role == UserRole.Candidate) user.asRight[UseCaseError]
+      else UseCaseError.Domain(DomainError.CandidateRequired).asLeft[User]
+    }
+
+  private def currentActor(actor: ActorContext): UseCaseIO[User] =
+    searchRead(users.find(actor.userId))
+      .subflatMap(
+        _.toRight(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized))
+      )
+      .subflatMap(user => authorization.validate(actor, user))
+
+  private def resolveCurrentCandidate(actor: ActorContext): UseCaseIO[User] =
+    currentActor(actor).subflatMap { user =>
       if (user.role == UserRole.Candidate) user.asRight[UseCaseError]
       else UseCaseError.Domain(DomainError.CandidateRequired).asLeft[User]
     }
@@ -205,6 +360,9 @@ final class SemanticSearchService(
       .subflatMap(_.leftMap(_ => UseCaseError.Search(SearchError.ProviderUnavailable)))
 
   private def vectorSearch[A](result: RepositoryIO[A]): UseCaseIO[A] =
+    UseCase.repository(result).leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable))
+
+  private def searchRead[A](result: RepositoryIO[A]): UseCaseIO[A] =
     UseCase.repository(result).leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable))
 }
 

@@ -325,6 +325,9 @@ enum EmbeddingError {
   case InvalidResponse
 }
 
+/** Returns ranked validation candidates up to the configured branch-result cap; the service applies the final page
+  * size.
+  */
 trait SemanticSearchRepository {
   def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
   def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]

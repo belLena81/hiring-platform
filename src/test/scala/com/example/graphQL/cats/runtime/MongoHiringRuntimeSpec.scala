@@ -40,7 +40,8 @@ class MongoHiringRuntimeSpec extends CatsEffectSuite {
       rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 1000,
       indexPollIntervalMillis = 10,
-      numCandidates = 20
+      numCandidates = 20,
+      branchResultLimit = 20
     )
 
   test("disabled embedding capability skips embedding factories") {

@@ -193,6 +193,7 @@ object MongoHiringRuntime {
           config.vectorSearch.jobLexicalIndex,
           config.vectorSearch.candidateLexicalIndex,
           config.vectorSearch.numCandidates,
+          config.vectorSearch.branchResultLimit,
           config.vectorSearch.fusionStrategy,
           config.vectorSearch.rerankEnabled,
           config.vectorSearch.rerankModel,

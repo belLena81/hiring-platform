@@ -13,9 +13,10 @@ private[config] object VectorSearchConfigValidation {
     (
       validVoyageApiKey(vector.enabled, voyage.apiKey),
       validNumCandidates(vector.numCandidates),
+      validBranchResultLimit(vector.branchResultLimit, vector.numCandidates),
       validFusionStrategy(vector.fusionStrategy),
       validRerankModel(vector.rerank.model)
-    ).mapN { (apiKey, numCandidates, fusionStrategy, rerankModel) =>
+    ).mapN { (apiKey, numCandidates, branchResultLimit, fusionStrategy, rerankModel) =>
       VectorSearchConfig(
         vector.enabled,
         apiKey,
@@ -36,7 +37,8 @@ private[config] object VectorSearchConfigValidation {
         rerankModel,
         indexes.readyTimeoutMs,
         indexes.pollIntervalMs,
-        numCandidates
+        numCandidates,
+        branchResultLimit
       )
     }.andThen(config =>
       Either
@@ -56,6 +58,12 @@ private[config] object VectorSearchConfigValidation {
       .toValidatedNel
   def validNumCandidates(value: Int): ValidatedNel[ConfigError, Int] =
     ConfigBounds.bounded(PageSize.Max, 10000, ConfigError.InvalidVectorNumCandidates)(value)
+
+  def validBranchResultLimit(value: Option[Int], numCandidates: Int): ValidatedNel[ConfigError, Int] =
+    val resolved = value.getOrElse(numCandidates)
+    Either
+      .cond(resolved >= PageSize.Max && resolved <= numCandidates, resolved, ConfigError.InvalidVectorBranchResultLimit)
+      .toValidatedNel
 
   def validFusionStrategy(value: String): ValidatedNel[ConfigError, SearchFusionStrategy] =
     value match {

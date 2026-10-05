@@ -33,7 +33,8 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
 
   private def repository(
       strategy: SearchFusionStrategy = SearchFusionStrategy.MongoRankFusion,
-      rerank: Boolean = true
+      rerank: Boolean = true,
+      branchLimit: Int = 0
   ): MongoSemanticSearchRepository =
     new MongoSemanticSearchRepository(
       null,
@@ -42,6 +43,7 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
       "jobs_lexical",
       "candidates_lexical",
       numCandidates = 60,
+      branchResultLimit = branchLimit,
       fusionStrategy = strategy,
       rerankEnabled = rerank,
       diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
@@ -50,7 +52,7 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
   private def bsonJson(value: org.bson.conversions.Bson): String =
     value.toBsonDocument(classOf[org.bson.BsonDocument], MongoClientSettings.getDefaultCodecRegistry).toJson()
 
-  test("production job fusion branches retain their vector and lexical constraints and candidate limits") {
+  test("production job fusion branches retain their vector and lexical constraints and validation candidate limit") {
     val repo = repository()
     val stages = repo.nativeJobFusionStages(
       searchQuery,
@@ -78,12 +80,33 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
       List("title", "description", "requirements", "skills")
     )
     assertEquals(lexical(2).getInteger("$limit").intValue(), 60)
-    assertEquals(stages(3).getInteger("$limit").intValue(), pageSize.value)
+    assertEquals(stages(3).getInteger("$limit").intValue(), 60)
     assert(stages.exists(_.containsKey("$rerank")))
   }
 
+  test("production fusion keeps branch result limits separate from ANN exploration") {
+    val repo = repository(branchLimit = 30)
+    val stages = repo.nativeJobFusionStages(
+      searchQuery,
+      searchQuery.lexicalQuery.getOrElse(""),
+      repo.jobFilter(searchQuery, searchQuery.filter)
+    )
+    val pipelines = stages.head
+      .get("$rankFusion", classOf[Document])
+      .get("input", classOf[Document])
+      .get("pipelines", classOf[Document])
+    val vector = pipelines.getList("vector", classOf[Document]).get(0).get("$vectorSearch", classOf[Document])
+    val lexical = pipelines.getList("lexical", classOf[Document]).get(2)
+
+    assertEquals(vector.getInteger("numCandidates").intValue(), 60)
+    assertEquals(vector.getInteger("limit").intValue(), 30)
+    assertEquals(lexical.getInteger("$limit").intValue(), 30)
+    assertEquals(stages(3).getInteger("$limit").intValue(), 30)
+    assertEquals(stages(4).get("$rerank", classOf[Document]).getInteger("numDocsToRerank").intValue(), 30)
+  }
+
   test("production candidate fusion branches apply account, skill and opt-in private filters before ranking") {
-    val repo = repository()
+    val repo = repository(branchLimit = 30)
     val filter = repo.candidateFilter(searchQuery, includeEmbeddingModel = true)
     val stages = repo.nativeCandidateFusionStages(searchQuery, List(0.3f, 0.4f), filter)
     val fusion = stages.head.get("$rankFusion", classOf[Document])
@@ -96,10 +119,12 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
 
     assertEquals(jobVector.getString("index"), "candidates_vector")
     assertEquals(jobVector.getInteger("numCandidates").intValue(), 60)
+    assertEquals(jobVector.getInteger("limit").intValue(), 30)
     assertEquals(
       queryVector.getList("queryVector", classOf[java.lang.Double]).asScala.map(_.doubleValue()).toList,
       List(0.3f.toDouble, 0.4f.toDouble)
     )
+    assertEquals(queryVector.getInteger("limit").intValue(), 30)
     assert(filterJson.contains("Candidate"))
     assert(filterJson.contains("Active"))
     assert(filterJson.contains("recruiterSearchOptIn"))
@@ -116,8 +141,9 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
         .toList,
       List("profile.skills", "profile.experienceSummary")
     )
-    assertEquals(lexical(2).getInteger("$limit").intValue(), 60)
-    assertEquals(stages(3).getInteger("$limit").intValue(), pageSize.value)
+    assertEquals(lexical(2).getInteger("$limit").intValue(), 30)
+    assertEquals(stages(3).getInteger("$limit").intValue(), 30)
+    assertEquals(stages(5).get("$rerank", classOf[Document]).getInteger("numDocsToRerank").intValue(), 30)
     assertEquals(stages.lastOption.map(_.keySet().iterator().next()), Some("$project"))
   }
 

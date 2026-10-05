@@ -12,6 +12,7 @@ class SearchEvaluationHarnessSpec extends munit.FunSuite {
       embeddingDimensions = 1024,
       quantization = "none",
       numCandidates = 100,
+      branchResultLimit = 100,
       pageSize = 20,
       concurrency = 8,
       durationMillis = 2000,
@@ -52,6 +53,7 @@ class SearchEvaluationHarnessSpec extends munit.FunSuite {
       Some(80L)
     )
     assertEquals(json.hcursor.downField("workload").get[Int]("numCandidates").toOption, Some(100))
+    assertEquals(json.hcursor.downField("workload").get[Int]("branchResultLimit").toOption, Some(100))
     assertEquals(json.hcursor.downField("workload").get[String]("timestampUtc").toOption, Some("2026-09-23T12:00:00Z"))
   }
 }

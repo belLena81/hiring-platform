@@ -122,7 +122,8 @@ class AppConfigSpec extends FunSuite {
       rerankModel = "rerank-2.5-lite",
       indexReadyTimeoutMillis = 120000,
       indexPollIntervalMillis = 1000,
-      numCandidates = 100
+      numCandidates = 100,
+      branchResultLimit = 100
     )
   private val defaultJwtAuth =
     JwtAuthConfig("01234567890123456789012345678901", "hiring-platform-local", "hiring-graphql-api")
@@ -737,6 +738,22 @@ class AppConfigSpec extends FunSuite {
       assertContainsError(AppConfig.fromConfig(defaultConfig + s"$path = ${minimum - 1}\n", Map.empty), error)
       assertContainsError(AppConfig.fromConfig(defaultConfig + s"$path = ${maximum + 1}\n", Map.empty), error)
     }
+  }
+
+  test("branch result limit defaults to num-candidates and stays above maximum requested page size") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.branchResultLimit), Right(100))
+    assert(AppConfig.fromConfig(defaultConfig + "vector-search.branch-result-limit = 100\n", Map.empty).isRight)
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "vector-search.branch-result-limit = 99\n", Map.empty),
+      ConfigError.InvalidVectorBranchResultLimit
+    )
+    assertContainsError(
+      AppConfig.fromConfig(
+        defaultConfig + "vector-search.branch-result-limit = 101\nvector-search.num-candidates = 100\n",
+        Map.empty
+      ),
+      ConfigError.InvalidVectorBranchResultLimit
+    )
   }
 
   test("experimental Mongo fusion and reranking require explicit compatible configuration") {

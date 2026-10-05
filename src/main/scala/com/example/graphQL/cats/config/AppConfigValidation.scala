@@ -114,6 +114,7 @@ private[config] object AppConfigValidation {
     case "vector-search.indexes.ready-timeout-ms" => Some(ConfigError.InvalidSearchIndexReadyTimeout)
     case "vector-search.indexes.poll-interval-ms" => Some(ConfigError.InvalidSearchIndexPollInterval)
     case "vector-search.num-candidates"           => Some(ConfigError.InvalidVectorNumCandidates)
+    case "vector-search.branch-result-limit"      => Some(ConfigError.InvalidVectorBranchResultLimit)
     case "vector-search.fusion-strategy"          => Some(ConfigError.InvalidVectorFusionStrategy)
     case "vector-search.rerank.model"             => Some(ConfigError.InvalidRerankModel)
     case "kafka.enabled"                          => Some(ConfigError.InvalidKafkaEnabled)

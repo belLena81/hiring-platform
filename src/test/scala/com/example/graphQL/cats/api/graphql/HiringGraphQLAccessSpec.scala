@@ -37,6 +37,7 @@ import com.example.graphQL.cats.service.search.SemanticSearchService
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.search.{RankedCandidate, RankedJob, VectorSearchQuery}
+import com.example.graphQL.cats.shared.crypto.SourceHash
 import io.circe.Json
 import munit.CatsEffectSuite
 
@@ -879,8 +880,9 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
          |  }
          |}""".stripMargin
 
-    executeWithSemanticSearch(query, Some(ActorContext(recruiterId, UserRole.Recruiter))).map { json =>
-      assertEquals(errorCode(json), Right("STALE_EMBEDDING"))
+    executeWithSemanticSearch(query, Some(ActorContext(recruiterId, UserRole.Recruiter)), staleSearchJob = true).map {
+      json =>
+        assertEquals(errorCode(json), Right("STALE_EMBEDDING"))
     }
   }
 
@@ -1007,8 +1009,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         .leftMap(error => new IllegalArgumentException("Invalid GraphQL test request", error))
     )
 
-  private def executeWithSemanticSearch(query: String, actor: Option[ActorContext]): IO[Json] = {
-    val meta = EmbeddingMeta("voyage-4-lite", "hash", now)
+  private def executeWithSemanticSearch(
+      query: String,
+      actor: Option[ActorContext],
+      staleSearchJob: Boolean = false
+  ): IO[Json] = {
+    val sourceHash = if (staleSearchJob) "hash" else SourceHash.sha256(SearchableText.job(openJob))
+    val meta = EmbeddingMeta("voyage-4-lite", sourceHash, now)
     val embeddedJob = openJob.copy(embedding = Some(EntityEmbedding(List(0.1f, 0.2f), meta)))
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](List(candidate, recruiter).map(user => user.id -> user).toMap)

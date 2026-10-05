@@ -43,6 +43,7 @@ enum ConfigError(val key: String) {
   case InvalidSearchIndexReadyTimeout extends ConfigError("SEARCH_INDEX_READY_TIMEOUT_MS")
   case InvalidSearchIndexPollInterval extends ConfigError("SEARCH_INDEX_POLL_INTERVAL_MS")
   case InvalidVectorNumCandidates extends ConfigError("VECTOR_NUM_CANDIDATES")
+  case InvalidVectorBranchResultLimit extends ConfigError("VECTOR_BRANCH_RESULT_LIMIT")
   case InvalidVectorFusionStrategy extends ConfigError("VECTOR_FUSION_STRATEGY")
   case InvalidRerankModel extends ConfigError("VECTOR_RERANK_MODEL")
   case InvalidKafkaEnabled extends ConfigError("KAFKA_ENABLED")
@@ -97,6 +98,7 @@ object ConfigError {
     InvalidSearchIndexReadyTimeout,
     InvalidSearchIndexPollInterval,
     InvalidVectorNumCandidates,
+    InvalidVectorBranchResultLimit,
     InvalidVectorFusionStrategy,
     InvalidRerankModel,
     InvalidKafkaEnabled,
@@ -140,7 +142,8 @@ final case class VectorSearchConfig(
     rerankModel: String,
     indexReadyTimeoutMillis: Int,
     indexPollIntervalMillis: Int,
-    numCandidates: Int
+    numCandidates: Int,
+    branchResultLimit: Int
 )
 
 final case class JwtAuthConfig(

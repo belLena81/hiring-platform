@@ -15,6 +15,7 @@ final case class VectorSearchQuery(
     vector: List[Float],
     lexicalQuery: Option[String],
     filter: JobSearchFilter,
+    /** Requested response page; repositories may return more hits up to their configured branch-result cap. */
     first: PageSize,
     mode: SearchMode,
     model: String,

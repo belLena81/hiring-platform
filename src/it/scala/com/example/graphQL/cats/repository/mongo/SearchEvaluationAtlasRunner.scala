@@ -62,14 +62,14 @@ object SearchEvaluationAtlasRunner extends IOApp {
       uri <- sys.env.get("ATLAS_TEST_URI").toRight("Set ATLAS_TEST_URI for an authorized disposable Atlas deployment.")
       database <- values.get("database").toRight("Supply --database for the disposable evaluation collection.")
       output <- values.get("output").toRight("Supply --output directory for JSON run records.")
-      documents <- int("documents", 10000)
-      queries <- int("queries", 100)
+      documents <- int("documents", 128)
+      queries <- int("queries", 20)
       dimensions <- int("dimensions", 1024)
       candidates <- int("num-candidates", 100)
-      pageSize <- int("page-size", 20)
-      concurrency <- int("concurrency", 8)
+      pageSize <- int("page-size", 7)
+      concurrency <- int("concurrency", 1)
       temperature = values.getOrElse("temperature", "cold")
-      seed <- values.get("seed").fold[Either[String, Long]](Right(20260923L))(_.toLongOption.toRight("Invalid --seed"))
+      seed <- values.get("seed").fold[Either[String, Long]](Right(20261005L))(_.toLongOption.toRight("Invalid --seed"))
       _ <- Either.cond(documents > 0 && documents <= 10000, (), "--documents must be between 1 and 10000")
       _ <- Either.cond(queries > 0 && queries <= 100, (), "--queries must be between 1 and 100")
       _ <- Either.cond(dimensions >= 17 && dimensions <= 4096, (), "--dimensions must be between 17 and 4096")
@@ -90,9 +90,14 @@ object SearchEvaluationAtlasRunner extends IOApp {
         (),
         "--database must use the isolated search_evaluation_ prefix"
       )
+      _ <- Either.cond(
+        Path.of(output).normalize().startsWith(Path.of(".local/data")),
+        (),
+        "--output must be beneath .local/data"
+      )
     } yield Settings(
       uri,
-      database,
+      s"${database}_${UUID.randomUUID().toString.replace("-", "")}",
       Path.of(output),
       documents,
       queries,
@@ -107,61 +112,70 @@ object SearchEvaluationAtlasRunner extends IOApp {
 
   private def runEvaluation(client: MongoClient[IO], settings: Settings): IO[Unit] =
     client.getDatabase(settings.database).flatMap { database =>
-      val collectionName = s"search_evaluation_${UUID.randomUUID().toString.replace("-", "")}"
-      database.getCollection[CatsDocument](collectionName, CodecRegistry.Default).map(_.as[Document]).flatMap {
-        collection =>
-          val indexName = "synthetic_vector"
-          val indexDefinition = new Document(
-            "fields",
-            List(
-              new Document("type", "vector")
-                .append("path", "embedding")
-                .append("numDimensions", Int.box(settings.dimensions))
-                .append("similarity", "cosine"),
-              new Document("type", "filter").append("path", "category")
-            ).asJava
-          )
+      Resource
+        .make(IO.pure(database))(_ =>
+          database
+            .runCommand(CatsDocument.fromJava(new Document("dropDatabase", 1)))
+            .attempt
+            .void
+        )
+        .use { _ =>
+          val collectionName = s"search_evaluation_${UUID.randomUUID().toString.replace("-", "")}"
+          database.getCollection[CatsDocument](collectionName, CodecRegistry.Default).map(_.as[Document]).flatMap {
+            collection =>
+              val indexName = "synthetic_vector"
+              val indexDefinition = new Document(
+                "fields",
+                List(
+                  new Document("type", "vector")
+                    .append("path", "embedding")
+                    .append("numDimensions", Int.box(settings.dimensions))
+                    .append("similarity", "cosine"),
+                  new Document("type", "filter").append("path", "category")
+                ).asJava
+              )
 
-          Resource
-            .make(
-              database.createCollection(collectionName).as(collection)
-            )(ownedCollection => ownedCollection.drop)
-            .use { _ =>
-              for {
-                _ <- seedCollection(collection, settings)
-                _ <- createSearchIndex(database, collectionName, indexName, indexDefinition)
-                _ <- awaitIndex(collection, indexName, 120.seconds)
-                version <- database
-                  .runCommand(CatsDocument.fromJava(new Document("buildInfo", 1)))
-                  .map(_.getString("version").getOrElse("unknown"))
-                _ <- Option
-                  .when(settings.temperature == "warm")(
-                    (1 to settings.queryCount).toList.traverse_(query =>
-                      retrieve(
-                        collection,
-                        settings,
-                        syntheticVector(settings.seed ^ query.toLong, settings.dimensions, query % 10, query % 7),
-                        query % 10,
-                        exact = false
-                      ).void
-                    )
-                  )
-                  .getOrElse(IO.unit)
-                started <- IO.monotonic
-                queryResults <- (1 to settings.queryCount).toList
-                  .grouped(settings.concurrency)
-                  .toList
-                  .traverse(batch => batch.parTraverse(query => evaluateQuery(collection, settings, query)))
-                  .map(_.flatten)
-                ended <- IO.monotonic
-                indexBytes <- database
-                  .runCommand(CatsDocument.fromJava(new Document("collStats", collectionName)))
-                  .map(_.getAs[Long]("totalIndexSize"))
-                  .handleError(_ => None)
-                _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
-              } yield ()
-            }
-      }
+              Resource
+                .make(
+                  database.createCollection(collectionName).as(collection)
+                )(ownedCollection => ownedCollection.drop)
+                .use { _ =>
+                  for {
+                    _ <- seedCollection(collection, settings)
+                    _ <- createSearchIndex(database, collectionName, indexName, indexDefinition)
+                    _ <- awaitIndex(collection, indexName, 120.seconds)
+                    version <- database
+                      .runCommand(CatsDocument.fromJava(new Document("buildInfo", 1)))
+                      .map(_.getString("version").getOrElse("unknown"))
+                    _ <- Option
+                      .when(settings.temperature == "warm")(
+                        (1 to settings.queryCount).toList.traverse_(query =>
+                          retrieve(
+                            collection,
+                            settings,
+                            syntheticVector(settings.seed ^ query.toLong, settings.dimensions, query % 10, query % 7),
+                            Some(query % 10),
+                            exact = false
+                          ).void
+                        )
+                      )
+                      .getOrElse(IO.unit)
+                    started <- IO.monotonic
+                    queryResults <- (1 to settings.queryCount).toList
+                      .grouped(settings.concurrency)
+                      .toList
+                      .traverse(batch => batch.parTraverse(query => evaluateQuery(collection, settings, query)))
+                      .map(_.flatten)
+                    ended <- IO.monotonic
+                    indexBytes <- database
+                      .runCommand(CatsDocument.fromJava(new Document("collStats", collectionName)))
+                      .map(_.getAs[Long]("totalIndexSize"))
+                      .handleError(_ => None)
+                    _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
+                  } yield ()
+                }
+          }
+        }
     }
 
   private def createSearchIndex(
@@ -208,8 +222,13 @@ object SearchEvaluationAtlasRunner extends IOApp {
     val category = queryNumber % 10
     val topic = queryNumber % 7
     val queryVector = syntheticVector(settings.seed ^ queryNumber.toLong, settings.dimensions, category, topic)
-    val ann = timedRanking(collection, settings, queryVector, category, exact = false)
-    val enn = timedRanking(collection, settings, queryVector, category, exact = true)
+    val filterCategory = queryNumber % 3 match {
+      case 0 => None
+      case 1 => Some(category)
+      case _ => Some(10)
+    }
+    val ann = timedRanking(collection, settings, queryVector, filterCategory, exact = false)
+    val enn = timedRanking(collection, settings, queryVector, filterCategory, exact = true)
     if (queryNumber % 2 == 0) (ann, enn).tupled.map { case (annResult, ennResult) =>
       PairedRanking(queryId, annResult, ennResult)
     }
@@ -220,7 +239,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
       collection: MongoCollection[IO, Document],
       settings: Settings,
       vector: List[Double],
-      category: Int,
+      category: Option[Int],
       exact: Boolean
   ): IO[TimedRanking] =
     for {
@@ -236,14 +255,14 @@ object SearchEvaluationAtlasRunner extends IOApp {
       collection: MongoCollection[IO, Document],
       settings: Settings,
       vector: List[Double],
-      category: Int,
+      category: Option[Int],
       exact: Boolean
   ): IO[List[String]] = {
     val vectorSearch = new Document("index", "synthetic_vector")
       .append("path", "embedding")
       .append("queryVector", vector.map(java.lang.Double.valueOf).asJava)
       .append("limit", Int.box(settings.pageSize))
-      .append("filter", new Document("category", Int.box(category)))
+    category.foreach(value => vectorSearch.append("filter", new Document("category", Int.box(value))))
     if (exact) vectorSearch.append("exact", java.lang.Boolean.TRUE)
     else vectorSearch.append("numCandidates", Int.box(settings.numCandidates))
     val pipeline = List(
@@ -265,7 +284,10 @@ object SearchEvaluationAtlasRunner extends IOApp {
       durationMillis: Long,
       indexBytes: Option[Long]
   ): IO[Unit] = {
-    val filters = Json.obj("categoryCount" -> Json.fromInt(10), "category" -> Json.fromString("queryId modulo 10"))
+    val filters = Json.obj(
+      "categories" -> Json.fromInt(10),
+      "queryBuckets" -> Json.fromString("broad, selective, and empty filters in round-robin order")
+    )
     val queryMetrics =
       Json.obj("source" -> Json.fromString("runner local observations; Atlas query metrics unavailable"))
     val report = SearchEvaluationRun(
@@ -276,6 +298,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
       embeddingDimensions = settings.dimensions,
       quantization = "index-default",
       numCandidates = settings.numCandidates,
+      branchResultLimit = settings.numCandidates,
       pageSize = settings.pageSize,
       concurrency = settings.concurrency,
       durationMillis = durationMillis,
@@ -313,10 +336,15 @@ object SearchEvaluationAtlasRunner extends IOApp {
 
   private def judgedRelevantIds(settings: Settings, queryId: String): Set[String] = {
     val queryNumber = queryId.drop(2).toInt
-    val category = queryNumber % 10
     val topic = queryNumber % 7
     (0 until settings.datasetDocuments).iterator
-      .filter(id => id % 10 == category && id % 7 == topic)
+      .filter { id =>
+        queryNumber % 3 match {
+          case 0 => id % 7 == topic
+          case 1 => id % 10 == queryNumber % 10 && id % 7 == topic
+          case _ => false
+        }
+      }
       .map(id => f"doc-$id%05d")
       .toSet
   }

@@ -75,6 +75,17 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
       MongoSemanticSearchResult.rankedJob(document.append("score", "invalid"), query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
+    assertEquals(
+      MongoSemanticSearchResult.rankedJob(document.append("score", Double.NaN), query),
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+    )
+    assertEquals(
+      MongoSemanticSearchResult.rankedJob(
+        scored(document).append("retrievalScore", "invalid"),
+        query
+      ),
+      Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
+    )
   }
 
   test("fresh candidate vector hit is returned and stale candidate hit is omitted") {
