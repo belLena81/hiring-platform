@@ -111,8 +111,10 @@ private[analytics] object AnalyticsTableSchemas {
 
   def createOrValidate(spark: SparkSession, path: String, shape: Shape, raw: Boolean = false): Unit = {
     val location = SparkPhysicalLocation.resolve(path)
-    val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(struct(shape))
-    (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
+    if (!DeltaTable.isDeltaTable(spark, location)) {
+      val builder = DeltaTable.createIfNotExists(spark).location(location).addColumns(struct(shape))
+      (if (raw) builder.property("delta.dataSkippingNumIndexedCols", "0") else builder).execute()
+    }
     val actual = spark.read.format("delta").load(location).schema
     if (!matches(actual, shape))
       throw AnalyticsError.LakehouseFailure(

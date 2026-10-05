@@ -6,8 +6,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 mode="${1:-stage}"
 nonce="${2:-$(openssl rand -hex 8)}"
-[[ "$nonce" =~ ^[a-f0-9]{16}$ && ( "$mode" == stage || "$mode" == run || "$mode" == scenarios || "$mode" == stop ) ]] || {
-  printf 'Usage: %s stage [nonce] | run nonce acceptance.json review-directory | scenarios nonce acceptance.json review-directory | stop nonce\n' "$0" >&2; exit 2;
+[[ "$nonce" =~ ^[a-f0-9]{16}$ && ( "$mode" == stage || "$mode" == stage-maintenance || "$mode" == run || "$mode" == scenarios || "$mode" == diagnose || "$mode" == maintenance || "$mode" == stop ) ]] || {
+  printf 'Usage: %s {stage|stage-maintenance} [nonce] | {run|scenarios|diagnose|maintenance} nonce acceptance.json review-directory | stop nonce\n' "$0" >&2; exit 2;
 }
 [[ -r .env ]] || { printf 'Ignored local .env credentials are required.\n' >&2; exit 1; }
 . ./.env
@@ -29,6 +29,17 @@ export HIRING_STREAMING_PROOF_REPO="$repo_root"
 export KAFKA_TOPIC="hiring.streaming.proof.$nonce"
 
 compose=(docker compose -f compose.yaml -f compose.analytics-streaming-proof.yaml -p "$project")
+network_overlay() {
+  local overlay="$config_dir/network.yaml"
+  if [[ -e "$overlay" || -L "$overlay" ]]; then
+    [[ -f "$overlay" && ! -L "$overlay" && "$(stat -c '%u:%a' "$overlay")" == "$(id -u):600" ]] || {
+      printf 'Private proof network override is unsafe.\n' >&2; exit 1;
+    }
+    compose+=(-f "$overlay")
+  elif [[ "$mode" != stop ]]; then
+    printf 'New proof requires its private network override.\n' >&2; exit 1;
+  fi
+}
 java_run() {
   local conf="$1" main="$2"; shift 2
   local logging_options=()
@@ -62,6 +73,7 @@ read_state() {
     "$(stat -c '%u:%a' "$config_dir/state.json")" == "$(id -u):600" ]] || {
     printf 'Private task state is absent or unsafe.\n' >&2; exit 1;
   }
+  network_overlay
   mapfile -t values < <(python3 - "$config_dir" <<'PY'
 import json, os, pathlib, sys
 p=pathlib.Path(sys.argv[1]); state=json.loads((p/'state.json').read_text()); credentials=json.loads((p/'credentials.json').read_text()); assert state['nonce']==os.environ['HIRING_STREAMING_PROOF_NONCE']
@@ -72,10 +84,11 @@ PY
   export HIRING_STREAMING_PROOF_MONGO_PORT="${values[0]}"
   export HIRING_STREAMING_PROOF_KAFKA_PORT="${values[1]}"
   export HIRING_STREAMING_PROOF_MONGO_PASSWORD="${values[4]}"
-  if [[ "$mode" == run || "$mode" == scenarios ]]; then analytics_cp="$(cat "$config_dir/analytics.classpath")"; fi
+  if [[ "$mode" == run || "$mode" == scenarios || "$mode" == diagnose || "$mode" == maintenance ]]; then analytics_cp="$(cat "$config_dir/analytics.classpath")"; fi
 }
 
-if [[ "$mode" == stage ]]; then
+if [[ "$mode" == stage || "$mode" == stage-maintenance ]]; then
+  export HIRING_STREAMING_PROOF_PROFILE="$mode"
   [[ ! -e "$config_dir" && ! -L "$config_dir" && ! -e "$log_dir" && ! -L "$log_dir" ]] || {
     printf 'This nonce is already in use.\n' >&2; exit 1;
   }
@@ -111,12 +124,22 @@ PY
   export KAFKA_READER_USERNAME=analytics_reader
   export KAFKA_CONSUMER_ENABLED=false
   python3 - <<'PY'
-import base64, json, os, pathlib, secrets
+import base64, ipaddress, json, os, pathlib, secrets, subprocess
 root=pathlib.Path(os.environ['HIRING_STREAMING_PROOF_REPO']); nonce=os.environ['HIRING_STREAMING_PROOF_NONCE']; p=pathlib.Path(os.environ['HIRING_STREAMING_PROOF_CONFIG'])
 credentials={'operatorPassword':os.environ['HIRING_STREAMING_PROOF_MONGO_PASSWORD'],'runtimePassword':secrets.token_hex(32),'apiPassword':secrets.token_hex(32),'jwtSecret':secrets.token_hex(32)}
 (p/'credentials.json').write_text(json.dumps(credentials)); (p/'mongo-keyfile').write_text(base64.b64encode(secrets.token_bytes(756)).decode())
 mongo=int(os.environ['HIRING_STREAMING_PROOF_MONGO_PORT']); kafka=int(os.environ['HIRING_STREAMING_PROOF_KAFKA_PORT']); api=int(os.environ['HIRING_STREAMING_PROOF_API_PORT']); database='hiring_streaming_proof_'+nonce; topic='hiring.streaming.proof.'+nonce
 state={'nonce':nonce,'mongoPort':mongo,'kafkaPort':kafka,'apiPort':api,'apiPid':0}; (p/'state.json').write_text(json.dumps(state))
+# Use one small task-owned subnet; preserved proof networks may exhaust Docker's default pools.
+network_ids=subprocess.check_output(['docker','network','ls','-q'],text=True).split()
+if len(network_ids)>256: raise RuntimeError('Docker network inventory bound exceeded')
+networks=json.loads(subprocess.check_output(['docker','network','inspect',*network_ids],text=True))
+used=[ipaddress.ip_network(entry['Subnet'],strict=False) for network in networks for entry in ((network.get('IPAM') or {}).get('Config') or []) if entry.get('Subnet')]
+routes=json.loads(subprocess.check_output(['ip','-j','route'],text=True))
+used.extend(ipaddress.ip_network(route['dst'],strict=False) for route in routes if route.get('dst') not in (None,'default','0.0.0.0/0'))
+subnet=next((ipaddress.ip_network(f'10.253.{(int(nonce[:2],16)+offset)%256}.0/24') for offset in range(256) if not any(ipaddress.ip_network(f'10.253.{(int(nonce[:2],16)+offset)%256}.0/24').overlaps(existing) for existing in used if existing.version==4)),None)
+if subnet is None: raise RuntimeError('No isolated proof subnet available')
+(p/'network.yaml').write_text('networks:\n  default:\n    ipam:\n      config:\n        - subnet: '+str(subnet)+'\n')
 q=json.dumps
 def mongo_uri(operator): return f"mongodb://{'proof_operator' if operator else 'proof_api'}:{credentials['operatorPassword' if operator else 'apiPassword']}@127.0.0.1:{mongo}/?authSource={'admin' if operator else database}&replicaSet=rs0&directConnection=true"
 for operator in (True,False):
@@ -125,8 +148,12 @@ for operator in (True,False):
 with (p/'replay-outcome-log4j2.properties').open('x',encoding='utf-8') as replay_logging:
  os.fchmod(replay_logging.fileno(),0o600)
  replay_logging.write('rootLogger.level = error\nrootLogger.appenderRef.stdout.ref = console\nappender.console.type = Console\nappender.console.name = console\nappender.console.target = SYSTEM_ERR\nappender.console.layout.type = PatternLayout\nappender.console.layout.pattern = %d{HH:mm:ss} %-5p %c{1}: %m%n\nlogger.replay.name = com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain\nlogger.replay.level = info\nlogger.replay.additivity = false\nlogger.replay.appenderRef.console.ref = console\nlogger.replayObject.name = com.example.hiring.analytics.cli.HiringAnalyticsLateFactReplayMain$\nlogger.replayObject.level = info\nlogger.replayObject.additivity = false\nlogger.replayObject.appenderRef.console.ref = console\n')
+with (p/'streaming-progress-log4j2.properties').open('x',encoding='utf-8') as progress_logging:
+ os.fchmod(progress_logging.fileno(),0o600)
+ progress_logging.write('rootLogger.level = error\nrootLogger.appenderRef.stdout.ref = console\nappender.console.type = Console\nappender.console.name = console\nappender.console.target = SYSTEM_ERR\nappender.console.layout.type = PatternLayout\nappender.console.layout.pattern = %d{HH:mm:ss} %-5p %c{1}: %m%n\nlogger.maintenance.name = com.example.hiring.analytics.streaming.maintenance\nlogger.maintenance.level = info\nlogger.maintenance.additivity = false\nlogger.maintenance.appenderRef.console.ref = console\n')
 for file in p.iterdir(): file.chmod(0o600)
 PY
+  network_overlay
   compose_started=true
   "${compose[@]}" up -d --wait mongodb kafka kafka-acl-init
   # Source identity uses Admin.describeCluster; permit metadata reads on this disposable broker.
@@ -283,6 +310,8 @@ s['apiPid']=int(os.environ['HIRING_STREAMING_PROOF_API_PID']); (p/'state.json').
 for operator in (True,False):
  uri=f"mongodb://{'proof_operator' if operator else 'analytics_runtime'}:{c['operatorPassword' if operator else 'runtimePassword']}@127.0.0.1:{s['mongoPort']}/?authSource={'admin' if operator else database}&replicaSet=rs0&directConnection=true"
  conf='include classpath("application.conf")\n'+f'analytics.mongo.uri={q(uri)}\nanalytics.mongo.database={q(database)}\nanalytics.spark.master="local[2]"\nanalytics.spark.local-directory={q(str(root/".local/data/analytics/spark-temp"/f"hiring-streaming-proof-{nonce}"/"driver"))}\nanalytics.kafka.bootstrap-servers={q("127.0.0.1:"+str(s["kafkaPort"]))}\nanalytics.kafka.username="analytics_reader"\nanalytics.kafka.password={q(os.environ["KAFKA_READER_PASSWORD"])}\nanalytics.kafka.security-protocol="SASL_PLAINTEXT"\nanalytics.kafka.allow-plaintext=true\nanalytics.kafka.topic={q("hiring.streaming.proof."+nonce)}\nanalytics.lakehouse.root={q(file_uri(root/".local/data"/f"hiring-streaming-proof-{nonce}"/"lakehouse"))}\nanalytics.hmac.secret-base64={q(os.environ["HIRING_ANALYTICS_HMAC_SECRET_BASE64"])}\nanalytics.streaming.stream-id={q("hiring-streaming-proof-"+nonce)}\nanalytics.streaming.activation-grant-id={q("local-reviewed-"+nonce)}\nanalytics.streaming.checkpoint-location={q(file_uri(root/".local/data/analytics/checkpoints"/f"hiring-streaming-proof-{nonce}"/"query"))}\nanalytics.streaming.trigger-interval=10 seconds\nanalytics.streaming.maintenance-interval=60 seconds\nanalytics.streaming.max-offsets-per-trigger=1000\nanalytics.streaming.maximum-replay-records=1000\nanalytics.streaming.initial-offsets=[{{partition=0,offset=0}},{{partition=1,offset=0}},{{partition=2,offset=0}}]\nanalytics.workload-producer.username="hiring_publisher_v2"\nanalytics.workload-producer.password={q(os.environ["KAFKA_PUBLISHER_V2_PASSWORD"])}\nanalytics.workload-api.url={q("http://127.0.0.1:"+str(s["apiPort"]))}\nanalytics.workload-api.nonce={q(nonce)}\nanalytics.workload-api.password={q("proof-password-"+nonce)}\n'
+ if os.environ['HIRING_STREAMING_PROOF_PROFILE']=='stage-maintenance':
+  conf+='analytics.streaming.progress-retention=60 seconds\n'
  (p/('analytics-operator.conf' if operator else 'analytics-runtime.conf')).write_text(conf)
 PY
   # Native erasure worker is a required account-deletion dependency, not a fabricated readiness record.
@@ -521,14 +550,21 @@ PYWORKER
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain fingerprint >"$log_dir/source-fingerprint.log" 2>&1
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain identity >"$log_dir/runtime-identity.log" 2>&1
   printf 'Isolated authenticated proof staged: %s. Runtime remains gated. Evidence metadata: %s\n' "$nonce" "$log_dir"
-elif [[ "$mode" == run || "$mode" == scenarios ]]; then
+elif [[ "$mode" == run || "$mode" == scenarios || "$mode" == diagnose || "$mode" == maintenance ]]; then
   [[ $# -eq 4 ]] || { printf 'Run requires acceptance JSON and independent review directory.\n' >&2; exit 2; }
   read_state
+  acceptance_path="$3"
+  reviews_directory="$4"
+  [[ "$acceptance_path" == /* ]] || acceptance_path="$repo_root/$acceptance_path"
+  [[ "$reviews_directory" == /* ]] || reviews_directory="$repo_root/$reviews_directory"
   java_run "$config_dir/analytics-operator.conf" com.example.hiring.analytics.cli.StreamingActivationProofMain \
-    provision "$3" "$4" proof_operator 3600 >"$log_dir/provision.log" 2>&1
+    provision "$acceptance_path" "$reviews_directory" proof_operator 3600 >"$log_dir/provision.log" 2>&1
   run_started="$(date -u +%s)"
-  setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
-    _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" >"$log_dir/stream.log" 2>&1 &
+  stream_main=com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain
+  if [[ "$mode" == diagnose ]]; then stream_main=com.example.hiring.analytics.cli.StreamingCostProofMain; fi
+  if [[ "$mode" == maintenance ]]; then stream_main=com.example.hiring.analytics.cli.StreamingMaintenanceProofMain; fi
+  setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -Dlog4j.configurationFile="$4" -cp "$3" "$5"' \
+    _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" "$config_dir/streaming-progress-log4j2.properties" "$stream_main" >"$log_dir/stream.log" 2>&1 &
   stream_pid=$!
   worker_supervisor_pid="${worker_supervisor_pid:-}"
   run_cleanup() {
@@ -549,11 +585,31 @@ elif [[ "$mode" == run || "$mode" == scenarios ]]; then
     sleep 5
   done) >"$log_dir/stream-resources.log" &
   resource_pid=$!
+  if [[ "$mode" == maintenance ]]; then
+    wait "$stream_pid"
+    wait "$resource_pid" || true
+    trap - EXIT
+    if rg -q '\bERROR\b|Exception|Caused by:|Dropping event from queue|numDroppedEvents' "$log_dir/stream.log"; then
+      printf 'Maintenance proof has an unclean runtime log.\n' >&2; exit 1;
+    fi
+    python3 scripts/verify-streaming-maintenance-progress.py "$log_dir/stream.log" >"$log_dir/maintenance-progress.log"
+    rg -q '^STREAMING_MAINTENANCE_RETENTION_PASS ' "$log_dir/stream.log"
+    printf 'Isolated streaming maintenance component passed; healthy freshness remains unmeasured: %s\n' "$log_dir"
+    exit 0
+  fi
   if [[ "$mode" == run ]]; then
     java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain >"$log_dir/healthy-workload.log" 2>&1
   else
     printf 'STREAMING_SCENARIO_SCOPE healthyFreshness=NOT_MEASURED healthyCadence=NOT_MEASURED overallAcceptance=OPEN\n' >"$log_dir/scenario-scope.log"
     java_run "$config_dir/analytics-runtime.conf" com.example.hiring.analytics.cli.HiringAnalyticsStreamingWorkloadMain burst >"$log_dir/scenario-seed-burst.log" 2>&1
+  fi
+  if [[ "$mode" == diagnose ]]; then
+    kill -- "-$stream_pid"
+    wait "$stream_pid"
+    wait "$resource_pid" || true
+    trap - EXIT
+    printf 'Streaming cost diagnostic complete; healthy freshness and overall acceptance remain OPEN: %s\n' "$log_dir"
+    exit 0
   fi
   kill -0 "$stream_pid"
   python3 - "$config_dir" "$log_dir/restart-baseline.json" <<'PY'
@@ -575,8 +631,8 @@ PY
   kill -- "-$stream_pid"
   wait "$stream_pid" || true
   wait "$resource_pid" || true
-  setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
-    _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" >>"$log_dir/stream.log" 2>&1 &
+  setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -Dlog4j.configurationFile="$4" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
+    _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" "$config_dir/streaming-progress-log4j2.properties" >>"$log_dir/stream.log" 2>&1 &
   stream_pid=$!
   (while kill -0 "$stream_pid" 2>/dev/null; do
     date -u '+%Y-%m-%dT%H:%M:%SZ'
@@ -683,8 +739,8 @@ PY
   cp -- "$config_dir/checkpoint-identity.crc.backup" "$identity_checksum"
   [[ "$foreign_result" -eq 0 ]] || { printf 'Foreign checkpoint identity did not produce the expected fail-closed result.\n' >&2; exit 1; }
   checkpoint_inventory verify >"$log_dir/checkpoint-byte-restoration.log"
-  setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
-    _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" >>"$log_dir/stream.log" 2>&1 &
+  setsid bash -c 'cd "$1/analytics"; exec java -Dspark.sql.shuffle.partitions=2 -Dspark.databricks.delta.snapshotPartitions=2 --add-opens=java.base/sun.security.action=ALL-UNNAMED -Dconfig.file="$2" -Dlog4j.configurationFile="$4" -cp "$3" com.example.hiring.analytics.cli.HiringAnalyticsStreamingMain' \
+    _ "$repo_root" "$config_dir/analytics-runtime.conf" "$analytics_cp" "$config_dir/streaming-progress-log4j2.properties" >>"$log_dir/stream.log" 2>&1 &
   stream_pid=$!
   worker_supervisor_pid="${worker_supervisor_pid:-}"
   run_cleanup() {
@@ -722,6 +778,10 @@ PY
   python3 "$config_dir/worker-supervisor.py" stop "$repo_root" "$nonce"
   wait "$worker_supervisor_pid"
   trap - EXIT
+  if rg -q '\bERROR\b|Exception|Caused by:|Dropping event from queue|numDroppedEvents' "$log_dir/stream.log"; then
+    printf 'Continuous proof has an unclean runtime log.\n' >&2; exit 1;
+  fi
+  python3 scripts/verify-streaming-maintenance-progress.py "$log_dir/stream.log" >"$log_dir/maintenance-progress.log"
   if [[ "$mode" == run ]]; then
     printf 'Real-clock healthy and bounded burst workload passed. State and resource evidence retained: %s\n' "$log_dir"
   else

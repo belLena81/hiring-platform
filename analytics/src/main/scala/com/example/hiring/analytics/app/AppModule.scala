@@ -143,33 +143,28 @@ object AppModule {
 
   /** Long-lived, opt-in Structured Streaming runtime. The Mongo activation gate is read-only and fail-closed. */
   def streaming[F[_]: Async](settings: AnalyticsStreamingRuntimeSettings): Resource[F, StreamingProgram[F]] =
+    streamingObserved(settings, None)
+
+  /** Adapter-private observation seam: callbacks execute only after durable operations return. */
+  private[analytics] def streamingObserved[F[_]: Async](
+      settings: AnalyticsStreamingRuntimeSettings,
+      observer: Option[StreamingDurableBoundaryObserver[F]],
+      costObserver: Option[StreamingBatchCost.Summary => F[Unit]] = None
+  ): Resource[F, StreamingProgram[F]] =
     for {
       pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
       localDirectory <- ownedStreamingDirectory[F](settings.common.sparkLocalDirectory)
       common = settings.common.copy(sparkLocalDirectory = localDirectory)
       shared <- shared[F](common, pseudonymizer, appName = "hiring-analytics-streaming")
+      streamingLock <- AnalyticsLakehouseLock.serialized(shared.lock)
+      cost <- costObserver.traverse(emit => StreamingBatchCost.resource(shared.spark, emit))
       program <- Resource.eval {
         val journal = new DeltaStreamingBatchJournal[F](shared.spark, shared.paths, shared.sparkExecution)
-        val checkpoint = new DeltaStreamingCheckpointAcknowledgement[F](journal)
+        val observedJournal = cost.fold[StreamingBatchJournal[F]](journal)(_.wrapJournal(journal))
+        val checkpoint = new DeltaStreamingCheckpointAcknowledgement[F](observedJournal)
+        val observedLock = cost.fold[AnalyticsLakehouseLock[F]](streamingLock)(_.wrapLock(streamingLock))
         val writer = new DeltaBatchWriter[F](shared.paths, shared.lakehouseExecution)
         val reader = new DeltaBatchReader[F](shared.lakehouseExecution)
-        val ingestion = new AnalyticsBatchIngestionStage[F](
-          shared.paths,
-          pseudonymizer,
-          shared.lakehouseExecution,
-          new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution),
-          writer,
-          common.operational.retention
-        )
-        val silver = new AnalyticsBatchSilverStage[F](
-          shared.paths,
-          pseudonymizer,
-          shared.lakehouseExecution,
-          writer,
-          reader,
-          QuarantineIdentifier,
-          common.operational.retention
-        )
         val publisher = new MongoAnalyticsReportPublisher[F](shared.client, shared.database, common.operational)
         val stream = new SparkHiringAnalyticsStream[F](
           shared.spark,
@@ -180,22 +175,45 @@ object AppModule {
           settings.streaming,
           new MongoStreamingActivationGate[F](shared.database, shared.streams),
           new MongoAnalyticsStreamingRegistry[F](shared.database, shared.streams),
-          shared.lock,
+          observedLock,
           common.lakehouseRoot,
           checkpoint,
-          (rawFrame, batchId, lineage, sourceEndOffsets, authorize) =>
-            for {
+          (rawFrame, batchId, lineage, sourceEndOffsets, authorize) => {
+            val callback = for {
               observedAt <- Async[F].realTimeInstant
-              _ <- shared.maintenance.validateHmacConfigurationLocked
+              _ <- cost.fold(shared.maintenance.validateHmacConfigurationLocked)(
+                _.timed(StreamingBatchCost.Stage.HmacValidation)(shared.maintenance.validateHmacConfigurationLocked)
+              )
               parsed <- shared.lakehouseExecution(OperationalEventTransforms.parseKafkaRecords(rawFrame))
-              preparation <- prepareStreamingBatch(
+              preparing = prepareStreamingBatch(
                 shared,
                 parsed,
                 lineage,
                 batchId,
                 observedAt,
                 sourceEndOffsets,
-                journal
+                observedJournal
+              )
+              preparation <- cost.fold(preparing)(_.timed(StreamingBatchCost.Stage.Prepare)(preparing))
+              observedWriter = observer.fold[DeltaWriter[F]](writer)(value =>
+                StreamingDurableBoundaryObserver.writer(writer, shared.paths, preparation.identity, value)
+              )
+              ingestion = new AnalyticsBatchIngestionStage[F](
+                shared.paths,
+                pseudonymizer,
+                shared.lakehouseExecution,
+                new DeltaManifestStore[F](shared.spark, shared.paths, shared.sparkExecution),
+                observedWriter,
+                common.operational.retention
+              )
+              silver = new AnalyticsBatchSilverStage[F](
+                shared.paths,
+                pseudonymizer,
+                shared.lakehouseExecution,
+                observedWriter,
+                reader,
+                QuarantineIdentifier,
+                common.operational.retention
               )
               _ <- SparkStreamingBatchStages
                 .resource(
@@ -206,8 +224,8 @@ object AppModule {
                   shared.lakehouseExecution,
                   ingestion,
                   silver,
-                  new AnalyticsLateFactStage[F](shared.paths, shared.lakehouseExecution, writer),
-                  writer,
+                  new AnalyticsLateFactStage[F](shared.paths, shared.lakehouseExecution, observedWriter),
+                  observedWriter,
                   reader,
                   publisher,
                   common.operational.retention,
@@ -216,19 +234,30 @@ object AppModule {
                   authorize
                 )
                 .use(stages =>
-                  new StreamingBatchCoordinator[F](journal, shared.markers, stages, checkpoint)
+                  new StreamingBatchCoordinator[F](
+                    observer.fold[StreamingBatchJournal[F]](observedJournal)(value =>
+                      StreamingDurableBoundaryObserver.journal(observedJournal, value)
+                    ),
+                    shared.markers,
+                    observer.fold[StreamingBatchStages[F]](cost.fold(stages)(_.wrap(stages)))(value =>
+                      StreamingDurableBoundaryObserver.stages(cost.fold(stages)(_.wrap(stages)), value)
+                    ),
+                    checkpoint
+                  )
                     .process(preparation, authorize)
                     .void
                 )
-            } yield (),
+            } yield ()
+            cost.fold(callback)(_.timed(StreamingBatchCost.Stage.Callback)(callback))
+          },
           () => KafkaOffsetRangeSource.sourceIdentity(common.kafka, settings.topic, shared.sparkExecution),
           maintenance = Some((identity, lineage, retainedCheckpoint, authorize) =>
             new AnalyticsStreamingMaintenance[F](
               common.lakehouseRoot,
-              shared.lock,
+              observedLock,
               settings.streaming.maintenanceInterval,
-              at =>
-                maintainStreaming(
+              at => {
+                val maintaining = maintainStreaming(
                   shared,
                   common,
                   settings,
@@ -240,6 +269,19 @@ object AppModule {
                   authorize,
                   at
                 )
+                cost.fold(maintaining)(_.timed(StreamingBatchCost.Stage.Maintenance)(maintaining))
+              },
+              Some(observation =>
+                Slf4jLogger
+                  .getLoggerFromName[F]("com.example.hiring.analytics.streaming.maintenance")
+                  .info(
+                    s"STREAMING_MAINTENANCE outcome=${observation.outcome.fold("none")(_.toString)} " +
+                      s"elapsedSinceSuccessMillis=${observation.elapsedSinceSuccess.toMillis} " +
+                      s"maximumElapsedSinceSuccessMillis=${observation.maximumElapsedSinceSuccess.toMillis} " +
+                      s"consecutiveDeferrals=${observation.consecutiveDeferrals} " +
+                      s"lastSuccess=${observation.lastSuccess.fold("none")(_.toString)}"
+                  )
+              )
             ).resource
           )
         )

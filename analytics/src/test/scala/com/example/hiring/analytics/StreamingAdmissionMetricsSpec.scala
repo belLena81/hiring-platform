@@ -35,23 +35,29 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
       StructType(Vector(StructField(Columns.EventId, StringType, nullable = true)))
     )
 
-  private def assertEquivalent(malformed: DataFrame, conflicts: DataFrame, future: DataFrame): Unit = {
+  private def assertEquivalent(
+      malformed: DataFrame,
+      conflicts: DataFrame,
+      future: DataFrame,
+      closed: DataFrame
+  ): Unit = {
     val expected = SparkStreamingBatchStages.AdmissionQuality(
       malformed.count(),
       conflicts.select(Columns.EventId).distinct().count(),
-      future.count()
+      future.count(),
+      closed.count()
     )
-    assertEquals(SparkStreamingBatchStages.measureQuality(malformed, conflicts, future), expected)
+    assertEquals(SparkStreamingBatchStages.measureQuality(malformed, conflicts, future, closed), expected)
   }
 
-  test("empty admission categories return three zero counts") {
+  test("empty admission categories return four zero counts") {
     withSpark { (spark, execution) =>
       execution {
         val empty = events(spark, Vector.empty)
-        assertEquivalent(empty, empty, empty)
+        assertEquivalent(empty, empty, empty, empty)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(empty, empty, empty),
-          SparkStreamingBatchStages.AdmissionQuality(0L, 0L, 0L)
+          SparkStreamingBatchStages.measureQuality(empty, empty, empty, empty),
+          SparkStreamingBatchStages.AdmissionQuality(0L, 0L, 0L, 0L)
         )
       }
     }
@@ -63,10 +69,11 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
         val malformed = events(spark, Vector(None, Some("malformed")))
         val conflicts = events(spark, Vector(Some("conflict"), Some("conflict"), Some("other-conflict")))
         val future = events(spark, Vector(Some("future"), Some("future"), Some("other-future")))
-        assertEquivalent(malformed, conflicts, future)
+        val closed = events(spark, Vector(Some("closed"), Some("closed")))
+        assertEquivalent(malformed, conflicts, future, closed)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(malformed, conflicts, future),
-          SparkStreamingBatchStages.AdmissionQuality(2L, 2L, 3L)
+          SparkStreamingBatchStages.measureQuality(malformed, conflicts, future, closed),
+          SparkStreamingBatchStages.AdmissionQuality(2L, 2L, 3L, 2L)
         )
       }
     }
@@ -79,11 +86,28 @@ final class StreamingAdmissionMetricsSpec extends CatsEffectSuite {
         val conflicts = events(spark, Vector(Some("blocked"), Some("blocked")))
         val future = events(spark, Vector(Some("blocked"), Some("retained"), Some("retained")))
           .join(conflicts, Seq(Columns.EventId), "left_anti")
-        assertEquivalent(empty, conflicts, future)
+        assertEquivalent(empty, conflicts, future, empty)
         assertEquals(
-          SparkStreamingBatchStages.measureQuality(empty, conflicts, future),
-          SparkStreamingBatchStages.AdmissionQuality(0L, 1L, 2L)
+          SparkStreamingBatchStages.measureQuality(empty, conflicts, future, empty),
+          SparkStreamingBatchStages.AdmissionQuality(0L, 1L, 2L, 0L)
         )
+      }
+    }
+  }
+
+  test("closed anti-join retains repeated rows and reports zero when all identities conflict") {
+    withSpark { (spark, execution) =>
+      execution {
+        val empty = events(spark, Vector.empty)
+        val conflicts = events(spark, Vector(Some("blocked")))
+        val mixed = events(spark, Vector(Some("blocked"), Some("retained"), Some("retained")))
+          .join(conflicts, Seq(Columns.EventId), "left_anti")
+        val blocked = events(spark, Vector(Some("blocked"), Some("blocked")))
+          .join(conflicts, Seq(Columns.EventId), "left_anti")
+        assertEquivalent(empty, conflicts, empty, mixed)
+        assertEquals(SparkStreamingBatchStages.measureQuality(empty, conflicts, empty, mixed).closed, 2L)
+        assertEquivalent(empty, conflicts, empty, blocked)
+        assertEquals(SparkStreamingBatchStages.measureQuality(empty, conflicts, empty, blocked).closed, 0L)
       }
     }
   }

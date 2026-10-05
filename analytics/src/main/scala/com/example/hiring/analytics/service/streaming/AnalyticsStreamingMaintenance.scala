@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.service.streaming
 
-import cats.effect.{Async, Resource}
+import cats.effect.{Async, Outcome, Ref, Resource}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -17,9 +17,84 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
     lakehouseRoot: String,
     lakehouseLock: AnalyticsLakehouseLock[F],
     interval: FiniteDuration,
-    maintain: Instant => F[Unit]
+    maintain: Instant => F[Unit],
+    observe: Option[AnalyticsStreamingMaintenance.Observation => F[Unit]] = None
 ) {
+  import AnalyticsStreamingMaintenance.*
+
   private val F = Async[F]
+
+  private final case class State(
+      started: FiniteDuration,
+      lastSuccessMonotonic: Option[FiniteDuration],
+      lastSuccess: Option[Instant],
+      lastAttempt: Option[Instant],
+      outcome: Option[TickOutcome],
+      consecutiveDeferrals: Long,
+      maximumElapsed: FiniteDuration
+  ) {
+    def observation(now: FiniteDuration): Observation =
+      Observation(
+        lastSuccess,
+        lastAttempt,
+        outcome,
+        consecutiveDeferrals,
+        now - lastSuccessMonotonic.getOrElse(started),
+        maximumElapsed.max(now - lastSuccessMonotonic.getOrElse(started))
+      )
+  }
+
+  private def snapshot(state: Ref[F, State]): F[Observation] =
+    (state.get, F.monotonic).mapN((current, now) => current.observation(now))
+
+  private def record(state: Ref[F, State], outcome: TickOutcome): F[Unit] =
+    (F.realTimeInstant, F.monotonic).tupled.flatMap { case (at, now) =>
+      state.update { previous =>
+        val current = previous.copy(maximumElapsed =
+          previous.maximumElapsed.max(now - previous.lastSuccessMonotonic.getOrElse(previous.started))
+        )
+        outcome match {
+          case TickOutcome.Started   => current.copy(lastAttempt = Some(at), outcome = Some(outcome))
+          case TickOutcome.Succeeded =>
+            current.copy(
+              lastSuccess = Some(at),
+              lastSuccessMonotonic = Some(now),
+              outcome = Some(outcome),
+              consecutiveDeferrals = 0L
+            )
+          case TickOutcome.Deferred =>
+            current.copy(outcome = Some(outcome), consecutiveDeferrals = current.consecutiveDeferrals + 1L)
+          case _ => current.copy(outcome = Some(outcome))
+        }
+      } *> observe.traverse_(callback => snapshot(state).flatMap(callback))
+    }
+
+  private def observedTick(state: Ref[F, State]): F[Unit] =
+    (record(state, TickOutcome.Started) *>
+      lakehouseLock
+        .resource(lakehouseRoot)
+        .attempt
+        .use {
+          case Left(AnalyticsError.LakehouseLockTimeout) => F.pure(TickOutcome.Deferred)
+          case Left(error)                               => F.raiseError[TickOutcome](error)
+          case Right(_) => F.realTimeInstant.flatMap(maintain).as(TickOutcome.Succeeded)
+        }
+        .flatMap(record(state, _))).guaranteeCase {
+      case Outcome.Canceled()   => record(state, TickOutcome.Cancelled)
+      case Outcome.Errored(_)   => record(state, TickOutcome.Failed)
+      case Outcome.Succeeded(_) => F.unit
+    }
+
+  /** State is allocated for each runtime; elapsed time also advances while no tick can acquire ownership. */
+  def observedResource: Resource[F, Runtime[F]] =
+    for {
+      started <- Resource.eval(F.monotonic)
+      state <- Resource.eval(
+        Ref.of[F, State](State(started, None, None, None, None, 0L, scala.concurrent.duration.Duration.Zero))
+      )
+      _ <- Resource.make(F.unit)(_ => record(state, TickOutcome.Stopped))
+      joined <- (F.sleep(interval) *> observedTick(state)).foreverM[Unit].background
+    } yield Runtime(joined.flatMap(_.embedNever), snapshot(state))
 
   def runOnce: F[Unit] = lakehouseLock.resource(lakehouseRoot).attempt.use {
     case Left(AnalyticsError.LakehouseLockTimeout) => F.unit
@@ -30,5 +105,25 @@ final class AnalyticsStreamingMaintenance[F[_]: Async](
   def run: F[Unit] = (F.sleep(interval) *> runOnce).foreverM
 
   /** Race the returned join effect against query execution; Resource cancels maintenance during shutdown. */
-  def resource: Resource[F, F[Unit]] = run.background.map(joined => joined.flatMap(_.embedNever))
+  def resource: Resource[F, F[Unit]] = observedResource.map(_.join)
+}
+
+object AnalyticsStreamingMaintenance {
+  enum TickOutcome {
+    case Started, Succeeded, Deferred, Failed, Cancelled, Stopped
+  }
+
+  /** Sanitized process-local progress, containing no storage identity, payload, or exception detail. Without a
+    * successful tick, elapsed time is measured from runtime acquisition.
+    */
+  final case class Observation(
+      lastSuccess: Option[Instant],
+      lastAttempt: Option[Instant],
+      outcome: Option[TickOutcome],
+      consecutiveDeferrals: Long,
+      elapsedSinceSuccess: FiniteDuration,
+      maximumElapsedSinceSuccess: FiniteDuration
+  )
+
+  final case class Runtime[F[_]](join: F[Unit], observation: F[Observation])
 }

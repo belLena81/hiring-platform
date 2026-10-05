@@ -6,7 +6,7 @@ import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
-import cats.effect.Async
+import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -38,7 +38,34 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
       bronze: AnalyticsBronzeInput,
       markerTokens: DataFrame,
       activeMarkersPresent: Boolean
-  ): F[AnalyticsPreparedEvents] = {
+  ): F[AnalyticsPreparedEvents] =
+    loadQuarantineEvidence(spark, bronze, markerTokens, activeMarkersPresent).flatMap(persistQuarantine(_, bronze))
+
+  def quarantinePreparation(
+      spark: SparkSession,
+      bronze: AnalyticsBronzeInput,
+      markerTokens: DataFrame,
+      activeMarkersPresent: Boolean
+  ): Resource[F, AnalyticsPreparedEvents] =
+    Resource.eval(loadQuarantineEvidence(spark, bronze, markerTokens, activeMarkersPresent)).flatMap { evidence =>
+      SparkStreamingBatchStages
+        .cacheAdmissionFrames(Vector(evidence.conflicts), execution)
+        .evalMap(_ => persistQuarantine(evidence, bronze))
+    }
+
+  private final case class QuarantineEvidence(
+      safeValid: DataFrame,
+      malformedToPersist: DataFrame,
+      incomingSilver: DataFrame,
+      conflicts: DataFrame
+  )
+
+  private def loadQuarantineEvidence(
+      spark: SparkSession,
+      bronze: AnalyticsBronzeInput,
+      markerTokens: DataFrame,
+      activeMarkersPresent: Boolean
+  ): F[QuarantineEvidence] = {
     val parsed = bronze.frame
     for {
       valid <- blocking(OperationalEventTransforms.validEvents(parsed))
@@ -92,6 +119,18 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
           .distinct()
       )
       conflicts <- blocking(newConflicts.unionByName(historicalConflicts).distinct())
+    } yield QuarantineEvidence(safeValid, malformedToPersist, incomingSilver, conflicts)
+  }
+
+  private def persistQuarantine(
+      evidence: QuarantineEvidence,
+      bronze: AnalyticsBronzeInput
+  ): F[AnalyticsPreparedEvents] = {
+    val safeValid = evidence.safeValid
+    val malformedToPersist = evidence.malformedToPersist
+    val incomingSilver = evidence.incomingSilver
+    val conflicts = evidence.conflicts
+    for {
       conflictCounts <- blocking {
         val row = safeValid
           .alias("safe")

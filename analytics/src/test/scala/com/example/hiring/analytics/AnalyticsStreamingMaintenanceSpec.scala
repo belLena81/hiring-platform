@@ -172,4 +172,177 @@ final class AnalyticsStreamingMaintenanceSpec extends CatsEffectSuite {
       IO(assertEquals(result, Left(AnalyticsError.LakehouseLockTimeout)))
     }
   }
+
+  test("observed maintenance reports deferrals, advancing age, success and isolated runtime state") {
+    import AnalyticsStreamingMaintenance.TickOutcome
+    TestControl.executeEmbed {
+      for {
+        attempts <- Ref.of[IO, Int](0)
+        observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
+        lock = new AnalyticsLakehouseLock[IO] {
+          override def resource(root: String): Resource[IO, Unit] =
+            Resource.eval(attempts.getAndUpdate(_ + 1)).flatMap {
+              case 0 | 1 => Resource.eval(IO.raiseError[Unit](AnalyticsError.LakehouseLockTimeout))
+              case _     => Resource.pure[IO, Unit](())
+            }
+        }
+        maintenance = new AnalyticsStreamingMaintenance[IO](
+          "hiring",
+          lock,
+          60.seconds,
+          _ => IO.unit,
+          Some(value => observations.update(_ :+ value))
+        )
+        _ <- maintenance.observedResource.use { runtime =>
+          for {
+            _ <- IO.sleep(125.seconds)
+            deferred <- runtime.observation
+            _ <- IO {
+              assertEquals(deferred.outcome, Some(TickOutcome.Deferred))
+              assertEquals(deferred.consecutiveDeferrals, 2L)
+              assertEquals(deferred.elapsedSinceSuccess, 125.seconds)
+              assertEquals(deferred.lastSuccess, None)
+              assert(deferred.lastAttempt.nonEmpty)
+            }
+            _ <- IO.sleep(60.seconds)
+            succeeded <- runtime.observation
+            _ <- IO {
+              assertEquals(succeeded.outcome, Some(TickOutcome.Succeeded))
+              assertEquals(succeeded.consecutiveDeferrals, 0L)
+              assertEquals(succeeded.elapsedSinceSuccess, 5.seconds)
+              assert(succeeded.lastSuccess.nonEmpty)
+            }
+          } yield ()
+        }
+        recorded <- observations.get
+        _ <- IO(
+          assertEquals(
+            recorded.map(_.outcome),
+            Vector(
+              Some(TickOutcome.Started),
+              Some(TickOutcome.Deferred),
+              Some(TickOutcome.Started),
+              Some(TickOutcome.Deferred),
+              Some(TickOutcome.Started),
+              Some(TickOutcome.Succeeded),
+              Some(TickOutcome.Stopped)
+            )
+          )
+        )
+        _ <- maintenance.observedResource.use(_.observation.flatMap { fresh =>
+          IO {
+            assertEquals(fresh.outcome, None)
+            assertEquals(fresh.lastSuccess, None)
+            assertEquals(fresh.elapsedSinceSuccess, Duration.Zero)
+          }
+        })
+      } yield ()
+    }
+  }
+
+  test("fatal body and finalizer failures are reported without exposing exception details") {
+    import AnalyticsStreamingMaintenance.TickOutcome
+    val failure = new IllegalStateException("sensitive storage detail")
+    TestControl.executeEmbed {
+      List(false, true).traverse_ { failOnRelease =>
+        for {
+          observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
+          lock = new AnalyticsLakehouseLock[IO] {
+            override def resource(root: String): Resource[IO, Unit] =
+              Resource.make(IO.unit)(_ => if (failOnRelease) IO.raiseError(failure) else IO.unit)
+          }
+          maintenance = new AnalyticsStreamingMaintenance[IO](
+            "hiring",
+            lock,
+            60.seconds,
+            _ => if (failOnRelease) IO.unit else IO.raiseError(failure),
+            Some(value => observations.update(_ :+ value))
+          )
+          result <- maintenance.resource.use(_.attempt)
+          recorded <- observations.get
+          _ <- IO {
+            assertEquals(result, Left(failure))
+            assertEquals(
+              recorded.map(_.outcome).takeRight(2),
+              Vector(Some(TickOutcome.Failed), Some(TickOutcome.Stopped))
+            )
+            assert(recorded.forall(_.lastSuccess.isEmpty))
+            assert(!recorded.toString.contains("sensitive storage detail"))
+          }
+        } yield ()
+      }
+    }
+  }
+
+  test("resource shutdown reports cancellation and releases owned maintenance") {
+    import AnalyticsStreamingMaintenance.TickOutcome
+    TestControl.executeEmbed {
+      for {
+        entered <- Deferred[IO, Unit]
+        held <- Ref.of[IO, Boolean](false)
+        observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
+        lock = new AnalyticsLakehouseLock[IO] {
+          override def resource(root: String): Resource[IO, Unit] = Resource.make(held.set(true))(_ => held.set(false))
+        }
+        maintenance = new AnalyticsStreamingMaintenance[IO](
+          "hiring",
+          lock,
+          60.seconds,
+          _ => entered.complete(()).void *> IO.never,
+          Some(value => observations.update(_ :+ value))
+        )
+        _ <- maintenance.observedResource.use(_ => entered.get)
+        released <- held.get
+        recorded <- observations.get
+        _ <- IO {
+          assertEquals(released, false)
+          assertEquals(
+            recorded.map(_.outcome).takeRight(2),
+            Vector(Some(TickOutcome.Cancelled), Some(TickOutcome.Stopped))
+          )
+          assert(recorded.forall(_.lastSuccess.isEmpty))
+        }
+      } yield ()
+    }
+  }
+
+  test("maximum maintenance age includes a slow successful body before its age resets") {
+    TestControl.executeEmbed {
+      AnalyticsLakehouseLock.processLocal[IO].use { lock =>
+        new AnalyticsStreamingMaintenance[IO]("hiring", lock, 60.seconds, _ => IO.sleep(250.seconds)).observedResource
+          .use { runtime =>
+            IO.sleep(315.seconds) *> runtime.observation.flatMap { observed =>
+              IO {
+                assert(observed.lastSuccess.nonEmpty)
+                assertEquals(observed.elapsedSinceSuccess, 5.seconds)
+                assertEquals(observed.maximumElapsedSinceSuccess, 310.seconds)
+              }
+            }
+          }
+      }
+    }
+  }
+
+  test("shutdown during idle sleep records stopped and the final elapsed bound") {
+    TestControl.executeEmbed {
+      for {
+        observations <- Ref.of[IO, Vector[AnalyticsStreamingMaintenance.Observation]](Vector.empty)
+        _ <- AnalyticsLakehouseLock.processLocal[IO].use { lock =>
+          new AnalyticsStreamingMaintenance[IO](
+            "hiring",
+            lock,
+            60.seconds,
+            _ => IO.unit,
+            Some(value => observations.update(_ :+ value))
+          ).resource.use(_ => IO.sleep(30.seconds))
+        }
+        recorded <- observations.get
+        _ <- IO {
+          assertEquals(recorded.map(_.outcome), Vector(Some(AnalyticsStreamingMaintenance.TickOutcome.Stopped)))
+          assertEquals(recorded.map(_.maximumElapsedSinceSuccess), Vector(30.seconds))
+        }
+      } yield ()
+    }
+  }
+
 }

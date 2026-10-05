@@ -46,6 +46,14 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
   )
   private[cli] case class Observations(maxBacklog: Int = 0, maxObserverHeapBytes: Long = 0L)
 
+  private[cli] def pendingBronzeMinima(samples: Vector[Sample]): Vector[(Int, Long)] =
+    samples
+      .filter(_.bronzeAt.isEmpty)
+      .groupBy(_.partition)
+      .toVector
+      .map { case (partition, values) => partition -> values.map(_.offset).min }
+      .sortBy(_._1)
+
   /** Bronze availability ends at its completed read, before unrelated report verification. */
   private[cli] def observeBronze(
       samples: Ref[IO, Vector[Sample]],
@@ -284,9 +292,7 @@ object HiringAnalyticsStreamingWorkloadMain extends IOApp {
                       coordinates <- execution {
                         if (!DeltaTable.isDeltaTable(spark, bronze)) Set.empty[(Int, Long)]
                         else {
-                          val minimum = existing.groupBy(_.partition).toVector.map { case (partition, values) =>
-                            partition -> values.map(_.offset).min
-                          }
+                          val minimum = pendingBronzeMinima(existing)
                           val predicate = minimum.foldLeft(lit(false)) { case (condition, (partition, offset)) =>
                             condition || (col("partition") === partition && col("offset") >= offset)
                           }

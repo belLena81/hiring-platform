@@ -613,40 +613,16 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       candidateWatermark: Option[Timestamp],
       completedAt: Option[Timestamp]
   ): Unit = {
-    val sourceRow = Row(
-      identity.lineage.value,
-      identity.batchId.value,
-      status,
-      candidateWatermark.orNull,
-      completedAt.orNull
-    )
-    val sourceSchema = StructType(
-      Vector(
-        StructField(LineageColumn, StringType, nullable = false),
-        StructField(BatchIdColumn, LongType, nullable = false),
-        StructField(OutcomeColumn, StringType, nullable = false),
-        StructField(CandidateWatermarkColumn, TimestampType, nullable = true),
-        StructField(CompletedAtColumn, TimestampType, nullable = true)
-      )
-    )
-    val source = spark.createDataFrame(Vector(sourceRow).asJava, sourceSchema)
     DeltaTable
       .forPath(spark, SparkPhysicalLocation.resolve(paths.streamingProgress))
-      .as("target")
-      .merge(
-        source.as("source"),
-        s"target.$LineageColumn = source.$LineageColumn AND target.$BatchIdColumn = source.$BatchIdColumn AND " +
-          s"target.$OutcomeColumn IN ('$PreparedName', '$IngestionCommittedName')"
-      )
-      .whenMatched()
-      .updateExpr(
+      .update(
+        identityFilter(identity) && col(OutcomeColumn).isin(PreparedName, IngestionCommittedName),
         Map(
-          OutcomeColumn -> s"source.$OutcomeColumn",
-          CandidateWatermarkColumn -> s"source.$CandidateWatermarkColumn",
-          CompletedAtColumn -> s"source.$CompletedAtColumn"
+          OutcomeColumn -> lit(status),
+          CandidateWatermarkColumn -> lit(candidateWatermark.orNull).cast(TimestampType),
+          CompletedAtColumn -> lit(completedAt.orNull).cast(TimestampType)
         ).asJava
       )
-      .execute()
   }
 
   private def ensureProgressTable(): Unit =
