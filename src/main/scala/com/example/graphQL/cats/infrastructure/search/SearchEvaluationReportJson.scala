@@ -48,6 +48,13 @@ object SearchEvaluationReportJson {
       Json.obj("outcome" -> text("Unavailable"), "reason" -> text(reason.toString))
   }
 
+  def renderAssessment(value: SearchEvaluationAssessmentResult): Json = Json.obj(
+    "decision" -> text(value.decision.toString),
+    "policyIdentity" -> text(value.policyIdentity),
+    "evaluatedUseCases" -> Json.arr(value.evaluatedUseCases.map(useCase => text(useCase.toString))*),
+    "reasons" -> Json.arr(value.reasons.map(reason => text(reason.toString))*)
+  )
+
   def render(report: SearchEvaluationReport): Json = {
     val run = report.run
     val coordinates = run.coordinates
@@ -69,6 +76,7 @@ object SearchEvaluationReportJson {
       "workload" -> Json.obj(
         "rankingOrigin" -> text(coordinates.rankingOrigin.toString),
         "embeddingModel" -> text(coordinates.embeddingModel),
+        "embeddingProvenance" -> text(coordinates.embeddingProvenance.toString),
         "embeddingDimensions" -> Json.fromInt(coordinates.embeddingDimensions),
         "indexIdentity" -> text(coordinates.indexIdentity),
         "numCandidates" -> Json.fromInt(coordinates.numCandidates),
@@ -125,8 +133,16 @@ object SearchEvaluationReportJson {
         )*
       ),
       "acceptance" -> Json.obj(
-        "adoption" -> text(report.adoption.toString),
-        "reliabilityGate" -> text("NotAssessableThresholdNotAgreed"),
+        "adoption" -> text(report.assessment.fold(report.adoption.toString)(_.decision.toString)),
+        "assessment" -> optional(report.assessment)(renderAssessment),
+        "reliabilityGate" -> text(report.assessment.fold("NotAssessableThresholdNotAgreed") { a =>
+          if (a.reasons.contains(SearchEvaluationAssessmentReason.RetrievalFailure)) "Failed"
+          else if (a.reasons.contains(SearchEvaluationAssessmentReason.PolicyProposed))
+            "NotAssessableThresholdNotAgreed"
+          else if (a.reasons.contains(SearchEvaluationAssessmentReason.IncompleteCoverage))
+            "NotAssessableIncompleteCoverage"
+          else "Passed"
+        }),
         "qualityConvention" -> text("SuccessfulOnlyIncludingEmptyAndNoPositiveLabels"),
         "zeroMetricConvention" -> text("EmptyJudgmentsOrExactSetProduceZero")
       )

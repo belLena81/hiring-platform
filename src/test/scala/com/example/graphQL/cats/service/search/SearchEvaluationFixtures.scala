@@ -183,7 +183,8 @@ object SearchEvaluationFixtures {
       8,
       8,
       K,
-      "RRF score descending, branch ranks ascending, UUID ascending"
+      "RRF score descending, branch ranks ascending, UUID ascending",
+      SearchEvaluationEmbeddingProvenance.AuthoredFixture
     )
     SearchEvaluationRun(strategy, coordinates, 1, 0, false, timestamp, None, environment, Nil)
   }

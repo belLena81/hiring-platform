@@ -8,7 +8,8 @@ enum SearchEvaluationSplit { case Tuning, HeldOut }
 enum SearchEvaluationJudgmentOrigin { case Synthetic, ProvisionalFabricated, HumanReviewedFabricated }
 enum SearchEvaluationLabelReview { case Pending, Reviewed }
 enum SearchEvaluationStrategy { case Lexical, Vector, ApplicationRrf, AtlasAnn }
-enum SearchEvaluationRankingOrigin { case AuthoredFixture, ObservedAtlas }
+enum SearchEvaluationRankingOrigin { case AuthoredFixture, ObservedAtlas, ObservedApplication }
+enum SearchEvaluationEmbeddingProvenance { case AuthoredFixture, SyntheticFixture, ProviderGenerated }
 enum SearchEvaluationFailure { case RetrievalFailed, ReferenceFailed, TimedOut }
 enum SearchEvaluationUnavailable { case UnsupportedUseCase, NotCaptured, RequiresAtlas }
 enum SearchEvaluationTelemetry {
@@ -63,7 +64,8 @@ final case class SearchEvaluationCoordinates(
     numCandidates: Int,
     branchResultLimit: Int,
     pageSize: Int,
-    tieRule: String
+    tieRule: String,
+    embeddingProvenance: SearchEvaluationEmbeddingProvenance = SearchEvaluationEmbeddingProvenance.SyntheticFixture
 )
 final case class SearchEvaluationEnvironment(
     identity: String,
@@ -135,5 +137,6 @@ final case class SearchEvaluationReport(
     queries: List[SearchEvaluationQueryResult],
     summary: SearchEvaluationSummary,
     groups: List[SearchEvaluationGroup],
-    adoption: SearchEvaluationAdoption
+    adoption: SearchEvaluationAdoption,
+    assessment: Option[SearchEvaluationAssessmentResult] = None
 )

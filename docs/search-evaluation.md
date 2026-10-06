@@ -4,7 +4,7 @@ This procedure separates relevance, retrieval quality, latency, and provider cos
 
 The [current roadmap](development-milestones.md) places MongoDB/vector optimization in Phase 8, search evaluation and embedding architecture in Phase 9, and AI discovery in Phase 10. Existing metrics and the disposable runner provide a baseline; they do not complete those phases.
 
-The [search evaluation and embedding specification](specs/hiring-search-enhancements.md#search-evaluation-and-embedding-architecture) owns the detailed target contracts and acceptance criteria. It preserves HSE-06/HSE-07 and separates deterministic synthetic retrieval checks from human-authored relevance judgments over fabricated hiring data. The commands below describe the existing runner; they do not establish implementation of that later evaluation stage or authorize Atlas/provider spending. [MongoDB/vector optimization](specs/mongodb-vector-retrieval-optimization.md) owns access-plan and ANN tuning; [discovery](specs/hiring-discovery-search-quality.md) owns adoption of evaluated product changes.
+The [search evaluation and embedding specification](specs/hiring-search-enhancements.md#search-evaluation-and-embedding-architecture) owns the detailed contracts and acceptance criteria. It preserves HSE-06/HSE-07 and separates deterministic synthetic retrieval checks from human-authored relevance judgments over fabricated hiring data. Local preparation and typed assessment do not authorize Atlas/provider spending. [MongoDB/vector optimization](specs/mongodb-vector-retrieval-optimization.md) owns access-plan and ANN tuning; [discovery](specs/hiring-discovery-search-quality.md) owns adoption of evaluated product changes.
 
 ## Bounded retrieval comparison
 
@@ -39,7 +39,37 @@ sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationFixt
 
 Both entrypoints separately fingerprint the actual Scala source tree, including fixtures. The caller's revision label and fingerprint are distinct: a Git HEAD alone cannot identify uncommitted changes. The replay defaults to K=7 and concurrency 1; its bounded concurrency-8 run and fixture tests check deterministic execution. Each replay writes a separate run directory to preserve earlier artifacts.
 
-Quality averages alone cannot authorize adoption. The separate reliability threshold, relevance/latency/cost conditions, reviewed held-out labels and paired live evidence remain pending. Eligibility or privacy violations block acceptance irrespective of relevance scores or reliability averages.
+Quality averages alone cannot authorize adoption. The conservative evaluation policy is approved; reviewed held-out labels and paired live relevance, reliability, latency and cost evidence remain pending. Eligibility or privacy violations block acceptance irrespective of relevance scores or reliability averages.
+
+## Paired ranking assessment
+
+`SearchEvaluationAssessment.assess` takes two validated reports, an explicitly scoped policy, a digest-bound human label attestation and separately observed privacy/eligibility/billing evidence for each run. It recomputes canonical measurements before trusting a report. The numerical core remains separate from JSON; `SearchEvaluationReportJson.renderAssessment` renders the decision and reasons. An assessment is an evaluation recommendation and never changes the configured search strategy.
+
+The conservative policy approved by the user on October 6 requires no held-out Recall@K or NDCG@K regression in any selected use-case/filter group, no failed supported queries (including tuning), and no p95 or provider-request increase. The assessment separately requires no observed billing cost increase and may add an absolute billed-cost ceiling; no absolute currency amount has been chosen. Provider-request counts do not establish billing cost. Selected use cases need complete supported-query coverage and held-out groups; unsupported combinations remain explicit and cannot silently shrink the accepted scope.
+
+Human label review must identify the exact corpus digest and judgment identity. Provisional labels, an unagreed policy, authored rankings, synthetic embeddings, missing measurements or missing observed privacy/eligibility evidence defer recommendation. Recorded privacy or eligibility failure rejects it. Invalid policy/coordinates or modified numerical summaries fail typed validation. An observed Atlas ranking using fabricated vectors is still tooling evidence; positive semantic-quality recommendation requires genuine provider-generated embeddings and the other observed acceptance evidence.
+
+The user approved the conservative evaluation policy and explicitly kept labels **pending human review**. The curated runner records that agreed policy; general policy construction defaults to proposed. Local tests use fabricated label attestations and observed-evidence values only to exercise the assessment; they are not human signoff or billing observations.
+
+## Curated judgment review and retrieval capture
+
+Export the complete review packet without a provider or database connection:
+
+```bash
+sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationJudgmentReview'
+```
+
+The packet is written under ignored `.local/data/search-evaluation/judgment-review/`, named by the corpus digest. It includes all sixteen fabricated entities and twelve queries, their fixed tuning/held-out split, eligibility, binary labels, intended roles/required skills and every eligible entity's rationale. Review the packet, adjudicate ambiguity and record the human reviewer against its exact corpus digest and judgment identity. Exporting or automatically checking the packet leaves its human review status pending.
+
+The separate curated runner captures supported queries through the production service and Mongo retrieval code using isolated, deterministic fixture vectors. It requires both explicit authorization and a securely configured disposable `ATLAS_TEST_URI`; it cannot target a caller-selected application database. Run only after the disposable Atlas execution has been authorized:
+
+```bash
+sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.HiringSearchEvaluationAtlasRunner --authorize-disposable-atlas --output .local/data/search-evaluation --source-revision <working-tree-id> --concurrency 1'
+```
+
+Use concurrency 8 for the paired execution. The runner owns a generated `search_evaluation_` nonce database and its cleanup, verifies four production index definitions/readiness, and seeds closed/deleted/inactive/stale-source and consent/private-filter fixtures. Supported job-search and recruiter combinations capture lexical, vector and application RRF results; recommendations support only broad vector queries because their current API has no filters. Unsupported modes and filtered recommendation cases stay explicit in the twelve-query corpus.
+
+These are **observed retrieval with synthetic embeddings** when actually executed. They do not constitute semantic relevance acceptance, human signoff, production activation or billing observations. Provider requests are zero; Atlas cost remains unknown. Local compilation and controlled adapter tests are preparation evidence; absence of an executed live run remains unverified.
 
 ## Automated Embedding comparison
 
