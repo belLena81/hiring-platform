@@ -273,7 +273,7 @@ final class MongoUserRepository(
           }
         } yield ()
       }.pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+        MongoRepositorySupport.transactionGuard(diagnostics, "MongoUserRepository.write", session)(effect)(mapWrite)
       )
 
   override def createAccount(
@@ -392,7 +392,7 @@ final class MongoUserRepository(
         case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
       }
       .pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+        MongoRepositorySupport.transactionGuard(diagnostics, "MongoUserRepository.write", session)(effect)(mapWrite)
       )
   }
 

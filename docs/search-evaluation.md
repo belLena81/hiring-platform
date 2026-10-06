@@ -13,7 +13,7 @@ Use an authorized disposable Atlas deployment configured through `ATLAS_TEST_URI
 Run it only against a disposable Atlas database, once for each concurrency/temperature combination you want to compare:
 
 ```bash
-sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.SearchEvaluationAtlasRunner --database search_evaluation_benchmark --output .local/data/search-evaluation --documents 10000 --queries 100 --dimensions 1024 --num-candidates 100 --page-size 20 --concurrency 8 --temperature cold --seed 20260923'
+sbt 'IntegrationTest / runMain com.example.graphQL.cats.repository.mongo.SearchEvaluationAtlasRunner --source-revision <working-tree-id> --database search_evaluation_benchmark --output .local/data/search-evaluation --documents 10000 --queries 100 --dimensions 1024 --num-candidates 100 --page-size 20 --concurrency 8 --temperature cold --seed 20260923'
 ```
 
 Use `--concurrency 1` and `--temperature warm` for the other runs. `ATLAS_TEST_URI` must point to a disposable test deployment; the runner does not print the URI. The output includes Atlas version, workload, collection index size when `collStats` permits it, paired ANN/ENN latency and errors, ANN-vs-ENN recall, independent synthetic judged ranking metrics, and explicit nulls where Atlas Vector Search index bytes or CPU/memory/query telemetry are not available to the driver. `collectionIndexBytes` is not Atlas Vector Search index size. Add vector-index size and Atlas CPU/memory/query metrics from the Atlas metrics export before comparing resource costs. The recorded local evidence covers compilation; it does not include execution against Atlas.
@@ -22,7 +22,24 @@ Compare the configured application-side RRF baseline with the selected experimen
 
 Write one JSON run record per strategy containing those inputs and measurements. Keep raw query text synthetic. Do not claim a performance improvement without paired results under the same environment and workload. Use measured relevance and resource tradeoffs to decide whether an experimental fusion mode should be enabled.
 
-`SearchEvaluationHarness.report` turns one captured paired run into the JSON record shape used for comparison. Supply, per query, ANN and ENN rankings, judged relevant IDs, both observed latencies, and any error; also supply workload and environment values captured by the Atlas driver. The report calculates mean Recall@K against ENN, mean NDCG@K against judgments, success/error counts, throughput, and separate p50/p95/p99 latency for ANN and ENN. It carries Atlas query metrics, collection/vector index sizes, CPU, memory, and provider request counts through unchanged so missing measurements remain explicit `null` values. The pure report builder does not connect to Atlas or invent environment measurements.
+The evaluation core validates typed corpus/run observations and produces an immutable numerical report; the infrastructure JSON adapter renders it. Ranking failures and exact-reference failures are separate. Recall/NDCG quality means cover successful rankings only, with explicit denominators and attempted/success/failed/unavailable counts. Fidelity requires both retrieval and exact-reference success and has its own denominator. Successful empty eligible sets or queries without positive judgments retain the zero metric convention and are counted explicitly. Missing telemetry includes a reason; absent retrieval latency or billing is never inferred from fixture replay.
+
+## Local fixture preparation
+
+The approved local workload contains eight fabricated jobs, eight candidate summaries and twelve queries (four per use case), equally split between tuning and held-out sets. The binary rubric uses intended role and required skills. The rubric is user approved, but generated per-query labels are provisional until domain review; approving the rubric does not make these labels human reviewed. Freeze corpus/judgment digests and the split before any future tuning.
+
+Offline replay supplies authored vector/lexical branch rankings to the actual application RRF functions and the same typed evaluator/renderer used by the Atlas adapter. It checks reproducibility, numerical/report behavior and existing ranking ties. It does not execute lexical/vector retrieval, measure live search latency or establish human relevance. Recommendations remain vector-only; lexical/hybrid recommendation combinations are reported unavailable. No provider calls or paid requests are made. Reports belong under ignored `.local/data/search-evaluation/` and logs under `.local/logs/`.
+
+Run from the repository root with Java 17+ and an explicit label for the working tree being measured:
+
+```bash
+sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationFixtureReplay --source-revision <working-tree-id>'
+sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationFixtureReplay --source-revision <working-tree-id> --concurrency 8'
+```
+
+Both entrypoints separately fingerprint the actual Scala source tree, including fixtures. The caller's revision label and fingerprint are distinct: a Git HEAD alone cannot identify uncommitted changes. The replay defaults to K=7 and concurrency 1; its bounded concurrency-8 run and fixture tests check deterministic execution. Each replay writes a separate run directory to preserve earlier artifacts.
+
+Quality averages alone cannot authorize adoption. The separate reliability threshold, relevance/latency/cost conditions, reviewed held-out labels and paired live evidence remain pending. Eligibility or privacy violations block acceptance irrespective of relevance scores or reliability averages.
 
 ## Automated Embedding comparison
 

@@ -2,19 +2,19 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{ExitCode, IO, IOApp, Resource}
 import cats.syntax.all.*
-import com.example.graphQL.cats.service.search.{SearchEvaluationHarness, SearchEvaluationQuery, SearchEvaluationRun}
+import com.example.graphQL.cats.service.search.*
+import com.example.graphQL.cats.infrastructure.search.{SearchEvaluationArtifacts, SearchEvaluationReportJson}
+import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.pagination.PageSize
 import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
 import mongo4cats.codecs.CodecRegistry
 import mongo4cats.bson.Document as CatsDocument
-import io.circe.Json
 import org.bson.Document
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
-import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
@@ -34,10 +34,15 @@ object SearchEvaluationAtlasRunner extends IOApp {
       pageSize: Int,
       concurrency: Int,
       temperature: String,
-      seed: Long
+      seed: Long,
+      sourceRevision: String
   )
 
-  private final case class TimedRanking(ids: List[String], latencyMillis: Double, error: Option[String])
+  private final case class TimedRanking(
+      ids: List[String],
+      latencyMillis: Double,
+      error: Option[SearchEvaluationFailure]
+  )
   private final case class PairedRanking(queryId: String, ann: TimedRanking, enn: TimedRanking)
 
   override def run(args: List[String]): IO[ExitCode] =
@@ -62,6 +67,10 @@ object SearchEvaluationAtlasRunner extends IOApp {
       uri <- sys.env.get("ATLAS_TEST_URI").toRight("Set ATLAS_TEST_URI for an authorized disposable Atlas deployment.")
       database <- values.get("database").toRight("Supply --database for the disposable evaluation collection.")
       output <- values.get("output").toRight("Supply --output directory for JSON run records.")
+      sourceRevision <- values
+        .get("source-revision")
+        .filter(_.trim.nonEmpty)
+        .toRight("Supply --source-revision for this working tree; its Scala fingerprint is captured separately.")
       documents <- int("documents", 128)
       queries <- int("queries", 20)
       dimensions <- int("dimensions", 1024)
@@ -106,7 +115,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
       pageSize,
       concurrency,
       temperature,
-      seed
+      seed,
+      sourceRevision
     )
   }
 
@@ -247,7 +257,12 @@ object SearchEvaluationAtlasRunner extends IOApp {
       result <- retrieve(collection, settings, vector, category, exact).attempt
       ended <- IO.monotonic
     } yield result.fold(
-      error => TimedRanking(Nil, (ended - started).toNanos.toDouble / 1000000.0, Some(error.getClass.getSimpleName)),
+      _ =>
+        TimedRanking(
+          Nil,
+          (ended - started).toNanos.toDouble / 1000000.0,
+          Some(if (exact) SearchEvaluationFailure.ReferenceFailed else SearchEvaluationFailure.RetrievalFailed)
+        ),
       ids => TimedRanking(ids, (ended - started).toNanos.toDouble / 1000000.0, None)
     )
 
@@ -284,54 +299,106 @@ object SearchEvaluationAtlasRunner extends IOApp {
       durationMillis: Long,
       indexBytes: Option[Long]
   ): IO[Unit] = {
-    val filters = Json.obj(
-      "categories" -> Json.fromInt(10),
-      "queryBuckets" -> Json.fromString("broad, selective, and empty filters in round-robin order")
-    )
-    val queryMetrics =
-      Json.obj("source" -> Json.fromString("runner local observations; Atlas query metrics unavailable"))
-    val report = SearchEvaluationRun(
-      strategy = "atlasAnnComparedWithEnn",
-      datasetDocuments = settings.datasetDocuments,
-      filters = filters,
-      embeddingModel = "deterministic-synthetic",
-      embeddingDimensions = settings.dimensions,
-      quantization = "index-default",
-      numCandidates = settings.numCandidates,
-      branchResultLimit = settings.numCandidates,
-      pageSize = settings.pageSize,
-      concurrency = settings.concurrency,
-      durationMillis = durationMillis,
-      warmupQueries = if (settings.temperature == "warm") settings.queryCount else 0,
-      temperature = settings.temperature,
-      timestampUtc = Instant.now().toString,
-      environment = s"${settings.database} disposable synthetic Atlas workload",
-      atlasVersion = atlasVersion,
-      collectionIndexBytes = indexBytes,
-      vectorSearchIndexBytes = None,
-      cpuMillis = None,
-      peakMemoryBytes = None,
-      providerRequests = Some(0L),
-      queryMetrics = queryMetrics,
-      queries = results.map { result =>
-        SearchEvaluationQuery(
+    val entityIds = (0 until settings.datasetDocuments).map(id => f"doc-$id%05d").toList
+    val corpusIdentity =
+      s"synthetic-vector-${settings.seed}-${settings.datasetDocuments}-${settings.dimensions}-${settings.queryCount}"
+    val corpus = SearchEvaluationCorpus(
+      corpusIdentity,
+      SourceHash.sha256(corpusIdentity),
+      settings.seed,
+      entityIds,
+      SearchEvaluationRubric(
+        "independent-synthetic-topic",
+        SearchEvaluationJudgmentOrigin.Synthetic,
+        false,
+        "synthetic topic generator"
+      ),
+      results.zipWithIndex.map { case (result, index) =>
+        val number = index + 1
+        val eligible = entityIds.zipWithIndex.collect {
+          case (id, entityIndex) if number % 3 == 0 || (number % 3 == 1 && entityIndex % 10 == number % 10) => id
+        }
+        val group = number % 3 match {
+          case 0 => SearchEvaluationFilterGroup.Broad
+          case 1 => SearchEvaluationFilterGroup.Selective
+          case _ => SearchEvaluationFilterGroup.Empty
+        }
+        SearchEvaluationFixtureQuery(
           result.queryId,
+          SearchEvaluationUseCase.JobSearch,
+          group,
+          SearchEvaluationSplit.HeldOut,
+          s"category-bucket-${number % 3}",
+          eligible,
           judgedRelevantIds(settings, result.queryId),
-          result.ann.ids,
-          result.enn.ids,
-          result.ann.latencyMillis,
-          Some(result.enn.latencyMillis),
-          result.ann.error.orElse(result.enn.error)
+          SearchEvaluationLabelReview.Pending
         )
       }
     )
-    val json = SearchEvaluationHarness.report(report, settings.pageSize).spaces2
-    val filename = s"search-evaluation-${settings.concurrency}-${Instant.now().toEpochMilli}.json"
-    IO.blocking {
-      Files.createDirectories(settings.outputDirectory)
-      Files.writeString(settings.outputDirectory.resolve(filename), json, StandardCharsets.UTF_8)
-      ()
+    def observation(value: TimedRanking): SearchEvaluationRanking = value.error match {
+      case Some(category) => SearchEvaluationRanking.Failed(category, Some(value.latencyMillis))
+      case None           => SearchEvaluationRanking.Succeeded(value.ids, Some(value.latencyMillis))
     }
+    for {
+      fingerprint <- SearchEvaluationArtifacts.sourceFingerprint
+      timestamp <- IO.realTimeInstant
+      run = SearchEvaluationRun(
+        SearchEvaluationStrategy.AtlasAnn,
+        SearchEvaluationCoordinates(
+          settings.sourceRevision,
+          fingerprint,
+          corpus.identity,
+          corpus.digest,
+          corpus.rubric.identity,
+          SearchEvaluationRankingOrigin.ObservedAtlas,
+          "deterministic-synthetic",
+          settings.dimensions,
+          s"synthetic-vector-cosine-dimensions-${settings.dimensions}-category",
+          settings.numCandidates,
+          settings.numCandidates,
+          settings.pageSize,
+          "captured Atlas branch order"
+        ),
+        settings.concurrency,
+        if (settings.temperature == "warm") settings.queryCount else 0,
+        settings.temperature == "warm",
+        timestamp,
+        Option.when(durationMillis > 0L)(durationMillis),
+        SearchEvaluationEnvironment(
+          "disposable synthetic Atlas",
+          Some(atlasVersion),
+          indexBytes,
+          None,
+          None,
+          None,
+          Some(0L),
+          Map(
+            SearchEvaluationTelemetry.Cpu -> SearchEvaluationTelemetryReason.NotCaptured,
+            SearchEvaluationTelemetry.Memory -> SearchEvaluationTelemetryReason.NotCaptured,
+            SearchEvaluationTelemetry.VectorIndex -> SearchEvaluationTelemetryReason.NotCaptured,
+            SearchEvaluationTelemetry.Billing -> SearchEvaluationTelemetryReason.NoProviderUsed,
+            SearchEvaluationTelemetry.AtlasQueryMetrics -> SearchEvaluationTelemetryReason.NotCaptured
+          ) ++
+            Option.when(indexBytes.isEmpty)(
+              SearchEvaluationTelemetry.CollectionIndex -> SearchEvaluationTelemetryReason.NotCaptured
+            )
+        ),
+        results.map(result => SearchEvaluationQuery(result.queryId, observation(result.ann), observation(result.enn)))
+      )
+      report <- IO.fromEither(
+        SearchEvaluationHarness
+          .report(corpus, run, settings.pageSize)
+          .left
+          .map(_ => new IllegalArgumentException("Invalid synthetic evaluation observations"))
+      )
+      json = SearchEvaluationReportJson.render(report).spaces2
+      filename = s"search-evaluation-${settings.concurrency}-${timestamp.toEpochMilli}.json"
+      _ <- IO.blocking {
+        Files.createDirectories(settings.outputDirectory)
+        Files.writeString(settings.outputDirectory.resolve(filename), json, StandardCharsets.UTF_8)
+        ()
+      }
+    } yield ()
   }
 
   private def judgedRelevantIds(settings: Settings, queryId: String): Set[String] = {

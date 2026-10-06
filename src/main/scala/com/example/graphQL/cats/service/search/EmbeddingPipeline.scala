@@ -2,13 +2,13 @@ package com.example.graphQL.cats.service.search
 
 import cats.effect.std.Queue
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, EntityEmbedding, SearchableText}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.example.graphQL.cats.shared.crypto.SourceHash
 import fs2.Stream
 import java.time.Instant
 import retry.*
@@ -83,12 +83,6 @@ final class EmbeddingPipeline(
     case Terminal(failure: EmbeddingWorkFailure)
   }
 
-  private enum EmbeddingOutcome {
-    case Embedded(value: EntityEmbedding)
-    case Retry
-    case Discarded
-  }
-
   private val retryPolicy: RetryPolicy[IO, ProcessingOutcome] =
     limitRetries[IO](math.max(retryAttempts - 1, 0)) join constantDelay[IO](retryDelay)
 
@@ -137,17 +131,13 @@ final class EmbeddingPipeline(
     jobs.findVersioned(id).value.flatMap {
       case Right(Some(observed)) =>
         val job = observed.value
-        val text = SearchableText.job(job)
-        val hash = SourceHash.sha256(text)
-        if (job.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
-        else
-          embedDocument(text).flatMap {
-            case EmbeddingOutcome.Embedded(embedding) =>
-              jobs.updateEmbedding(observed, embedding).value.map(writeOutcome)
-            case EmbeddingOutcome.Retry     => IO.pure(ProcessingOutcome.Retry)
-            case EmbeddingOutcome.Discarded =>
-              IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
-          }
+        val prepared = EmbeddingPreparation.prepare(
+          Some(SearchableText.job(job)),
+          job.embedding.map(_.meta),
+          model,
+          SearchableText.DocumentMaxChars
+        )
+        embedPrepared(prepared)(embedding => jobs.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
       case Right(None) => IO.pure(ProcessingOutcome.Completed)
       case Left(_)     => IO.pure(ProcessingOutcome.Retry)
     }
@@ -156,48 +146,42 @@ final class EmbeddingPipeline(
     users.findVersioned(id).value.flatMap {
       case Right(Some(observed)) =>
         val user = observed.value
-        user.candidateProfile match {
-          case Some(profile) =>
-            val text = SearchableText.candidate(profile)
-            val hash = SourceHash.sha256(text)
-            if (user.embedding.exists(isCurrent(_, hash))) IO.pure(ProcessingOutcome.Completed)
-            else
-              embedDocument(text).flatMap {
-                case EmbeddingOutcome.Embedded(embedding) =>
-                  users.updateEmbedding(observed, embedding).value.map(writeOutcome)
-                case EmbeddingOutcome.Retry     => IO.pure(ProcessingOutcome.Retry)
-                case EmbeddingOutcome.Discarded =>
-                  IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge))
-              }
-          case None => IO.pure(ProcessingOutcome.Completed)
-        }
+        val prepared = EmbeddingPreparation.prepare(
+          user.candidateProfile.map(SearchableText.candidate),
+          user.embedding.map(_.meta),
+          model,
+          SearchableText.DocumentMaxChars
+        )
+        embedPrepared(prepared)(embedding => users.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
       case Right(None) => IO.pure(ProcessingOutcome.Completed)
       case Left(_)     => IO.pure(ProcessingOutcome.Retry)
     }
 
-  private def isCurrent(embedding: EntityEmbedding, hash: String): Boolean =
-    embedding.meta.sourceHash == hash && embedding.meta.model == model
-
-  private def writeOutcome(result: Either[RepositoryError, Unit]): ProcessingOutcome = result match {
-    case Right(_) | Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
+  private def attemptOutcome(result: Either[RepositoryError, ProcessingOutcome]): ProcessingOutcome = result match {
+    case Right(outcome)                 => outcome
+    case Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
     case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) | Left(
           RepositoryError.InvalidStoredData
         ) | Left(RepositoryError.MissingWriteResult) | Left(RepositoryError.MissingStoredResult) =>
       ProcessingOutcome.Retry
   }
 
-  private def embedDocument(text: String): IO[EmbeddingOutcome] =
-    if (text.length > SearchableText.DocumentMaxChars) IO.pure(EmbeddingOutcome.Discarded)
-    else
-      embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Document)).flatMap {
-        case Left(_)       => IO.pure(EmbeddingOutcome.Retry)
+  private def embedPrepared(prepared: EmbeddingPreparation)(
+      persist: EntityEmbedding => RepositoryIO[Unit]
+  ): RepositoryIO[ProcessingOutcome] = prepared match {
+    case EmbeddingPreparation.NoWork           => RepositoryIO.fromEither(Right(ProcessingOutcome.Completed))
+    case EmbeddingPreparation.DocumentTooLarge =>
+      RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge)))
+    case EmbeddingPreparation.Prepared(text, hash) =>
+      RepositoryIO.lift(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Document))).flatMap {
+        case Left(_)       => RepositoryIO.fromEither(Right(ProcessingOutcome.Retry))
         case Right(vector) =>
-          now.map { instant =>
-            EmbeddingOutcome.Embedded(
-              EntityEmbedding(vector.values, EmbeddingMeta(model, SourceHash.sha256(text), instant))
-            )
+          RepositoryIO.lift(now).flatMap { instant =>
+            persist(EntityEmbedding(vector.values, EmbeddingMeta(model, hash, instant)))
+              .as(ProcessingOutcome.Completed)
           }
       }
+  }
 }
 
 object EmbeddingPipeline {

@@ -7,9 +7,10 @@ import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
-import org.bson.Document
+import org.bson.{Document, BsonDocument, BsonString, BsonInt32, BsonInt64, BsonDateTime, BsonArray, BsonValue}
 import java.time.Instant
 import java.util.Date
+import scala.jdk.CollectionConverters.*
 
 trait MongoEmbeddingWorkEnqueuer {
   def requiresTransaction: Boolean
@@ -60,67 +61,68 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
       key: EmbeddingWorkKey,
       now: Instant
   ): RepositoryIO[Unit] = {
-    val readyUpdate = MongoUpdate.combine(
-      MongoUpdate.setOnInsert(MongoFields.Kind, key.kind.toString),
-      MongoUpdate.setOnInsert(MongoFields.WorkEntityId, key.entityId),
-      MongoUpdate.setOnInsert(MongoFields.CreatedAt, Date.from(now)),
-      MongoUpdate.inc(MongoFields.Generation, java.lang.Long.valueOf(1L)),
-      MongoUpdate.set(MongoFields.Attempts, java.lang.Integer.valueOf(0)),
-      MongoUpdate.set(MongoFields.State, "Ready"),
-      MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
-      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
-      MongoUpdate.unset(MongoFields.LeaseOwner),
-      MongoUpdate.unset(MongoFields.LeaseToken),
-      MongoUpdate.unset(MongoFields.LeaseUntil),
-      MongoUpdate.unset(MongoFields.Failure)
-    )
-    val refreshActiveLease = MongoUpdate.combine(
-      MongoUpdate.inc(MongoFields.Generation, java.lang.Long.valueOf(1L)),
-      MongoUpdate.set(MongoFields.Attempts, java.lang.Integer.valueOf(0)),
-      MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
-    )
+    val pipeline = List(enqueueStage(key, now))
+    // A state predicate in an upsert filter attempts a duplicate insert for an active lease.
+    // Conditional pipeline fields instead inspect state within one identity-only atomic write.
     MongoRepositorySupport
-      .repositoryGuard(diagnostics, "embeddingWork.enqueue") {
+      .transactionGuard(diagnostics, "embeddingWork.enqueue", session) {
         RepositoryIO
           .lift(
-            updateOne(
+            MongoSessionOperations.updateOnePipeline(
+              collection,
               session,
-              MongoFilter
-                .and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.ne(MongoFields.State, "Processing")),
-              readyUpdate,
+              MongoFilter.eq(MongoFields.Id, key.value),
+              pipeline,
               new UpdateOptions().upsert(true)
             )
           )
-          .flatMap {
-            case Some(result) if result.getMatchedCount == 1L || Option(result.getUpsertedId).nonEmpty =>
-              RepositoryIO.fromEither(Right(()))
-            case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-            case Some(_) =>
-              RepositoryIO
-                .lift(
-                  updateOne(
-                    session,
-                    MongoFilter
-                      .and(MongoFilter.eq(MongoFields.Id, key.value), MongoFilter.eq(MongoFields.State, "Processing")),
-                    refreshActiveLease
-                  )
-                )
-                .subflatMap {
-                  case Some(result) if result.getMatchedCount == 1L => Right(())
-                  case Some(_)                                      => Left(RepositoryError.Conflict)
-                  case None                                         => Left(RepositoryError.MissingWriteResult)
-                }
+          .subflatMap {
+            case Some(result) if result.wasAcknowledged() && result.getMatchedCount + result.getUpserts.size == 1 =>
+              Right(())
+            case Some(_) => Left(RepositoryError.Conflict)
+            case None    => Left(RepositoryError.MissingWriteResult)
           }
       }(_ => Left(RepositoryError.Unavailable))
   }
 
-  private def updateOne(
-      session: Option[ClientSession[IO]],
-      filter: MongoFilter,
-      update: MongoUpdate,
-      options: UpdateOptions = new UpdateOptions()
-  ) =
-    MongoSessionOperations.updateOne(collection, session, filter, update, options)
+  private def enqueueStage(key: EmbeddingWorkKey, now: Instant): BsonDocument = {
+    def reference(field: String): BsonString = new BsonString(s"$$$field")
+    def expression(operator: String, arguments: BsonValue*): BsonDocument =
+      new BsonDocument(operator, new BsonArray(arguments.toList.asJava))
+    def literal(value: BsonValue): BsonDocument = new BsonDocument("$literal", value)
+    def initialized(field: String, value: BsonValue): BsonDocument =
+      expression(
+        "$cond",
+        expression("$eq", new BsonDocument("$type", reference(field)), new BsonString("missing")),
+        literal(value),
+        reference(field)
+      )
+    val processing = expression("$eq", reference(MongoFields.State), literal(new BsonString("Processing")))
+    def retainLease(field: String, otherwise: BsonValue): BsonDocument =
+      expression("$cond", processing, reference(field), otherwise)
+    val timestamp = literal(new BsonDateTime(now.toEpochMilli))
+    val fields = new BsonDocument()
+      .append(MongoFields.Kind, initialized(MongoFields.Kind, new BsonString(key.kind.toString)))
+      .append(MongoFields.WorkEntityId, initialized(MongoFields.WorkEntityId, new BsonString(key.entityId)))
+      .append(MongoFields.CreatedAt, initialized(MongoFields.CreatedAt, new BsonDateTime(now.toEpochMilli)))
+      .append(
+        MongoFields.Generation,
+        expression("$add", initialized(MongoFields.Generation, new BsonInt64(0L)), new BsonInt64(1L))
+      )
+      .append(MongoFields.Attempts, literal(new BsonInt32(0)))
+      .append(MongoFields.UpdatedAt, timestamp)
+      .append(MongoFields.State, retainLease(MongoFields.State, literal(new BsonString("Ready"))))
+      .append(MongoFields.AvailableAt, retainLease(MongoFields.AvailableAt, timestamp))
+    List(
+      MongoFields.LeaseOwner,
+      MongoFields.LeaseToken,
+      MongoFields.LeaseUntil,
+      MongoFields.Failure,
+      MongoFields.FinishedAt
+    )
+      .foreach(field => { val _ = fields.append(field, retainLease(field, new BsonString("$$REMOVE"))) })
+    new BsonDocument("$set", fields)
+  }
 
   override def claim(
       workerId: String,

@@ -290,6 +290,41 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("forbidden actors, unowned jobs and closed jobs reject query matching before provider or retrieval work") {
+    val owned = openJob.copy(embedding = Some(jobEmbedding))
+    val unowned = owned.copy(recruiterId = candidateId)
+    val scenarios: List[(ActorContext, Job, DomainError)] = List(
+      (ActorContext(candidateId, UserRole.Candidate), owned, DomainError.RecruiterRequired),
+      (ActorContext(recruiterId, UserRole.Recruiter), unowned, DomainError.Forbidden),
+      (ActorContext(recruiterId, UserRole.Recruiter), owned.copy(status = JobStatus.Closed), DomainError.JobMustBeOpen)
+    )
+    scenarios.traverse_ { case (actor, job, expected) =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+          Map(recruiterId -> recruiter, candidateId -> candidateWithProfile.copy(embedding = Some(embedding)))
+        )
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> job))
+        providerCalls <- Ref.of[IO, Int](0)
+        retrievalQueries <- Ref.of[IO, Vector[VectorSearchQuery]](Vector.empty)
+        service = semanticService(
+          new InMemoryUsers(usersRef),
+          new InMemoryJobs(jobsRef),
+          CountingEmbeddingService(providerCalls),
+          RecordingSearchRepository(retrievalQueries)
+        )
+        result <- service
+          .candidateMatches(actor, jobId, Some("Scala backend"), CandidateMatchFilters.empty, pageSize, searchId)
+          .value
+        calls <- providerCalls.get
+        queries <- retrievalQueries.get
+      } yield {
+        assertEquals(result.left.toOption, Some(UseCaseError.Domain(expected)))
+        assertEquals(calls, 0)
+        assertEquals(queries, Vector.empty)
+      }
+    }
+  }
+
   test("candidate matching rechecks recruiter ownership and open status after retrieval") {
     val owned = openJob.copy(embedding = Some(jobEmbedding))
     val hit = RankedCandidate(

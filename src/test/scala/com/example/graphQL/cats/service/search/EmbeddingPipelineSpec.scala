@@ -3,6 +3,7 @@ package com.example.graphQL.cats.service.search
 import cats.effect.{IO, Resource}
 import cats.effect.Deferred
 import cats.effect.Ref
+import cats.effect.std.Queue
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
@@ -195,6 +196,89 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
+  test("every typed provider failure retains bounded attempts and constant retry delay") {
+    EmbeddingError.values.toList.traverse_ { failure =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        calls <- Ref.of[IO, List[FiniteDuration]](Nil)
+        work <- InMemoryEmbeddingWorkRepository.create
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        clock <- Ref.of[IO, Instant](now)
+        provider = new EmbeddingService {
+          override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+            IO.monotonic.flatMap(time => calls.update(_ :+ time)).as(Left(failure))
+        }
+        key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+        _ <- successful(work.enqueue(key, now))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          provider,
+          clock,
+          retryDelay = 10.millis
+        ).use(wakeups => wakeups.offer(()) *> completion.get)
+        attempts <- calls.get
+        snapshot <- work.snapshot
+      } yield {
+        assertEquals(attempts.size, 3)
+        attempts.zip(attempts.drop(1)).foreach { case (before, after) => assert(after - before >= 10.millis) }
+        assertEquals(snapshot.get(key.value).flatMap(_.failure), Some(EmbeddingWorkFailure.RetryExhausted))
+        assertEquals(snapshot.get(key.value).map(_.attempts), Some(0))
+      }
+    }
+  }
+
+  test("repository fetch failures retry while guarded write conflicts complete") {
+    RepositoryError.values.toList.traverse_ { failure =>
+      List(true, false).traverse_ { failFetch =>
+        for {
+          usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+          jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+          calls <- Ref.of[IO, Int](0)
+          fetches <- Ref.of[IO, Int](0)
+          write <- Deferred[IO, Either[RepositoryError, Unit]]
+          completion <- Deferred[IO, Either[RepositoryError, Unit]]
+          clock <- Ref.of[IO, Instant](now)
+          work <- InMemoryEmbeddingWorkRepository.create
+          jobs = RecordingEmbeddingWrites(
+            InMemoryJobs(jobsRef),
+            write,
+            fetchFailure = if (failFetch) Some(failure) else None,
+            writeFailure = if (failFetch) None else Some(failure),
+            onFind = fetches.update(_ + 1)
+          )
+          key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+          _ <- successful(work.enqueue(key, now))
+          _ <- controlledWorker(
+            ObservableWork(work, completion),
+            InMemoryUsers(usersRef),
+            jobs,
+            CountingEmbeddingService(calls),
+            clock,
+            retryDelay = 1.millis
+          )
+            .use(wakeups => wakeups.offer(()) *> completion.get)
+          snapshot <- work.snapshot
+          providerCalls <- calls.get
+          fetchCount <- fetches.get
+          finalJobs <- jobsRef.get
+        } yield {
+          val completes = !failFetch && failure == RepositoryError.Conflict
+          assertEquals(fetchCount, if (completes) 1 else 3)
+          assertEquals(providerCalls, if (failFetch) 0 else if (completes) 1 else 3)
+          assertEquals(
+            snapshot.get(key.value).flatMap(_.failure),
+            if (completes) None else Some(EmbeddingWorkFailure.RetryExhausted)
+          )
+          assertEquals(snapshot.contains(key.value), !completes)
+          assertEquals(finalJobs.get(jobId).flatMap(_.embedding), None)
+        }
+      }
+    }
+  }
+
   test("embedding worker reports unexpected processing failure and records retry exhaustion") {
     val provider = new EmbeddingService {
       override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
@@ -296,6 +380,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       started <- Deferred[IO, Unit]
       release <- Deferred[IO, Unit]
       calls <- Ref.of[IO, Int](0)
+      work <- InMemoryEmbeddingWorkRepository.create
+      completion <- Deferred[IO, Either[RepositoryError, Unit]]
       users = InMemoryUsers(usersRef)
       embeddings = BlockingEmbeddingService(calls, started, release)
       _ <- pipelineResource(
@@ -306,7 +392,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         queueSize = 8,
         parallelism = 1,
         retryAttempts = 3,
-        retryDelay = 10.millis
+        retryDelay = 10.millis,
+        durableWork = Some(ObservableWork(work, completion))
       ).use { queue =>
         for {
           _ <- queue.offer(EmbeddingWork.CandidateProfileChanged(candidateId))
@@ -315,12 +402,314 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             _.updated(candidateId, candidate.copy(profile = Some(UserProfile.Candidate(changedProfile))))
           )
           _ <- release.complete(()).void
+          _ <- completion.get
           finalUser <- eventually(users.find(candidateId).value)(
             _.toOption.flatten.exists(_.candidateProfile.contains(changedProfile))
           )
         } yield assertEquals(finalUser.toOption.flatten.flatMap(_.embedding), None)
       }
     } yield ()
+  }
+
+  test("job and candidate deletion during provider work cannot restore deleted entities") {
+    List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.CandidateProfileChanged(candidateId)).traverse_ { changed =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        started <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        calls <- Ref.of[IO, Int](0)
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        _ <- successful(work.enqueue(DurableEmbeddingWorkPublisher.keyFor(changed), now))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          BlockingEmbeddingService(calls, started, release),
+          clock
+        ).use { wakeups =>
+          for {
+            _ <- wakeups.offer(())
+            _ <- started.get
+            _ <- changed match {
+              case EmbeddingWork.JobChanged(id)              => jobsRef.update(_ - id)
+              case EmbeddingWork.CandidateProfileChanged(id) => usersRef.update(_ - id)
+            }
+            _ <- release.complete(()).void
+            result <- completion.get
+            storedUsers <- usersRef.get
+            storedJobs <- jobsRef.get
+          } yield {
+            assertEquals(result, Right(()))
+            changed match {
+              case EmbeddingWork.JobChanged(id)              => assert(!storedJobs.contains(id))
+              case EmbeddingWork.CandidateProfileChanged(id) => assert(!storedUsers.contains(id))
+            }
+          }
+        }
+        remaining <- work.snapshot
+      } yield assertEquals(remaining, Map.empty[String, StoredWork])
+    }
+  }
+
+  test("newer job profile and removed-profile work survive old claim completion and replay") {
+    List(
+      (EmbeddingWork.JobChanged(jobId), false),
+      (EmbeddingWork.CandidateProfileChanged(candidateId), false),
+      (EmbeddingWork.CandidateProfileChanged(candidateId), true)
+    ).traverse_ { case (changed, removeProfile) =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        started <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        oldCompletion <- Deferred[IO, Either[RepositoryError, Unit]]
+        newCompletion <- Deferred[IO, Either[RepositoryError, Unit]]
+        calls <- Ref.of[IO, Int](0)
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        key = DurableEmbeddingWorkPublisher.keyFor(changed)
+        changedProfile = CandidateProfile(Set("Scala", "Kafka"), Some("Updated summary"), None)
+        _ <- successful(work.enqueue(key, now))
+        _ <- controlledWorker(
+          ObservableWork(work, oldCompletion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          BlockingEmbeddingService(calls, started, release),
+          clock
+        ).use { wakeups =>
+          for {
+            _ <- wakeups.offer(())
+            _ <- started.get
+            _ <- changed match {
+              case EmbeddingWork.JobChanged(id) => jobsRef.update(_.updated(id, openJob.copy(title = "Staff Engineer")))
+              case EmbeddingWork.CandidateProfileChanged(id) =>
+                usersRef.update(
+                  _.updated(
+                    id,
+                    candidate.copy(profile = if (removeProfile) None else Some(UserProfile.Candidate(changedProfile)))
+                  )
+                )
+            }
+            _ <- successful(work.enqueue(key, now.plusSeconds(1)))
+            _ <- release.complete(()).void
+            completion <- oldCompletion.get
+          } yield assertEquals(completion, Left(RepositoryError.Conflict))
+        }
+        retained <- work.snapshot
+        staleUsers <- usersRef.get
+        staleJobs <- jobsRef.get
+        _ <- clock.set(now.plusSeconds(31))
+        _ <- controlledWorker(
+          ObservableWork(work, newCompletion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          CountingEmbeddingService(calls),
+          clock
+        ).use(wakeups => wakeups.offer(()) *> newCompletion.get)
+        replayed <- work.snapshot
+        storedUsers <- usersRef.get
+        storedJobs <- jobsRef.get
+        count <- calls.get
+      } yield {
+        assertEquals(retained.get(key.value).map(_.generation), Some(2L))
+        assertEquals(staleUsers.get(candidateId).flatMap(_.embedding), None)
+        assertEquals(staleJobs.get(jobId).flatMap(_.embedding), None)
+        assertEquals(replayed.get(key.value), None)
+        assertEquals(count, if (removeProfile) 1 else 2)
+        changed match {
+          case EmbeddingWork.JobChanged(id) =>
+            assertEquals(
+              storedJobs.get(id).flatMap(_.embedding).map(_.meta.sourceHash),
+              Some(SourceHash.sha256(SearchableText.job(openJob.copy(title = "Staff Engineer"))))
+            )
+          case EmbeddingWork.CandidateProfileChanged(id) =>
+            assertEquals(
+              storedUsers.get(id).flatMap(_.embedding).map(_.meta.sourceHash),
+              if (removeProfile) None else Some(SourceHash.sha256(SearchableText.candidate(changedProfile)))
+            )
+        }
+      }
+    }
+  }
+
+  test("document metadata keeps configured model and injected completion time") {
+    val provider = new EmbeddingService {
+      override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = {
+        assertEquals(input.inputType, EmbeddingInputType.Document)
+        IO.pure(Right(EmbeddingVector(List(0.1f, 0.2f), "provider-reported-model", 2)))
+      }
+    }
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      completion <- Deferred[IO, Either[RepositoryError, Unit]]
+      clock <- Ref.of[IO, Instant](now.plusSeconds(5))
+      work <- InMemoryEmbeddingWorkRepository.create
+      _ <- successful(work.enqueue(DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId)), now))
+      _ <- controlledWorker(
+        ObservableWork(work, completion),
+        InMemoryUsers(usersRef),
+        InMemoryJobs(jobsRef),
+        provider,
+        clock
+      ).use(wakeups => wakeups.offer(()) *> completion.get)
+      stored <- jobsRef.get
+    } yield assertEquals(
+      stored.get(jobId).flatMap(_.embedding).map(_.meta),
+      Some(EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.job(openJob)), now.plusSeconds(5)))
+    )
+  }
+
+  test("missing documents absent profiles current sources and oversized sources avoid provider calls") {
+    val oversized = openJob.copy(description = "x" * SearchableText.DocumentMaxChars)
+    val currentOversized = oversized.copy(embedding =
+      Some(
+        EntityEmbedding(
+          List(0.1f),
+          EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.job(oversized)), now)
+        )
+      )
+    )
+    val currentCandidate = candidate.copy(embedding =
+      candidate.candidateProfile.map(profile =>
+        EntityEmbedding(
+          List(0.1f),
+          EmbeddingMeta("voyage-4-lite", SourceHash.sha256(SearchableText.candidate(profile)), now)
+        )
+      )
+    )
+    val cases = List(
+      (EmbeddingWork.JobChanged(jobId), Option.empty[Job], Option.empty[User], Option.empty[EmbeddingWorkFailure]),
+      (EmbeddingWork.CandidateProfileChanged(candidateId), None, None, None),
+      (EmbeddingWork.CandidateProfileChanged(candidateId), None, Some(candidate.copy(profile = None)), None),
+      (EmbeddingWork.CandidateProfileChanged(candidateId), None, Some(currentCandidate), None),
+      (EmbeddingWork.JobChanged(jobId), Some(currentOversized), None, None),
+      (EmbeddingWork.JobChanged(jobId), Some(oversized), None, Some(EmbeddingWorkFailure.DocumentTooLarge))
+    )
+    cases.traverse_ { case (changed, job, user, failure) =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](user.map(value => candidateId -> value).toMap)
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](job.map(value => jobId -> value).toMap)
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        _ <- successful(work.enqueue(DurableEmbeddingWorkPublisher.keyFor(changed), now))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          CountingEmbeddingService.uncounted,
+          clock
+        ).use(wakeups => wakeups.offer(()) *> completion.get)
+        snapshot <- work.snapshot
+        storedJobs <- jobsRef.get
+        storedUsers <- usersRef.get
+      } yield {
+        assertEquals(snapshot.get(DurableEmbeddingWorkPublisher.keyFor(changed).value).flatMap(_.failure), failure)
+        assertEquals(storedJobs, job.map(value => jobId -> value).toMap)
+        assertEquals(storedUsers, user.map(value => candidateId -> value).toMap)
+      }
+    }
+  }
+
+  test("cancelled provider calls keep unpersisted claims replayable for both entity types") {
+    List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.CandidateProfileChanged(candidateId)).traverse_ { changed =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        started <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        calls <- Ref.of[IO, Int](0)
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        key = DurableEmbeddingWorkPublisher.keyFor(changed)
+        _ <- successful(work.enqueue(key, now))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          BlockingEmbeddingService(calls, started, release),
+          clock
+        ).use(wakeups => wakeups.offer(()) *> started.get)
+        interrupted <- work.snapshot
+        unfinished <- completion.tryGet
+        beforeUsers <- usersRef.get
+        beforeJobs <- jobsRef.get
+        _ <- clock.set(now.plusSeconds(31))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          CountingEmbeddingService(calls),
+          clock
+        ).use(wakeups => wakeups.offer(()) *> completion.get)
+        replayed <- work.snapshot
+        count <- calls.get
+        afterUsers <- usersRef.get
+        afterJobs <- jobsRef.get
+      } yield {
+        assertEquals(interrupted.get(key.value).map(_.state), Some("Processing"))
+        assertEquals(unfinished, None)
+        assertEquals(beforeUsers.get(candidateId).flatMap(_.embedding), None)
+        assertEquals(beforeJobs.get(jobId).flatMap(_.embedding), None)
+        assertEquals(replayed.get(key.value), None)
+        assertEquals(count, 2)
+        changed match {
+          case EmbeddingWork.JobChanged(id)              => assert(afterJobs.get(id).flatMap(_.embedding).nonEmpty)
+          case EmbeddingWork.CandidateProfileChanged(id) => assert(afterUsers.get(id).flatMap(_.embedding).nonEmpty)
+        }
+      }
+    }
+  }
+
+  test("acknowledged embedding writes replay after interruption without another provider call") {
+    List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.CandidateProfileChanged(candidateId)).traverse_ { changed =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        beforeCompletion <- Deferred[IO, Unit]
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        calls <- Ref.of[IO, Int](0)
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        key = DurableEmbeddingWorkPublisher.keyFor(changed)
+        interruptedWork = ObservableWork(work, completion, beforeCompletion.complete(()).void *> IO.never[Unit])
+        _ <- successful(work.enqueue(key, now))
+        _ <- controlledWorker(
+          interruptedWork,
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          CountingEmbeddingService(calls),
+          clock
+        ).use(wakeups => wakeups.offer(()) *> beforeCompletion.get)
+        interrupted <- work.snapshot
+        _ <- clock.set(now.plusSeconds(31))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          CountingEmbeddingService.uncounted,
+          clock
+        ).use(wakeups => wakeups.offer(()) *> completion.get)
+        replayed <- work.snapshot
+        count <- calls.get
+        storedUsers <- usersRef.get
+        storedJobs <- jobsRef.get
+      } yield {
+        assertEquals(interrupted.get(key.value).map(_.state), Some("Processing"))
+        assertEquals(replayed.get(key.value), None)
+        assertEquals(count, 1)
+        val metadata = changed match {
+          case EmbeddingWork.JobChanged(id)              => storedJobs.get(id).flatMap(_.embedding).map(_.meta)
+          case EmbeddingWork.CandidateProfileChanged(id) => storedUsers.get(id).flatMap(_.embedding).map(_.meta)
+        }
+        assertEquals(metadata.map(_.updatedAt), Some(now))
+      }
+    }
   }
 
   test("VHS-AC05 embedding work publishing stays non-blocking when the scheduler is full") {
@@ -471,14 +860,15 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       queueSize: Int,
       parallelism: Int,
       retryAttempts: Int,
-      retryDelay: FiniteDuration
+      retryDelay: FiniteDuration,
+      durableWork: Option[EmbeddingWorkRepository] = None
   ) =
     Resource
       .eval(InMemoryEmbeddingWorkRepository.create)
       .flatMap(work =>
         EmbeddingPipeline
           .resource(
-            work,
+            durableWork.getOrElse(work),
             users,
             jobs,
             embeddings,
@@ -491,6 +881,59 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
             diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
           )
       )
+
+  private def successful[A](result: RepositoryIO[A]): IO[A] =
+    result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
+
+  private def controlledWorker(
+      work: EmbeddingWorkRepository,
+      users: UserRepository,
+      jobs: JobRepository,
+      provider: EmbeddingService,
+      clock: Ref[IO, Instant],
+      retryDelay: FiniteDuration = 1.hour
+  ): Resource[IO, Queue[IO, Unit]] =
+    Resource.eval(Queue.bounded[IO, Unit](8)).flatMap { wakeups =>
+      val worker = new EmbeddingPipeline(
+        wakeups,
+        work,
+        users,
+        jobs,
+        provider,
+        "voyage-4-lite",
+        1,
+        3,
+        retryDelay,
+        30.seconds,
+        clock.get,
+        "fixture-worker",
+        Diagnostics.noop
+      )
+      Resource.make(worker.stream.compile.drain.start)(_.cancel).as(wakeups)
+    }
+
+  private final case class ObservableWork(
+      delegate: EmbeddingWorkRepository,
+      completion: Deferred[IO, Either[RepositoryError, Unit]],
+      beforeCompletion: IO[Unit] = IO.unit
+  ) extends EmbeddingWorkRepository {
+    override def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit] = delegate.enqueue(key, now)
+    override def claim(
+        workerId: String,
+        now: Instant,
+        leaseUntil: Instant
+    ): RepositoryIO[Option[ClaimedEmbeddingWork]] =
+      delegate.claim(workerId, now, leaseUntil)
+    override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] = RepositoryIO.fromIOEither(
+      beforeCompletion *> delegate.complete(claim).value.flatTap(result => completion.complete(result).void)
+    )
+    override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] =
+      delegate.retry(claim, availableAt)
+    override def fail(claim: ClaimedEmbeddingWork, failure: EmbeddingWorkFailure, now: Instant): RepositoryIO[Unit] =
+      RepositoryIO.fromIOEither(
+        delegate.fail(claim, failure, now).value.flatTap(result => completion.complete(result).void)
+      )
+  }
 
   private def waitFor(done: IO[Boolean], remaining: Int = 20): IO[Unit] =
     done.flatMap {
@@ -547,7 +990,10 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
 
   private final case class RecordingEmbeddingWrites(
       delegate: InMemoryJobs,
-      writeResult: Deferred[IO, Either[RepositoryError, Unit]]
+      writeResult: Deferred[IO, Either[RepositoryError, Unit]],
+      fetchFailure: Option[RepositoryError] = None,
+      writeFailure: Option[RepositoryError] = None,
+      onFind: IO[Unit] = IO.unit
   ) extends JobRepository {
     override def relatedJobs(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
@@ -558,7 +1004,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
 
     override def findVersioned(
         id: Identifiers.JobId
-    ): RepositoryIO[Option[Versioned[Job]]] = delegate.findVersioned(id)
+    ): RepositoryIO[Option[Versioned[Job]]] = RepositoryIO.lift(onFind) *>
+      fetchFailure.fold(delegate.findVersioned(id))(error => RepositoryIO.fromEither(Left(error)))
 
     override def findMany(ids: List[Identifiers.JobId]): RepositoryIO[List[Job]] = delegate.findMany(ids)
 
@@ -591,14 +1038,20 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         id: Identifiers.JobId,
         embedding: EntityEmbedding
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      delegate.updateEmbedding(id, embedding).value.flatTap(result => writeResult.complete(result).void)
+      writeFailure
+        .fold(delegate.updateEmbedding(id, embedding))(error => RepositoryIO.fromEither(Left(error)))
+        .value
+        .flatTap(result => writeResult.complete(result).void)
     )
 
     override def updateEmbedding(
         observed: Versioned[Job],
         embedding: EntityEmbedding
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      delegate.updateEmbedding(observed, embedding).value.flatTap(result => writeResult.complete(result).void)
+      writeFailure
+        .fold(delegate.updateEmbedding(observed, embedding))(error => RepositoryIO.fromEither(Left(error)))
+        .value
+        .flatTap(result => writeResult.complete(result).void)
     )
   }
 

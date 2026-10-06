@@ -114,6 +114,25 @@ private[mongo] object MongoSessionOperations {
       )
     )
 
+  /** mongo4cats exposes session-aware pipeline updates through its bulk write command. */
+  def updateOnePipeline(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      filter: MongoFilter,
+      pipeline: Seq[Bson],
+      options: UpdateOptions
+  ): IO[Option[com.mongodb.bulk.BulkWriteResult]] = {
+    val commands = List(
+      mongo4cats.models.collection.WriteCommand.PipelinedUpdateOne(filter.sessionFilter, pipeline, options)
+    )
+    val bulkOptions = new com.mongodb.client.model.BulkWriteOptions()
+    collection.flatMap(c =>
+      session
+        .fold(c.bulkWrite(commands, bulkOptions))(active => c.bulkWrite(active, commands, bulkOptions))
+        .map(Some(_))
+    )
+  }
+
   def updateMany(
       collection: IO[Documents],
       session: Option[ClientSession[IO]],

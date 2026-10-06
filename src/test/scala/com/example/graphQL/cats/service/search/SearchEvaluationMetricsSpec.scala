@@ -12,4 +12,10 @@ class SearchEvaluationMetricsSpec extends munit.FunSuite {
     assertEquals(SearchEvaluationMetrics.recallAtK(List("a"), Set.empty, 5), 0.0)
     assertEquals(SearchEvaluationMetrics.ndcgAtK(List("a"), Set("a"), 0), 0.0)
   }
+
+  test("scalar helpers normalize duplicates before K without double-crediting relevance") {
+    assertEquals(SearchEvaluationMetrics.recallAtK(List("a", "a", "b"), Set("a", "b"), 2), 1.0)
+    assertEquals(SearchEvaluationMetrics.ndcgAtK(List("a", "a", "b"), Set("a", "b"), 2), 1.0)
+    assertEquals(SearchEvaluationMetrics.ndcgAtK(List("a", "a"), Set("a"), 2), 1.0)
+  }
 }
