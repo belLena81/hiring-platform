@@ -56,6 +56,7 @@ object MongoHiringSetup {
   val JobsCreatedIndex = "jobs_created_id"
   val JobsOpenCreatedIndex = "jobs_open_created_id"
   val JobsOpenCityCreatedIndex = "jobs_open_city_created_id"
+  val JobsLocationPointIndex = "jobs_location_point_2dsphere"
   val JobsEmbeddingMetaIndex = "jobs_embedding_meta_filters"
   val UsersEmbeddingMetaIndex = "users_embedding_meta_filters"
   val EventOutboxClaimIndex = "event_outbox_claim"
@@ -76,6 +77,14 @@ object MongoHiringSetup {
   val AnalyticsReportPublishedIndex = "analytics_report_snapshots_published_as_of"
   val AnalyticsReportExpiryIndex = "analytics_report_snapshots_expiry"
   val AnalyticsReportRunExpiryIndex = "analytics_report_runs_expiry"
+  val InterviewWorkflowCandidateIndex = "interview_workflows_candidate_id"
+  val InterviewWorkflowRecruiterIndex = "interview_workflows_recruiter_id"
+  val InterviewWorkflowCommandDueIndex = "interview_workflow_commands_due"
+  val InterviewWorkflowCommandLeaseIndex = "interview_workflow_commands_lease"
+  val InterviewWorkflowInboxIdentityIndex = "interview_workflow_inbox_identity_unique"
+  val FakeInterviewCalendarParticipantsIndex = "fake_interview_calendar_participants_active"
+  val FakeInterviewCalendarReleaseIndex = "fake_interview_calendar_release_unique"
+  val FakeInterviewNotificationRecipientIndex = "fake_interview_notification_recipient"
 
   def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics): IO[Unit] =
     initialize(database, None, resetOnStart = false, diagnostics = diagnostics)
@@ -95,6 +104,7 @@ object MongoHiringSetup {
       MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics) *>
         MongoHiringValidators.createUserValidator(database) *>
         MongoHiringValidators.createJobValidator(database) *>
+        MongoHiringMigrations.verifyJobGeoPoints(setup) *>
         MongoHiringIndexSetup.create(database) *>
         MongoHiringValidators.createOutboxValidator(database) *>
         atlas.traverse_(MongoAtlasSearchSetup.provision(setup, _))

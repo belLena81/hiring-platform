@@ -180,7 +180,8 @@ final case class KafkaConfig(
     consumerGroup: String,
     publisher: KafkaPublisherConfig,
     consumer: KafkaConsumerConfig,
-    saslSecurityProtocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls
+    saslSecurityProtocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls,
+    interview: InterviewRuntimeConfig = InterviewRuntimeConfig()
 )
 
 type Port = Int :| Interval.Closed[1, 65535]
@@ -213,3 +214,19 @@ type KafkaMaxAttempts = Int :| Interval.Closed[1, 100]
 type KafkaPollIntervalMs = Int :| Interval.Closed[100, 60000]
 type KafkaRetentionDays = Int :| Interval.Closed[1, 365]
 type HttpsUrl = String :| StartWith["https://"]
+
+final case class InterviewRuntimeConfig(
+    enabled: Boolean = false,
+    orchestratorUsername: Option[String] = None,
+    orchestratorPassword: Option[String] = None,
+    workerUsername: Option[String] = None,
+    workerPassword: Option[String] = None,
+    maxAttempts: Int = 5,
+    retryBaseSeconds: Int = 1,
+    retryCapSeconds: Int = 30,
+    providerTimeoutSeconds: Int = 10,
+    claimSeconds: Int = 60,
+    preCommitDeadlineSeconds: Int = 300,
+    replayRetentionSeconds: Long = 604800L,
+    completedDedupRetentionSeconds: Long = 691200L
+)

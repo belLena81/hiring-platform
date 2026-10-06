@@ -12,6 +12,7 @@ import com.example.graphQL.cats.domain.model.{
   CandidateResidence,
   EmbeddingMeta,
   EntityEmbedding,
+  GeoPoint,
   Job,
   JobStatus,
   Location,
@@ -188,6 +189,29 @@ class MongoHiringCodecsSpec extends FunSuite {
 
     assertEquals(document.getDate("closedAt"), Date.from(later))
     assertEquals(result.toEither, Right(job))
+  }
+
+  test("job codec stores and reads optional coordinates in GeoJSON longitude-latitude order") {
+    val point = GeoPoint.validate(35.2d, 33.4d).toOption.get
+    val job = Job(
+      jobId,
+      recruiterId,
+      "Senior Scala Developer",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect"),
+      Location("Cyprus", "Nicosia", remote = false, Some(point)),
+      JobStatus.Open,
+      now,
+      later
+    )
+    val document = MongoHiringCodecs.job(job)
+    val storedPoint = document.get("location", classOf[Document]).get("point", classOf[Document])
+    assertEquals(
+      storedPoint.getList("coordinates", classOf[java.lang.Double]).asScala.toList.map(_.doubleValue()),
+      List(33.4d, 35.2d)
+    )
+    assertEquals(MongoHiringCodecs.readJob(document).toEither, Right(job))
   }
 
   test("job codec preserves embedding metadata when present") {

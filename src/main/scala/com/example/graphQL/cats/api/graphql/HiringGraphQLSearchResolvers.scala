@@ -2,15 +2,81 @@ package com.example.graphQL.cats.api.graphql
 
 import cats.effect.IO
 import cats.data.EitherT
+import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.service.search.{RankedCandidate, RankedJob}
+import com.example.graphQL.cats.service.search.{JobFacetQuery, NearbyRadius, JobSearchFilter, NearbyJobsQuery}
+import com.example.graphQL.cats.domain.model.GeoPoint
 import com.example.graphQL.cats.service.search.CandidateMatchFilters
 import io.circe.Json
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLSearchResolvers {
+  def nearbyJobs(context: Context[RequestContext, Unit]): HiringGraphQLResult[NearbyJobsResults] =
+    authenticated(context) { case (actor, hiring) =>
+      val center = context.arg(nearbyCenterArgument)
+      val inputFilter = context.arg(nearbyFilterArgument)
+      val filter = JobSearchFilter(
+        inputFilter.flatMap(_.city).map(_.trim),
+        inputFilter.flatMap(_.skills).getOrElse(Nil).map(_.trim).filter(_.nonEmpty).toSet,
+        inputFilter.flatMap(_.createdAfter)
+      )
+      val baseQuery =
+        NearbyJobsQuery(GeoPoint(center.latitude, center.longitude), context.arg(radiusKmArgument), filter)
+      val decodedCursor = context
+        .arg(afterArgument)
+        .traverse(value => NearbyJobsQuery.decodeCursor(value, baseQuery))
+        .leftMap(message => GraphQLFailure("INVALID_CURSOR", message, exceptional = false))
+      for {
+        limit <- inputResult(pageSize(context.arg(firstArgument)))
+        cursor <- inputResult(decodedCursor)
+        query = baseQuery.copy(after = cursor)
+        values <- raiseOnUseCaseError(
+          hiring.jobService.nearbyJobs(
+            actor,
+            query,
+            limit.value
+          )
+        )
+      } yield {
+        val page = values.take(limit.value)
+        NearbyJobsResults(
+          page.map(value =>
+            NearbyJobResult(
+              value.job,
+              value.distanceKm,
+              NearbyJobsQuery.encodeCursor(value.distanceKm, value.job.id.value.toString, baseQuery)
+            )
+          ),
+          values.size > limit.value
+        )
+      }
+    }
+
+  def jobDiscoveryFacets(
+      context: Context[RequestContext, Unit]
+  ): HiringGraphQLResult[com.example.graphQL.cats.service.search.JobDiscoveryFacets] =
+    authenticated(context) { case (actor, hiring) =>
+      val inputFilter = context.arg(nearbyFilterArgument)
+      val filter = JobSearchFilter(
+        inputFilter.flatMap(_.city).map(_.trim),
+        inputFilter.flatMap(_.skills).getOrElse(Nil).map(_.trim).filter(_.nonEmpty).toSet,
+        inputFilter.flatMap(_.createdAfter)
+      )
+      val radiusArgs = (context.arg(optionalNearbyCenterArgument), context.arg(optionalRadiusKmArgument)) match {
+        case (None, None)                 => Right(None)
+        case (Some(center), Some(radius)) =>
+          Right(Some(NearbyRadius(GeoPoint(center.latitude, center.longitude), radius)))
+        case _ =>
+          Left(GraphQLFailure("INVALID_FILTER", "Center and radiusKm must be supplied together", exceptional = false))
+      }
+      inputResult(radiusArgs).flatMap(radius =>
+        raiseOnUseCaseError(hiring.jobService.jobDiscoveryFacets(actor, JobFacetQuery(filter, radius)))
+      )
+    }
+
   def semanticJobSearch(context: Context[RequestContext, Unit]): HiringGraphQLResult[RankedJobResults] =
     authenticatedSearch(context).flatMap { case (actor, hiring, service) =>
       val filter = jobFilter(context.arg(jobFilterArgument))

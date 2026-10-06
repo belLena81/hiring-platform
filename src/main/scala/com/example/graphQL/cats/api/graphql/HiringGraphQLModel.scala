@@ -40,6 +40,8 @@ private[graphql] object HiringGraphQLModel {
   final case class PageInfo(hasNextPage: Boolean, endCursor: Option[String])
   final case class Edge[A](node: A, cursor: String)
   final case class Connection[A](edges: List[Edge[A]], pageInfo: PageInfo, searchId: Option[String] = None)
+  final case class NearbyJobResult(job: Job, distanceKm: Double, cursor: String)
+  final case class NearbyJobsResults(results: List[NearbyJobResult], hasNextPage: Boolean)
   final case class JobFilterGraphQLInput(
       city: Option[String],
       skills: Option[List[String]],
@@ -83,6 +85,16 @@ private[graphql] object HiringGraphQLModel {
       snapshot: com.example.graphQL.cats.service.AnalyticsReportSnapshot
   )
 
+  final case class ScheduleInterviewGraphQLInput(
+      applicationId: ApplicationId,
+      startsAt: Instant,
+      endsAt: Instant,
+      idempotencyKey: UUID
+  ) derives Decoder,
+        Encoder
+  final case class RepairInterviewGraphQLInput(workflowId: UUID, expectedRevision: Long, idempotencyKey: UUID)
+      derives Decoder,
+        Encoder
   final case class SubmitApplicationGraphQLInput(jobId: JobId, idempotencyKey: UUID) derives Decoder, Encoder
   final case class CreateJobGraphQLInput(
       idempotencyKey: UUID,
@@ -92,7 +104,8 @@ private[graphql] object HiringGraphQLModel {
       skills: List[String],
       country: String,
       city: Option[String],
-      remote: Boolean
+      remote: Boolean,
+      coordinates: Option[GeoPointGraphQLInput]
   ) derives Decoder,
         Encoder
   final case class JobGraphQLInput(
@@ -102,9 +115,16 @@ private[graphql] object HiringGraphQLModel {
       skills: List[String],
       country: String,
       city: Option[String],
-      remote: Boolean
+      remote: Boolean,
+      coordinates: Option[GeoPointGraphQLInput]
   ) derives Decoder,
         Encoder
+  final case class GeoPointGraphQLInput(latitude: Double, longitude: Double) derives Decoder, Encoder
+  final case class NearbyJobsFilterGraphQLInput(
+      city: Option[String],
+      skills: Option[List[String]],
+      createdAfter: Option[Instant]
+  ) derives Decoder
   final case class UpdateJobGraphQLInput(idempotencyKey: UUID, id: JobId, patch: JobGraphQLInput)
       derives Decoder,
         Encoder

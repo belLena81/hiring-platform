@@ -263,6 +263,58 @@ private[cats] object ServiceFixtures {
           .map(Right(_))
       )
 
+    override def nearbyJobs(query: com.example.graphQL.cats.service.search.NearbyJobsQuery, limit: Int) =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map { all =>
+        def distance(point: com.example.graphQL.cats.domain.model.GeoPoint): Double = {
+          val lat1 = Math.toRadians(query.center.latitude)
+          val lat2 = Math.toRadians(point.latitude)
+          val dLat = lat2 - lat1
+          val dLon = Math.toRadians(point.longitude - query.center.longitude)
+          val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) *
+            Math.sin(dLon / 2) * Math.sin(dLon / 2)
+          6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        }
+        val selected = all.values.toList
+          .flatMap { job =>
+            job.location.coordinates
+              .filter(point => distance(point) <= query.radiusKm)
+              .map(point => com.example.graphQL.cats.service.search.NearbyJob(job, distance(point)))
+          }
+          .filter(value =>
+            value.job.status == JobStatus.Open && !value.job.location.remote &&
+              query.filter.city.forall(_ == value.job.location.city) && query.filter.skills
+                .subsetOf(value.job.skills) &&
+              query.filter.createdAfter.forall(!value.job.createdAt.isBefore(_))
+          )
+        Right(selected.sortBy(value => (value.distanceKm, value.job.id.value.toString)).take(limit))
+      })
+
+    override def jobDiscoveryFacets(query: com.example.graphQL.cats.service.search.JobFacetQuery) =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map { all =>
+        val filter = query.filter
+        val eligible = all.values.toList.filter(job =>
+          job.status == JobStatus.Open && filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
+            job.skills
+          ) &&
+            filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>
+              job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
+            )
+        )
+        Right(com.example.graphQL.cats.service.search.JobDiscoveryFacets.fromJobs(eligible))
+      })
+
+    private def haversine(
+        center: com.example.graphQL.cats.domain.model.GeoPoint,
+        point: com.example.graphQL.cats.domain.model.GeoPoint
+    ): Double = {
+      val lat1 = Math.toRadians(center.latitude); val lat2 = Math.toRadians(point.latitude)
+      val dLat = lat2 - lat1; val dLon = Math.toRadians(point.longitude - center.longitude)
+      val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(
+        dLon / 2
+      )
+      6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+    }
+
     override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
         ref.get

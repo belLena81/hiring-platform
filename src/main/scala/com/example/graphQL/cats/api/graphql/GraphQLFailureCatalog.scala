@@ -178,6 +178,7 @@ private[graphql] object GraphQLFailureCatalog {
       case DomainValidationError.TextTooLong(field, maximum, _)        => s"$field must be at most $maximum characters"
       case DomainValidationError.ByteLengthExceeded(field, maximum, _) => s"$field must be at most $maximum bytes"
       case DomainValidationError.TooManyValues(field, maximum, _)      => s"$field must contain at most $maximum values"
+      case DomainValidationError.InvalidCoordinates                    => "Coordinates are outside geographic bounds"
     }
 
   private def failure(metadata: FailureMetadata, message: String): GraphQLFailure =

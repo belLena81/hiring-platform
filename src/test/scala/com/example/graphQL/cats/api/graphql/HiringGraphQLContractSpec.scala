@@ -37,6 +37,15 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
       case Right(document) => context.use(HiringGraphQLSchema.executeInContext(request, document, _))
     }
 
+  test("interview scheduling operations match the active public schema") {
+    fixture("interview-scheduling.graphql").map { operation =>
+      val document = sangria.parser.QueryParser.parse(operation).get
+      val violations =
+        sangria.validation.QueryValidator.default.validateQuery(HiringGraphQLSchema.schema, document, Map.empty, None)
+      assertEquals(violations.toList, Nil)
+    }
+  }
+
   test("served SDL matches the deterministic contract fixture") {
     fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))
   }

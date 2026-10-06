@@ -1128,3 +1128,9 @@ time_to_hire_metrics
 ```
 
 The dimensions for this dataset remain to be specified in its implementation slice.
+
+## Geographic discovery and scheduled interviews
+
+Authenticated discovery combines onsite radius with city, skills and creation-date filters and returns deterministic distance/ID ordering. Exact structured facets count the complete eligible filter set before pagination; separately requested hits and facets have no shared-snapshot promise. Private candidate attributes are neither discovery facets nor ranking features.
+
+A recruiter schedules an Accepted application for an owned job with a future UTC interval and idempotency key. The durable workflow reserves both participants, atomically advances Accepted to Interview with history and notification intent, then delivers both notifications. Candidates inspect their own workflows; recruiters inspect owned-job workflows; Admin repairs with expected revision and idempotency after reconciliation. Adjacent calendar reservations are permitted; overlapping participant intervals are rejected. Real providers and cancellation/rescheduling remain deferred.

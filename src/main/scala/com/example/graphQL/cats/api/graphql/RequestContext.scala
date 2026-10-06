@@ -41,7 +41,8 @@ final case class HiringGraphQLServices(
     semanticSearchService: Option[SearchUseCases] = None,
     interactionService: InteractionUseCases = InteractionUseCases.noop,
     searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
-    analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
+    analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
+    interviewScheduling: Option[com.example.graphQL.cats.service.application.InterviewSchedulingService] = None
 )
 
 final case class EmailVisibility(userId: UserId)

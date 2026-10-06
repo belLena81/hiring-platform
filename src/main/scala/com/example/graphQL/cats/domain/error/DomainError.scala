@@ -26,4 +26,5 @@ enum DomainValidationError {
   case TextTooLong(field: String, maximum: Int, actual: Int)
   case ByteLengthExceeded(field: String, maximum: Int, actual: Int)
   case TooManyValues(field: String, maximum: Int, actual: Int)
+  case InvalidCoordinates
 }

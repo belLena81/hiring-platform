@@ -12,6 +12,21 @@ private[graphql] object HiringGraphQLTypes {
   private def simple[T, V](name: String, tpe: OutputType[V])(get: T => V): Field[RequestContext, T] =
     Field(name, tpe, resolve = context => get(context.value))
 
+  lazy val interviewWorkflowType
+      : ObjectType[RequestContext, com.example.graphQL.cats.domain.workflow.InterviewWorkflow] = ObjectType(
+    "InterviewWorkflow",
+    fields[RequestContext, com.example.graphQL.cats.domain.workflow.InterviewWorkflow](
+      simple("id", uuidType)(_.id.value),
+      simple("applicationId", applicationIdType)(_.applicationId),
+      simple("startsAt", instantType)(_.interval.startsAt),
+      simple("endsAt", instantType)(_.interval.endsAt),
+      simple("revision", LongType)(_.revision),
+      simple("progress", StringType)(_.phase.toString),
+      simple("notifiedParticipants", ListType(StringType))(_.notified.toList.map(_.toString).sorted)
+    )
+  )
+  lazy val scheduleInterviewResultType = mutationResultType("ScheduleInterviewResult", interviewWorkflowType)
+  lazy val repairInterviewResultType = mutationResultType("RepairInterviewResult", interviewWorkflowType)
   lazy val healthType: ObjectType[RequestContext, Unit] =
     ObjectType("Health", fields[RequestContext, Unit](Field("status", healthStatus, resolve = _ => "UP")))
   lazy val readinessType: ObjectType[RequestContext, ProbeResult] = ObjectType(
@@ -59,9 +74,52 @@ private[graphql] object HiringGraphQLTypes {
     fields[RequestContext, Location](
       simple("country", StringType)(_.country),
       simple("city", StringType)(_.city),
-      simple("remote", BooleanType)(_.remote)
+      simple("remote", BooleanType)(_.remote),
+      simple("coordinates", OptionType(geoPointType))(_.coordinates)
     )
   )
+  lazy val geoPointType: ObjectType[RequestContext, GeoPoint] = ObjectType(
+    "GeoPoint",
+    fields[RequestContext, GeoPoint](
+      simple("latitude", FloatType)(_.latitude),
+      simple("longitude", FloatType)(_.longitude)
+    )
+  )
+  lazy val nearbyJobType: ObjectType[RequestContext, NearbyJobResult] = ObjectType(
+    "NearbyJob",
+    fields[RequestContext, NearbyJobResult](
+      simple("job", jobType)(_.job),
+      simple("distanceKm", FloatType)(_.distanceKm),
+      simple("cursor", StringType)(_.cursor)
+    )
+  )
+  lazy val nearbyJobsResultsType: ObjectType[RequestContext, NearbyJobsResults] = ObjectType(
+    "NearbyJobsConnection",
+    fields[RequestContext, NearbyJobsResults](
+      simple("results", ListType(nearbyJobType))(_.results),
+      simple("hasNextPage", BooleanType)(_.hasNextPage)
+    )
+  )
+  lazy val jobFacetBucketType: ObjectType[RequestContext, com.example.graphQL.cats.service.search.JobFacetBucket] =
+    ObjectType(
+      "JobFacetBucket",
+      fields[RequestContext, com.example.graphQL.cats.service.search.JobFacetBucket](
+        simple("value", StringType)(_.value),
+        simple("count", LongType)(_.count)
+      )
+    )
+  lazy val jobDiscoveryFacetsType
+      : ObjectType[RequestContext, com.example.graphQL.cats.service.search.JobDiscoveryFacets] =
+    ObjectType(
+      "JobDiscoveryFacets",
+      fields[RequestContext, com.example.graphQL.cats.service.search.JobDiscoveryFacets](
+        simple("skills", ListType(jobFacetBucketType))(_.skills),
+        simple("countries", ListType(jobFacetBucketType))(_.countries),
+        simple("cities", ListType(jobFacetBucketType))(_.cities),
+        simple("remote", ListType(jobFacetBucketType))(_.remote),
+        simple("truncated", BooleanType)(_.truncated)
+      )
+    )
   lazy val candidateProfileType: ObjectType[RequestContext, CandidateProfileView] = ObjectType(
     "CandidateProfile",
     fields[RequestContext, CandidateProfileView](

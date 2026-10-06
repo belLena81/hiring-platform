@@ -1,0 +1,17 @@
+mutation ScheduleInterview($input: ScheduleInterviewInput!) {
+  scheduleInterview(input: $input) {
+    ... on InterviewWorkflow { id applicationId startsAt endsAt revision progress notifiedParticipants }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}
+query InterviewProgress($workflowId: UUID!) {
+  interviewWorkflow(workflowId: $workflowId) { id applicationId startsAt endsAt revision progress notifiedParticipants }
+}
+mutation RepairInterview($input: RepairInterviewInput!) {
+  repairInterviewWorkflow(input: $input) {
+    ... on InterviewWorkflow { id revision progress }
+    ... on ValidationError { code message }
+    ... on DomainError { code message }
+  }
+}

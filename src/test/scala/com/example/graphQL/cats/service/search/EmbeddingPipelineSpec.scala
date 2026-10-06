@@ -1012,6 +1012,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]] =
       delegate.findOpen(filter, page)
 
+    override def nearbyJobs(query: NearbyJobsQuery, limit: Int) = delegate.nearbyJobs(query, limit)
+    override def jobDiscoveryFacets(query: JobFacetQuery) = delegate.jobDiscoveryFacets(query)
+
     override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] = delegate.findAll(page)
 
     override def findByRecruiter(

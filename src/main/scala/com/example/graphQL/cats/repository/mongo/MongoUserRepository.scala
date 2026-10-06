@@ -450,7 +450,9 @@ final class MongoUserRepository(
     val userWrite = MongoSessionOperations.updateOne(collection, session, userFilter, userUpdate)
     RepositoryIO.lift(userWrite).flatMap {
       case Some(result) if result.getMatchedCount == 1L =>
-        markSubjectFenceDeleted(session, userId, now) *> closeRecruiterJobs(userId, now, session)
+        markSubjectFenceDeleted(session, userId, now) *>
+          new MongoInterviewSubjectCleanup(database).enqueue(userId, now, session) *>
+          closeRecruiterJobs(userId, now, session)
       case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
       case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
     }

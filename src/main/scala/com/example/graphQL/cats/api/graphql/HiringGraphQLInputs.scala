@@ -20,6 +20,13 @@ private[graphql] object HiringGraphQLInputs {
       extends ValueCoercionViolation(s"Invalid $typeName value; expected a string")
   private final case class InstantCoercionViolation()
       extends ValueCoercionViolation("Invalid Instant value; expected ISO-8601")
+  lazy val scheduleInterviewInputType =
+    deriveInputObjectType[ScheduleInterviewGraphQLInput](InputObjectTypeName("ScheduleInterviewInput"))
+  lazy val repairInterviewInputType =
+    deriveInputObjectType[RepairInterviewGraphQLInput](InputObjectTypeName("RepairInterviewInput"))
+  lazy val scheduleInterviewInputArgument = Argument("input", scheduleInterviewInputType)
+  lazy val repairInterviewInputArgument = Argument("input", repairInterviewInputType)
+  lazy val workflowIdArgument = Argument("workflowId", uuidType)
   lazy val healthStatus: EnumType[String] = enumType("HealthStatus", List("UP"))
   lazy val readinessStatus: EnumType[String] = enumType("ReadinessStatus", List("READY", "NOT_READY"))
   lazy val jobStatus: EnumType[JobStatus] = enumType("JobStatus", JobStatus.values.toList)
@@ -99,6 +106,18 @@ private[graphql] object HiringGraphQLInputs {
     Argument("query", OptionInputType(StringType))
   lazy val candidateMatchFilterInputType: InputObjectType[CandidateMatchFilter] =
     deriveInputObjectType[CandidateMatchFilter](InputObjectTypeName("CandidateMatchFilter"))
+  lazy val geoPointInputType: InputObjectType[GeoPointGraphQLInput] =
+    deriveInputObjectType[GeoPointGraphQLInput](InputObjectTypeName("GeoPointInput"))
+  given InputType[GeoPointGraphQLInput] = geoPointInputType
+  lazy val nearbyJobsFilterInputType: InputObjectType[NearbyJobsFilterGraphQLInput] =
+    deriveInputObjectType[NearbyJobsFilterGraphQLInput](InputObjectTypeName("NearbyJobsFilter"))
+  lazy val nearbyCenterArgument: Argument[GeoPointGraphQLInput] = Argument("center", geoPointInputType)
+  lazy val radiusKmArgument: Argument[Double] = Argument("radiusKm", FloatType)
+  lazy val optionalRadiusKmArgument: Argument[Option[Double]] = Argument("radiusKm", OptionInputType(FloatType))
+  lazy val optionalNearbyCenterArgument: Argument[Option[GeoPointGraphQLInput]] =
+    Argument("center", OptionInputType(geoPointInputType))
+  lazy val nearbyFilterArgument: Argument[Option[NearbyJobsFilterGraphQLInput]] =
+    Argument("filter", OptionInputType(nearbyJobsFilterInputType))
   lazy val candidateMatchFilterArgument: Argument[Option[CandidateMatchFilter]] =
     Argument("filter", OptionInputType(candidateMatchFilterInputType))
   lazy val jobStatusArgument: Argument[Option[JobStatus]] = Argument("status", OptionInputType(jobStatus))

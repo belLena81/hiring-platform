@@ -22,6 +22,16 @@ private[mongo] object MongoHiringMigrations {
   private val OutboxSubjectReferencesMigrationId = "003_event_outbox_subject_references"
   private val AnalyticsReportControlMigrationId = "004_analytics_report_control"
   private val AnalyticsDeletionReceiptMigrationId = "005_analytics_deletion_receipts"
+  private val JobGeoPointsMigrationId = "006_job_geo_points"
+  private val InterviewWorkflowStorageMigrationId = "007_interview_workflow_storage"
+  private val InterviewWorkflowCollections = List(
+    MongoCollections.InterviewWorkflows,
+    MongoCollections.InterviewWorkflowCommands,
+    MongoCollections.InterviewWorkflowInbox,
+    MongoCollections.FakeInterviewCalendarReservations,
+    MongoCollections.FakeInterviewCalendarParticipantLocks,
+    MongoCollections.FakeInterviewNotificationReceipts
+  )
 
   val ownedCollections: Set[String] = Set(
     MongoCollections.Users,
@@ -44,7 +54,14 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.AnalyticsReportSnapshots,
     MongoCollections.AnalyticsReportControl,
     MongoCollections.AnalyticsReportRuns,
-    MongoCollections.HiringMigrationLedger
+    MongoCollections.HiringMigrationLedger,
+    MongoCollections.InterviewSubjectCleanup,
+    MongoCollections.InterviewWorkflows,
+    MongoCollections.InterviewWorkflowCommands,
+    MongoCollections.InterviewWorkflowInbox,
+    MongoCollections.FakeInterviewCalendarReservations,
+    MongoCollections.FakeInterviewCalendarParticipantLocks,
+    MongoCollections.FakeInterviewNotificationReceipts
   )
 
   private final case class SetupCollectionLimitExceeded(maximum: Int)
@@ -66,7 +83,211 @@ private[mongo] object MongoHiringMigrations {
     Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
       migrateAggregateVersions(database) *> verifyCandidateSearchProfiles(database) *>
       migrateOutboxSubjectReferences(database, diagnostics) *> migrateAnalyticsReportControl(database) *>
-      migrateAnalyticsDeletionReceipts(database) *> createAccountRegistry(database)
+      migrateAnalyticsDeletionReceipts(database) *> migrateInterviewWorkflowStorage(
+        database
+      ) *> migrateInterviewSubjectCleanup(database) *> migrateInterviewInboxIdentity(database) *> createAccountRegistry(
+        database
+      )
+
+  /** Retire only the known unfiltered inbox index; quarantine/hiring receipts must not share a null identity. */
+  private def migrateInterviewInboxIdentity(database: SetupDatabase): IO[Unit] = {
+    val collection = database.getCollection(MongoCollections.InterviewWorkflowInbox)
+    val indexName = MongoHiringSetup.InterviewWorkflowInboxIdentityIndex
+    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
+    collection.listIndexes[Document].flatMap { indexes =>
+      indexes.find(_.getString("name") == indexName) match {
+        case Some(index) if !index.containsKey("partialFilterExpression") =>
+          val keys = index.get("key", classOf[Document])
+          val expected = new Document("workflowId", Int.box(1)).append("messageId", Int.box(1))
+          if (keys != expected || !index.getBoolean("unique", false))
+            IO.raiseError(new IllegalStateException("Interview inbox identity index has an unexpected definition"))
+          else
+            database
+              .runCommand(
+                new Document("dropIndexes", MongoCollections.InterviewWorkflowInbox)
+                  .append("index", indexName)
+              )
+              .handleErrorWith {
+                case error: MongoCommandException if error.getErrorCode == 27 => IO.unit
+                case error                                                    => IO.raiseError(error)
+              }
+        case _ => IO.unit
+      }
+    } *> ledger
+      .updateOne(
+        Filters.eq(MongoFields.Id, "009_interview_inbox_identity"),
+        Updates.combine(
+          Updates.setOnInsert(MongoFields.Id, "009_interview_inbox_identity"),
+          Updates.setOnInsert(MongoFields.Version, 1L),
+          Updates.set(MongoFields.State, "Complete")
+        ),
+        new UpdateOptions().upsert(true)
+      )
+      .void
+  }
+
+  private def migrateInterviewSubjectCleanup(database: SetupDatabase): IO[Unit] = {
+    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
+    val migration = Filters.eq(MongoFields.Id, "008_interview_subject_cleanup")
+    database.createCollection(MongoCollections.InterviewSubjectCleanup).handleErrorWith {
+      case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
+      case error                                                    => IO.raiseError(error)
+    } *> ledger
+      .updateOne(
+        migration,
+        Updates.combine(
+          Updates.setOnInsert(MongoFields.Id, "008_interview_subject_cleanup"),
+          Updates.setOnInsert(MongoFields.Version, 1L),
+          Updates.set(MongoFields.State, "Complete")
+        ),
+        new UpdateOptions().upsert(true)
+      )
+      .void
+  }
+
+  /** Introduces empty durable-work and local fake-provider stores. There is no legacy payload to backfill; each
+    * collection creation is idempotent and the ledger is marked complete only after all namespaces exist. Index setup
+    * runs immediately after this migration and verifies each required definition on every startup.
+    */
+  private def migrateInterviewWorkflowStorage(database: SetupDatabase): IO[Unit] = {
+    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
+    val migration = Filters.eq(MongoFields.Id, InterviewWorkflowStorageMigrationId)
+    val options = new UpdateOptions().upsert(true)
+
+    def ensureCollection(name: String): IO[Unit] =
+      database.createCollection(name).handleErrorWith {
+        case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
+        case error                                                    => IO.raiseError(error)
+      }
+
+    def verifyLedger: IO[Unit] =
+      ledger.find(migration).first.flatMap {
+        case Some(document)
+            if document.getLong(MongoFields.Version).longValue() == 1L &&
+              document.getString(MongoFields.State) == "Complete" =>
+          IO.unit
+        case _ => IO.raiseError(new IllegalStateException("Interview workflow storage migration did not complete"))
+      }
+
+    def markRunning: IO[Unit] =
+      ledger
+        .updateOne(
+          migration,
+          Updates.combine(
+            Updates.setOnInsert(MongoFields.Id, InterviewWorkflowStorageMigrationId),
+            Updates.set(MongoFields.Version, 1L),
+            Updates.set(MongoFields.State, "Running")
+          ),
+          options
+        )
+        .void
+        .handleErrorWith {
+          case error: MongoWriteException if error.getError.getCode == 11000 => IO.unit
+          case error                                                         => IO.raiseError(error)
+        }
+
+    def run: IO[Unit] =
+      markRunning *> InterviewWorkflowCollections.traverse_(ensureCollection) *>
+        ledger
+          .updateOne(
+            migration,
+            Updates.combine(Updates.set(MongoFields.Version, 1L), Updates.set(MongoFields.State, "Complete")),
+            options
+          )
+          .void *> verifyLedger
+
+    ledger.find(migration).first.flatMap {
+      case Some(document) if document.containsKey(MongoFields.Version) && document.getLong(MongoFields.Version) != 1L =>
+        IO.raiseError(new IllegalStateException("Unsupported interview workflow storage migration version"))
+      case _ => run
+    }
+  }
+
+  /** Verifies existing optional GeoJSON points after the strict collection validator is installed. Missing points are
+    * valid and are deliberately left untouched. The scan is bounded and resumes after the last verified job ID; new
+    * writes are protected by the validator before this runs.
+    */
+  private[mongo] def verifyJobGeoPoints(database: SetupDatabase): IO[Unit] = {
+    val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)
+    val jobs = database.getCollection(MongoCollections.Jobs)
+    val migration = Filters.eq(MongoFields.Id, JobGeoPointsMigrationId)
+    val pointExists = Filters.exists("location.point", true)
+
+    def markComplete: IO[Unit] =
+      ledger
+        .updateOne(
+          migration,
+          Updates.combine(
+            Updates.set(MongoFields.Version, 1L),
+            Updates.set(MongoFields.State, "Complete"),
+            Updates.unset(MongoFields.LastId)
+          )
+        )
+        .void
+
+    def scan(checkpoint: Option[String]): IO[Unit] = {
+      val afterCheckpoint = checkpoint.fold(pointExists)(id => Filters.and(pointExists, Filters.gt(MongoFields.Id, id)))
+      collectWithin(
+        jobs
+          .find(afterCheckpoint)
+          .sort(Indexes.ascending(MongoFields.Id))
+          .limit(RevisionMigrationBatchSize)
+          .boundedStream(32),
+        RevisionMigrationBatchSize
+      ).flatMap { batch =>
+        batch.traverse_ { job =>
+          val id = Option(job.getString(MongoFields.Id))
+          val point = Option(job.get(MongoFields.Location, classOf[Document]))
+            .flatMap(location => Option(location.get("point", classOf[Document])))
+          (id, point) match {
+            case (Some(_), Some(value)) if isValidJobGeoPoint(value) => IO.unit
+            case (Some(jobId), _)                                    =>
+              IO.raiseError(new IllegalStateException(s"Job geo-point migration found an invalid point at job $jobId"))
+            case _ => IO.raiseError(new IllegalStateException("Job geo-point migration found an invalid job key"))
+          }
+        } *> batch.lastOption.traverse_ { last =>
+          Option(last.getString(MongoFields.Id)).fold(
+            IO.raiseError[Unit](new IllegalStateException("Invalid job geo-point migration key"))
+          )(id => ledger.updateOne(migration, Updates.set(MongoFields.LastId, id)).void)
+        } *> (if (batch.size == RevisionMigrationBatchSize)
+                scan(batch.lastOption.map(_.getString(MongoFields.Id)))
+              else markComplete)
+      }
+    }
+
+    ledger.find(migration).first.flatMap {
+      case Some(document) if document.getString(MongoFields.State) == "Complete" => IO.unit
+      case existing                                                              =>
+        val checkpoint = existing.flatMap(value => Option(value.getString(MongoFields.LastId)))
+        ledger
+          .updateOne(
+            migration,
+            Updates.combine(
+              Updates.setOnInsert(MongoFields.Id, JobGeoPointsMigrationId),
+              Updates.set(MongoFields.Version, 1L),
+              Updates.set(MongoFields.State, "Running")
+            ),
+            new UpdateOptions().upsert(true)
+          )
+          .void *> scan(checkpoint)
+    }
+  }
+
+  private[mongo] def isValidJobGeoPoint(point: Document): Boolean = {
+    val coordinates = Option(point.get("coordinates")) collect { case values: java.util.List[?] =>
+      values.asScala.toList
+    }
+    val longitudeLatitude = coordinates.filter(_.size == 2).flatMap { values =>
+      values match {
+        case List(longitude: Number, latitude: Number) =>
+          val lon = longitude.doubleValue()
+          val lat = latitude.doubleValue()
+          Option.when(lon.isFinite && lat.isFinite && lon >= -180d && lon <= 180d && lat >= -90d && lat <= 90d)(())
+        case _ => None
+      }
+    }
+    point.get("type") == "Point" && longitudeLatitude.isDefined
+  }
 
   private def migrateAggregateVersions(database: SetupDatabase): IO[Unit] = {
     val ledger = database.getCollection(MongoCollections.HiringMigrationLedger)

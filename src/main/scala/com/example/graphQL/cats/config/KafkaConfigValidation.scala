@@ -12,8 +12,13 @@ private[config] object KafkaConfigValidation {
         kafka.enabled && kafka.consumer.enabled,
         kafka.consumer.saslUsername,
         kafka.consumer.saslPassword
+      ),
+      validInterview(
+        kafka.interview.getOrElse(RawInterviewRuntimeConfig()),
+        kafka.enabled,
+        List(kafka.publisher.saslUsername, kafka.consumer.saslUsername).flatten
       )
-    ).mapN { (saslSecurityProtocol, _, _) =>
+    ).mapN { (saslSecurityProtocol, _, _, interview) =>
       KafkaConfig(
         kafka.enabled,
         kafka.bootstrapServers,
@@ -36,7 +41,49 @@ private[config] object KafkaConfigValidation {
           kafka.consumer.saslUsername,
           kafka.consumer.saslPassword
         ),
-        saslSecurityProtocol
+        saslSecurityProtocol,
+        interview
+      )
+    }
+
+  private[config] def validInterview(
+      raw: RawInterviewRuntimeConfig,
+      kafkaEnabled: Boolean = true,
+      operationalPrincipals: List[String] = Nil
+  ): ValidatedNel[ConfigError, InterviewRuntimeConfig] =
+    (
+      validKafkaCredentials(raw.enabled, raw.orchestratorUsername, raw.orchestratorPassword),
+      validKafkaCredentials(raw.enabled, raw.workerUsername, raw.workerPassword),
+      Either
+        .cond(
+          raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
+            raw.retryCapSeconds >= raw.retryBaseSeconds && raw.retryCapSeconds <= 300 &&
+            raw.providerTimeoutSeconds >= 1 && raw.providerTimeoutSeconds.toLong + 30L < raw.claimSeconds.toLong &&
+            raw.claimSeconds <= 3600 && raw.preCommitDeadlineSeconds >= 1 && raw.preCommitDeadlineSeconds <= 300 && raw.replayRetentionSeconds == 604800L &&
+            raw.completedDedupRetentionSeconds >= 691200L && raw.completedDedupRetentionSeconds <= 31536000L &&
+            (!raw.enabled || (kafkaEnabled && raw.orchestratorUsername != raw.workerUsername &&
+              !operationalPrincipals.exists(principal =>
+                raw.orchestratorUsername.contains(principal) || raw.workerUsername.contains(principal)
+              ))),
+          (),
+          ConfigError.InvalidKafkaCredentials
+        )
+        .toValidatedNel
+    ).mapN { (_, _, _) =>
+      InterviewRuntimeConfig(
+        raw.enabled,
+        raw.orchestratorUsername,
+        raw.orchestratorPassword,
+        raw.workerUsername,
+        raw.workerPassword,
+        raw.maxAttempts,
+        raw.retryBaseSeconds,
+        raw.retryCapSeconds,
+        raw.providerTimeoutSeconds,
+        raw.claimSeconds,
+        raw.preCommitDeadlineSeconds,
+        raw.replayRetentionSeconds,
+        raw.completedDedupRetentionSeconds
       )
     }
 

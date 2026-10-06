@@ -103,18 +103,64 @@ private[mongo] object MongoHiringValidators {
   }
 
   def createJobValidator(database: MongoDatabase[IO]): IO[Unit] = {
+    val geoPoint = new Document("bsonType", "object")
+      .append("required", List("type", "coordinates").asJava)
+      .append(
+        "properties",
+        new Document("type", new Document("bsonType", "string").append("enum", List("Point").asJava))
+          .append(
+            "coordinates",
+            new Document("bsonType", "array")
+              .append("minItems", 2)
+              .append("maxItems", 2)
+              .append("items", new Document("bsonType", "number"))
+          )
+      )
+    val location = new Document("bsonType", "object")
+      .append("properties", new Document("point", geoPoint))
     val schema = new Document(
       "$jsonSchema",
       new Document("bsonType", "object")
         .append("required", List(MongoFields.Version).asJava)
-        .append("properties", new Document(MongoFields.Version, new Document("bsonType", "long").append("minimum", 0L)))
+        .append(
+          "properties",
+          new Document(MongoFields.Version, new Document("bsonType", "long").append("minimum", 0L))
+            .append(MongoFields.Location, location)
+        )
+    )
+    val longitude = new Document("$arrayElemAt", List("$location.point.coordinates", 0).asJava)
+    val latitude = new Document("$arrayElemAt", List("$location.point.coordinates", 1).asJava)
+    val coordinateBounds = new Document(
+      "$and",
+      List(
+        new Document("$isNumber", List(longitude).asJava),
+        new Document("$isNumber", List(latitude).asJava),
+        new Document("$gte", List(longitude, -180d).asJava),
+        new Document("$lte", List(longitude, 180d).asJava),
+        new Document("$gte", List(latitude, -90d).asJava),
+        new Document("$lte", List(latitude, 90d).asJava)
+      ).asJava
+    )
+    val coordinatesAreArray = new Document("$isArray", List("$location.point.coordinates").asJava)
+    val validCoordinates = new Document(
+      "$cond",
+      List(
+        coordinatesAreArray,
+        coordinateBounds,
+        false
+      ).asJava
+    )
+    val pointIsAbsent = new Document("$eq", List(new Document("$type", "$location.point"), "missing").asJava)
+    val geoPredicate = new Document(
+      "$expr",
+      new Document("$cond", List(pointIsAbsent, true, validCoordinates).asJava)
     )
     database.createCollection(MongoCollections.Jobs).void.recoverWith {
       case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
     } *> database
       .runCommand(
         new Document("collMod", MongoCollections.Jobs)
-          .append("validator", schema)
+          .append("validator", new Document("$and", List(schema, geoPredicate).asJava))
           .append("validationLevel", "strict")
           .append("validationAction", "error")
       )

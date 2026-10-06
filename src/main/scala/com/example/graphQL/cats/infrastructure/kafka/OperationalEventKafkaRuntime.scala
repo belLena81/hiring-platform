@@ -218,8 +218,9 @@ object OperationalEventKafkaRuntime {
           .records
           .evalMap { message =>
             val record = message.record
-            handleRecord(config, receipts, quarantine, record.topic, record.partition, record.offset, record.value)
-              .flatMap(commit => if (commit) message.offset.commit else IO.unit)
+            processRecordBeforeCommit(record.topic, record.partition, record.offset)(
+              handleRecord(config, receipts, quarantine, record.topic, record.partition, record.offset, record.value)
+            )(message.offset.commit)
           },
         1.second
       )
@@ -289,6 +290,18 @@ object OperationalEventKafkaRuntime {
       }
     }
 
+  private[kafka] def processRecordBeforeCommit(
+      topic: String,
+      partition: Int,
+      offset: Long
+  )(process: IO[Boolean])(commit: IO[Unit]): IO[Unit] =
+    process.flatMap {
+      case true => commit
+      // Stop this stream before reading a later offset. Continuing with false here could
+      // commit N+1 and make the undurable record at N unrecoverable for this group.
+      case false => IO.raiseError(UndurableRecord(topic, partition, offset))
+    }
+
   private def quarantineRecord(
       config: KafkaConfig,
       quarantine: EventQuarantineRepository,
@@ -334,6 +347,9 @@ object OperationalEventKafkaRuntime {
 
   private def sanitized(error: Throwable): String =
     Option(error.getMessage).filter(_.nonEmpty).getOrElse(error.getClass.getSimpleName)
+
+  private final case class UndurableRecord(topic: String, partition: Int, offset: Long)
+      extends RuntimeException(s"Kafka record could not be durably processed: $topic-$partition@$offset")
 
   private[kafka] def isProducerFenced(error: Throwable): Boolean =
     Iterator

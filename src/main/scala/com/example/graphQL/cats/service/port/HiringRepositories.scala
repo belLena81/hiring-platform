@@ -19,7 +19,16 @@ import com.example.graphQL.cats.service.AnalyticsReportSnapshot
 import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.pagination.{ApplicationEventPageRequest, ApplicationPageRequest, JobPageRequest}
-import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, RankedJob, VectorSearchQuery}
+import com.example.graphQL.cats.service.search.{
+  JobDiscoveryFacets,
+  JobFacetQuery,
+  JobSearchFilter,
+  NearbyJob,
+  NearbyJobsQuery,
+  RankedCandidate,
+  RankedJob,
+  VectorSearchQuery
+}
 import java.time.Instant
 import java.util.UUID
 
@@ -263,6 +272,8 @@ trait JobRepository {
   def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]]
   def findMany(ids: List[JobId]): RepositoryIO[List[Job]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]]
+  def nearbyJobs(query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]]
+  def jobDiscoveryFacets(query: JobFacetQuery): RepositoryIO[JobDiscoveryFacets]
   def findAll(page: JobPageRequest): RepositoryIO[List[Job]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]]
   def createWithEvents(

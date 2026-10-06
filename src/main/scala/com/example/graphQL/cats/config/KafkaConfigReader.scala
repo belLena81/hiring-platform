@@ -13,7 +13,8 @@ private[config] final case class RawKafkaConfig(
     consumerGroup: KafkaConsumerGroup,
     publisher: RawKafkaPublisherConfig,
     consumer: RawKafkaConsumerConfig,
-    saslSecurityProtocol: Option[String] = None
+    saslSecurityProtocol: Option[String] = None,
+    interview: Option[RawInterviewRuntimeConfig] = None
 ) derives ConfigReader
 private[config] final case class RawKafkaPublisherConfig(
     workerId: NonBlankStr,
@@ -31,4 +32,20 @@ private[config] final case class RawKafkaConsumerConfig(
     quarantineTtlDays: KafkaRetentionDays,
     saslUsername: Option[String],
     saslPassword: Option[String]
+) derives ConfigReader
+
+private[config] final case class RawInterviewRuntimeConfig(
+    enabled: Boolean = false,
+    orchestratorUsername: Option[String] = None,
+    orchestratorPassword: Option[String] = None,
+    workerUsername: Option[String] = None,
+    workerPassword: Option[String] = None,
+    maxAttempts: Int = 5,
+    retryBaseSeconds: Int = 1,
+    retryCapSeconds: Int = 30,
+    providerTimeoutSeconds: Int = 10,
+    claimSeconds: Int = 60,
+    preCommitDeadlineSeconds: Int = 300,
+    replayRetentionSeconds: Long = 604800L,
+    completedDedupRetentionSeconds: Long = 691200L
 ) derives ConfigReader

@@ -233,4 +233,22 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assertEquals(stages(2).get("$sort", classOf[Document]).getInteger("score").intValue(), -1)
     assertEquals(stages(3).getInteger("$limit").intValue(), 10)
   }
+  test("lexical capture adapter fixes public job fields and applies eligibility before its bounded limit") {
+    val repo = repository()
+    val stages = repo.lexicalJobStages("Scala engineer", repo.jobFilter(searchQuery, searchQuery.filter)).asScala.toList
+    assertEquals(
+      stages.head
+        .get("$search", classOf[Document])
+        .get("text", classOf[Document])
+        .getList("path", classOf[String])
+        .asScala
+        .toList,
+      List("title", "description", "requirements", "skills")
+    )
+    assert(stages(1).containsKey("$match"))
+    assert(stages(2).containsKey("$limit"))
+    assert(!stages.head.toJson.contains("residence"))
+    assert(!stages.head.toJson.contains("availability"))
+  }
+
 }

@@ -85,7 +85,7 @@ private[mongo] object MongoHiringCodecs {
       value.description.validNel,
       value.requirements.validNel,
       value.skills.toSet.validNel,
-      Location(value.location.country, value.location.city, value.location.remote).validNel,
+      decodeLocation(value.location),
       enumValue(MongoFields.Status, value.status, JobStatus.values).toValidatedNel,
       value.createdAt.toInstant.validNel,
       value.updatedAt.toInstant.validNel,
@@ -156,6 +156,22 @@ private[mongo] object MongoHiringCodecs {
     noUnexpectedFields(document, fields)
       .andThen(_ => decode(eventDocument, OperationalEventFields)(MongoHiringPersistenceCodecs.decodeOperationalEvent))
       .andThen(readOperationalEvent)
+  }
+
+  private def decodeLocation(value: StoredLocation): ValidatedNel[StoredDocumentError, Location] = {
+    val coordinates = value.point match {
+      case None                                                                  => None.validNel
+      case Some(point) if point.`type` == "Point" && point.coordinates.size == 2 =>
+        GeoPoint
+          .validate(point.coordinates(1), point.coordinates(0))
+          .leftMap(_ => InvalidField("location.point"))
+          .toValidatedNel
+          .map(Some(_))
+      case Some(_) => InvalidField("location.point").invalidNel
+    }
+    coordinates
+      .andThen(point => Location.validate(value.country, value.city, value.remote, point))
+      .leftMap(_.map(_ => InvalidField("location")))
   }
 
   private def projectOperationalEvent(document: Document): Document =
@@ -585,7 +601,12 @@ private[mongo] object MongoHiringCodecs {
       value.description,
       value.requirements,
       value.skills.toList.sorted,
-      StoredLocation(value.location.country, value.location.city, value.location.remote),
+      StoredLocation(
+        value.location.country,
+        value.location.city,
+        value.location.remote,
+        value.location.coordinates.map(point => StoredGeoPoint("Point", List(point.longitude, point.latitude)))
+      ),
       value.status.toString,
       Date.from(value.createdAt),
       Date.from(value.updatedAt),

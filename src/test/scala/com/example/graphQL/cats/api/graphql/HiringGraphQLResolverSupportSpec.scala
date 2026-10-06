@@ -67,7 +67,16 @@ final class HiringGraphQLResolverSupportSpec extends CatsEffectSuite {
     val updateJob = UpdateJobGraphQLInput(
       idempotencyKey,
       jobId,
-      JobGraphQLInput("Scala Engineer", "Build systems", List("Scala"), List("Cats"), "CY", None, remote = true)
+      JobGraphQLInput(
+        "Scala Engineer",
+        "Build systems",
+        List("Scala"),
+        List("Cats"),
+        "CY",
+        None,
+        remote = true,
+        coordinates = None
+      )
     )
 
     assertEquals(payload, expected)

@@ -70,6 +70,10 @@ object TestGraphQLSupport {
       def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId) = unsupported
       def viewJob(actor: ActorContext, jobId: JobId) = unsupported
       def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest) = unsupported
+      def nearbyJobs(actor: ActorContext, query: com.example.graphQL.cats.service.search.NearbyJobsQuery, limit: Int) =
+        unsupported
+      def jobDiscoveryFacets(actor: ActorContext, query: com.example.graphQL.cats.service.search.JobFacetQuery) =
+        unsupported
       def myJobs(actor: ActorContext, page: JobPageRequest) = unsupported
     },
     new ApplicationUseCases {

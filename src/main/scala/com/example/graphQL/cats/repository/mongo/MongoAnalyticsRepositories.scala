@@ -277,6 +277,13 @@ final class MongoAnalyticsErasureRequestRepository(
                   )
             }
         })(_ => Left(RepositoryError.Unavailable))
+        .flatMap {
+          case AccountDeletionStatus.Complete =>
+            RepositoryIO
+              .lift(new MongoInterviewSubjectCleanup(database).complete(userId))
+              .map(if (_) AccountDeletionStatus.Complete else AccountDeletionStatus.Pending)
+          case other => RepositoryIO.fromEither(Right(other))
+        }
 
   override def purgeSubjectOutbox(userId: UserId): RepositoryIO[Unit] =
     MongoRepositorySupport

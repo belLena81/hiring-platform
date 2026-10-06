@@ -23,6 +23,11 @@ private[mongo] object MongoHiringIndexSetup {
 
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
+      MongoCollections.InterviewSubjectCleanup,
+      Indexes.ascending("state", "requestedAt"),
+      new IndexOptions().name("interview_subject_cleanup_due")
+    ),
+    IndexSpec(
       MongoCollections.Users,
       Indexes.ascending(MongoFields.EmailCanonical),
       new IndexOptions().name(UsersEmailIndex).unique(true).sparse(true)
@@ -97,6 +102,11 @@ private[mongo] object MongoHiringIndexSetup {
         Indexes.descending(MongoFields.CreatedAt, MongoFields.Id)
       ),
       new IndexOptions().name(JobsOpenCityCreatedIndex)
+    ),
+    IndexSpec(
+      MongoCollections.Jobs,
+      Indexes.geo2dsphere("location.point"),
+      new IndexOptions().name(JobsLocationPointIndex)
     ),
     IndexSpec(
       MongoCollections.Jobs,
@@ -286,11 +296,75 @@ private[mongo] object MongoHiringIndexSetup {
       MongoCollections.AnalyticsReportRuns,
       Indexes.ascending(MongoFields.ExpiresAt),
       new IndexOptions().name(MongoHiringSetup.AnalyticsReportRunExpiryIndex).expireAfter(0L, TimeUnit.SECONDS)
+    ),
+    IndexSpec(
+      MongoCollections.InterviewWorkflows,
+      Indexes.ascending("candidateId", MongoFields.Id),
+      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowCandidateIndex)
+    ),
+    IndexSpec(
+      MongoCollections.InterviewWorkflows,
+      Indexes.ascending("recruiterId", MongoFields.Id),
+      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowRecruiterIndex)
+    ),
+    IndexSpec(
+      MongoCollections.InterviewWorkflowCommands,
+      Indexes.ascending("commandState", MongoFields.AvailableAt, MongoFields.Id),
+      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowCommandDueIndex)
+    ),
+    IndexSpec(
+      MongoCollections.InterviewWorkflowCommands,
+      Indexes.ascending("commandState", "claimUntil", MongoFields.Id),
+      new IndexOptions().name(MongoHiringSetup.InterviewWorkflowCommandLeaseIndex)
+    ),
+    IndexSpec(
+      MongoCollections.InterviewWorkflowInbox,
+      Indexes.ascending("workflowId", "messageId"),
+      new IndexOptions()
+        .name(MongoHiringSetup.InterviewWorkflowInboxIdentityIndex)
+        .unique(true)
+        .partialFilterExpression(Filters.eq("documentType", "inboxReceipt"))
+    ),
+    IndexSpec(
+      MongoCollections.FakeInterviewCalendarReservations,
+      Indexes.ascending("participants", "startsAt", "endsAt"),
+      new IndexOptions()
+        .name(MongoHiringSetup.FakeInterviewCalendarParticipantsIndex)
+    ),
+    IndexSpec(
+      MongoCollections.FakeInterviewCalendarReservations,
+      Indexes.ascending("releaseKey"),
+      new IndexOptions().name(MongoHiringSetup.FakeInterviewCalendarReleaseIndex).unique(true)
+    ),
+    IndexSpec(
+      MongoCollections.FakeInterviewNotificationReceipts,
+      Indexes.ascending("recipientId", "deliveredAt"),
+      new IndexOptions().name(MongoHiringSetup.FakeInterviewNotificationRecipientIndex)
     )
   )
 
+  private val interviewRetentionSpecs: List[IndexSpec] = List(
+    MongoCollections.InterviewWorkflows,
+    MongoCollections.InterviewWorkflowCommands,
+    MongoCollections.InterviewWorkflowInbox,
+    MongoCollections.FakeInterviewCalendarReservations,
+    MongoCollections.FakeInterviewNotificationReceipts
+  ).map(name =>
+    IndexSpec(
+      name,
+      Indexes.ascending(MongoFields.RetentionExpiresAt),
+      new IndexOptions().name(s"${name}_completed_evidence_expiry").expireAfter(0L, TimeUnit.SECONDS)
+    )
+  )
+
+  private val interviewSubjectSpecs: List[IndexSpec] = List(
+    MongoCollections.InterviewWorkflowCommands,
+    MongoCollections.InterviewWorkflowInbox,
+    MongoCollections.FakeInterviewNotificationReceipts
+  ).map(name => IndexSpec(name, Indexes.ascending("workflowId"), new IndexOptions().name(s"${name}_workflow_identity")))
+
   def create(database: MongoDatabase[IO]): IO[Unit] =
-    indexSpecs
+    (indexSpecs ++ interviewRetentionSpecs ++ interviewSubjectSpecs)
       .groupBy(_.collection)
       .toList
       .traverse { case (collectionName, specs) =>

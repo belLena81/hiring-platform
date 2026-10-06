@@ -148,6 +148,11 @@ class AppConfigSpec extends FunSuite {
       consumer = KafkaConsumerConfig(enabled = false, receiptTtlDays = 8, quarantineTtlDays = 7)
     )
 
+  test("an absent interview configuration uses disabled local defaults") {
+    val parsed = AppConfig.fromConfig(defaultConfig, Map.empty)
+    assertEquals(parsed.map(_.kafka.interview), Right(InterviewRuntimeConfig()))
+  }
+
   test("Kafka publisher and reader credentials are resolved independently") {
     val enabled = defaultConfig.replace("kafka {\n  enabled = false", "kafka {\n  enabled = true")
     val parsed = AppConfig.fromConfig(

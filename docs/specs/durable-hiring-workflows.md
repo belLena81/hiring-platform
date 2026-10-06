@@ -3,10 +3,10 @@
 ## Identity and scope
 
 - Roadmap owner: Phase 11, Kafka workflow contracts, Saga and State.
-- Status: **draft**. Durable-work invariants and local failure scenarios are specified; stream sizing, a concrete cross-boundary workflow, and external integration choices remain gated below.
+- Status: **in progress**. The local interview scheduling/fake-provider decisions are supplied by the implementation handoff; real providers and deployed retention remain outside this local implementation.
 - Coordinator: Product Manager. Implementation owners: Scala Developer and Data Engineer; Architect and Big Data Engineer own boundary/catalog review; Security Engineer and QA provide independent verdicts.
 - Outcome: accepted hiring work survives process failure and duplicate delivery, with explicit progress and authorized repair when it cannot complete automatically.
-- Authorized present task: specification only. Future implementation proceeds in the ordered slices below after their dependencies are resolved.
+- Authorized present task: local implementation of durable interview scheduling with fake calendar/notification adapters and correction of the existing undurable-consumer acknowledgment gap.
 - Non-goals: a generic Saga engine, event sourcing, new application statuses, changing the existing interview mutation, paid providers, cloud provisioning, or replacing MongoDB transactions with Kafka transactions.
 - Dependencies: [search and embedding architecture](hiring-search-enhancements.md), current operational invariants, [architecture](../../ARCHITECTURE.md#planned-kafka-workflow-contracts), and [roadmap](../development-milestones.md).
 - Existing analytics deletion/activation gates apply immediately; this future phase cannot defer them or certify them by designing another workflow.
@@ -47,7 +47,7 @@ Proposed workflow messages carry typed command/event ID, workflow/correlation ID
 - Candidate retains access only to their own hiring data; recruiters initiate work only for owned jobs/applications; singleton Admin has authorized repair visibility. Background workers use narrowly scoped service identities.
 - Actor identity comes from trusted authentication. Workflow records retain the minimal initiating authority/audit reference, and sensitive steps recheck current resource ownership, account state and permitted application transition at their guarded write.
 - Ordinary application mutations return according to their current local transaction. Kafka/provider unavailability does not undo a committed hiring write; failure to commit its required Mongo outbox does fail the transaction.
-- No new public GraphQL contract is approved here. A future scheduling API needs explicit input/payload/error definitions, authorization tests, SDL and executable operation fixtures before its implementation slice.
+- The local GraphQL contract is `scheduleInterview(input)`, `interviewWorkflow(workflowId)` and `repairInterviewWorkflow(input)`. Inputs require typed application/workflow IDs, UTC instants, idempotency keys and an expected revision for Admin repair. The active SDL and representative operations live in `src/test/resources/graphql/`.
 - Operator inspection and repair use a scoped service boundary, with expected revision, bounded selection and safe audit. Admin authorization is required; a caller-supplied workflow ID is never authority. Decide CLI versus API delivery before exposing this boundary.
 
 ### Pure workflow state and typed outcomes
@@ -108,7 +108,7 @@ If the guarded status write fails or the deadline expires before it can commit, 
 
 Candidate/recruiter notifications occur after commit. Partial delivery tracks each recipient independently; sent messages cannot be recalled. Unknown delivery requires provider lookup/idempotency or visible repair. Restart and replay cannot generate another reservation for the same accepted step. Existing `moveApplicationToInterview` remains a status/history operation with its existing semantics; it does not silently acquire calendar/provider dependencies.
 
-Scheduling-specific choices still required: request fields and response lifecycle, time-zone/availability rules, cancellation/rescheduling behavior, provider guarantees, recipient data minimization, and whether scheduling completion requires notification delivery. These block scheduling implementation, not pure recovery policy or existing-worker tests.
+Local scheduling uses future UTC intervals, `[start,end)` participant availability, persistent fake provider receipts and completion only after both participant notifications. Cancellation/rescheduling and real providers are deferred.
 
 ## Code style and boundaries
 
@@ -124,36 +124,43 @@ Apply [engineering quality](../engineering-quality.md) and [schema evolution](..
 
 ## Open decisions and alternatives
 
+### Local scheduling decisions (2026-10-06)
+
+- Add `scheduleInterview(applicationId, startsAt, endsAt, idempotencyKey)`, require a future UTC interval and an `Accepted` application, and derive both participants from authoritative records. Status/history change remains `Accepted -> Interview` under the existing lifecycle policy.
+- Use durable capability-specific workflow state, inbox/outbox coordination and fake calendar/notification providers. Commands/results use separate `hiring.interview-commands` and `hiring.interview-results` topics keyed by workflow ID; preserve the existing seven-field operational envelope. Local defaults and failure behavior follow the implementation handoff. No real provider or new hiring status is authorized.
+- Candidate/recruiter workflow inspection follows existing ownership rules; Admin repair uses expected revision/idempotency. Account deletion must fence publication and purge attributable workflow/provider data before deletion is complete.
+- Checkpoint: local implementation, execution evidence and independent Code/Security/QA gates are complete below. Live deployment, real-provider guarantees and elapsed deployed retention horizons remain pending.
+
 | Decision | Alternatives and default direction | Evidence / owner / blocked work |
 |---|---|---|
-| First concrete Saga | Extend existing reindexing only if multiple durable boundaries need coordination; otherwise use scoped fake-calendar scheduling. | Architect + PM demonstrate the external boundary and business outcome; blocks Saga implementation selection. |
-| Topic layout/sizing | Preserve shared operational facts; separate commands/results only for ownership/retention/ordering differences. | Big Data + Security review volume, replay/deletion horizon, principal rights; blocks provisioning/routing. |
+| First concrete Saga | Scoped durable fake-calendar interview scheduling selected; existing reindexing remains independent. | Implemented and locally verified reservation, guarded hiring commit, notification and compensation boundaries. |
+| Topic layout/sizing | Shared operational facts unchanged; separate interview commands/results with the approved local limits and rights. | Actual SASL worker/orchestrator routing and accelerated retention passed; deployed sizing remains pending. |
 | Consumer engine | Existing FS2/fs2-kafka by default; Kafka Streams only for measured keyed joins/windows/state-store benefit. | Architect records restore/changelog/repartition/deletion and cost comparison; blocks new library adoption only. |
 | Calendar/notification provider | Deterministic fake first; real provider compared on idempotency, lookup, cancellation, privacy, SLA and request cost. | PM + Security scoped authorization and capability evidence; blocks real integration and duplicate-free claims. |
-| Repair surface | Restricted local CLI or authenticated Admin API. | PM/operator access workflow and Security audit review; blocks exposed repair contract. |
+| Repair surface | Authenticated Admin API selected with revision/idempotency and audit. | Authorized/forbidden access and reconciliation/repair integrations passed; no local CLI is required. |
 | Retry/replay limits | Bounded configured policy, not arbitrary infinite retry; retain inbox through allowed replay. | QA failure workload and operations recovery objectives; blocks production tuning/retention approval. |
 
-No provider, production budget, partition count or latency threshold is chosen by this document.
+The authorized local fake providers, stream defaults and retry budgets are defined above. Production providers, redundancy, budget and latency acceptance remain unresolved.
 
 ## Acceptance and evidence
 
-Future production/test implementation paths are assigned with each ready slice. The linked baseline is source context only; every new criterion below is **Not implemented / Not run**.
+The local scheduling implementation and executable acceptance fixtures are present in this checkout. The matrix below records execution evidence separately from source implementation; pending executions cannot establish a passing gate.
 
 | ID | Given / When / Then | Planned verification | Actual outcome |
 |---|---|---|---|
-| DHW-01 | Given current facts, when catalog/routing is reviewed, then every stream has owner/key/retention/ACL/replay/deletion rules and the seven-field envelope remains explicit. | Catalog walkthrough + active contract fixtures. | Not run |
-| DHW-02 | Given any selected state/input/time, when deciding, then deterministic commands obey valid business transitions with no effects. | Pure transition table/property tests. | Not run |
-| DHW-03 | Given duplicate delivery, when workers race, then one inbox/state/outbox transaction applies and no acknowledged work is lost. | Replica-set race and crash-before/after-commit tests. | Not run |
-| DHW-04 | Given an earlier unresolved partition record, when later work finishes, then committed offsets do not pass the durable frontier. | Kafka integration with controlled interleavings. | Not run |
-| DHW-05 | Given expired claims or stale/out-of-order replies, when processing resumes, then current state and command identity remain guarded. | Fake-clock concurrent-worker and replay tests. | Not run |
-| DHW-06 | Given a provider succeeds before process failure, when restarted, then reconciliation converges without blindly repeating an uncertain effect. | Fake provider crash-window and real provider contract checks when authorized. | Not run |
-| DHW-07 | Given cancellation or overdue durable deadlines, when restarted, then work resumes or enters bounded repair without leaked workers. | Cats Effect resource/cancellation and restart tests. | Not run |
-| DHW-08 | Given exhausted retry or failed compensation, when operators inspect/repair, then progress and allowed guarded action are visible and audited. | Failure drill and forbidden/repeated repair tests. | Not run |
-| DHW-09 | Given deleted subjects and replay/retention boundaries, when work is replayed, then no deleted data or effects are recreated. | Deletion-race, old-replay-denial and storage inventory tests. | Not run |
-| DHW-10 | Given a confirmed interview reservation and rejected status commit, when compensation runs, then reservation releases; uncertain commit is reconciled first. | Conditional scheduling transaction/provider tests. | Not run |
-| DHW-11 | Given committed interview status and partial/uncertain notifications, when retried, then per-recipient reconciliation or repair is visible without invented delivery guarantees. | Conditional notification duplicate/restart tests. | Not run |
-| DHW-12 | Given provider/broker outage, when normal hiring transactions execute, then local durable acceptance remains independent and later delivery recovers. | Mongo + Kafka outage integration; existing embedding recovery tests extended. | Not run |
-| DHW-13 | Given operational storage evolution, when concurrent startup/restart occurs, then verified indexes/state become ready without corrupting live revisions. | Disposable migration and rollback/recovery rehearsal. | Not run |
+| DHW-01 | Given current facts, when catalog/routing is reviewed, then every stream has owner/key/retention/ACL/replay/deletion rules and the seven-field envelope remains explicit. | Catalog walkthrough + active contract fixtures. | Local contract fixtures and actual SASL topic operation pass; catalog and ACL configuration are implemented. Production redundancy and deployed retention remain pending. |
+| DHW-02 | Given any selected state/input/time, when deciding, then deterministic commands obey valid business transitions with no effects. | Pure transition table/property tests. | Pure scheduling and transaction-classification focused suite: 10 passed. Final full-suite gate remains separate. |
+| DHW-03 | Given duplicate delivery, when workers race, then one inbox/state/outbox transaction applies and no acknowledged work is lost. | Replica-set race and crash-before/after-commit tests. | Mongo revision/inbox transaction cases pass; actual two-worker drill completes 32 workflows with exactly 32 reservations and 64 recipient receipts despite repeated requests. |
+| DHW-04 | Given an earlier unresolved partition record, when later work finishes, then committed offsets do not pass the durable frontier. | Kafka integration with controlled interleavings. | Actual Kafka consumer restart replays failed record before the following record; null record quarantine reaches the next valid record. Both tests passed. |
+| DHW-05 | Given expired claims or stale/out-of-order replies, when processing resumes, then current state and command identity remain guarded. | Fake-clock concurrent-worker and replay tests. | Real Mongo stale publication/execution tokens, guarded revision/inbox cases and pure transition tests pass; actual restart waits for fenced lease recovery. |
+| DHW-06 | Given a provider succeeds before process failure, when restarted, then reconciliation converges without blindly repeating an uncertain effect. | Fake provider crash-window and real provider contract checks when authorized. | Actual resource cancellation after durable calendar success and after durable notification success both converge on restart. Real providers remain pending. |
+| DHW-07 | Given cancellation or overdue durable deadlines, when restarted, then work resumes or enters bounded repair without leaked workers. | Cats Effect resource/cancellation and restart tests. | Real elapsed-deadline reservation reconciliation releases the slot without a hiring commit; worker resource restart proof passes. |
+| DHW-08 | Given exhausted retry or failed compensation, when operators inspect/repair, then progress and allowed guarded action are visible and audited. | Failure drill and forbidden/repeated repair tests. | Five failed release attempts preserve the reservation in visible repair. Five failed notification attempts preserve the hiring commit; authorized Admin repair resets the attempt generation and completes. |
+| DHW-09 | Given deleted subjects and replay/retention boundaries, when work is replayed, then no deleted data or effects are recreated. | Deletion-race, old-replay-denial and storage inventory tests. | Actual Mongo account deletion, provider fencing, purge and canonical command/result replay pass with no resurrection. Four cleanup cases pass. Separately, accelerated physical earliest-offset advancement passed for both isolated Kafka topics; no deployed retention claim. |
+| DHW-10 | Given a confirmed interview reservation and rejected status commit, when compensation runs, then reservation releases; uncertain commit is reconciled first. | Conditional scheduling transaction/provider tests. | Guarded commit/receipt cases and real deadline compensation pass; uncertain driver outcomes have a separate unavailable classification and stable receipt lookup. |
+| DHW-11 | Given committed interview status and partial/uncertain notifications, when retried, then per-recipient reconciliation or repair is visible without invented delivery guarantees. | Conditional notification duplicate/restart tests. | Partial notification exhaustion/Admin repair passes; actual postcommit notification-success crash/restart retains the reservation and finishes both receipts. |
+| DHW-12 | Given provider/broker outage, when normal hiring transactions execute, then local durable acceptance remains independent and later delivery recovers. | Mongo + Kafka outage integration; existing embedding recovery tests extended. | Scheduling service acceptance passes without Kafka/provider resources; actual worker outage/restart and provider-unavailable recovery pass. A dedicated broker-process-outage acceptance test is not claimed. |
+| DHW-13 | Given operational storage evolution, when concurrent startup/restart occurs, then verified indexes/state become ready without corrupting live revisions. | Disposable migration and rollback/recovery rehearsal. | Real Mongo repeatable setup and concurrent inbox index cutover pass; source preserves unrelated records and fails closed on unknown definitions. Stop incompatible writers before production cutover. |
 
 ## Performance, implementation handoff and checkpoint
 
@@ -166,4 +173,41 @@ Use small deterministic synthetic workflows. Record seed/count, message bytes, k
 5. Conditional scheduling slice resolves its open public/provider contract, then implements reservation/status/notification recovery (DHW-10–11). Update SDL, operations, use cases and catalog together.
 6. Independent Code Reviewer, Security Engineer and final QA evaluate final source and failure evidence. Run root `sbt test`, configured format checks and relevant `IntegrationTest / test`; use separate provider/deployed gates when applicable.
 
-Checkpoint: specification drafted; no future implementation criterion completed. Test commands above are planned, not executed evidence. No provider or infrastructure was provisioned. Next action: independent specification review and resolve only decisions required by the first implementation slice. Code Reviewer: pending. Security Engineer: pending. Final QA: pending. Documentation review does not approve future production code or activation.
+Checkpoint: local implementation is underway; executions and independent verdicts are recorded below as they become available. The historical documentation checkpoint does not certify the new source or production activation.
+
+## Local implementation checkpoint (2026-10-06)
+
+The authorized local implementation is complete and its execution evidence is recorded below. Partial source existed before this task; its presence was not counted as runtime evidence. Geographic discovery, workflow persistence/interpretation, scheduling API/runtime, Kafka transport and deletion cleanup have passed the final local executions. Independent Code Reviewer, Security Engineer and final independent QA: PASS for the authorized local scope.
+
+- Runtime is opt-in through `kafka.interview.enabled`, with separate orchestrator/worker SASL identities and consumer groups. Commands and results use one active typed metadata envelope; participants and intervals remain in MongoDB. Existing operational envelopes are unchanged.
+- Defaults: five attempts; exponential retry from one second to 30 seconds; ten-second provider timeout; 60-second fenced claims; five-minute precommit window bounded by interview start. Topics have one partition, replication/minimum ISR one, delete cleanup, seven-day retention and 64 KiB maximum records. Replay is bounded to seven days; completed evidence is retained for eight days. Unfinished work has no TTL.
+- Deletion marks the existing permanent subject fence in the account transaction and enqueues attributable interview cleanup. The cleanup worker waits for claims, provider calls and Kafka sends to drain, purges workflow/provider data, captures both topic end-offset barriers and waits for actual earliest-offset advancement. Public deletion completion requires both existing analytics erasure and interview cleanup. No lakehouse reset or existing-data deletion is authorized by this implementation.
+- Operational migrations `006_job_geo_points`, `007_interview_workflow_storage` and `008_interview_subject_cleanup` and `009_interview_inbox_identity` preserve existing local data. Stop incompatible writers before cutover; startup verifies required index definitions before workers run.
+- Validation: final Java 17 formatting and 526 units passed; 85 integration cases executed successfully. Four Atlas cases were skipped and two older operational Compose checks were disabled. Actual worker restarts, deadline/compensation/notification/deletion replay drills, 32-workflow/two-worker measurement and accelerated physical retention passed. Independent Code Reviewer, Security Engineer and final independent QA: PASS.
+- Resolved findings: MongoDB rejected the absent-field partial-index expression, so participant availability uses an ordinary compound index. The first workload exposed transient database failures being treated as confirmed business conflicts; unavailable outcomes now reconcile and publication authorization failures retry promptly. Fixtures now exercise genuinely stale revisions and persisted reservations. UTC millisecond normalization prevents collapsed intervals and aligns mutation, inspection and replay.
+- Pending external gates: Atlas execution, human relevance approval, production redundancy, real providers, cancellation/rescheduling and deployed retention.
+
+Scheduling acceptance rechecks the authoritative application and job in its MongoDB transaction. It advances the existing application `updatedAt` monotonically to acquire a real document write lock; it adds no application fields or statuses. Admin repair records its actor and atomically supersedes earlier commands before issuing reconciliation work. Canonical message identity, polarity, step, revision, causation, occurrence and deadline are checked before interpretation; expired applicable work enters visible repair and unrelated/stale records receive bounded durable diagnostics.
+
+Interview transactions classify exhausted transient MongoDB write conflicts as unavailable outcomes requiring reconciliation. They remain distinct from a confirmed guard rejection; existing transaction callers retain their configured classification. Transient publication authorization failures return the fenced claim to due work with bounded backoff rather than waiting for its entire lease. Timeout/claim validation and deletion drain calculations use widened arithmetic so extreme configuration values cannot wrap into a shorter barrier wait.
+
+## Local scheduling measurements and executions
+
+The disposable MongoDB and isolated local SASL Kafka proof executed 32 workflows with two worker resources. Workers were cancelled after a durable calendar reservation and again after a durable notification receipt following the hiring commit, then restarted. All 32 workflows completed with 32 reservations, 64 recipient receipts and zero workflows requiring repair. The separate Kafka tests passed both failed-record replay before the next offset and null-record quarantine before a valid record.
+
+| Measurement | Recorded result |
+|---|---|
+| Completion p50 / p95 / p99 | 150,257 / 154,872 / 154,872 milliseconds |
+| Calendar reserve / notification delivery / notification lookup requests | 33 / 66 / 1 |
+| Broker publication / command consumption / result consumption requests | 264 / 161 / 133 |
+| MongoDB commands | 24,270, including request persistence and evidence reads |
+| Sampled pending workflow backlog | 32 to 0; 369 samples with request-age and phase counts |
+| MongoDB storage growth | 413,696 bytes |
+| MongoDB index growth | 1,122,304 bytes |
+| MongoDB container CPU / memory | 9.43 CPU seconds; 127.25 to 139.53 MB |
+
+Completion latency includes deliberate crash recovery and the 60-second fenced leases; it is not a normal-operation latency estimate. Resource measurements cover the disposable MongoDB container, including probe processes, rather than total JVM/broker usage. The zero error count describes completion outcomes; intentional failures and retries are captured in request counts and recovery tests. No SLO or production cost claim follows from these measurements.
+
+Ignored local evidence: `.local/data/interview-scheduling-workload.json`, `.local/logs/interview-scheduling-final-proof.log` and `.local/logs/interview-scheduling-recovery-final.log`. The final focused run passed 10 pure/classification tests and 10 real MongoDB repository/recovery tests. The final Java 17 unit suite passed all 526 tests with configured formatting checks. The complete integration command exited successfully with 91 framework cases: 85 actually executed, four explicitly skipped Atlas cases and two disabled older operational Compose checks. Final-state logs are `.local/logs/hiring-capabilities-final-unit.log` and `.local/logs/hiring-capabilities-final-integration.log`; the latter includes the repeated 32-workflow proof and both actual Kafka acknowledgment tests. Independent Code Reviewer, Security Engineer and final independent QA verdicts are PASS for the authorized local implementation.
+
+Accelerated physical Kafka retention was repeated after the final integration suite on both isolated topics: command earliest offset reached barrier 402, and result earliest offset reached barrier 389. The final script exited successfully; evidence is `.local/logs/interview-physical-retention-final.log`. Regular local Kafka/MongoDB data was preserved. This proves physical cleanup on the isolated accelerated configuration, not seven elapsed production days or an end-to-end deployed erasure acceptance run.

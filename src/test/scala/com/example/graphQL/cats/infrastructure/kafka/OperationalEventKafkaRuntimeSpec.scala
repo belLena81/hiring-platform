@@ -2,6 +2,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.effect.std.UUIDGen
+import cats.syntax.all.*
 import com.example.graphQL.cats.config.{
   KafkaConfig,
   KafkaConsumerConfig,
@@ -148,6 +149,24 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           "not-json".getBytes
         )
         .map(commit => assert(!commit))
+    }
+  }
+
+  test("an undurable record stops sequential processing before a later offset can commit") {
+    for {
+      processed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
+      committed <- cats.effect.Ref.of[IO, Vector[Long]](Vector.empty)
+      result <- List(10L, 11L).traverse_ { offset =>
+        OperationalEventKafkaRuntime.processRecordBeforeCommit("hiring.events", 0, offset)(
+          processed.update(_ :+ offset).as(offset != 10L)
+        )(committed.update(_ :+ offset))
+      }.attempt
+      handled <- processed.get
+      offsets <- committed.get
+    } yield {
+      assert(result.isLeft)
+      assertEquals(handled, Vector(10L))
+      assertEquals(offsets, Vector.empty)
     }
   }
 

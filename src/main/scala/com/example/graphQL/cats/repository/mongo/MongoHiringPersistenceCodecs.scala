@@ -12,7 +12,8 @@ import java.util.Date
 
 /** Persistence-shaped records used by the generated BSON codecs. */
 private[mongo] object MongoHiringPersistenceCodecs {
-  final case class StoredLocation(country: String, city: String, remote: Boolean)
+  final case class StoredGeoPoint(`type`: String, coordinates: List[Double])
+  final case class StoredLocation(country: String, city: String, remote: Boolean, point: Option[StoredGeoPoint] = None)
   final case class StoredCandidateResidence(
       country: String,
       city: Option[String],
@@ -159,6 +160,7 @@ private[mongo] object MongoHiringPersistenceCodecs {
 
   private val providers = CodecRegistries.fromProviders(
     IterableCodecProvider.apply(),
+    ScalaMacros.createCodecProviderIgnoreNone[StoredGeoPoint](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredLocation](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredCandidateResidence](),
     ScalaMacros.createCodecProviderIgnoreNone[StoredProfile](),

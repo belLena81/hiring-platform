@@ -9,7 +9,15 @@ import com.example.graphQL.cats.domain.pagination.{
   JobPageRequest,
   PageSize
 }
-import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, RankedJob}
+import com.example.graphQL.cats.service.search.{
+  JobDiscoveryFacets,
+  JobFacetQuery,
+  JobSearchFilter,
+  NearbyJob,
+  NearbyJobsQuery,
+  RankedCandidate,
+  RankedJob
+}
 import com.example.graphQL.cats.service.port.RepositoryIO
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
@@ -52,6 +60,8 @@ trait JobUseCases {
   def closeJob(request: IdempotencyRequest, actor: ActorContext, jobId: JobId): UseCaseIO[Job]
   def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job]
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseIO[List[Job]]
+  def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseIO[List[NearbyJob]]
+  def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseIO[JobDiscoveryFacets]
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseIO[List[Job]]
 }
 

@@ -157,6 +157,7 @@ input CreateJobInput {
   country: String!
   city: String
   remote: Boolean!
+  coordinates: GeoPointInput
 }
 
 union CreateJobResult = Job | ValidationError | DomainError
@@ -185,6 +186,16 @@ type DomainError implements UserError {
   message: String!
 }
 
+type GeoPoint {
+  latitude: Float!
+  longitude: Float!
+}
+
+input GeoPointInput {
+  latitude: Float!
+  longitude: Float!
+}
+
 type Health {
   status: HealthStatus!
 }
@@ -199,6 +210,16 @@ scalar Instant
 
 type InteractionSuccess {
   recorded: Boolean!
+}
+
+type InterviewWorkflow {
+  id: UUID!
+  applicationId: ApplicationID!
+  startsAt: Instant!
+  endsAt: Instant!
+  revision: Long!
+  progress: String!
+  notifiedParticipants: [String!]!
 }
 
 type Job {
@@ -225,9 +246,22 @@ type JobConnection {
   searchId: ID
 }
 
+type JobDiscoveryFacets {
+  skills: [JobFacetBucket!]!
+  countries: [JobFacetBucket!]!
+  cities: [JobFacetBucket!]!
+  remote: [JobFacetBucket!]!
+  truncated: Boolean!
+}
+
 type JobEdge {
   node: Job!
   cursor: String!
+}
+
+type JobFacetBucket {
+  value: String!
+  count: Long!
 }
 
 input JobFilter {
@@ -246,6 +280,7 @@ input JobInput {
   country: String!
   city: String
   remote: Boolean!
+  coordinates: GeoPointInput
 }
 
 enum JobStatus {
@@ -258,6 +293,7 @@ type Location {
   country: String!
   city: String!
   remote: Boolean!
+  coordinates: GeoPoint
 }
 
 input LoginInput {
@@ -271,6 +307,8 @@ union LoginResult = AuthSuccess | ValidationError | DomainError
 union MoveApplicationToInterviewResult = Application | ValidationError | DomainError
 
 type Mutation {
+  scheduleInterview(input: ScheduleInterviewInput!): ScheduleInterviewResult!
+  repairInterviewWorkflow(input: RepairInterviewInput!): RepairInterviewResult!
   submitApplication(input: SubmitApplicationInput!): SubmitApplicationResult!
   createJob(input: CreateJobInput!): CreateJobResult!
   updateJob(input: UpdateJobInput!): UpdateJobResult!
@@ -290,6 +328,23 @@ type Mutation {
   recordSearchResultClick(input: RecordSearchResultClickInput!): RecordSearchResultClickResult!
 }
 
+type NearbyJob {
+  job: Job!
+  distanceKm: Float!
+  cursor: String!
+}
+
+type NearbyJobsConnection {
+  results: [NearbyJob!]!
+  hasNextPage: Boolean!
+}
+
+input NearbyJobsFilter {
+  city: String
+  skills: [String!]
+  createdAfter: Instant
+}
+
 type PageInfo {
   hasNextPage: Boolean!
   endCursor: String
@@ -298,6 +353,7 @@ type PageInfo {
 union PublishJobResult = Job | ValidationError | DomainError
 
 type Query {
+  interviewWorkflow(workflowId: UUID!): InterviewWorkflow!
   health: Health!
   readiness: Readiness!
   me: User
@@ -305,6 +361,8 @@ type Query {
   accountDeletionStatus(receiptId: ID!): AccountDeletionStatus!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!
+  nearbyJobs(center: GeoPointInput!, radiusKm: Float!, filter: NearbyJobsFilter, first: Int!, after: String): NearbyJobsConnection!
+  jobDiscoveryFacets(filter: NearbyJobsFilter, center: GeoPointInput, radiusKm: Float): JobDiscoveryFacets!
   semanticJobSearch(query: String!, filter: JobFilter, first: Int!, searchId: UUID): RankedJobResults!
   recommendedJobs(first: Int!, searchId: UUID): RankedJobResults!
   candidateMatches(jobId: JobID!, query: String, filter: CandidateMatchFilter, first: Int!, searchId: UUID): RankedCandidateResults!
@@ -382,6 +440,23 @@ input RejectApplicationInput {
 }
 
 union RejectApplicationResult = Application | ValidationError | DomainError
+
+input RepairInterviewInput {
+  workflowId: UUID!
+  expectedRevision: Long!
+  idempotencyKey: UUID!
+}
+
+union RepairInterviewResult = InterviewWorkflow | ValidationError | DomainError
+
+input ScheduleInterviewInput {
+  applicationId: ApplicationID!
+  startsAt: Instant!
+  endsAt: Instant!
+  idempotencyKey: UUID!
+}
+
+union ScheduleInterviewResult = InterviewWorkflow | ValidationError | DomainError
 
 enum SearchMode {
   FILTER

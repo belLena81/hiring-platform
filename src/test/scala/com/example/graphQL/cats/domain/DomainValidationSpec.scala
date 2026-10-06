@@ -2,7 +2,7 @@ package com.example.graphQL.cats.domain
 
 import com.example.graphQL.cats.domain.error.DomainValidationError.{BlankField, EmptyCollection}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location, User, UserRole}
 import java.time.Instant
 import java.util.UUID
 import munit.FunSuite
@@ -69,6 +69,13 @@ class DomainValidationSpec extends FunSuite {
         )
       )
     )
+  }
+
+  test("geographic job points require finite coordinates within WGS84 bounds") {
+    assert(GeoPoint.validate(35.2, 33.4).isRight)
+    assert(GeoPoint.validate(90.01, 33.4).isLeft)
+    assert(GeoPoint.validate(35.2, Double.NaN).isLeft)
+    assert(Location.validate("Cyprus", "Nicosia", remote = false, Some(GeoPoint(35.2, 181d))).isInvalid)
   }
 
   test("valid job validation preserves ADT status and normalized text") {

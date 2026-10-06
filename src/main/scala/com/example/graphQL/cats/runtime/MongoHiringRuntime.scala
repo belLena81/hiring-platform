@@ -33,6 +33,8 @@ import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository,
+  MongoInterviewWorkflowRepository,
+  MongoInterviewSubjectCleanup,
   MongoConsumerReceiptRepository,
   MongoDatabaseProbe,
   MongoEventQuarantineRepository,
@@ -128,6 +130,12 @@ object MongoHiringRuntime {
       erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client, config.diagnostics)
       analyticsReports = MongoAnalyticsReportRepository.transactional(database, client, config.diagnostics)
       quarantine = new MongoEventQuarantineRepository(database, config.diagnostics)
+      interviewRepository = MongoInterviewWorkflowRepository.live(
+        database,
+        client,
+        config.diagnostics,
+        config.kafka.interview.completedDedupRetentionSeconds.seconds
+      )
       services <- hiringServices(
         capability,
         applications,
@@ -136,6 +144,8 @@ object MongoHiringRuntime {
         mutationReceipts,
         erasureRequests,
         analyticsReports,
+        interviewRepository,
+        config.kafka,
         config.jwtAuth,
         config.passwordHash,
         passwordHashPermits,
@@ -143,6 +153,12 @@ object MongoHiringRuntime {
       )
       _ <- Resource.eval(setup.awaitSuccessful)
       _ <- OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
+      _ <- InterviewSchedulingRuntime.resource(
+        config.kafka,
+        interviewRepository,
+        new MongoInterviewSubjectCleanup(database),
+        config.diagnostics
+      )
       metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
     } yield MongoHiringRuntime(
       probe(database, metadata, config.diagnostics, setup.ready),
@@ -232,6 +248,8 @@ object MongoHiringRuntime {
       mutationReceipts: MongoMutationReceiptRepository,
       erasureRequests: MongoAnalyticsErasureRequestRepository,
       analyticsReports: MongoAnalyticsReportRepository,
+      interviewRepository: MongoInterviewWorkflowRepository,
+      kafka: KafkaConfig,
       jwtAuth: JwtAuthConfig,
       passwordHash: PasswordHashConfig,
       passwordHashPermits: Semaphore[IO],
@@ -262,7 +280,16 @@ object MongoHiringRuntime {
         semanticSearch,
         interactionService,
         searchSessionHandoff,
-        AnalyticsReportingService(users, analyticsReports)
+        AnalyticsReportingService(users, analyticsReports),
+        Option.when(kafka.interview.enabled)(
+          new com.example.graphQL.cats.service.application.InterviewSchedulingService(
+            users,
+            jobs,
+            applications,
+            interviewRepository,
+            kafka.interview.preCommitDeadlineSeconds.seconds
+          )
+        )
       )
 
     Argon2PasswordHasher

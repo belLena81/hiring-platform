@@ -26,6 +26,7 @@ import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCase
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.pagination.JobPageRequest
 import com.example.graphQL.cats.service.search.JobSearchFilter
+import com.example.graphQL.cats.service.search.{NearbyJob, NearbyJobsQuery, JobDiscoveryFacets, JobFacetQuery}
 import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -144,6 +145,29 @@ final class JobService(
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseIO[List[Job]] =
     authorization.resolve(actor) *> UseCase.repository(jobs.findOpen(filter, page))
+
+  def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseIO[List[NearbyJob]] =
+    if (!query.isValid)
+      UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("radiusOrCenter")))
+    else if (query.after.exists(_.queryFingerprint != query.fingerprint))
+      UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("cursor")))
+    else if (limit < 1 || limit > com.example.graphQL.cats.domain.pagination.PageSize.Max)
+      UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("pageSize")))
+    else
+      authorization.resolve(actor).flatMap { user =>
+        if (user.role != UserRole.Candidate && user.role != UserRole.Admin)
+          UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
+        else UseCase.repository(jobs.nearbyJobs(query, limit + 1))
+      }
+
+  def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseIO[JobDiscoveryFacets] =
+    authorization.resolve(actor).flatMap { user =>
+      if (user.role != UserRole.Candidate && user.role != UserRole.Admin)
+        UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
+      else if (!query.isValid)
+        UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("radius")))
+      else UseCase.repository(jobs.jobDiscoveryFacets(query))
+    }
 
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseIO[List[Job]] =
     for {

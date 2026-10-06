@@ -2,6 +2,7 @@ package com.example.graphQL.cats.repository.mongo
 
 /** Persisted Mongo collection names used by the hiring platform. */
 private[mongo] object MongoCollections {
+  val InterviewSubjectCleanup = "interview_subject_cleanup"
   val Users = "users"
   val Jobs = "jobs"
   val Applications = "applications"
@@ -23,6 +24,12 @@ private[mongo] object MongoCollections {
   val AnalyticsReportControl = "analytics_report_control"
   val AnalyticsReportRuns = "analytics_report_runs"
   val HiringMigrationLedger = "hiring_migration_ledger"
+  val InterviewWorkflows = "interview_workflows"
+  val InterviewWorkflowCommands = "interview_workflow_commands"
+  val InterviewWorkflowInbox = "interview_workflow_inbox"
+  val FakeInterviewCalendarReservations = "fake_interview_calendar_reservations"
+  val FakeInterviewCalendarParticipantLocks = "fake_interview_calendar_participant_locks"
+  val FakeInterviewNotificationReceipts = "fake_interview_notification_receipts"
 }
 
 /** Persisted BSON field names used by the hiring platform. */

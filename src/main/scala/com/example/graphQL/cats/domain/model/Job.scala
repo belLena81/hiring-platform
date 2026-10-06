@@ -11,14 +11,36 @@ enum JobStatus {
   case Draft, Open, Closed
 }
 
-final case class Location(country: String, city: String, remote: Boolean)
+final case class GeoPoint(latitude: Double, longitude: Double) {
+  def isValid: Boolean = latitude.isFinite && longitude.isFinite && latitude >= -90d && latitude <= 90d &&
+    longitude >= -180d && longitude <= 180d
+}
+
+object GeoPoint {
+  def validate(latitude: Double, longitude: Double): Either[DomainValidationError, GeoPoint] =
+    Either.cond(
+      GeoPoint(latitude, longitude).isValid,
+      GeoPoint(latitude, longitude),
+      DomainValidationError.InvalidCoordinates
+    )
+}
+
+final case class Location(country: String, city: String, remote: Boolean, coordinates: Option[GeoPoint] = None)
 
 object Location {
-  def validate(country: String, city: String, remote: Boolean): ValidatedNel[DomainValidationError, Location] =
+  def validate(
+      country: String,
+      city: String,
+      remote: Boolean,
+      coordinates: Option[GeoPoint] = None
+  ): ValidatedNel[DomainValidationError, Location] =
     (
       validateText("country", country),
-      validateText("city", city)
-    ).mapN(Location(_, _, remote))
+      validateText("city", city),
+      coordinates.traverse(point =>
+        Either.cond(point.isValid, point, DomainValidationError.InvalidCoordinates).toValidatedNel
+      )
+    ).mapN((validCountry, validCity, validCoordinates) => Location(validCountry, validCity, remote, validCoordinates))
 }
 
 final case class Job(

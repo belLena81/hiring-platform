@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.api.graphql
 
 import com.example.graphQL.cats.api.graphql.HiringGraphQLFetchers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLInterviewResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLAccountResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLApplicationResolvers.*
@@ -35,6 +36,7 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   lazy val queryType: ObjectType[RequestContext, Unit] = ObjectType(
     "Query",
     fields[RequestContext, Unit](
+      resultField("interviewWorkflow", interviewWorkflowType, workflowIdArgument :: Nil)(interviewWorkflow),
       Field("health", healthType, resolve = _ => ()),
       ioField("readiness", readinessType)(context => context.ctx.readiness),
       resultField("me", OptionType(userType))(accountMe(_).map(Some(_))),
@@ -56,6 +58,16 @@ private[graphql] object HiringGraphQLSchemaAssembly {
         firstArgument :: afterArgument :: cityArgument :: skillsArgument :: createdAfterArgument :: searchIdArgument :: Nil,
         complexity = Some(connectionComplexity)
       )(jobs),
+      resultField(
+        "nearbyJobs",
+        nearbyJobsResultsType,
+        nearbyCenterArgument :: radiusKmArgument :: nearbyFilterArgument :: firstArgument :: afterArgument :: Nil
+      )(nearbyJobs),
+      resultField(
+        "jobDiscoveryFacets",
+        jobDiscoveryFacetsType,
+        nearbyFilterArgument :: optionalNearbyCenterArgument :: optionalRadiusKmArgument :: Nil
+      )(jobDiscoveryFacets),
       resultField(
         "semanticJobSearch",
         rankedJobResultsType,
@@ -98,6 +110,12 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   lazy val mutationType: ObjectType[RequestContext, Unit] = ObjectType(
     "Mutation",
     fields[RequestContext, Unit](
+      resultField("scheduleInterview", scheduleInterviewResultType, scheduleInterviewInputArgument :: Nil)(
+        scheduleInterview
+      ),
+      resultField("repairInterviewWorkflow", repairInterviewResultType, repairInterviewInputArgument :: Nil)(
+        repairInterviewWorkflow
+      ),
       resultField("submitApplication", submitApplicationResultType, submitApplicationInputArgument :: Nil)(
         submitApplication
       ),

@@ -118,7 +118,12 @@ private[graphql] object HiringGraphQLJobResolvers {
       input.description,
       input.requirements,
       input.skills.toSet,
-      Location(input.country, input.city.getOrElse(""), input.remote),
+      Location(
+        input.country,
+        input.city.getOrElse(""),
+        input.remote,
+        input.coordinates.map(point => com.example.graphQL.cats.domain.model.GeoPoint(point.latitude, point.longitude))
+      ),
       status
     )
 
@@ -128,7 +133,12 @@ private[graphql] object HiringGraphQLJobResolvers {
       input.description,
       input.requirements,
       input.skills.toSet,
-      Location(input.country, input.city.getOrElse(""), input.remote)
+      Location(
+        input.country,
+        input.city.getOrElse(""),
+        input.remote,
+        input.coordinates.map(point => com.example.graphQL.cats.domain.model.GeoPoint(point.latitude, point.longitude))
+      )
     )
 
   private def jobConnection(values: List[Job], requested: Int, now: Instant)(using
