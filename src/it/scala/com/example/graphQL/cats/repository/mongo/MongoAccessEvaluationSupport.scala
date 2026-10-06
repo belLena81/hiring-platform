@@ -4,6 +4,7 @@ import cats.effect.{IO, Resource}
 import com.mongodb.MongoClientSettings
 import com.mongodb.event.{CommandFailedEvent, CommandListener, CommandStartedEvent, CommandSucceededEvent}
 import fs2.interop.reactivestreams.*
+import io.circe.Json
 import mongo4cats.client.MongoClient
 import mongo4cats.database.MongoDatabase
 import org.bson.{BsonDocument, Document}
@@ -44,7 +45,48 @@ private[mongo] object MongoAccessEvaluationSupport {
     def snapshot: IO[List[BsonDocument]] = IO.delay(observed.iterator().asScala.toList)
   }
 
-  final case class Fixture(client: MongoClient[IO], database: MongoDatabase[IO], commands: Commands)
+  final case class Fixture(
+      client: MongoClient[IO],
+      database: MongoDatabase[IO],
+      commands: Commands,
+      uri: String,
+      sampleResources: IO[Json]
+  )
+
+  // The probe is owned by the container resource and runs only at workload boundaries.
+  // CPU counters are cumulative; memory is an instantaneous cgroup sample, not an interval maximum.
+  private def sampleResources(instance: ReplicaSet): IO[Json] =
+    (for {
+      result <- IO.blocking(
+        instance.execInContainer(
+          "sh",
+          "-c",
+          "cat /sys/fs/cgroup/cpu.stat && cat /sys/fs/cgroup/memory.current"
+        )
+      )
+      takenAt <- IO.realTimeInstant
+      elapsed <- IO.monotonic
+      lines = result.getStdout.linesIterator.toList
+      usage = lines.collectFirst {
+        case line if line.startsWith("usage_usec ") =>
+          line.stripPrefix("usage_usec ").trim.toLongOption
+      }.flatten
+      memory = lines.lastOption.flatMap(_.trim.toLongOption)
+    } yield Json.obj(
+      "scope" -> Json.fromString("Disposable Mongo container cgroup v2, including boundary probe processes"),
+      "status" -> Json.fromString(
+        if (result.getExitCode == 0 && usage.nonEmpty && memory.nonEmpty) "available" else "unavailable"
+      ),
+      "timestampUtc" -> Json.fromString(takenAt.toString),
+      "monotonicNanos" -> Json.fromLong(elapsed.toNanos),
+      "cpuUsageMicros" -> usage.fold(Json.Null)(Json.fromLong),
+      "memoryCurrentBytes" -> memory.fold(Json.Null)(Json.fromLong)
+    )).handleError(error =>
+      Json.obj(
+        "status" -> Json.fromString("unavailable"),
+        "reason" -> Json.fromString(error.getClass.getSimpleName)
+      )
+    )
 
   private def replicaSet: Resource[IO, ReplicaSet] =
     Resource.make(IO.blocking {
@@ -80,16 +122,25 @@ private[mongo] object MongoAccessEvaluationSupport {
     for {
       instance <- replicaSet
       _ <- Resource.eval(awaitPrimary(instance))
+      uri = s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      fixture <- clientFixture(uri, sampleResources(instance))
+    } yield fixture
+
+  /** A separately owned disposable database/client on the same container, with its own command listener. */
+  def isolatedFixture(fixture: Fixture): Resource[IO, Fixture] =
+    clientFixture(fixture.uri, fixture.sampleResources)
+
+  private def clientFixture(uri: String, resources: IO[Json]): Resource[IO, Fixture] =
+    for {
       name <- Resource.eval(IO.randomUUID.map(id => s"mongodb_access_evaluation_${id.toString.replace("-", "")}"))
       commands <- Resource.eval(IO.delay(new Commands(name)))
-      uri = s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
       settings = MongoClientSettings
         .builder(MongoDatabaseProbe.effectiveSettings(uri))
         .addCommandListener(commands)
         .build()
       client <- MongoClient.create[IO](settings)
       database <- Resource.make(client.getDatabase(name))(db => command(db, new Document("dropDatabase", 1)).void)
-    } yield Fixture(client, database, commands)
+    } yield Fixture(client, database, commands, uri, resources)
 
   def command(database: MongoDatabase[IO], command: Document): IO[Document] =
     IO.delay(database.underlying.runCommand(command, classOf[Document]))

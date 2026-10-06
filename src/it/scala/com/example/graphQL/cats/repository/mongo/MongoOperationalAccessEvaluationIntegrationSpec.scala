@@ -34,7 +34,9 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
   private val page = JobPageRequest(None, None, size)
   private val applicationsPage = ApplicationPageRequest(None, None, size)
   private val historyPage = ApplicationEventPageRequest(None, size)
-  private val repetitions = 20
+  private val repetitions = 100
+  private val warmupRequests = 8
+  private val workRecordsPerPhase = 128
 
   private def user(index: Int, role: UserRole): User =
     User(
@@ -102,7 +104,15 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
     case Left(error)   => IO.raiseError(new ObservedRepositoryFailure(error))
   }
 
-  private final case class Capability(name: String, actor: String, run: IO[Int])
+  private final case class Capability(
+      name: String,
+      actor: String,
+      run: IO[Int],
+      prepare: IO[Unit] = IO.unit,
+      minimumReturned: Int = 0,
+      operation: String = "read",
+      reconcile: List[Observation] => IO[Json] = _ => IO.pure(Json.Null)
+  )
   private final case class Observation(latencyMillis: Double, returned: Int, error: Option[String])
 
   test("production operational access records bounded commands, plans and reproducible local baselines") {
@@ -121,8 +131,6 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
         Diagnostics.noop
       )
       val applicationRepository = MongoApplicationRepository.transactional(database, fixture.client, Diagnostics.noop)
-      val work = new MongoEmbeddingWorkRepository(database, Diagnostics.noop)
-      val outbox = MongoOperationalEventOutboxRepository.transactional(database, fixture.client, Diagnostics.noop)
       val search = new MongoSemanticSearchRepository(
         database,
         "job-vector",
@@ -161,6 +169,32 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
             .map(_.size)
         ),
         Capability(
+          "jobDiscoveryCityOnly",
+          "Candidate",
+          successful(jobRepository.findOpen(JobSearchFilter(Some("Nicosia"), Set.empty, None), page)).map(_.size)
+        ),
+        Capability(
+          "jobDiscoverySkillsOnly",
+          "Candidate",
+          successful(jobRepository.findOpen(JobSearchFilter(None, Set("MongoDB"), None), page)).map(_.size)
+        ),
+        Capability(
+          "jobDiscoveryDateOnly",
+          "Candidate",
+          successful(jobRepository.findOpen(JobSearchFilter(None, Set.empty, Some(now.minusSeconds(5))), page))
+            .map(_.size)
+        ),
+        Capability(
+          "jobDiscoveryLaterPage",
+          "Candidate",
+          successful(
+            jobRepository.findOpen(
+              JobSearchFilter(None, Set.empty, None),
+              page.copy(cursor = Some(JobCursor(jobs(8).createdAt, jobs(8).id)))
+            )
+          ).map(_.size)
+        ),
+        Capability(
           "recruiterJobsBroad",
           "Recruiter",
           successful(jobRepository.findByRecruiter(recruiters.head.id, page)).map(_.size)
@@ -188,6 +222,26 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           ).map(_.size)
         ),
         Capability(
+          "candidateApplicationsFiltered",
+          "Candidate",
+          successful(
+            applicationRepository.findByCandidate(
+              candidateScope,
+              applicationsPage.copy(status = Some(ApplicationStatus.Created))
+            )
+          ).map(_.size)
+        ),
+        Capability(
+          "candidateApplicationsLaterPage",
+          "Candidate",
+          successful(
+            applicationRepository.findByCandidate(
+              candidateScope,
+              applicationsPage.copy(cursor = Some(ApplicationCursor(applications(32).createdAt, applications(32).id)))
+            )
+          ).map(_.size)
+        ),
+        Capability(
           "recruiterApplications",
           "Recruiter",
           successful(applicationRepository.findByJob(recruiterScope, jobs.head.id, applicationsPage)).map(_.size)
@@ -196,6 +250,39 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           "recruiterApplicationsForbidden",
           "Recruiter",
           successful(applicationRepository.findByJob(recruiterScope, jobs(1).id, applicationsPage)).map(_.size)
+        ),
+        Capability(
+          "recruiterApplicationsFiltered",
+          "Recruiter",
+          successful(
+            applicationRepository.findByJob(
+              recruiterScope,
+              jobs.head.id,
+              applicationsPage.copy(status = Some(ApplicationStatus.Created))
+            )
+          ).map(_.size)
+        ),
+        Capability(
+          "recruiterApplicationsEmpty",
+          "Recruiter",
+          successful(
+            applicationRepository.findByJob(
+              recruiterScope,
+              jobs.head.id,
+              applicationsPage.copy(status = Some(ApplicationStatus.Hired))
+            )
+          ).map(_.size)
+        ),
+        Capability(
+          "recruiterApplicationsLaterPage",
+          "Recruiter",
+          successful(
+            applicationRepository.findByJob(
+              recruiterScope,
+              jobs.head.id,
+              applicationsPage.copy(cursor = Some(ApplicationCursor(applications.head.createdAt, applications.head.id)))
+            )
+          ).map(_.size)
         ),
         Capability(
           "adminApplications",
@@ -211,6 +298,17 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           "recruiterHistory",
           "Recruiter",
           successful(applicationRepository.history(recruiterScope, applications.head.id, historyPage)).map(_.size)
+        ),
+        Capability(
+          "candidateHistoryLaterPage",
+          "Candidate",
+          successful(
+            applicationRepository.history(
+              candidateScope,
+              applications.head.id,
+              historyPage.copy(cursor = Some(ApplicationEventCursor(events(1).occurredAt, events(1).id)))
+            )
+          ).map(_.size)
         ),
         Capability(
           "adminAccountsBroad",
@@ -264,24 +362,6 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           "candidateEligibilityProjection",
           "Recruiter",
           successful(search.candidateEligibility(candidates.take(7).map(_.id))).map(_.size)
-        ),
-        Capability(
-          "embeddingClaimComplete",
-          "Worker",
-          successful(work.claim("synthetic-worker", now, now.plusSeconds(60)))
-            .flatMap(_.fold(IO.pure(0))(claim => successful(work.complete(claim)).as(1)))
-        ),
-        Capability(
-          "outboxClaimPublish",
-          "Publisher",
-          successful(outbox.claim("synthetic-publisher", "synthetic-transaction", now, now.plusSeconds(60), 1)).flatMap(
-            values =>
-              values
-                .traverse_(value =>
-                  successful(outbox.markPublished(value.event.eventId, value.leaseToken, now, now.plusSeconds(86400)))
-                )
-                .as(values.size)
-          )
         )
       )
       for {
@@ -303,26 +383,6 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
             MongoHiringCodecs.event(value)
           )
         )
-        _ <- (0 until 64).toList.traverse_(index =>
-          successful(work.enqueue(EmbeddingWorkKey(EmbeddingWorkKind.Job, jobs(index).id.value.toString), now))
-        )
-        _ <- (0 until 64).toList.traverse_ { index =>
-          val event = OperationalEventEnvelope(
-            support.deterministicId(s"outbox:$index"),
-            OperationalEventType.JOB_VIEWED,
-            now,
-            OperationalAggregateType.Job,
-            jobs(index).id.value.toString,
-            candidates(index % 32).id,
-            Json.obj("jobId" -> Json.fromString(jobs(index).id.value.toString))
-          )
-          MongoHiringCodecs
-            .outboxRecord(event, now)
-            .fold(
-              error => IO.raiseError(new AssertionError(error)),
-              document => MongoRepositoryTestSupport.insertOne(database, MongoCollections.EventOutbox, document)
-            )
-        }
         buildStarted <- IO.monotonic
         _ <- MongoHiringIndexSetup.create(database)
         buildEnded <- IO.monotonic
@@ -330,26 +390,11 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
         revision <- IO.blocking(scala.sys.process.Process(Seq("git", "rev-parse", "HEAD")).!!.trim)
         digest <- sourceDigest
         version <- support.command(database, new Document("buildInfo", 1)).map(_.getString("version"))
-        storage <- MongoHiringMigrations.ownedCollections.toList.traverse { name =>
-          support
-            .command(database, new Document("collStats", name))
-            .map(value =>
-              Json.obj(
-                "collection" -> Json.fromString(name),
-                "collectionIndexBytes" -> Json.fromLong(value.get("totalIndexSize").asInstanceOf[Number].longValue)
-              )
-            )
-            .handleError(error =>
-              Json.obj(
-                "collection" -> Json.fromString(name),
-                "collectionIndexBytes" -> Json.Null,
-                "status" -> Json.fromString(s"Unavailable: ${error.getClass.getSimpleName}")
-              )
-            )
-        }
+        storage <- collectionStorage(fixture)
         reports <- List(1, 8)
           .traverse(concurrency => capabilities.traverse(capability => observe(fixture, capability, concurrency)))
           .map(_.flatten)
+        writes <- writeWorkloads(fixture)
         report = Json.obj(
           "seed" -> Json.fromLong(20261005L),
           "jobs" -> Json.fromInt(jobs.size),
@@ -358,8 +403,8 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           "singletonAdmins" -> Json.fromInt(1),
           "applications" -> Json.fromInt(applications.size),
           "historyRecords" -> Json.fromInt(events.size),
-          "embeddingWorkRecords" -> Json.fromInt(64),
-          "outboxRecords" -> Json.fromInt(64),
+          "embeddingWorkRecords" -> Json.fromInt(0),
+          "outboxRecords" -> Json.fromInt(0),
           "pageSize" -> Json.fromInt(7),
           "queriesPerCapability" -> Json.fromInt(repetitions),
           "mongoVersion" -> Json.fromString(version),
@@ -374,24 +419,125 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           "environment" -> Json.fromString(
             "Disposable local Mongo replica set; synthetic fixtures; first pass followed by repeated workload, no server cache control"
           ),
-          "cpuMemoryTelemetry" -> Json.fromString("Unavailable; no server resource sampler configured"),
+          "cpuMemoryTelemetry" -> Json.fromString(
+            "Per-workload boundary cgroup samples. CPU delta is approximate; memory samples are not interval maxima."
+          ),
           "vectorIndexBytes" -> Json.Null,
           "embeddingProviderRequests" -> Json.fromInt(0),
-          "acceptance" -> Json.fromString("Baseline only; no numerical performance target or optimization winner"),
-          "capabilities" -> Json.fromValues(reports)
+          "acceptance" -> Json.fromString(
+            "Measurements only; agreed local limits exist but no optimization or paired regression comparison has been adopted"
+          ),
+          "optimizationPolicy" -> Json.obj(
+            "status" -> Json.fromString(
+              "User agreed local write/storage ceilings; acceptance requires a paired comparison"
+            ),
+            "maximumWriteP95RegressionPercent" -> Json.fromInt(10),
+            "maximumOrdinaryIndexBytesGrowthPercent" -> Json.fromInt(25),
+            "concurrency" -> Json.arr(Json.fromInt(1), Json.fromInt(8)),
+            "maximumUnexpectedErrors" -> Json.fromInt(0),
+            "comparison" -> Json.fromString(
+              "Paired identical corpus/load/index-build conditions; insert growth is not index overhead"
+            )
+          ),
+          "capabilities" -> Json.fromValues(reports),
+          "writeWorkloads" -> writes
         )
         _ <- write(report)
       } yield {
         assertEquals(reports.size, capabilities.size * 2)
-        assert(
-          reports
-            .filterNot(_.hcursor.get[String]("actor").exists(Set("Worker", "Publisher")))
-            .forall(_.hcursor.get[Int]("errors").contains(0))
-        )
+        val writeReports =
+          writes.hcursor.get[Vector[Json]]("capabilities").toOption.getOrElse(fail("missing write reports"))
+        (reports ++ writeReports).foreach { row =>
+          val cursor = row.hcursor
+          assertEquals(cursor.get[Int]("errors"), Right(0), cursor.get[String]("capability").toString)
+          assertEquals(cursor.get[Int]("firstPassErrors"), Right(0))
+          assertEquals(cursor.get[Int]("warmupErrors"), Right(0))
+          val minimum = cursor.get[Int]("minimumReturnedPerRequest").toOption.getOrElse(fail("missing operation bound"))
+          List("returnedPerRequest", "firstPassReturned", "warmupReturned").foreach { field =>
+            assert(cursor.get[Vector[Int]](field).exists(_.forall(value => value >= minimum && value <= size.value)))
+          }
+          assertEquals(cursor.get[Int]("sampleCount"), Right(repetitions))
+          assert(cursor.get[Vector[Int]]("returnedPerRequest").exists(_.size == repetitions))
+          assert(cursor.get[Vector[Int]]("firstPassReturned").exists(_.size == 1))
+          assert(cursor.get[Vector[Int]]("warmupReturned").exists(_.size == warmupRequests))
+          if (cursor.get[String]("operation").contains("claimAndPublish")) {
+            List("firstPassReconciliation", "warmupReconciliation", "measuredReconciliation").foreach { field =>
+              val reconciliation = cursor.downField(field)
+              assertEquals(reconciliation.get[Boolean]("positiveProgress"), Right(true))
+              assertEquals(reconciliation.get[Boolean]("publishedMatchesCompleted"), Right(true))
+              assertEquals(reconciliation.get[Boolean]("retryableMatchesRemaining"), Right(true))
+              assertEquals(reconciliation.get[Int]("totalRecords"), Right(workRecordsPerPhase))
+              assertEquals(reconciliation.get[Int]("inFlightRecords"), Right(0))
+              assertEquals(reconciliation.get[Int]("activeSubjectLeases"), Right(0))
+            }
+          }
+        }
         assert(reports.forall(_.hcursor.get[Vector[Int]]("returnedPerRequest").exists(_.size == repetitions)))
         assert(reports.forall(_.hcursor.get[Vector[Int]]("returnedPerRequest").exists(_.forall(_ <= size.value))))
       }
     }
+  }
+
+  test("explain evidence preserves metric locations and separates selected rejected and executed indexes") {
+    val tree = Json.obj(
+      "queryPlanner" -> Json.obj(
+        "winningPlan" -> Json.obj(
+          "stage" -> Json.fromString("FETCH"),
+          "inputStage" -> Json
+            .obj("stage" -> Json.fromString("IXSCAN"), "indexName" -> Json.fromString("selected_index"))
+        ),
+        "rejectedPlans" -> Json.arr(
+          Json.obj("stage" -> Json.fromString("IXSCAN"), "indexName" -> Json.fromString("rejected_index"))
+        )
+      ),
+      "executionStats" -> Json.obj(
+        "nReturned" -> Json.fromInt(7),
+        "totalDocsExamined" -> Json.fromInt(9),
+        "executionStages" -> Json.obj(
+          "stage" -> Json.fromString("IXSCAN"),
+          "indexName" -> Json.fromString("selected_index"),
+          "keysExamined" -> Json.fromInt(11),
+          "nReturned" -> Json.fromInt(7)
+        )
+      ),
+      "stages" -> Json.arr(
+        Json.obj(
+          "$lookup" -> Json.obj("from" -> Json.fromString("users")),
+          "totalDocsExamined" -> Json.fromInt(3),
+          "indexesUsed" -> Json.arr(Json.fromString("related_index")),
+          "nReturned" -> Json.fromInt(7)
+        )
+      )
+    )
+    val plans = collectPlannerPlans(tree)
+    assertEquals(plans.size, 1)
+    assertEquals(plans.head.hcursor.get[String]("winningPlanPath"), Right("$.queryPlanner.winningPlan"))
+    assertEquals(plans.head.hcursor.get[Vector[String]]("winningIndexNames"), Right(Vector("selected_index")))
+    assertEquals(plans.head.hcursor.get[Vector[String]]("rejectedIndexNames"), Right(Vector("rejected_index")))
+    val metrics = collectMetrics(tree)
+    assertEquals(
+      metrics.flatMap(_.hcursor.get[String]("path").toOption).toSet,
+      Set("$.executionStats", "$.executionStats.executionStages", "$.stages[0]")
+    )
+    val lookupMetrics =
+      metrics.find(_.hcursor.get[String]("path").contains("$.stages[0]")).getOrElse(fail("missing lookup metrics"))
+    assertEquals(lookupMetrics.hcursor.get[String]("pipelineOperator"), Right("$lookup"))
+    assertEquals(lookupMetrics.hcursor.downField("metrics").get[Int]("totalDocsExamined"), Right(3))
+    val executed = collectExecutionIndexes(tree)
+    assertEquals(
+      executed.flatMap(_.hcursor.get[Vector[String]]("indexNames").toOption).flatten.toSet,
+      Set("selected_index", "related_index")
+    )
+    val scan = collectPlannerPlans(
+      Json.obj(
+        "queryPlanner" -> Json.obj(
+          "winningPlan" -> Json.obj("stage" -> Json.fromString("COLLSCAN")),
+          "rejectedPlans" -> Json.arr()
+        )
+      )
+    )
+    assertEquals(scan.head.hcursor.get[Vector[String]]("winningIndexNames"), Right(Vector.empty[String]))
+    assertEquals(scan.head.hcursor.get[Vector[String]]("winningStages"), Right(Vector("COLLSCAN")))
   }
 
   test("production candidate predicates execute the true false absent consent truth table on Mongo") {
@@ -502,49 +648,306 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
     }
   }
 
-  private def observe(fixture: support.Fixture, capability: Capability, concurrency: Int): IO[Json] =
-    for {
-      _ <- fixture.commands.clear
-      started <- IO.monotonic
-      observations <- (0 until repetitions).toList
-        .grouped(concurrency)
-        .toList
-        .traverse(batch =>
-          batch.parTraverse(_ =>
-            capability.run.attempt.timed.map { case (elapsed, result) =>
-              val error = result.left.toOption.map {
-                case failure: ObservedRepositoryFailure => failure.error.toString
-                case failure                            => failure.getClass.getSimpleName
-              }
-              Observation(elapsed.toNanos.toDouble / 1000000d, result.toOption.getOrElse(0), error)
-            }
+  private def collectionStorage(fixture: support.Fixture): IO[List[Json]] =
+    MongoHiringMigrations.ownedCollections.toList.traverse { name =>
+      support
+        .command(fixture.database, new Document("collStats", name))
+        .map(value =>
+          Json.obj(
+            "collection" -> Json.fromString(name),
+            "documents" -> Json.fromLong(value.get("count").asInstanceOf[Number].longValue),
+            "collectionIndexBytes" -> Json.fromLong(value.get("totalIndexSize").asInstanceOf[Number].longValue),
+            "collectionStorageBytes" -> Json.fromLong(value.get("storageSize").asInstanceOf[Number].longValue)
           )
         )
-        .map(_.flatten)
+        .handleError(error =>
+          Json.obj(
+            "collection" -> Json.fromString(name),
+            "status" -> Json.fromString(s"Unavailable: ${error.getClass.getSimpleName}")
+          )
+        )
+    }
+
+  private def clearCollection(fixture: support.Fixture, name: String): IO[Unit] =
+    support
+      .command(
+        fixture.database,
+        new Document("delete", name).append(
+          "deletes",
+          List(new Document("q", new Document()).append("limit", 0)).asJava
+        )
+      )
+      .void
+
+  private def writeWorkloads(readFixture: support.Fixture): IO[Json] =
+    support.isolatedFixture(readFixture).use { fixture =>
+      (cats.effect.Ref.of[IO, Int](0), IO.realTimeInstant).tupled.flatMap { case (sequence, measuredAt) =>
+        val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop)
+        val outbox =
+          MongoOperationalEventOutboxRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        val users = new MongoUserRepository(
+          fixture.database,
+          MongoRepositoryTestSupport.noTransaction,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop
+        )
+        val jobRepository = MongoJobRepository.transactional(fixture.database, fixture.client, work, Diagnostics.noop)
+        // Distinct and shared subjects exercise the same production claim contract.
+        // claim maps expected lease conflicts to None, so an empty attempt is legitimate.
+        // Actual progress and durable post-phase reconciliation are required independently.
+        val publisherActors = (0 until workRecordsPerPhase).toList.map(index => user(1000 + index, UserRole.Candidate))
+        val prepareWork = clearCollection(fixture, MongoCollections.EmbeddingWork) *>
+          jobs.traverse_(job =>
+            successful(work.enqueue(EmbeddingWorkKey(EmbeddingWorkKind.Job, job.id.value.toString), now))
+          )
+        def prepareOutbox(sharedSubject: Boolean): IO[Unit] =
+          clearCollection(fixture, MongoCollections.EventOutbox) *>
+            clearCollection(fixture, MongoCollections.OutboxSubjectFences) *>
+            jobs.zipWithIndex.traverse_ { case (job, index) =>
+              val event = OperationalEventEnvelope(
+                support.deterministicId(s"publisher-event:$index"),
+                OperationalEventType.JOB_VIEWED,
+                now,
+                OperationalAggregateType.Job,
+                job.id.value.toString,
+                publisherActors(if (sharedSubject) 0 else index).id,
+                Json.obj("jobId" -> Json.fromString(job.id.value.toString))
+              )
+              MongoHiringCodecs
+                .outboxRecord(event, now)
+                .fold(
+                  error => IO.raiseError(new AssertionError(error)),
+                  document =>
+                    MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.EventOutbox, document)
+                )
+            }
+        def publicationCount(query: Document): IO[Int] =
+          support
+            .command(
+              fixture.database,
+              new Document("count", MongoCollections.EventOutbox).append("query", query)
+            )
+            .map(_.get("n").asInstanceOf[Number].intValue)
+        val reconcilePublication: List[Observation] => IO[Json] = observations =>
+          for {
+            published <- publicationCount(new Document(MongoFields.State, "Published"))
+            retryable <- publicationCount(new Document(MongoFields.State, "Retryable"))
+            inFlight <- publicationCount(new Document(MongoFields.State, "InFlight"))
+            total <- publicationCount(new Document())
+            leases <- support
+              .command(
+                fixture.database,
+                new Document("count", MongoCollections.OutboxSubjectFences).append(
+                  "query",
+                  new Document(MongoFields.LeaseToken, new Document("$exists", true))
+                )
+              )
+              .map(_.get("n").asInstanceOf[Number].intValue)
+            completed = observations.map(_.returned).sum
+          } yield Json.obj(
+            "completedOperations" -> Json.fromInt(completed),
+            "publishedRecords" -> Json.fromInt(published),
+            "retryableRecords" -> Json.fromInt(retryable),
+            "inFlightRecords" -> Json.fromInt(inFlight),
+            "totalRecords" -> Json.fromInt(total),
+            "activeSubjectLeases" -> Json.fromInt(leases),
+            "positiveProgress" -> Json.fromBoolean(completed > 0),
+            "publishedMatchesCompleted" -> Json.fromBoolean(published == completed),
+            "retryableMatchesRemaining" -> Json.fromBoolean(retryable == workRecordsPerPhase - completed),
+            "claimContract" -> Json.fromString(
+              "MongoOperationalEventOutboxRepository.claim maps expected lease Conflict to an empty claim; empty attempts are counted separately and never counted as completed publications."
+            )
+          )
+        val prepareJobWrites = List(MongoCollections.Jobs, MongoCollections.EmbeddingWork, MongoCollections.EventOutbox)
+          .traverse_(clearCollection(fixture, _)) *> sequence.set(0)
+        val createJob = for {
+          index <- sequence.getAndUpdate(_ + 1)
+          id = support.deterministicId(s"created-job:$index")
+          eventId = support.deterministicId(s"created-job-event:$index")
+          value = jobs.head.copy(id = JobId(id))
+          event = OperationalEventEnvelope(
+            eventId,
+            OperationalEventType.JOB_CREATED,
+            now,
+            OperationalAggregateType.Job,
+            id.toString,
+            value.recruiterId,
+            Json.obj("jobId" -> Json.fromString(id.toString))
+          )
+          _ <- successful(jobRepository.createWithEvents(value, now, List(event), MutationWriteContext.directWrite))
+        } yield 1
+        val claimAndPublish =
+          successful(outbox.claim("synthetic-publisher", "synthetic-transaction", now, now.plusSeconds(60), 1))
+            .flatMap(values =>
+              values
+                .traverse_(value =>
+                  // Anchor synthetic retention beyond this run so TTL cannot invalidate reconciliation.
+                  successful(
+                    outbox.markPublished(value.event.eventId, value.leaseToken, now, measuredAt.plusSeconds(86400))
+                  )
+                )
+                .as(values.size)
+            )
+        val capabilities = List(
+          Capability(
+            "embeddingClaimComplete",
+            "Worker",
+            successful(work.claim("synthetic-worker", now, now.plusSeconds(60)))
+              .flatMap(_.fold(IO.pure(0))(claim => successful(work.complete(claim)).as(1))),
+            prepareWork,
+            minimumReturned = 1,
+            operation = "claimAndComplete"
+          ),
+          Capability(
+            "outboxClaimPublish",
+            "Publisher",
+            claimAndPublish,
+            prepareOutbox(sharedSubject = false),
+            operation = "claimAndPublish",
+            reconcile = reconcilePublication
+          ),
+          Capability(
+            "outboxClaimPublishSharedSubject",
+            "Publisher",
+            claimAndPublish,
+            prepareOutbox(sharedSubject = true),
+            operation = "claimAndPublish",
+            reconcile = reconcilePublication
+          ),
+          Capability(
+            "jobCreateWithEmbeddingWorkAndEvent",
+            "Recruiter",
+            createJob,
+            prepareJobWrites,
+            minimumReturned = 1,
+            operation = "transactionalWrite"
+          )
+        )
+        for {
+          _ <- (publisherActors ++ recruiters).traverse_(value => successful(users.insert(value)))
+          _ <- jobs.traverse_(value =>
+            MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
+          )
+          started <- IO.monotonic
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          ended <- IO.monotonic
+          reports <- capabilities
+            .traverse(capability => List(1, 8).traverse(observe(fixture, capability, _)))
+            .map(_.flatten)
+        } yield Json.obj(
+          "isolation" -> Json
+            .fromString("Separate owned database/client on the same disposable container; no read-corpus writes"),
+          "publicationSubjects" -> Json.fromString(
+            "Distinct-subject scenario: 128 active candidates. Shared-subject scenario: one active candidate for all 128 events. Jobs remain distinct in both."
+          ),
+          "publishedRetention" -> Json
+            .fromString("Anchored 24 hours beyond run start to prevent synthetic TTL depletion during reconciliation"),
+          "recordsReplenishedPerPhase" -> Json.fromInt(workRecordsPerPhase),
+          "setupMillis" -> Json.fromLong((ended - started).toMillis),
+          "storageInterpretation" -> Json.fromString(
+            "Before/after collection samples reflect this workload's document and state changes; not a paired index-overhead comparison"
+          ),
+          "capabilities" -> Json.fromValues(reports)
+        )
+      }
+    }
+
+  private def runObservations(capability: Capability, count: Int, concurrency: Int): IO[List[Observation]] =
+    (0 until count).toList
+      .grouped(concurrency)
+      .toList
+      .traverse(batch =>
+        batch.parTraverse(_ =>
+          capability.run.attempt.timed.map { case (elapsed, result) =>
+            val error = result.left.toOption.map {
+              case failure: ObservedRepositoryFailure => failure.error.toString
+              case failure                            => failure.getClass.getSimpleName
+            }
+            Observation(elapsed.toNanos.toDouble / 1000000d, result.toOption.getOrElse(0), error)
+          }
+        )
+      )
+      .map(_.flatten)
+
+  private def observe(fixture: support.Fixture, capability: Capability, concurrency: Int): IO[Json] =
+    for {
+      _ <- capability.prepare
+      firstPass <- runObservations(capability, 1, 1)
+      firstPassReconciliation <- capability.reconcile(firstPass)
+      _ <- capability.prepare
+      warmup <- runObservations(capability, warmupRequests, concurrency)
+      warmupReconciliation <- capability.reconcile(warmup)
+      _ <- capability.prepare
+      storageBefore <- if (capability.operation != "read") collectionStorage(fixture) else IO.pure(Nil)
+      resourcesBefore <- fixture.sampleResources
+      _ <- fixture.commands.clear
+      started <- IO.monotonic
+      observations <- runObservations(capability, repetitions, concurrency)
       ended <- IO.monotonic
       commands <- fixture.commands.snapshot
+      resourcesAfter <- fixture.sampleResources
+      measuredReconciliation <- capability.reconcile(observations)
+      storageAfter <- if (capability.operation != "read") collectionStorage(fixture) else IO.pure(Nil)
       shapes = commands.groupBy(command => sanitizeCommand(command).noSpaces).toList.sortBy(_._1)
       explains <- shapes.traverse { case (_, samples) => explain(fixture.database, samples.head) }
       totalMillis = (ended - started).toNanos.toDouble / 1000000d
+      completedLatencies = observations.filter(value => value.error.isEmpty && value.returned > 0).map(_.latencyMillis)
     } yield Json.obj(
       "capability" -> Json.fromString(capability.name),
       "actor" -> Json.fromString(capability.actor),
+      "operation" -> Json.fromString(capability.operation),
       "concurrency" -> Json.fromInt(concurrency),
       "p50Millis" -> Json.fromDoubleOrNull(percentile(observations.map(_.latencyMillis), 0.50)),
       "p95Millis" -> Json.fromDoubleOrNull(percentile(observations.map(_.latencyMillis), 0.95)),
       "p99Millis" -> Json.fromDoubleOrNull(percentile(observations.map(_.latencyMillis), 0.99)),
-      "firstRequestMillis" -> Json.fromDoubleOrNull(observations.headOption.fold(0d)(_.latencyMillis)),
+      "completionSampleCount" -> Json.fromInt(if (capability.operation == "read") 0 else completedLatencies.size),
+      "completionP50Millis" -> completionPercentile(capability, completedLatencies, 0.50),
+      "completionP95Millis" -> completionPercentile(capability, completedLatencies, 0.95),
+      "completionP99Millis" -> completionPercentile(capability, completedLatencies, 0.99),
+      "completionTimingInterpretation" -> Json.fromString(
+        "Non-read operations with returned count >0 and no error; completion sample count can be smaller than attempt count. Null for reads or no completed writes. Write regression compares completion p95 under paired identical workload/subject distribution."
+      ),
+      "firstPassMillis" -> Json.fromDoubleOrNull(firstPass.headOption.fold(0d)(_.latencyMillis)),
+      "firstPassErrors" -> Json.fromInt(firstPass.count(_.error.nonEmpty)),
+      "firstPassErrorCategories" -> Json.fromValues(firstPass.flatMap(_.error).map(Json.fromString)),
+      "firstWarmedRequestMillis" -> Json.fromDoubleOrNull(observations.headOption.fold(0d)(_.latencyMillis)),
       "throughputRequestsPerSecond" -> Json.fromDoubleOrNull(repetitions.toDouble * 1000d / totalMillis),
+      "completedOperations" -> Json.fromInt(
+        if (capability.operation == "read") observations.count(_.error.isEmpty) else observations.map(_.returned).sum
+      ),
+      "completedOperationsPerSecond" -> Json.fromDoubleOrNull(
+        (if (capability.operation == "read") observations.count(_.error.isEmpty)
+         else observations.map(_.returned).sum).toDouble * 1000d / totalMillis
+      ),
+      "emptyOperations" -> Json.fromInt(observations.count(value => value.error.isEmpty && value.returned == 0)),
       "elapsedMillis" -> Json.fromDoubleOrNull(totalMillis),
       "sampleCount" -> Json.fromInt(repetitions),
-      "warmupRequests" -> Json.fromInt(0),
+      "warmupRequests" -> Json.fromInt(warmupRequests),
+      "warmupErrors" -> Json.fromInt(warmup.count(_.error.nonEmpty)),
+      "warmupErrorCategories" -> Json.fromValues(warmup.flatMap(_.error).map(Json.fromString)),
+      "warmupP50Millis" -> Json.fromDoubleOrNull(percentile(warmup.map(_.latencyMillis), 0.50)),
       "errors" -> Json.fromInt(observations.count(_.error.nonEmpty)),
       "returnedPerRequest" -> Json.fromValues(observations.map(value => Json.fromInt(value.returned))),
       "errorCategories" -> Json.fromValues(observations.flatMap(_.error).map(Json.fromString)),
+      "minimumReturnedPerRequest" -> Json.fromInt(capability.minimumReturned),
+      "firstPassReturned" -> Json.fromValues(firstPass.map(value => Json.fromInt(value.returned))),
+      "warmupReturned" -> Json.fromValues(warmup.map(value => Json.fromInt(value.returned))),
+      "firstPassReconciliation" -> firstPassReconciliation,
+      "warmupReconciliation" -> warmupReconciliation,
+      "measuredReconciliation" -> measuredReconciliation,
+      "resourceSamples" -> resourceSamples(resourcesBefore, resourcesAfter),
+      "collectionStorageBefore" -> Json.fromValues(storageBefore),
+      "collectionStorageAfter" -> Json.fromValues(storageAfter),
+      "timingScope" -> Json.fromString(
+        "Production adapter calls including retries/cursor decoding; transactional job writes also include deterministic fixture allocation. Preparation, boundary probes, storage queries and explains are excluded."
+      ),
+      "firstPassInterpretation" -> Json.fromString(
+        "First invocation for this capability/concurrency, before its dedicated warmup; not a cold-cache claim. Read corpus is shared between concurrency runs."
+      ),
       "documentHydration" -> Json.fromString(
         if (capability.name.endsWith("EligibilityProjection"))
           "Selective authoritative projection; embedding vectors excluded; candidate email, name and resume references excluded"
-        else if (Set("Worker", "Publisher").contains(capability.actor))
+        else if (capability.operation != "read")
           "Full bounded work or event records; publication updates and leases retained"
         else
           "Full operational entity documents; actor/parent selection stays in Mongo; GraphQL field authorization is separate"
@@ -562,6 +965,32 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
       ),
       "executionStats" -> Json.fromValues(explains)
     )
+
+  private def completionPercentile(capability: Capability, values: List[Double], fraction: Double): Json =
+    if (capability.operation == "read" || values.isEmpty) Json.Null
+    else Json.fromDoubleOrNull(percentile(values, fraction))
+
+  private def resourceSamples(before: Json, after: Json): Json = {
+    val cpuDelta = for {
+      start <- before.hcursor.get[Long]("cpuUsageMicros").toOption
+      end <- after.hcursor.get[Long]("cpuUsageMicros").toOption
+      if end >= start
+    } yield end - start
+    val elapsed = for {
+      start <- before.hcursor.get[Long]("monotonicNanos").toOption
+      end <- after.hcursor.get[Long]("monotonicNanos").toOption
+      if end > start
+    } yield end - start
+    val averageCores = for { delta <- cpuDelta; nanos <- elapsed } yield delta.toDouble * 1000d / nanos.toDouble
+    Json.obj(
+      "samples" -> Json.arr(before, after),
+      "cpuUsageMicrosDelta" -> cpuDelta.fold(Json.Null)(Json.fromLong),
+      "approximateAverageCpuCores" -> averageCores.fold(Json.Null)(Json.fromDoubleOrNull),
+      "limitations" -> Json.fromString(
+        "Two boundary samples only; memory maxima between samples are unknown. CPU interval includes probe overhead and container background work. No attribution to individual requests or host isolation."
+      )
+    )
+  }
 
   private def percentile(values: List[Double], fraction: Double): Double = {
     val ordered = values.sorted
@@ -660,19 +1089,45 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           Json.obj(
             "command" -> Json.fromString(commandName),
             "metrics" -> Json.fromValues(collectMetrics(tree)),
-            "winningAndRejectedIndexNames" -> Json.fromValues(collectIndexes(tree).distinct.sorted.map(Json.fromString))
+            "plannerPlans" -> Json.fromValues(collectPlannerPlans(tree)),
+            "executionIndexReferences" -> Json.fromValues(collectExecutionIndexes(tree))
           )
       }
     }
   }
 
-  private def collectMetrics(json: Json): List[Json] = {
-    val fields =
-      Set("nReturned", "totalKeysExamined", "totalDocsExamined", "executionTimeMillis", "keysExamined", "docsExamined")
-    json.asObject.fold(json.asArray.toList.flatten.toList.flatMap(collectMetrics)) { obj =>
-      val metrics = obj.toList.filter(entry => fields.contains(entry._1) && entry._2.isNumber)
-      Option.when(metrics.nonEmpty)(Json.fromFields(metrics)).toList ++ obj.values.toList.flatMap(collectMetrics)
+  private def children(json: Json, path: String): List[(String, Json)] =
+    json.asObject.fold(json.asArray.toList.flatten.zipWithIndex.map { case (value, index) =>
+      s"$path[$index]" -> value
+    }) { obj =>
+      obj.toList.map { case (name, value) => s"$path.$name" -> value }
     }
+
+  private def collectMetrics(json: Json, path: String = "$"): List[Json] = {
+    val fields =
+      Set(
+        "nReturned",
+        "totalKeysExamined",
+        "totalDocsExamined",
+        "executionTimeMillis",
+        "executionTimeMillisEstimate",
+        "keysExamined",
+        "docsExamined"
+      )
+    val current = json.asObject.toList.flatMap { obj =>
+      val metrics = obj.toList.filter(entry => fields.contains(entry._1) && entry._2.isNumber)
+      Option
+        .when(metrics.nonEmpty)(
+          Json.obj(
+            "path" -> Json.fromString(path),
+            "stage" -> obj("stage").filter(_.isString).getOrElse(Json.Null),
+            "pipelineOperator" -> obj.keys.find(_.startsWith("$")).fold(Json.Null)(Json.fromString),
+            "metrics" -> Json.fromFields(metrics)
+          )
+        )
+        .toList
+    }
+    current ++ children(json, path).flatMap { case (nextPath, value) => collectMetrics(value, nextPath) }
   }
 
   private def collectIndexes(json: Json): List[String] =
@@ -680,11 +1135,55 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
       obj("indexName").flatMap(_.asString).toList ++ obj.values.toList.flatMap(collectIndexes)
     }
 
+  private def collectStages(json: Json): List[String] =
+    json.asObject.fold(json.asArray.toList.flatten.toList.flatMap(collectStages)) { obj =>
+      obj("stage").flatMap(_.asString).toList ++ obj.values.toList.flatMap(collectStages)
+    }
+
+  private def collectPlannerPlans(json: Json, path: String = "$"): List[Json] = {
+    val current = json.asObject.toList.flatMap { obj =>
+      obj("winningPlan").toList.map { winning =>
+        val rejected = obj("rejectedPlans").getOrElse(Json.arr())
+        Json.obj(
+          "path" -> Json.fromString(path),
+          "winningPlanPath" -> Json.fromString(s"$path.winningPlan"),
+          "winningIndexNames" -> Json.fromValues(collectIndexes(winning).distinct.sorted.map(Json.fromString)),
+          "winningStages" -> Json.fromValues(collectStages(winning).distinct.sorted.map(Json.fromString)),
+          "rejectedPlansPath" -> Json.fromString(s"$path.rejectedPlans"),
+          "rejectedIndexNames" -> Json.fromValues(collectIndexes(rejected).distinct.sorted.map(Json.fromString)),
+          "rejectedStages" -> Json.fromValues(collectStages(rejected).distinct.sorted.map(Json.fromString))
+        )
+      }
+    }
+    current ++ children(json, path).flatMap { case (nextPath, value) => collectPlannerPlans(value, nextPath) }
+  }
+
+  private def collectExecutionIndexes(json: Json, path: String = "$"): List[Json] = {
+    val current = json.asObject.toList.flatMap { obj =>
+      val names = obj("indexesUsed").flatMap(_.asArray).toList.flatten.flatMap(_.asString).toList ++
+        Option.when(path.contains(".executionStats"))(obj("indexName").flatMap(_.asString).toList).toList.flatten
+      Option
+        .when(names.nonEmpty)(
+          Json.obj(
+            "path" -> Json.fromString(path),
+            "stage" -> obj("stage").filter(_.isString).getOrElse(Json.Null),
+            "indexNames" -> Json.fromValues(names.distinct.sorted.map(Json.fromString))
+          )
+        )
+        .toList
+    }
+    current ++ children(json, path).flatMap { case (nextPath, value) => collectExecutionIndexes(value, nextPath) }
+  }
+
   private def write(report: Json): IO[Unit] = IO.blocking {
     val directory = Paths.get(".local/data/mongodb-access-evaluation")
     val _ = Files.createDirectories(directory)
     val _ =
-      Files.writeString(directory.resolve("operational-access-baseline.json"), report.spaces2, StandardCharsets.UTF_8)
+      Files.writeString(
+        directory.resolve("operational-access-measurements.json"),
+        report.spaces2,
+        StandardCharsets.UTF_8
+      )
     ()
   }
 
