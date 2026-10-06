@@ -8,7 +8,13 @@ import com.example.graphQL.cats.domain.workflow.{
   InterviewCleanupState,
   InterviewRetentionBarrier
 }
-import com.example.graphQL.cats.service.port.{InterviewSubjectCleanupRepository, InterviewCleanupUpdate, RepositoryIO}
+import com.example.graphQL.cats.service.port.{
+  InterviewSubjectCleanupRepository,
+  InterviewCleanupUpdate,
+  InterviewCleanupCursor,
+  InterviewCleanupPage,
+  RepositoryIO
+}
 import com.example.graphQL.cats.service.{RepositoryError, Diagnostics}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
@@ -123,17 +129,48 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
     case Left(_) => false
   }
 
-  override def pending: RepositoryIO[Vector[InterviewSubjectCleanup]] = guard("interviewCleanup.pending") {
-    RepositoryIO
-      .lift(
-        queue.flatMap(
-          _.find(MongoFilter.ne("state", "Complete").bson)
-            .sort(Sorts.ascending("requestedAt", MongoFields.Id))
-            .limit(32)
-            .all
-        )
-      )
-      .flatMap(_.toVector.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decode(row))))
+  override def pendingPage(
+      cursor: Option[InterviewCleanupCursor],
+      observedAt: Instant
+  ): RepositoryIO[InterviewCleanupPage] = guard("interviewCleanup.pending") {
+    import MongoInterviewCleanupSweepCodec.*
+    val sweep = cursor match {
+      case Some(value) => RepositoryIO.fromEither(decode(value).map(Some(_)))
+      case None        =>
+        RepositoryIO
+          .lift(
+            queue.flatMap(
+              _.find(eligible(observedAt)).sort(Sorts.descending(MongoFields.Id)).hint("_id_").limit(1).first
+            )
+          )
+          .flatMap(_.traverse(row => RepositoryIO.fromEither(identity(row).map(id => Sweep(None, id, observedAt)))))
+    }
+    sweep.flatMap {
+      case None          => RepositoryIO.fromEither(Right(InterviewCleanupPage(Vector.empty, None)))
+      case Some(current) =>
+        RepositoryIO
+          .lift(
+            queue.flatMap(
+              _.find(pageFilter(current)).sort(Sorts.ascending(MongoFields.Id)).hint("_id_").limit(PageSize).all
+            )
+          )
+          .flatMap { rows =>
+            val selected = rows.toVector
+            val next =
+              if (selected.size < PageSize) Right(None)
+              else
+                selected.lastOption
+                  .traverse(row =>
+                    identity(row).map { id =>
+                      Option.unless(id == current.throughId)(encode(current, id))
+                    }
+                  )
+                  .map(_.flatten)
+            RepositoryIO.fromEither(
+              next.map(token => InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decode), token))
+            )
+          }
+    }
   }
 
   override def transition(

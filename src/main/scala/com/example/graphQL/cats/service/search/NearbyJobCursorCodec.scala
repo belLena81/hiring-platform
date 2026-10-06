@@ -16,6 +16,25 @@ enum NearbyCursorError {
 }
 
 object NearbyJobCursorCodec {
+  private[search] def fingerprint(query: NearbyJobsQuery): String =
+    com.example.graphQL.cats.shared.crypto.SourceHash.sha256(
+      io.circe.Json
+        .arr(
+          io.circe.Json.fromDoubleOrNull(query.center.latitude),
+          io.circe.Json.fromDoubleOrNull(query.center.longitude),
+          io.circe.Json.fromDoubleOrNull(query.radiusKm),
+          query.filter.city.map(value => io.circe.Json.fromString(value.trim)).getOrElse(io.circe.Json.Null),
+          io.circe.Json.fromValues(
+            query.filter.skills.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted.map(io.circe.Json.fromString)
+          ),
+          query.filter.createdAfter
+            .map(value => io.circe.Json.fromString(value.toString))
+            .getOrElse(io.circe.Json.Null),
+          io.circe.Json.fromString("distanceKm,id")
+        )
+        .noSpaces
+    )
+
   def encode(distanceKm: Double, jobId: JobId, query: NearbyJobsQuery): String =
     Base64.getUrlEncoder
       .withoutPadding()

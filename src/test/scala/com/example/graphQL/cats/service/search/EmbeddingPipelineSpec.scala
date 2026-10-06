@@ -221,11 +221,13 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         ).use(wakeups => wakeups.offer(()) *> completion.get)
         attempts <- calls.get
         snapshot <- work.snapshot
+        finalJobs <- jobsRef.get
       } yield {
         assertEquals(attempts.size, 3)
         attempts.zip(attempts.drop(1)).foreach { case (before, after) => assert(after - before >= 10.millis) }
         assertEquals(snapshot.get(key.value).flatMap(_.failure), Some(EmbeddingWorkFailure.RetryExhausted))
         assertEquals(snapshot.get(key.value).map(_.attempts), Some(0))
+        assertEquals(finalJobs, Map(jobId -> openJob))
       }
     }
   }

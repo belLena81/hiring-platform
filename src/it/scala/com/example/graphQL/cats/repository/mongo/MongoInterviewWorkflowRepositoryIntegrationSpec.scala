@@ -2,13 +2,15 @@ package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole, User}
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
+import com.example.graphQL.cats.domain.model.{ApplicationEvent, ApplicationStatus, UserRole, User}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, UserId}
+import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.{ActorContext, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.application.InterviewSchedulingService
+import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
 import munit.CatsEffectSuite
 import java.time.Instant
@@ -467,9 +469,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
     }
   }
 
-  test("Admin initiated interview scheduling attributes the hiring history and outbox to the Admin") {
+  test("Admin interview commit matches the lifecycle state, history and outbox and replays once") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
       val target = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val admin = User(
         UserId(UUID.randomUUID()),
@@ -521,7 +524,29 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
             now
           )
         )
+        original <- success(applications.find(initiated.applicationId)).flatMap(value =>
+          IO.fromOption(value)(new AssertionError("Missing accepted application"))
+        )
+        expected <- IO.fromEither(
+          ApplicationLifecycle
+            .changeStatus(ApplicationStatus.Interview, admin.id, now, None, None)
+            .run(original)
+            .leftMap(error => new AssertionError(s"Unexpected lifecycle rejection: $error"))
+        )
+        (expectedApplication, expectedChange) = expected
+        expectedEvent = ApplicationEvent(
+          ApplicationEventId(eventId),
+          initiated.applicationId,
+          Some(expectedChange.previousStatus),
+          expectedChange.newStatus,
+          expectedChange.actorId,
+          expectedChange.occurredAt,
+          expectedChange.feedback,
+          expectedChange.reason
+        )
         _ <- success(repository.commitHiring(pending._1, now))
+        _ <- success(repository.commitHiring(pending._1, now.plusSeconds(1)))
+        saved <- success(applications.find(initiated.applicationId))
         history <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.ApplicationEvents,
@@ -532,9 +557,39 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           MongoCollections.EventOutbox,
           MongoFilter.eq(MongoFields.Id, eventId.toString).bson
         )
+        historyCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.ApplicationEvents)
+        outboxCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.EventOutbox)
+        receiptCount <- MongoRepositoryTestSupport.count(
+          fixture.database,
+          MongoCollections.InterviewWorkflowInbox,
+          MongoFilter.eq(MongoFields.Id, s"${initiated.id.value}:hiring").bson
+        )
+        notificationCount <- MongoRepositoryTestSupport.count(
+          fixture.database,
+          MongoCollections.InterviewWorkflowCommands,
+          MongoFilter
+            .and(
+              MongoFilter.eq("workflowId", initiated.id.value.toString),
+              MongoFilter.eq("command.kind", "notify")
+            )
+            .bson
+        )
+        current <- success(repository.findForAdmin(initiated.id))
+        expectedWorkflow = InterviewWorkflow
+          .decide(pending._1, pending._1.revision, InterviewWorkflowEvent.StatusCommitted)
+          .fold(error => fail(s"Transition: $error"), identity)
       } yield {
-        assertEquals(history.map(_.getString(MongoFields.ActorId)), Some(admin.id.value.toString))
-        assertEquals(outbox.map(_.getString(MongoFields.ActorId)), Some(admin.id.value.toString))
+        assertEquals(saved, Some(expectedApplication))
+        assertEquals(history.flatMap(MongoHiringCodecs.readEvent(_).toOption), Some(expectedEvent))
+        assertEquals(
+          outbox.flatMap(MongoHiringCodecs.readOperationalEvent(_).toOption),
+          Some(OperationalEvents.statusChanged(eventId, expectedApplication, expectedEvent))
+        )
+        assertEquals(historyCount, 1L)
+        assertEquals(outboxCount, 1L)
+        assertEquals(receiptCount, 1L)
+        assertEquals(notificationCount, 2L)
+        assertEquals(current, Some(expectedWorkflow._1))
       }
     }
   }
@@ -557,7 +612,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           5,
           1.second,
           30.seconds
-        )
+        ),
+        Diagnostics.noop
       )
       def stableId(identity: String): UUID =
         UUID.nameUUIDFromBytes(identity.getBytes(java.nio.charset.StandardCharsets.UTF_8))
@@ -1006,6 +1062,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           FakeInterviewNotificationProvider.durable(repository),
           com.example.graphQL.cats.service.application
             .InterviewWorkerSettings("budget", 1.second, 60.seconds, 10.seconds, 1, 1.second, 30.seconds),
+          Diagnostics.noop,
           currentTime = clock.get
         )
         _ <- worker.publishDue(transport)

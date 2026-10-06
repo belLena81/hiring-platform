@@ -19,21 +19,7 @@ final case class NearbyJobsQuery(
     after: Option[NearbyJobCursor] = None
 ) {
   def isValid: Boolean = JobDiscoveryValidation.nearby(this).isValid
-  def fingerprint: String = com.example.graphQL.cats.shared.crypto.SourceHash.sha256(
-    io.circe.Json
-      .arr(
-        io.circe.Json.fromDoubleOrNull(center.latitude),
-        io.circe.Json.fromDoubleOrNull(center.longitude),
-        io.circe.Json.fromDoubleOrNull(radiusKm),
-        filter.city.map(value => io.circe.Json.fromString(value.trim)).getOrElse(io.circe.Json.Null),
-        io.circe.Json.fromValues(
-          filter.skills.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted.map(io.circe.Json.fromString)
-        ),
-        filter.createdAfter.map(value => io.circe.Json.fromString(value.toString)).getOrElse(io.circe.Json.Null),
-        io.circe.Json.fromString("distanceKm,id")
-      )
-      .noSpaces
-  )
+  def fingerprint: String = NearbyJobCursorCodec.fingerprint(this)
 }
 final case class NearbyJobCursor(distanceKm: Double, jobId: JobId, queryFingerprint: String)
 final case class NearbyJobsPage(query: NearbyJobsQuery, first: Int, after: Option[NearbyJobCursor])
@@ -74,18 +60,16 @@ object JobDiscoveryFacets {
         .toList
         .sortBy { case (value, count) => (-count, value) }
         .map { case (value, count) => JobFacetBucket(value, count) }
-    val dimensions = List(
-      buckets(jobs.flatMap(_.skills)),
-      buckets(jobs.map(_.location.country).filter(_.nonEmpty)),
-      buckets(jobs.map(_.location.city).filter(_.nonEmpty)),
-      buckets(jobs.map(job => job.location.remote.toString))
-    )
+    val skillBuckets = buckets(jobs.flatMap(_.skills))
+    val countryBuckets = buckets(jobs.map(_.location.country).filter(_.nonEmpty))
+    val cityBuckets = buckets(jobs.map(_.location.city).filter(_.nonEmpty))
+    val remoteBuckets = buckets(jobs.map(job => job.location.remote.toString))
     JobDiscoveryFacets(
-      dimensions(0).take(MaxBucketsPerDimension),
-      dimensions(1).take(MaxBucketsPerDimension),
-      dimensions(2).take(MaxBucketsPerDimension),
-      dimensions(3).take(MaxBucketsPerDimension),
-      dimensions.exists(_.size > MaxBucketsPerDimension)
+      skillBuckets.take(MaxBucketsPerDimension),
+      countryBuckets.take(MaxBucketsPerDimension),
+      cityBuckets.take(MaxBucketsPerDimension),
+      remoteBuckets.take(MaxBucketsPerDimension),
+      List(skillBuckets, countryBuckets, cityBuckets, remoteBuckets).exists(_.size > MaxBucketsPerDimension)
     )
   }
 }

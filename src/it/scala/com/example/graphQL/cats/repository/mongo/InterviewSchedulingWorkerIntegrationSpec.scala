@@ -184,9 +184,15 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
     }
     val settings =
       InterviewWorkerSettings("interview-worker-a", 100.millis, 60.seconds, 10.seconds, 5, 1.second, 30.seconds)
-    val first = new InterviewWorkflowWorker(repository, calendar, notifications, settings)
+    val first = new InterviewWorkflowWorker(repository, calendar, notifications, settings, Diagnostics.noop)
     val second =
-      new InterviewWorkflowWorker(repository, calendar, notifications, settings.copy(workerId = "interview-worker-b"))
+      new InterviewWorkflowWorker(
+        repository,
+        calendar,
+        notifications,
+        settings.copy(workerId = "interview-worker-b"),
+        Diagnostics.noop
+      )
     val bootstrap = env("INTERVIEW_KAFKA_BOOTSTRAP")
     def invalid(identity: String): IO[Boolean] =
       IO.realTimeInstant.flatMap(now => repository.quarantine(identity, now).value.map(_.isRight))

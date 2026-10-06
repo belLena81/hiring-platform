@@ -116,4 +116,69 @@ class JobDiscoverySpec extends FunSuite {
     }
   }
 
+  test("nearby cursor canonical criteria and full-precision bytes match fixed golden values") {
+    val query = NearbyJobsQuery(
+      GeoPoint(35.5d, 33.25d),
+      20.5d,
+      JobSearchFilter(Some(" Nicosia|Old \"Town\" "), Set(" Scala,Cats ", "Pipe|Skill", " "), Some(now))
+    )
+    val fingerprint = "a69011814621cddab045b832630cba7e5e326ecb4d8d21f71d557879cf62e844"
+    val encoded =
+      "MS4yMzQ1Njc4OTAxMjM0NTZ8MDAwMDAwMDAtMDAwMC0wMDAwLTAwMDAtMDAwMDAwMDAwMDAxfGE2OTAxMTgxNDYyMWNkZGFiMDQ1YjgzMjYzMGNiYTdlNWUzMjZlY2I0ZDhkMjFmNzFkNTU3ODc5Y2Y2MmU4NDQ"
+    val identity = JobId(new UUID(0L, 1L))
+    val distance = 1.234567890123456d
+    assertEquals(query.fingerprint, fingerprint)
+    assertEquals(NearbyJobsQuery.encodeCursor(distance, identity, query), encoded)
+    assertEquals(NearbyJobsQuery.decodeCursor(encoded, query), Right(NearbyJobCursor(distance, identity, fingerprint)))
+    assertEquals(
+      query
+        .copy(filter = JobSearchFilter(Some("Nicosia|Old \"Town\""), Set("Pipe|Skill", "Scala,Cats"), Some(now)))
+        .fingerprint,
+      fingerprint
+    )
+    assertNotEquals(
+      query.copy(filter = query.filter.copy(skills = Set("Scala", "Cats", "Pipe|Skill"))).fingerprint,
+      fingerprint
+    )
+    assertEquals(
+      NearbyJobsQuery(GeoPoint(0.5d, -0.25d), 0.5d, JobSearchFilter(None, Set.empty, None)).fingerprint,
+      "8cb85609aace395691451337b669d90338f1a26a4209c18f5864117fa67116cd"
+    )
+  }
+
+  test("facet dimensions preserve empty results and each dimension's count and order") {
+    assertEquals(JobDiscoveryFacets.fromJobs(Nil), JobDiscoveryFacets(Nil, Nil, Nil, Nil, truncated = false))
+    val result = JobDiscoveryFacets.fromJobs(
+      List(
+        job(1, Set("Scala", "Cats"), "Nicosia"),
+        job(2, Set("Scala"), "Limassol").copy(location = Location("Greece", "Limassol", remote = true)),
+        job(3, Set("Cats"), "Nicosia")
+      )
+    )
+    assertEquals(
+      result,
+      JobDiscoveryFacets(
+        List(JobFacetBucket("Cats", 2L), JobFacetBucket("Scala", 2L)),
+        List(JobFacetBucket("Cyprus", 2L), JobFacetBucket("Greece", 1L)),
+        List(JobFacetBucket("Nicosia", 2L), JobFacetBucket("Limassol", 1L)),
+        List(JobFacetBucket("false", 2L), JobFacetBucket("true", 1L)),
+        truncated = false
+      )
+    )
+  }
+
+  test("facet bucket bounds preserve tied value order and report truncation only above twenty") {
+    val jobs = (1 to 21).toList.map { index =>
+      job(index, Set(f"Skill$index%02d"), f"City$index%02d")
+        .copy(location = Location(f"Country$index%02d", f"City$index%02d", remote = false))
+    }
+    val result = JobDiscoveryFacets.fromJobs(jobs)
+    assertEquals(result.skills, (1 to 20).toList.map(index => JobFacetBucket(f"Skill$index%02d", 1L)))
+    assertEquals(result.countries, (1 to 20).toList.map(index => JobFacetBucket(f"Country$index%02d", 1L)))
+    assertEquals(result.cities, (1 to 20).toList.map(index => JobFacetBucket(f"City$index%02d", 1L)))
+    assertEquals(result.remote, List(JobFacetBucket("false", 21L)))
+    assert(result.truncated)
+    assert(!JobDiscoveryFacets.fromJobs(jobs.take(20)).truncated)
+  }
+
 }

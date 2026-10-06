@@ -2,6 +2,25 @@ package com.example.graphQL.cats.service.port
 
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.InterviewSubjectCleanup
+import java.time.Instant
+
+/** Internal adapter token. It carries ordering coordinates, never authority to perform subject cleanup. */
+opaque type InterviewCleanupCursor = String
+
+object InterviewCleanupCursor {
+  private[cats] def fromEncoded(value: String): InterviewCleanupCursor = value
+  extension (value: InterviewCleanupCursor) private[cats] def encoded: String = value
+}
+
+final case class InterviewCleanupPage(
+    entries: Vector[Either[RepositoryError, InterviewSubjectCleanup]],
+    next: Option[InterviewCleanupCursor]
+)
+
+final case class InterviewCleanupProgress(
+    next: Option[InterviewCleanupCursor],
+    firstFailure: Option[RepositoryError]
+)
 
 type InterviewRetentionBarrier = com.example.graphQL.cats.domain.workflow.InterviewRetentionBarrier
 val InterviewRetentionBarrier = com.example.graphQL.cats.domain.workflow.InterviewRetentionBarrier
@@ -17,7 +36,7 @@ enum InterviewCleanupUpdate {
 }
 
 trait InterviewSubjectCleanupRepository {
-  def pending: RepositoryIO[Vector[InterviewSubjectCleanup]]
+  def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant): RepositoryIO[InterviewCleanupPage]
   def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]]
   def transition(expected: InterviewSubjectCleanup, next: InterviewSubjectCleanup): RepositoryIO[InterviewCleanupUpdate]
   def purge(subject: UserId): RepositoryIO[Unit]

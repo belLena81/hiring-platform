@@ -10,27 +10,36 @@ object HybridRankFusion {
       lexical: List[RankedCandidate],
       limit: Int
   ): List[RankedCandidate] = {
-    final case class Entry(value: RankedCandidate, ranks: List[Option[Int]]) {
-      val score: Double = ranks.flatten.map(rank => 1.0 / (RankConstant + rank)).sum
+    final case class Entry(
+        value: RankedCandidate,
+        jobVectorRank: Option[Int],
+        queryVectorRank: Option[Int],
+        lexicalRank: Option[Int]
+    ) {
+      val score: Double = List(jobVectorRank, queryVectorRank, lexicalRank).flatten
+        .map(rank => 1.0 / (RankConstant + rank))
+        .sum
     }
-    val branches = List(jobVector, queryVector, lexical)
-    val entries = branches.zipWithIndex.foldLeft(Map.empty[String, Entry]) { case (acc, (branch, branchIndex)) =>
-      branch.zipWithIndex.foldLeft(acc) { case (current, (candidate, index)) =>
+    def addBranch(entries: Map[String, Entry], branch: List[RankedCandidate])(
+        withRank: (Entry, Int) => Entry
+    ): Map[String, Entry] =
+      branch.zipWithIndex.foldLeft(entries) { case (current, (candidate, index)) =>
         val id = candidate.candidate.id.value.toString
-        current.get(id) match {
-          case None => current.updated(id, Entry(candidate, List.fill(3)(None).updated(branchIndex, Some(index + 1))))
-          case Some(existing) =>
-            current.updated(id, existing.copy(ranks = existing.ranks.updated(branchIndex, Some(index + 1))))
-        }
+        val entry = current.getOrElse(id, Entry(candidate, None, None, None))
+        current.updated(id, withRank(entry, index + 1))
       }
-    }
+    val jobVectorEntries =
+      addBranch(Map.empty[String, Entry], jobVector)((entry, rank) => entry.copy(jobVectorRank = Some(rank)))
+    val queryVectorEntries =
+      addBranch(jobVectorEntries, queryVector)((entry, rank) => entry.copy(queryVectorRank = Some(rank)))
+    val entries = addBranch(queryVectorEntries, lexical)((entry, rank) => entry.copy(lexicalRank = Some(rank)))
     entries.values.toList
       .sortBy(entry =>
         (
           -entry.score,
-          entry.ranks(0).getOrElse(Int.MaxValue),
-          entry.ranks(1).getOrElse(Int.MaxValue),
-          entry.ranks(2).getOrElse(Int.MaxValue),
+          entry.jobVectorRank.getOrElse(Int.MaxValue),
+          entry.queryVectorRank.getOrElse(Int.MaxValue),
+          entry.lexicalRank.getOrElse(Int.MaxValue),
           entry.value.candidate.id.value.toString
         )
       )

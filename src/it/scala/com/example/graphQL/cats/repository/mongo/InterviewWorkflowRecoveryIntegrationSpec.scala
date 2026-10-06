@@ -80,7 +80,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val notification = FakeInterviewNotificationProvider.durable(repository)
-      val worker = new InterviewWorkflowWorker(repository, calendar, notification, settings)
+      val worker = new InterviewWorkflowWorker(repository, calendar, notification, settings, Diagnostics.noop)
       for {
         now <- IO.realTimeInstant
         original = workflow(now)
@@ -156,7 +156,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
         repository,
         failedRelease,
         FakeInterviewNotificationProvider.durable(repository),
-        settings
+        settings,
+        Diagnostics.noop
       )
       for {
         now <- IO.realTimeInstant
@@ -222,8 +223,9 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
             EitherT.leftT[IO, Option[InterviewNotificationReceipt]](InterviewProviderError.Unavailable)
           else notification.lookup(key)
       }
-      val failingWorker = new InterviewWorkflowWorker(repository, calendar, failedNotification, settings)
-      val recoveredWorker = new InterviewWorkflowWorker(repository, calendar, notification, settings)
+      val failingWorker =
+        new InterviewWorkflowWorker(repository, calendar, failedNotification, settings, Diagnostics.noop)
+      val recoveredWorker = new InterviewWorkflowWorker(repository, calendar, notification, settings, Diagnostics.noop)
       for {
         now <- IO.realTimeInstant
         value = workflow(now)
@@ -295,7 +297,8 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
         repository,
         calendar,
         FakeInterviewNotificationProvider.durable(repository),
-        settings
+        settings,
+        Diagnostics.noop
       )
       val users = new MongoUserRepository(
         fixture.database,
@@ -362,9 +365,9 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
           _ => IO.pure(false),
           Diagnostics.noop
         )
-        _ <- success(cleaner.runOnce)
-        _ <- success(cleaner.runOnce)
-        _ <- success(cleaner.runOnce)
+        _ <- success(cleaner.runOnce(None))
+        _ <- success(cleaner.runOnce(None))
+        _ <- success(cleaner.runOnce(None))
         commandAcknowledged <- worker.receiveCommand(command)
         resultAcknowledged <- worker.receiveResult(result)
         pending <- cleanup.complete(value.candidateId)

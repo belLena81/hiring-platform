@@ -56,7 +56,8 @@ private[runtime] object InterviewSchedulingRuntime {
               settings.retryBaseSeconds.seconds,
               settings.retryCapSeconds.seconds,
               settings.replayRetentionSeconds.seconds
-            )
+            ),
+            diagnostics = diagnostics
           )
           val commandConfig = InterviewKafkaConfig(
             config.bootstrapServers,

@@ -103,6 +103,31 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
     }
   }
 
+  List("null", "1e100", "-1e100").foreach { invalidValue =>
+    test(s"rejects nonfinite vector component $invalidValue for document and query inputs") {
+      val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+        IO.pure(jsonResponse(Status.Ok, s"""{"data":[{"embedding":[$invalidValue,0.2]}]}"""))
+      }
+      val service = new VoyageEmbeddingService(
+        Client.fromHttpApp[IO](app),
+        "test-key",
+        endpoint,
+        "voyage-4-lite",
+        2,
+        1.second,
+        diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
+      )
+
+      for {
+        document <- service.embed(input)
+        query <- service.embed(input.copy(inputType = EmbeddingInputType.Query))
+      } yield {
+        assertEquals(document, Left(EmbeddingError.InvalidResponse))
+        assertEquals(query, Left(EmbeddingError.InvalidResponse))
+      }
+    }
+  }
+
   test("maps client timeouts to provider unavailability") {
     val app: HttpApp[IO] = Kleisli { (_: Request[IO]) => IO.never[Response[IO]] }
     val client = Client.fromHttpApp[IO](app)

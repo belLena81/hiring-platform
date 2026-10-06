@@ -5,6 +5,7 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.model.{ApplicationStatus, UserRole, ApplicationEvent}
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
+import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
@@ -462,12 +463,24 @@ final class MongoInterviewWorkflowRepository(
                     )
                   )
                   .subflatMap(_.toRight(RepositoryError.Conflict))
-                jobId <- RepositoryIO.fromEither(string(application, MongoFields.JobId))
+                decoded <- RepositoryIO.fromEither(
+                  MongoHiringCodecs
+                    .readApplication(application)
+                    .toEither
+                    .leftMap(_ => RepositoryError.InvalidStoredData)
+                )
+                lifecycle <- RepositoryIO.fromEither(
+                  ApplicationLifecycle
+                    .changeStatus(ApplicationStatus.Interview, workflow.initiatedBy, now, None, None)
+                    .run(decoded)
+                    .leftMap(_ => RepositoryError.Conflict)
+                )
+                (updated, change) = lifecycle
                 _ <- guardWrite(
                   jobs,
                   session,
                   MongoFilter.and(
-                    MongoFilter.eq(MongoFields.Id, jobId),
+                    MongoFilter.eq(MongoFields.Id, updated.jobId.value.toString),
                     MongoFilter.eq(MongoFields.RecruiterId, workflow.recruiterId.value.toString)
                   ),
                   MongoUpdate.inc(MongoFields.Version, 1L)
@@ -488,52 +501,36 @@ final class MongoInterviewWorkflowRepository(
                   session,
                   MongoFilter.and(
                     MongoFilter.eq(MongoFields.Id, workflow.applicationId.value.toString),
-                    MongoFilter.eq(MongoFields.Status, ApplicationStatus.Accepted.toString)
+                    MongoFilter.eq(MongoFields.Status, change.previousStatus.toString)
                   ),
                   MongoUpdate.combine(
-                    MongoUpdate.set(MongoFields.Status, ApplicationStatus.Interview.toString),
-                    MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
+                    MongoUpdate.set(MongoFields.Status, updated.status.toString),
+                    MongoUpdate.set(MongoFields.UpdatedAt, Date.from(updated.updatedAt))
                   )
                 )
                 eventId = UUID.nameUUIDFromBytes(
                   s"${workflow.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8)
                 )
-                event = new Document(MongoFields.Id, eventId.toString)
-                  .append(MongoFields.ApplicationId, workflow.applicationId.value.toString)
-                  .append(MongoFields.PreviousStatus, ApplicationStatus.Accepted.toString)
-                  .append(MongoFields.NewStatus, ApplicationStatus.Interview.toString)
-                  .append(MongoFields.ActorId, workflow.initiatedBy.value.toString)
-                  .append(MongoFields.OccurredAt, Date.from(now))
+                statusEvent = ApplicationEvent(
+                  ApplicationEventId(eventId),
+                  updated.id,
+                  Some(change.previousStatus),
+                  change.newStatus,
+                  change.actorId,
+                  change.occurredAt,
+                  change.feedback,
+                  change.reason
+                )
                 _ <- insert(
                   session,
                   Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents),
-                  event
-                )
-                decoded <- RepositoryIO.fromEither(
-                  MongoHiringCodecs
-                    .readApplication(application)
-                    .toEither
-                    .leftMap(_ => RepositoryError.InvalidStoredData)
-                )
-                statusEvent = ApplicationEvent(
-                  ApplicationEventId(eventId),
-                  workflow.applicationId,
-                  Some(ApplicationStatus.Accepted),
-                  ApplicationStatus.Interview,
-                  workflow.initiatedBy,
-                  now,
-                  None,
-                  None
+                  MongoHiringCodecs.event(statusEvent)
                 )
                 _ <- insertOperationalEvents(
                   Mongo4catsCollections.documents(database, MongoCollections.EventOutbox),
                   session,
                   List(
-                    OperationalEvents.statusChanged(
-                      eventId,
-                      decoded.copy(status = ApplicationStatus.Interview, updatedAt = now),
-                      statusEvent
-                    )
+                    OperationalEvents.statusChanged(eventId, updated, statusEvent)
                   ),
                   now,
                   diagnostics

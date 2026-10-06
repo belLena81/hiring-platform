@@ -8,8 +8,9 @@ import com.example.graphQL.cats.domain.workflow.{
   InterviewCleanupObservation
 }
 import com.example.graphQL.cats.service.port.*
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Interprets capability-specific cleanup commands; only durable observations advance the pure policy. */
@@ -18,17 +19,43 @@ final class InterviewSubjectCleanupWorker(
     fencer: InterviewPublisherFencer,
     capture: IO[Vector[InterviewRetentionBarrier]],
     passed: Vector[InterviewRetentionBarrier] => IO[Boolean],
-    diagnostics: Diagnostics
+    diagnostics: Diagnostics,
+    currentTime: IO[Instant] = IO.realTimeInstant
 ) {
   private def boundary[A](effect: IO[A]): RepositoryIO[A] =
     RepositoryIO.fromIOEither(effect.attempt.map(_.leftMap(_ => RepositoryError.Unavailable)))
 
-  def runOnce: RepositoryIO[Unit] = repository.pending.flatMap(_.traverse_(process))
+  def runOnce(cursor: Option[InterviewCleanupCursor]): RepositoryIO[InterviewCleanupProgress] =
+    RepositoryIO.lift(currentTime).flatMap(repository.pendingPage(cursor, _)).flatMap { page =>
+      RepositoryIO.lift(
+        page.entries
+          .foldLeftM(Option.empty[RepositoryError]) { (firstFailure, subject) =>
+            processObserved(subject).map(failure => firstFailure.orElse(failure))
+          }
+          .map(InterviewCleanupProgress(page.next, _))
+      )
+    }
+
+  private def processObserved(subject: Either[RepositoryError, InterviewSubjectCleanup]): IO[Option[RepositoryError]] =
+    subject.fold(error => RepositoryIO.fromEither[Unit](Left(error)), process).value.attempt.flatMap {
+      case Right(Right(_))    => IO.pure(None)
+      case Right(Left(error)) =>
+        diagnostics
+          .emit(LogEvent.RuntimeFailed, fields = Map(LogField.SpanName -> "interviewCleanup.process"))
+          .as(Some(error))
+      case Left(error) =>
+        diagnostics
+          .emit(
+            LogEvent.RuntimeFailed,
+            fields = LogFields.failure(error) + (LogField.SpanName -> "interviewCleanup.process")
+          )
+          .as(Some(RepositoryError.Unavailable))
+    }
 
   private def process(current: InterviewSubjectCleanup): RepositoryIO[Unit] = {
     def advance(observation: InterviewCleanupObservation): RepositoryIO[Unit] =
       for {
-        now <- RepositoryIO.lift(IO.realTimeInstant)
+        now <- RepositoryIO.lift(currentTime)
         next <- RepositoryIO.fromEither(
           InterviewSubjectCleanup.decide(current, observation, now).leftMap(_ => RepositoryError.InvalidStoredData)
         )
@@ -58,14 +85,16 @@ final class InterviewSubjectCleanupWorker(
   def resource: Resource[IO, Unit] = Resource
     .make(
       fs2.Stream
-        .repeatEval(
-          runOnce.value
-            .flatMap {
-              case Right(_) => IO.unit
-              case Left(_)  => diagnostics.emit(LogEvent.RuntimeFailed)
-            }
-            .handleErrorWith(error => diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)))
-        )
+        .unfoldEval(Option.empty[InterviewCleanupCursor]) { cursor =>
+          runOnce(cursor).value.attempt.flatMap {
+            case Right(Right(progress)) => IO.pure(Some(((), progress.next)))
+            case Right(Left(_))         => diagnostics.emit(LogEvent.RuntimeFailed).as(Some(((), cursor)))
+            case Left(error)            =>
+              diagnostics
+                .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
+                .as(Some(((), cursor)))
+          }
+        }
         .metered(1.second)
         .compile
         .drain

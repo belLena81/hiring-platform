@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.IO
+import cats.effect.{IO, Ref, Deferred}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.Diagnostics
@@ -9,19 +9,24 @@ import com.example.graphQL.cats.service.port.{
   InterviewPublisherFencer,
   InterviewRetentionBarrier,
   RepositoryIO,
-  InterviewCleanupUpdate
+  InterviewCleanupUpdate,
+  InterviewCleanupCursor,
+  InterviewCleanupPage,
+  RepositoryError
 }
 import com.example.graphQL.cats.domain.workflow.{
   InterviewCleanupObservation,
   InterviewCleanupState,
   InterviewSubjectCleanup
 }
-import org.bson.Document
+import org.bson.{Document, BsonBinary, BsonDocument, BsonDouble, BsonInt32, BsonInt64, BsonNull, BsonString}
 import com.mongodb.client.model.Filters
 import java.time.Instant
 import java.util.{Date, UUID}
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
+import io.circe.parser.parse
 
 final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
@@ -42,7 +47,392 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   private def worker(cleanup: MongoInterviewSubjectCleanup, passed: Boolean): InterviewSubjectCleanupWorker =
     new InterviewSubjectCleanupWorker(cleanup, fencer, IO.pure(barriers), _ => IO.pure(passed), Diagnostics.noop)
   private def step(cleanup: MongoInterviewSubjectCleanup, passed: Boolean = false): IO[Unit] =
-    worker(cleanup, passed).runOnce.value.flatMap(result => IO(assert(result.isRight)))
+    worker(cleanup, passed)
+      .runOnce(None)
+      .value
+      .flatMap(result =>
+        IO(
+          assert(
+            result.flatMap(progress => progress.firstFailure.toLeft(())).isRight
+          )
+        )
+      )
+
+  private def page(
+      cleanup: MongoInterviewSubjectCleanup,
+      cursor: Option[InterviewCleanupCursor],
+      at: Instant
+  ): IO[InterviewCleanupPage] =
+    cleanup.pendingPage(cursor, at).value.flatMap {
+      case Right(value) => IO.pure(value)
+      case Left(error)  => IO.raiseError(new AssertionError(s"Cleanup selection failed: $error"))
+    }
+
+  private def pendingRow(id: AnyRef, at: Instant): Document =
+    new Document("_id", id)
+      .append("state", "Pending")
+      .append("revision", Long.box(0L))
+      .append("requestedAt", Date.from(at))
+      .append("interviewTransactionalIds", java.util.List.of[String]())
+
+  test("cleanup visits a later subject while thirty-two older subjects await retention") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      val later = UserId(new UUID(0L, 33L))
+      val cleaner = worker(cleanup, false)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- (1L to 32L).toList.traverse_ { ordinal =>
+          val row = pendingRow(new UUID(0L, ordinal).toString, at)
+            .append("state", "AwaitingRetention")
+            .append("revision", Long.box(3L))
+            .append(
+              "barriers",
+              java.util.List.of(
+                new Document("topic", "hiring.interview-commands")
+                  .append("partition", Int.box(0))
+                  .append("endOffset", Long.box(4L)),
+                new Document("topic", "hiring.interview-results")
+                  .append("partition", Int.box(0))
+                  .append("endOffset", Long.box(5L))
+              )
+            )
+          MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.InterviewSubjectCleanup, row)
+        }
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(later.value.toString, at.plusSeconds(1))
+        )
+        _ <- List.fill(4)(()).foldLeftM(Option.empty[InterviewCleanupCursor]) { (cursor, _) =>
+          cleaner.runOnce(cursor).value.flatMap {
+            case Right(progress) => IO.pure(progress.next)
+            case Left(error)     => IO.raiseError(new AssertionError(s"Cleanup page failed: $error"))
+          }
+        }
+        reached <- cleanup.find(later).value
+      } yield assertEquals(reached.toOption.flatten.map(_.state), Some(InterviewCleanupState.MongoPurged))
+    }
+  }
+
+  test("malformed selected cleanup records do not prevent a healthy subject from advancing") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      val healthy = UserId(new UUID(0L, 2L))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(new UUID(0L, 1L).toString, at).append("revision", "invalid")
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(Int.box(7), at)
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(healthy.value.toString, at.plusSeconds(1))
+        )
+        _ <- worker(cleanup, false).runOnce(None).value
+        reached <- cleanup.find(healthy).value
+        malformedComplete <- cleanup.complete(UserId(new UUID(0L, 1L)))
+      } yield {
+        assertEquals(reached.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
+        assert(!malformedComplete)
+      }
+    }
+  }
+
+  test("cleanup cursor retains numeric widths, binary values and ordered document identities") {
+    val at = Instant.parse("2026-10-06T12:00:00Z")
+    val keys = Vector(
+      new BsonInt32(7),
+      new BsonInt64(7L),
+      new BsonDouble(7.0),
+      new BsonBinary(Array[Byte](1, 2, 3)),
+      BsonNull.VALUE,
+      new BsonString("$revision"),
+      new BsonDocument("second", new BsonInt64(2L)).append("first", new BsonInt32(1))
+    )
+    keys.foreach { key =>
+      val state = MongoInterviewCleanupSweepCodec.Sweep(Some(key), key, at)
+      val decoded = MongoInterviewCleanupSweepCodec.decode(MongoInterviewCleanupSweepCodec.encode(state, key))
+      assertEquals(decoded, Right(state))
+      assertEquals(decoded.toOption.map(_.throughId.getBsonType), Some(key.getBsonType))
+      if (key.isDocument)
+        assertEquals(
+          decoded.toOption.map(_.throughId.asDocument().keySet().asScala.toVector),
+          Some(key.asDocument().keySet().asScala.toVector)
+        )
+    }
+  }
+
+  test("bounded cleanup pages cross malformed identity types and timestamps without losing healthy work") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      val healthy = UserId(new UUID(0L, 2L))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- (1 to 31).toList.traverse_(ordinal =>
+          MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.InterviewSubjectCleanup,
+            pendingRow(Int.box(ordinal), at).append("requestedAt", "malformed")
+          )
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow("$revision", at).append("requestedAt", java.util.List.of(Date.from(at)))
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(healthy.value.toString, at)
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(new Document("key", "invalid"), at)
+        )
+        first <- page(cleanup, None, at.plusSeconds(30))
+        _ = assertEquals(first.entries, Vector.fill(32)(Left(RepositoryError.InvalidStoredData)))
+        _ = assert(first.next.nonEmpty)
+        second <- page(cleanup, first.next, at.plusSeconds(31))
+        _ = assertEquals(second.entries.size, 2)
+        _ = assertEquals(second.entries.flatMap(_.toOption).map(_.subjectId), Vector(healthy))
+        _ = assertEquals(second.entries.count(_.isLeft), 1)
+        _ = assertEquals(second.next, None)
+        progress <- worker(cleanup, false).runOnce(first.next).value
+        reached <- cleanup.find(healthy).value
+        corrupt <- MongoRepositoryTestSupport.count(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          Filters.not(Filters.`type`("_id", org.bson.BsonType.STRING))
+        )
+      } yield {
+        assertEquals(progress.toOption.flatMap(_.firstFailure), Some(RepositoryError.InvalidStoredData))
+        assertEquals(reached.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
+        assertEquals(corrupt, 32L)
+      }
+    }
+  }
+
+  test("a finite cleanup sweep defers later arrivals and future dates until the next sweep") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      val behind = UserId(new UUID(0L, 0L))
+      val ahead = UserId(new UUID(0L, 34L))
+      val future = UserId(new UUID(0L, 35L))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- (1L to 33L).toList.traverse_(ordinal =>
+          MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.InterviewSubjectCleanup,
+            pendingRow(new UUID(0L, ordinal).toString, at)
+          )
+        )
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(future.value.toString, at.plusSeconds(100))
+        )
+        first <- page(cleanup, None, at.plusSeconds(1))
+        _ <- List(behind, ahead).traverse_(id =>
+          MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.InterviewSubjectCleanup,
+            pendingRow(id.value.toString, if (id == ahead) at else at.plusSeconds(2))
+          )
+        )
+        last <- page(cleanup, first.next, at.plusSeconds(3))
+        _ = assertEquals(last.entries.flatMap(_.toOption).map(_.subjectId), Vector(UserId(new UUID(0L, 33L))))
+        _ = assertEquals(last.next, None)
+        restarted <- page(cleanup, None, at.plusSeconds(4))
+        rest <- page(cleanup, restarted.next, at.plusSeconds(4))
+        ids = (restarted.entries ++ rest.entries).flatMap(_.toOption).map(_.subjectId)
+        later <- page(cleanup, None, at.plusSeconds(101))
+        laterRest <- page(cleanup, later.next, at.plusSeconds(101))
+      } yield {
+        assertEquals(first.entries.size, 32)
+        assert(ids.contains(behind) && ids.contains(ahead))
+        assert(!ids.contains(future))
+        assert((later.entries ++ laterRest.entries).flatMap(_.toOption).exists(_.subjectId == future))
+      }
+    }
+  }
+
+  test("a later arrival inside the current identity range waits for the next sweep") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      val inserted = UserId(new UUID(0L, 33L))
+      val ceiling = UserId(new UUID(0L, 34L))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- ((1L to 32L).toList :+ 34L).traverse_(ordinal =>
+          MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.InterviewSubjectCleanup,
+            pendingRow(new UUID(0L, ordinal).toString, at)
+          )
+        )
+        first <- page(cleanup, None, at.plusSeconds(1))
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(inserted.value.toString, at.plusSeconds(2))
+        )
+        continued <- page(cleanup, first.next, at.plusSeconds(3))
+        restarted <- page(cleanup, None, at.plusSeconds(4))
+        restartedRest <- page(cleanup, restarted.next, at.plusSeconds(4))
+      } yield {
+        assert(first.next.nonEmpty)
+        assertEquals(continued.entries.flatMap(_.toOption).map(_.subjectId), Vector(ceiling))
+        assertEquals(continued.next, None)
+        assert((restarted.entries ++ restartedRest.entries).flatMap(_.toOption).exists(_.subjectId == inserted))
+      }
+    }
+  }
+
+  test("cleanup selection explains use the existing identity index without a blocking sort") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- (1L to 33L).toList.traverse_(ordinal =>
+          MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.InterviewSubjectCleanup,
+            pendingRow(new UUID(0L, ordinal).toString, at)
+          )
+        )
+        _ <- fixture.commands.clear
+        first <- page(cleanup, None, at.plusSeconds(1))
+        _ <- page(cleanup, first.next, at.plusSeconds(1))
+        reads <- fixture.commands.snapshot.map(
+          _.filter(command =>
+            command.getFirstKey == "find" && command
+              .getString("find")
+              .getValue == MongoCollections.InterviewSubjectCleanup
+          )
+        )
+        plans <- reads.traverse { observed =>
+          val command = Document.parse(observed.toJson)
+          List("$db", "lsid", "readConcern").foreach(command.remove)
+          MongoAccessEvaluationSupport.command(
+            fixture.database,
+            new Document("explain", command).append("verbosity", "executionStats")
+          )
+        }
+      } yield {
+        assertEquals(reads.size, 3)
+        plans.foreach { result =>
+          val json = parse(result.toJson).toOption.getOrElse(fail("Invalid explain JSON"))
+          assert(json.findAllByKey("indexName").flatMap(_.asString).contains("_id_"))
+          assert(!json.findAllByKey("stage").flatMap(_.asString).contains("SORT"))
+          val stats = json.hcursor.downField("executionStats")
+          val returned = stats.get[Long]("nReturned").toOption.getOrElse(fail("Missing nReturned"))
+          val examined = stats.get[Long]("totalDocsExamined").toOption.getOrElse(fail("Missing documents examined"))
+          val keys = stats.get[Long]("totalKeysExamined").toOption.getOrElse(fail("Missing keys examined"))
+          assert(returned <= 32L)
+          assert(examined <= 33L && keys <= 33L)
+          println(s"Cleanup identity index: returned=$returned documentsExamined=$examined keysExamined=$keys")
+        }
+      }
+    }
+  }
+
+  test("an exactly full cleanup page and a removed sweep ceiling both wrap safely") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- (1L to 32L).toList.traverse_(ordinal =>
+          MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.InterviewSubjectCleanup,
+            pendingRow(new UUID(0L, ordinal).toString, at)
+          )
+        )
+        full <- page(cleanup, None, at.plusSeconds(1))
+        _ = assertEquals(full.entries.size, 32)
+        _ = assertEquals(full.next, None)
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(new UUID(0L, 33L).toString, at)
+        )
+        first <- page(cleanup, None, at.plusSeconds(1))
+        queue <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewSubjectCleanup)
+        _ <- queue.deleteOne(Filters.eq("_id", new UUID(0L, 33L).toString))
+        last <- page(cleanup, first.next, at.plusSeconds(2))
+      } yield {
+        assert(first.next.nonEmpty)
+        assertEquals(last, InterviewCleanupPage(Vector.empty, None))
+      }
+    }
+  }
+
+  test("two cleaners racing the same snapshot advance once and a restarted cleaner completes the durable steps") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val at = Instant.now().minusSeconds(60)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      val subject = UserId(new UUID(0L, 1L))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.InterviewSubjectCleanup,
+          pendingRow(subject.value.toString, at)
+        )
+        entered <- Ref.of[IO, Int](0)
+        both <- Deferred[IO, Unit]
+        synchronizedFencer = new InterviewPublisherFencer {
+          override def fence(ids: Vector[String]) = RepositoryIO.lift(
+            entered.updateAndGet(_ + 1).flatMap(count => if (count == 2) both.complete(()).void else both.get)
+          )
+        }
+        first = new InterviewSubjectCleanupWorker(
+          cleanup,
+          synchronizedFencer,
+          IO.pure(barriers),
+          _ => IO.pure(false),
+          Diagnostics.noop
+        )
+        second = new InterviewSubjectCleanupWorker(
+          cleanup,
+          synchronizedFencer,
+          IO.pure(barriers),
+          _ => IO.pure(false),
+          Diagnostics.noop
+        )
+        raced <- (first.runOnce(None).value, second.runOnce(None).value).parTupled.timeout(20.seconds)
+        afterRace <- cleanup.find(subject).value
+        _ <- step(cleanup)
+        _ <- step(cleanup)
+        awaiting <- cleanup.find(subject).value
+        _ <- step(cleanup, true)
+        done <- cleanup.complete(subject)
+      } yield {
+        assert(raced._1.exists(_.firstFailure.isEmpty) && raced._2.exists(_.firstFailure.isEmpty))
+        assertEquals(afterRace.toOption.flatten.map(_.revision), Some(1L))
+        assertEquals(afterRace.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
+        assertEquals(awaiting.toOption.flatten.map(_.revision), Some(3L))
+        assert(done)
+      }
+    }
+  }
   test("workflow deletion requires confirmed fencing and physical retention, purges both participants' effects") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
@@ -96,7 +486,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
           IO.raiseError(new AssertionError("barrier must be reused")),
           _ => IO.pure(false),
           Diagnostics.noop
-        ).runOnce.value
+        ).runOnce(None).value
         pendingAfterRestart <- new MongoInterviewSubjectCleanup(fixture.database).complete(subject)
         _ <- new InterviewSubjectCleanupWorker(
           cleanup,
@@ -104,7 +494,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
           IO.raiseError(new AssertionError("barrier must be reused")),
           _ => IO.pure(true),
           Diagnostics.noop
-        ).runOnce.value
+        ).runOnce(None).value
         complete <- cleanup.complete(subject)
         row <- MongoRepositoryTestSupport.findOne(
           fixture.database,
