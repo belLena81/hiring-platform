@@ -4,6 +4,7 @@ import cats.effect.{Clock, IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -24,80 +25,112 @@ final class InterviewWorkflowWorker(
     repository: InterviewWorkflowRepository,
     calendar: InterviewCalendarProvider,
     notifications: InterviewNotificationProvider,
-    settings: InterviewWorkerSettings
+    settings: InterviewWorkerSettings,
+    diagnostics: Diagnostics = Diagnostics.noop,
+    currentTime: IO[java.time.Instant] = Clock[IO].realTimeInstant
 ) {
   private def stableId(value: String): UUID = UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8))
 
+  private def report(operation: String): IO[Unit] =
+    diagnostics.emit(LogEvent.MongoRepositoryFailed, fields = Map(LogField.SpanName -> operation))
+
+  private def observe[A](operation: RepositoryIO[A], name: String): IO[Option[A]] =
+    operation.value.flatMap {
+      case Right(value) => IO.pure(Some(value))
+      case Left(_)      => report(name).as(None)
+    }
+
   def publisher(transport: InterviewTransport): Resource[IO, Unit] =
-    Resource.make((publishDue(transport).attempt *> IO.sleep(settings.pollInterval)).foreverM.start)(_.cancel).void
+    Resource
+      .make((publishDue(transport).handleErrorWith {
+        case fenced: InterviewProducerGenerationFenced => IO.raiseError(fenced)
+        case _                                         => report("interviewWorkflow.publisher")
+      } *> IO.sleep(settings.pollInterval)).foreverM.start)(_.cancel)
+      .void
 
   def publishDue(transport: InterviewTransport): IO[Unit] =
     for {
-      now <- Clock[IO].realTimeInstant
-      claimed <- repository
-        .claimDueCommands(settings.workerId, now, now.plusMillis(settings.claimLease.toMillis), 16)
-        .value
-      _ <- claimed.fold(
-        _ => IO.unit,
-        _.traverse_ { claim =>
-          repository.findForAdmin(claim.record.workflowId).value.flatMap {
-            case Right(Some(workflow)) =>
-              val commandId = stableId(claim.record.stepId)
-              val messageId = if (claim.record.result.nonEmpty) stableId(s"$commandId:result") else commandId
-              val message = InterviewMessage(
-                messageId,
-                workflow.id.value,
-                claim.record.stepId,
-                step(claim.record.command),
-                claim.record.revision,
-                if (claim.record.result.nonEmpty) commandId else workflow.id.value,
-                workflow.preCommitDeadline,
-                claim.record.result.map(InterviewResult.fromCommandResult),
-                claim.record.occurredAt
-              )
-              Clock[IO].realTimeInstant
-                .flatMap(checkedAt => repository.authorizePublication(claim, checkedAt).value)
+      now <- currentTime
+      claimed <- observe(
+        repository.claimDueCommands(settings.workerId, now, now.plusMillis(settings.claimLease.toMillis), 16),
+        "interviewWorkflow.claimPublication"
+      )
+      _ <- claimed.toList.flatten.traverse_ { claim =>
+        observe(repository.findForAdmin(claim.record.workflowId), "interviewWorkflow.loadPublication").flatMap {
+          case Some(Some(workflow)) =>
+            val commandId = stableId(claim.record.stepId)
+            val messageId = if (claim.record.result.nonEmpty) stableId(s"$commandId:result") else commandId
+            val message = InterviewMessage(
+              messageId,
+              workflow.id.value,
+              claim.record.stepId,
+              step(claim.record.command),
+              claim.record.revision,
+              if (claim.record.result.nonEmpty) commandId else workflow.id.value,
+              workflow.preCommitDeadline,
+              claim.record.result.map(InterviewResult.fromCommandResult),
+              claim.record.occurredAt
+            )
+            def finish: IO[Unit] = currentTime.flatMap(at =>
+              observe(
+                repository.requireRepair(claim, at, "publication_exhausted"),
+                "interviewWorkflow.finishPublication"
+              ).void
+            )
+            if (claim.record.publicationAttempts > settings.maxAttempts) finish
+            else
+              currentTime
+                .flatMap(checkedAt =>
+                  repository.authorizePublication(claim, transport.generationFor(message), checkedAt).value
+                )
                 .flatMap {
                   case Left(RepositoryError.Unavailable) =>
-                    Clock[IO].realTimeInstant.flatMap(at =>
-                      repository
-                        .retry(
+                    currentTime.flatMap(at =>
+                      observe(
+                        repository.retry(
                           claim,
                           at,
                           at.plusMillis(settings.initialBackoff.toMillis),
                           "publication_coordination_unavailable"
-                        )
-                        .value
-                        .void
+                        ),
+                        "interviewWorkflow.deferPublication"
+                      ).void
                     )
-                  case Left(_) | Right(false) => IO.unit
-                  case Right(true)            =>
+                  case Left(_)      => report("interviewWorkflow.authorizePublication")
+                  case Right(false) => IO.unit
+                  case Right(true)  =>
                     transport.publish(message).attempt.flatMap {
                       case Right(_) =>
-                        Clock[IO].realTimeInstant.flatMap(at => repository.markPublished(claim, at).value.void)
-                      case Left(_) =>
-                        Clock[IO].realTimeInstant.flatMap { at =>
-                          val delay = (settings.initialBackoff * math.pow(2.0, claim.record.attempts.toDouble - 1))
-                            .min(settings.maxBackoff)
-                          if (claim.record.attempts >= settings.maxAttempts)
-                            repository.requireRepair(claim, at, "publication_exhausted").value.void
-                          else
-                            repository
-                              .retry(claim, at, at.plusMillis(delay.toMillis), "publication_unavailable")
-                              .value
-                              .void
+                        currentTime.flatMap(at =>
+                          observe(repository.markPublished(claim, at), "interviewWorkflow.markPublished").void
+                        )
+                      case Left(fenced: InterviewProducerGenerationFenced)                     => IO.raiseError(fenced)
+                      case Left(_) if claim.record.publicationAttempts >= settings.maxAttempts => finish
+                      case Left(_)                                                             =>
+                        currentTime.flatMap { at =>
+                          val delay = InterviewWorkflowPolicy.backoffMillis(
+                            claim.record.publicationAttempts,
+                            settings.initialBackoff.toMillis,
+                            settings.maxBackoff.toMillis
+                          )
+                          observe(
+                            repository.retry(claim, at, at.plusMillis(delay), "publication_unavailable"),
+                            "interviewWorkflow.retryPublication"
+                          ).void
                         }
                     }
                 }
-            case _ => IO.unit
-          }
+          case _ => IO.unit
         }
-      )
+      }
     } yield ()
 
   private def quarantineMessage(message: InterviewMessage, reason: String): IO[Boolean] =
-    Clock[IO].realTimeInstant.flatMap(now =>
-      repository.quarantine(s"${message.workflowId}:${message.messageId}:$reason", now).value.map(_.isRight)
+    currentTime.flatMap(now =>
+      repository.quarantine(s"${message.workflowId}:${message.messageId}:$reason", now).value.flatMap {
+        case Right(_) => IO.pure(true)
+        case Left(_)  => report("interviewWorkflow.quarantine").as(false)
+      }
     )
 
   private def applicable(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean = {
@@ -106,7 +139,7 @@ final class InterviewWorkflowWorker(
   }
 
   private def withinReplayWindow(message: InterviewMessage)(process: IO[Boolean]): IO[Boolean] =
-    Clock[IO].realTimeInstant.flatMap { now =>
+    currentTime.flatMap { now =>
       if (message.occurredAt.isAfter(now)) quarantineMessage(message, "future")
       else if (message.occurredAt.isBefore(now.minusMillis(settings.replayWindow.toMillis))) {
         (for {
@@ -127,15 +160,24 @@ final class InterviewWorkflowWorker(
               InterviewWorkflowEvent.RetryExhausted("replay_expired")
             ) match {
               case Right((next, commands)) =>
-                repository.advance(next, workflow.revision, s"expired:${message.messageId}", commands, now).value.map {
-                  case Right(InterviewWorkflowAdvanceResult.StaleRevision) => false
-                  case Right(_)                                            => true
-                  case Left(_)                                             => false
-                }
+                repository
+                  .advance(
+                    next,
+                    workflow.revision,
+                    InterviewAdvanceCause.ReplayExpired(message.messageId),
+                    commands,
+                    now
+                  )
+                  .value
+                  .map {
+                    case Right(InterviewWorkflowAdvanceResult.StaleRevision) => false
+                    case Right(_)                                            => true
+                    case Left(_)                                             => false
+                  }
               case Left(_) => quarantineMessage(message, "expired")
             }
           case Right(_) => quarantineMessage(message, "expired")
-          case Left(_)  => IO.pure(false)
+          case Left(_)  => report("interviewWorkflow.receive").as(false)
         }
       } else process
     }
@@ -155,29 +197,43 @@ final class InterviewWorkflowWorker(
           ) == message.step && message.result.isEmpty &&
             message.messageId == stableId(message.stepId) && message.causationId == workflow.id.value &&
             message.occurredAt == command.occurredAt && message.deadline == workflow.preCommitDeadline =>
-        Clock[IO].realTimeInstant.flatMap { claimAt =>
+        currentTime.flatMap { claimAt =>
           repository
-            .claimExecution(command, settings.workerId, claimAt, claimAt.plusMillis(settings.claimLease.toMillis))
+            .claimExecution(
+              command,
+              settings.workerId,
+              claimAt,
+              claimAt.plusMillis(settings.claimLease.toMillis),
+              settings.maxAttempts
+            )
             .value
             .flatMap {
-              case Left(_)            => IO.pure(false)
-              case Right(None)        => IO.pure(true)
-              case Right(Some(claim)) => {
+              case Left(_)                                    => report("interviewWorkflow.claimExecution").as(false)
+              case Right(InterviewExecutionClaimOutcome.Busy) => IO.pure(false)
+              case Right(
+                    InterviewExecutionClaimOutcome.AlreadyHandled |
+                    InterviewExecutionClaimOutcome.ReconciliationQueued | InterviewExecutionClaimOutcome.RepairRequired
+                  ) =>
+                IO.pure(true)
+              case Right(InterviewExecutionClaimOutcome.Acquired(claim)) => {
                 execute(workflow, command.command, claim)
                   .timeoutTo(settings.providerTimeout, IO.pure(InterviewResult.OutcomeUnknown))
                   .flatMap { result =>
-                    Clock[IO].realTimeInstant.flatMap(at =>
+                    currentTime.flatMap(at =>
                       repository
                         .recordResult(claim, InterviewCommandResult.fromTransportResult(result), at)
                         .value
-                        .map(_.isRight)
+                        .flatMap {
+                          case Right(_) => IO.pure(true)
+                          case Left(_)  => report("interviewWorkflow.recordResult").as(false)
+                        }
                     )
                   }
               }
             }
         }
       case Right(_) => quarantineMessage(message, "inconsistent")
-      case Left(_)  => IO.pure(false)
+      case Left(_)  => report("interviewWorkflow.receive").as(false)
     }
 
   def receiveResult(message: InterviewMessage): IO[Boolean] = withinReplayWindow(message)(processResult(message))
@@ -201,10 +257,11 @@ final class InterviewWorkflowWorker(
                 InterviewStep.LookupNotifyCandidate,
                 InterviewStep.LookupNotifyRecruiter
               ).contains(message.step))) &&
-            message.causationId == stableId(message.stepId) && command.result
-              .map(_.toString) == message.result.map(_.toString) =>
+            message.causationId == stableId(message.stepId) && command.result == message.result.map(
+              InterviewCommandResult.fromTransportResult
+            ) =>
         repository.attemptCount(workflow.id, command.command).value.flatMap {
-          case Left(_)      => IO.pure(false)
+          case Left(_)      => report("interviewWorkflow.receive").as(false)
           case Right(count) => {
             val selected =
               if (
@@ -215,15 +272,26 @@ final class InterviewWorkflowWorker(
                 Some(InterviewWorkflowEvent.RetryExhausted("provider"))
               else event(message)
             selected.flatMap(ev => InterviewWorkflow.decide(workflow, workflow.revision, ev).toOption) match {
-              case None                   => IO.pure(true)
+              case None                   => quarantineMessage(message, "invalid_transition")
               case Some((next, commands)) =>
-                Clock[IO].realTimeInstant.flatMap { now =>
+                currentTime.flatMap { now =>
                   val retrying = message.result
                     .contains(InterviewResult.OutcomeUnknown) || message.result.contains(InterviewResult.Absent)
-                  val delay = (settings.initialBackoff * math.pow(2.0, count.toDouble - 1.0)).min(settings.maxBackoff)
-                  val available = if (retrying) Some(now.plusMillis(delay.toMillis)) else None
+                  val delay = InterviewWorkflowPolicy.backoffMillis(
+                    count,
+                    settings.initialBackoff.toMillis,
+                    settings.maxBackoff.toMillis
+                  )
+                  val available = if (retrying) Some(now.plusMillis(delay)) else None
                   repository
-                    .advance(next, workflow.revision, message.messageId.toString, commands, now, available)
+                    .advance(
+                      next,
+                      workflow.revision,
+                      InterviewAdvanceCause.ResultReceipt(message.messageId.toString),
+                      commands,
+                      now,
+                      available
+                    )
                     .value
                     .map {
                       case Right(InterviewWorkflowAdvanceResult.StaleRevision) => false
@@ -235,7 +303,7 @@ final class InterviewWorkflowWorker(
           }
         }
       case Right(_) => quarantineMessage(message, "inconsistent")
-      case Left(_)  => IO.pure(false)
+      case Left(_)  => report("interviewWorkflow.receive").as(false)
     }
 
   private def execute(
@@ -248,7 +316,7 @@ final class InterviewWorkflowWorker(
       case Left(InterviewProviderError.Conflict) => InterviewResult.Rejected
       case Left(_)                               => InterviewResult.OutcomeUnknown
     }
-    Clock[IO].realTimeInstant.flatMap { now =>
+    currentTime.flatMap { now =>
       command match {
         case InterviewWorkflowCommand.ReserveCalendarSlot(key) =>
           def reconcile: IO[InterviewResult] = calendar.lookup(workflow.id).value.map {
@@ -302,13 +370,13 @@ final class InterviewWorkflowWorker(
               Some(claim)
             )
           )
-        case InterviewWorkflowCommand.LookupNotificationReceipt(key) =>
+        case InterviewWorkflowCommand.LookupNotificationReceipt(_, key) =>
           notifications.lookup(key).value.map {
             case Right(Some(_)) => InterviewResult.Found
             case Right(None)    => InterviewResult.Absent
             case Left(_)        => InterviewResult.OutcomeUnknown
           }
-        case InterviewWorkflowCommand.Retry(_) | InterviewWorkflowCommand.RequireRepair(_) =>
+        case InterviewWorkflowCommand.RequireRepair(_) =>
           IO.pure(InterviewResult.Rejected)
       }
     }
@@ -322,9 +390,11 @@ final class InterviewWorkflowWorker(
     case InterviewWorkflowCommand.ReleaseCalendarSlot(_)                    => InterviewStep.Release
     case InterviewWorkflowCommand.Notify(InterviewParticipant.Candidate, _) => InterviewStep.NotifyCandidate
     case InterviewWorkflowCommand.Notify(InterviewParticipant.Recruiter, _) => InterviewStep.NotifyRecruiter
-    case InterviewWorkflowCommand.LookupNotificationReceipt(key)            =>
-      if (key.endsWith(":Candidate")) InterviewStep.LookupNotifyCandidate else InterviewStep.LookupNotifyRecruiter
-    case InterviewWorkflowCommand.Retry(_) | InterviewWorkflowCommand.RequireRepair(_) => InterviewStep.RequireRepair
+    case InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Candidate, _) =>
+      InterviewStep.LookupNotifyCandidate
+    case InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Recruiter, _) =>
+      InterviewStep.LookupNotifyRecruiter
+    case InterviewWorkflowCommand.RequireRepair(_) => InterviewStep.RequireRepair
   }
 
   private def event(message: InterviewMessage): Option[InterviewWorkflowEvent] = message.result.flatMap { result =>

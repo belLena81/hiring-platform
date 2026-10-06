@@ -85,7 +85,10 @@ private[mongo] object MongoHiringMigrations {
       migrateOutboxSubjectReferences(database, diagnostics) *> migrateAnalyticsReportControl(database) *>
       migrateAnalyticsDeletionReceipts(database) *> migrateInterviewWorkflowStorage(
         database
-      ) *> migrateInterviewSubjectCleanup(database) *> migrateInterviewInboxIdentity(database) *> createAccountRegistry(
+      ) *> migrateInterviewSubjectCleanup(database) *> migrateInterviewInboxIdentity(database) *>
+      MongoInterviewWorkflowMigrations.initialize(database) *> MongoInterviewCleanupMigrations.initialize(
+        database
+      ) *> createAccountRegistry(
         database
       )
 

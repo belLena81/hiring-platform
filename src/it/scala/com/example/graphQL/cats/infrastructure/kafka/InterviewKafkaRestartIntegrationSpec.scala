@@ -17,7 +17,7 @@ class InterviewKafkaRestartIntegrationSpec extends CatsEffectSuite {
   private val enabled = sys.env.get("INTERVIEW_KAFKA_EVIDENCE").contains("true")
   private def config(worker: Boolean) = InterviewKafkaConfig(
     sys.env.getOrElse("INTERVIEW_KAFKA_BOOTSTRAP", "127.0.0.1:9092"),
-    if (worker) "interview_worker" else "interview_orchestrator",
+    if (worker) "interview_result_publisher" else "interview_command_publisher",
     sys.env.getOrElse(if (worker) "KAFKA_INTERVIEW_WORKER_PASSWORD" else "KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD", ""),
     KafkaSaslSecurityProtocol.Plaintext,
     worker

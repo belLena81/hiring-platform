@@ -54,6 +54,7 @@ private[config] object KafkaConfigValidation {
     (
       validKafkaCredentials(raw.enabled, raw.orchestratorUsername, raw.orchestratorPassword),
       validKafkaCredentials(raw.enabled, raw.workerUsername, raw.workerPassword),
+      validKafkaCredentials(raw.enabled, raw.fencerUsername, raw.fencerPassword),
       Either
         .cond(
           raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
@@ -62,14 +63,16 @@ private[config] object KafkaConfigValidation {
             raw.claimSeconds <= 3600 && raw.preCommitDeadlineSeconds >= 1 && raw.preCommitDeadlineSeconds <= 300 && raw.replayRetentionSeconds == 604800L &&
             raw.completedDedupRetentionSeconds >= 691200L && raw.completedDedupRetentionSeconds <= 31536000L &&
             (!raw.enabled || (kafkaEnabled && raw.orchestratorUsername != raw.workerUsername &&
+              raw.fencerUsername != raw.orchestratorUsername && raw.fencerUsername != raw.workerUsername &&
               !operationalPrincipals.exists(principal =>
-                raw.orchestratorUsername.contains(principal) || raw.workerUsername.contains(principal)
+                raw.orchestratorUsername.contains(principal) || raw.workerUsername
+                  .contains(principal) || raw.fencerUsername.contains(principal)
               ))),
           (),
           ConfigError.InvalidKafkaCredentials
         )
         .toValidatedNel
-    ).mapN { (_, _, _) =>
+    ).mapN { (_, _, _, _) =>
       InterviewRuntimeConfig(
         raw.enabled,
         raw.orchestratorUsername,
@@ -83,7 +86,9 @@ private[config] object KafkaConfigValidation {
         raw.claimSeconds,
         raw.preCommitDeadlineSeconds,
         raw.replayRetentionSeconds,
-        raw.completedDedupRetentionSeconds
+        raw.completedDedupRetentionSeconds,
+        raw.fencerUsername,
+        raw.fencerPassword
       )
     }
 

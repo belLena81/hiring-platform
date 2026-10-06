@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.search
 
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, GeoPoint, Job, SearchMode}
+import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.domain.pagination.PageSize
 import java.time.Instant
 import java.util.UUID
@@ -17,7 +18,7 @@ final case class NearbyJobsQuery(
     filter: JobSearchFilter,
     after: Option[NearbyJobCursor] = None
 ) {
-  def isValid: Boolean = center.isValid && radiusKm.isFinite && radiusKm > 0d && radiusKm <= NearbyJobsQuery.MaxRadiusKm
+  def isValid: Boolean = JobDiscoveryValidation.nearby(this).isValid
   def fingerprint: String = com.example.graphQL.cats.shared.crypto.SourceHash.sha256(
     io.circe.Json
       .arr(
@@ -25,50 +26,32 @@ final case class NearbyJobsQuery(
         io.circe.Json.fromDoubleOrNull(center.longitude),
         io.circe.Json.fromDoubleOrNull(radiusKm),
         filter.city.map(value => io.circe.Json.fromString(value.trim)).getOrElse(io.circe.Json.Null),
-        io.circe.Json.fromValues(filter.skills.toList.map(_.trim).distinct.sorted.map(io.circe.Json.fromString)),
+        io.circe.Json.fromValues(
+          filter.skills.toList.map(_.trim).filter(_.nonEmpty).distinct.sorted.map(io.circe.Json.fromString)
+        ),
         filter.createdAfter.map(value => io.circe.Json.fromString(value.toString)).getOrElse(io.circe.Json.Null),
         io.circe.Json.fromString("distanceKm,id")
       )
       .noSpaces
   )
 }
-final case class NearbyJobCursor(distanceKm: Double, jobId: String, queryFingerprint: String)
+final case class NearbyJobCursor(distanceKm: Double, jobId: JobId, queryFingerprint: String)
 final case class NearbyJobsPage(query: NearbyJobsQuery, first: Int, after: Option[NearbyJobCursor])
 final case class NearbyRadius(center: GeoPoint, radiusKm: Double) {
-  def isValid: Boolean = center.isValid && radiusKm.isFinite && radiusKm > 0d && radiusKm <= NearbyJobsQuery.MaxRadiusKm
+  def isValid: Boolean = JobDiscoveryValidation.validRadius(center, radiusKm)
 }
 final case class JobFacetQuery(filter: JobSearchFilter, radius: Option[NearbyRadius]) {
-  def isValid: Boolean = radius.forall(_.isValid)
+  def isValid: Boolean = JobDiscoveryValidation.facets(this).isValid
 }
 
 object NearbyJobsQuery {
   val MaxRadiusKm: Double = 500d
 
-  def encodeCursor(distanceKm: Double, jobId: String, query: NearbyJobsQuery): String = {
-    val payload = s"$distanceKm|$jobId|${query.fingerprint}"
-    java.util.Base64.getUrlEncoder
-      .withoutPadding()
-      .encodeToString(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8))
-  }
+  def encodeCursor(distanceKm: Double, jobId: JobId, query: NearbyJobsQuery): String =
+    NearbyJobCursorCodec.encode(distanceKm, jobId, query)
 
-  def decodeCursor(value: String, query: NearbyJobsQuery): Either[String, NearbyJobCursor] =
-    scala.util
-      .Try(new String(java.util.Base64.getUrlDecoder.decode(value), java.nio.charset.StandardCharsets.UTF_8))
-      .toEither
-      .left
-      .map(_ => "Invalid nearby cursor")
-      .flatMap { decoded =>
-        decoded.split("\\|", -1).toList match {
-          case distanceText :: jobId :: fingerprint :: Nil =>
-            for {
-              distance <- scala.util.Try(distanceText.toDouble).toEither.left.map(_ => "Invalid nearby cursor")
-              _ <- Either.cond(distance.isFinite && distance >= 0d, (), "Invalid nearby cursor")
-              _ <- scala.util.Try(UUID.fromString(jobId)).toEither.left.map(_ => "Invalid nearby cursor")
-              _ <- Either.cond(fingerprint == query.fingerprint, (), "Nearby cursor does not match criteria")
-            } yield NearbyJobCursor(distance, jobId, fingerprint)
-          case _ => Left("Invalid nearby cursor")
-        }
-      }
+  def decodeCursor(value: String, query: NearbyJobsQuery): Either[NearbyCursorError, NearbyJobCursor] =
+    NearbyJobCursorCodec.decode(value, query)
 }
 
 final case class NearbyJob(job: Job, distanceKm: Double)

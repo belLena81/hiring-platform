@@ -26,7 +26,13 @@ import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, JobUseCase
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.pagination.JobPageRequest
 import com.example.graphQL.cats.service.search.JobSearchFilter
-import com.example.graphQL.cats.service.search.{NearbyJob, NearbyJobsQuery, JobDiscoveryFacets, JobFacetQuery}
+import com.example.graphQL.cats.service.search.{
+  NearbyJob,
+  NearbyJobsQuery,
+  JobDiscoveryFacets,
+  JobFacetQuery,
+  JobDiscoveryValidation
+}
 import java.time.Instant
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -147,27 +153,43 @@ final class JobService(
     authorization.resolve(actor) *> UseCase.repository(jobs.findOpen(filter, page))
 
   def nearbyJobs(actor: ActorContext, query: NearbyJobsQuery, limit: Int): UseCaseIO[List[NearbyJob]] =
-    if (!query.isValid)
-      UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("radiusOrCenter")))
-    else if (query.after.exists(_.queryFingerprint != query.fingerprint))
-      UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("cursor")))
-    else if (limit < 1 || limit > com.example.graphQL.cats.domain.pagination.PageSize.Max)
-      UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("pageSize")))
-    else
-      authorization.resolve(actor).flatMap { user =>
-        if (user.role != UserRole.Candidate && user.role != UserRole.Admin)
-          UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
-        else UseCase.repository(jobs.nearbyJobs(query, limit + 1))
-      }
+    for {
+      normalized <- UseCase.fromEither(
+        JobDiscoveryValidation.nearby(query).toEither.leftMap(errors => UseCaseError.Search(errors.head))
+      )
+      _ <- UseCase.fromEither(
+        Either.cond(
+          limit >= 1 && limit <= com.example.graphQL.cats.domain.pagination.PageSize.Max,
+          (),
+          UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("pageSize"))
+        )
+      )
+      user <- authorization.resolve(actor)
+      _ <- UseCase.fromEither(
+        Either.cond(
+          user.role == UserRole.Candidate || user.role == UserRole.Admin,
+          (),
+          UseCaseError.Domain(DomainError.Forbidden)
+        )
+      )
+      results <- UseCase.repository(jobs.nearbyJobs(normalized, limit + 1))
+    } yield results
 
   def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseIO[JobDiscoveryFacets] =
-    authorization.resolve(actor).flatMap { user =>
-      if (user.role != UserRole.Candidate && user.role != UserRole.Admin)
-        UseCase.left(UseCaseError.Domain(DomainError.Forbidden))
-      else if (!query.isValid)
-        UseCase.left(UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("radius")))
-      else UseCase.repository(jobs.jobDiscoveryFacets(query))
-    }
+    for {
+      normalized <- UseCase.fromEither(
+        JobDiscoveryValidation.facets(query).toEither.leftMap(errors => UseCaseError.Search(errors.head))
+      )
+      user <- authorization.resolve(actor)
+      _ <- UseCase.fromEither(
+        Either.cond(
+          user.role == UserRole.Candidate || user.role == UserRole.Admin,
+          (),
+          UseCaseError.Domain(DomainError.Forbidden)
+        )
+      )
+      results <- UseCase.repository(jobs.jobDiscoveryFacets(normalized))
+    } yield results
 
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseIO[List[Job]] =
     for {

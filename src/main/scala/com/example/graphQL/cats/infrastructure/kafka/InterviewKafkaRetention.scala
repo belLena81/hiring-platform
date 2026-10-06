@@ -2,6 +2,7 @@ package com.example.graphQL.cats.infrastructure.kafka
 
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
+import com.example.graphQL.cats.service.port.InterviewRetentionBarrier
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeserializer}
@@ -9,9 +10,7 @@ import org.apache.kafka.common.serialization.{ByteArrayDeserializer, StringDeser
 import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
-final case class InterviewRetentionBarrier(topic: String, partition: Int, endOffset: Long)
-
-/** Physical log barriers, captured only after durable subject fences and publisher drain. */
+/** Physical log barriers, captured only after durable subject fences and broker-confirmed producer fencing. */
 object InterviewKafkaRetention {
   def resource(
       bootstrapServers: String,

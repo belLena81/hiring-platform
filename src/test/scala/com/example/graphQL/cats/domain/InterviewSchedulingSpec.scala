@@ -190,4 +190,94 @@ class InterviewSchedulingSpec extends FunSuite {
       Left(InterviewWorkflowError.InvalidTransition)
     )
   }
+  test("obsolete committed results and delivered participant work are superseded without repair") {
+    val notifying = workflow().copy(revision = 2L, phase = InterviewWorkflowPhase.NotificationsPending)
+    assertEquals(
+      InterviewWorkflowPolicy.publicationDisposition(
+        notifying,
+        1L,
+        InterviewWorkflowCommand.CommitAcceptedToInterview(ApplicationStatus.Accepted),
+        true,
+        false,
+        6,
+        5
+      ),
+      InterviewPublicationDisposition.Supersede
+    )
+    val delivered = notifying.copy(notified = Set(InterviewParticipant.Candidate))
+    assertEquals(
+      InterviewWorkflowPolicy.publicationDisposition(
+        delivered,
+        2L,
+        InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Candidate, "key"),
+        true,
+        false,
+        6,
+        5
+      ),
+      InterviewPublicationDisposition.Supersede
+    )
+    assertEquals(notifying.phase, InterviewWorkflowPhase.NotificationsPending)
+  }
+
+  test("necessary results require repair beyond the publication budget and applied receipts are obsolete") {
+    val pending = workflow()
+    val command = InterviewWorkflow.initialCommand(pending)
+    assertEquals(
+      InterviewWorkflowPolicy.publicationDisposition(pending, 0L, command, true, false, 5, 5),
+      InterviewPublicationDisposition.Send
+    )
+    assertEquals(
+      InterviewWorkflowPolicy.publicationDisposition(pending, 0L, command, true, false, 6, 5),
+      InterviewPublicationDisposition.RequireRepair
+    )
+    assertEquals(
+      InterviewWorkflowPolicy.publicationDisposition(pending, 0L, command, true, true, 6, 5),
+      InterviewPublicationDisposition.Supersede
+    )
+  }
+
+  test("pure repair preserves delivered participants and emits typed participant reconciliation") {
+    val repair = workflow().copy(
+      revision = 4L,
+      phase = InterviewWorkflowPhase.RepairRequired,
+      notified = Set(InterviewParticipant.Candidate)
+    )
+    val result = InterviewWorkflowPolicy.repair(repair, 4L, true)
+    assertEquals(result.map(_._1.phase), Right(InterviewWorkflowPhase.NotificationsPending))
+    assertEquals(result.map(_._1.notified), Right(Set(InterviewParticipant.Candidate)))
+    assertEquals(
+      result.map(_._2),
+      Right(
+        List(
+          InterviewWorkflowCommand.LookupNotificationReceipt(
+            InterviewParticipant.Recruiter,
+            s"${repair.id.value}:notify:Recruiter"
+          )
+        )
+      )
+    )
+    assertEquals(InterviewWorkflowPolicy.repair(repair, 3L, true), Left(InterviewWorkflowError.StaleRevision))
+    assertEquals(
+      InterviewWorkflowPolicy.repair(repair.copy(phase = InterviewWorkflowPhase.Completed), 4L, true),
+      Left(InterviewWorkflowError.InvalidTransition)
+    )
+  }
+
+  test("only the typed Admin repair cause resets attempt accounting") {
+    val marker = InterviewAdvanceCause.ResultReceipt("repair:untrusted-text")
+    assert(!marker.resetsAttempts)
+    assertEquals(marker.auditActor, None)
+    val repair = InterviewAdvanceCause.AdminRepair(java.util.UUID.randomUUID(), workflow().recruiterId)
+    assert(repair.resetsAttempts)
+    assertEquals(repair.auditActor, Some(workflow().recruiterId))
+  }
+
+  test("retry backoff is pure, capped and cannot overflow for exhausted budgets") {
+    assertEquals(InterviewWorkflowPolicy.backoffMillis(1L, 1000L, 30000L), 1000L)
+    assertEquals(InterviewWorkflowPolicy.backoffMillis(3L, 1000L, 30000L), 4000L)
+    assertEquals(InterviewWorkflowPolicy.backoffMillis(Long.MaxValue, 1000L, 30000L), 30000L)
+    assertEquals(InterviewWorkflowPolicy.backoffMillis(2L, Long.MaxValue / 2L + 1L, Long.MaxValue), Long.MaxValue)
+  }
+
 }

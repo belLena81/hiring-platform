@@ -161,3 +161,7 @@ After deployment to the real environment, qualify analytics latency and burst dr
 ## Local discovery and scheduling delivery checkpoint
 
 The October 6 authorized local implementation is complete: Phase 10 nearby onsite discovery and exact structured facets, followed by Phase 11 acknowledgment repair and durable interview scheduling through local Kafka and persistent fake providers. Final formatting, 526 units and 85 executed integration cases passed; actual worker restart/retention drills and the bounded workloads passed. Independent Code Reviewer, Security Engineer and final independent QA: PASS for local scope. Four Atlas cases were skipped and two older operational Compose checks were disabled. Criterion evidence and measurements are maintained in [discovery](specs/hiring-discovery-search-quality.md) and [workflows](specs/durable-hiring-workflows.md). Atlas execution, human relevance approval, personalization, production redundancy, real providers, cancellation/rescheduling and deployed retention remain deferred or pending as specified. Existing Phase 6/7 analytics gates remain in force.
+
+### Functional workflow and discovery follow-up
+
+The [recovery specification](specs/hiring-workflow-recovery.md) tracks bounded execution/publication accounting, transactional publication fencing, typed cleanup CAS and shared discovery validation. Its local evidence supplements Phases 9–11; it does not activate external providers, establish relevance or satisfy deployed analytics/retention gates.

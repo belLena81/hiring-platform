@@ -124,7 +124,7 @@ final class MongoJobRepository(
               "$and",
               List(
                 new Document("_distanceKm", distance),
-                new Document(MongoFields.Id, new Document("$gt", cursor.jobId))
+                new Document(MongoFields.Id, new Document("$gt", cursor.jobId.value.toString))
               ).asJava
             )
           ).asJava
@@ -157,6 +157,7 @@ final class MongoJobRepository(
   override def jobDiscoveryFacets(query: com.example.graphQL.cats.service.search.JobFacetQuery) = {
     import scala.jdk.CollectionConverters.*
     val filter = query.filter
+    val bucketReadLimit = com.example.graphQL.cats.service.search.JobDiscoveryFacets.MaxBucketsPerDimension + 1
     val facets = new Document(
       "skills",
       List(
@@ -168,7 +169,7 @@ final class MongoJobRepository(
         new Document("$match", new Document("skills", new Document("$ne", ""))),
         new Document("$group", new Document("_id", "$skills").append("count", new Document("$sum", 1))),
         new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", 21)
+        new Document("$limit", bucketReadLimit)
       ).asJava
     ).append(
       "countries",
@@ -176,7 +177,7 @@ final class MongoJobRepository(
         new Document("$match", new Document("location.country", new Document("$nin", List(null, "").asJava))),
         new Document("$group", new Document("_id", "$location.country").append("count", new Document("$sum", 1))),
         new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", 21)
+        new Document("$limit", bucketReadLimit)
       ).asJava
     ).append(
       "cities",
@@ -184,14 +185,14 @@ final class MongoJobRepository(
         new Document("$match", new Document("location.city", new Document("$nin", List(null, "").asJava))),
         new Document("$group", new Document("_id", "$location.city").append("count", new Document("$sum", 1))),
         new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", 21)
+        new Document("$limit", bucketReadLimit)
       ).asJava
     ).append(
       "remote",
       List(
         new Document("$group", new Document("_id", "$location.remote").append("count", new Document("$sum", 1))),
         new Document("$sort", new Document("count", -1).append("_id", 1)),
-        new Document("$limit", 21)
+        new Document("$limit", bucketReadLimit)
       ).asJava
     )
     val radiusStage = query.radius.toList.map { radius =>
@@ -216,29 +217,9 @@ final class MongoJobRepository(
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.jobDiscoveryFacets")(
       RepositoryIO
         .lift(collection.flatMap(_.aggregate[Document](pipeline.asJava.asScala.toSeq).boundedStream(1).compile.toList))
-        .subflatMap { results =>
-          val result = results.headOption
-          def buckets(name: String): List[com.example.graphQL.cats.service.search.JobFacetBucket] =
-            result
-              .flatMap(doc => Option(doc.getList(name, classOf[Document])).map(_.asScala.toList))
-              .getOrElse(Nil)
-              .flatMap(doc =>
-                for {
-                  value <- Option(doc.get("_id")).map(_.toString)
-                  count <- Option(doc.get("count")).collect { case number: Number => number.longValue() }
-                } yield com.example.graphQL.cats.service.search.JobFacetBucket(value, count)
-              )
-          val all = List(buckets("skills"), buckets("countries"), buckets("cities"), buckets("remote"))
-          Right(
-            com.example.graphQL.cats.service.search.JobDiscoveryFacets(
-              all(0).take(20),
-              all(1).take(20),
-              all(2).take(20),
-              all(3).take(20),
-              all.exists(_.size > 20)
-            )
-          )
-        }
+        .subflatMap(results =>
+          MongoStoredDocumentDecoding.repository(MongoJobDiscoveryCodecs.facets(results.headOption))
+        )
     )(_ => Left(RepositoryError.Unavailable))
   }
 

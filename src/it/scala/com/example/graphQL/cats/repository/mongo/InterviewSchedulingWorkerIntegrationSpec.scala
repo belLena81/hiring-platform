@@ -29,7 +29,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
   }
 
   private def configuration: IO[Map[String, String]] = IO.blocking {
-    val file = Path.of(".local/data/interview-kafka-proof/runtime.env")
+    val file =
+      Path.of(sys.env.getOrElse("INTERVIEW_KAFKA_PROOF_ROOT", ".local/data/interview-kafka-proof"), "runtime.env")
     if (!Files.exists(file)) Map.empty
     else
       Files
@@ -193,7 +194,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
       orchestrator <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
           bootstrap,
-          "interview_orchestrator",
+          "interview_command_publisher",
           env("KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD"),
           KafkaSaslSecurityProtocol.Plaintext,
           false
@@ -206,7 +207,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
       workerTransport <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
           bootstrap,
-          "interview_worker",
+          "interview_result_publisher",
           env("KAFKA_INTERVIEW_WORKER_PASSWORD"),
           KafkaSaslSecurityProtocol.Plaintext,
           true
@@ -219,7 +220,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
       _ <- InterviewKafkaRuntime.resource(
         InterviewKafkaConfig(
           bootstrap,
-          "interview_worker",
+          "interview_result_publisher",
           env("KAFKA_INTERVIEW_WORKER_PASSWORD"),
           KafkaSaslSecurityProtocol.Plaintext,
           true
@@ -230,6 +231,8 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
         case Right(message) => count("brokerCommandsConsumed") *> second.receiveCommand(message)
       }
       routing = new InterviewTransport {
+        override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
+          (if (message.result.nonEmpty) workerTransport else orchestrator).generationFor(message)
         override def publish(message: InterviewMessage): IO[Unit] =
           count(
             "brokerPublishRequests"

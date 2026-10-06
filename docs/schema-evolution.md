@@ -31,3 +31,9 @@ Operational migrations `006_job_geo_points`, `007_interview_workflow_storage`, `
 Current evidence and pending gates are maintained in the [discovery specification](specs/hiring-discovery-search-quality.md) and [workflow specification](specs/durable-hiring-workflows.md).
 
 Run sbt test for the Docker-independent contract suite and sbt 'IntegrationTest / test' for disposable MongoDB, migration, transaction, and HTTP checks. Current acceptance and evidence are tracked in [the active specification](specs/pre-mvp-contract-reset.md).
+
+## Interview workflow recovery maintenance
+
+Operational migrations `010_interview_workflow_attempts` and `011_interview_publication_fencing` preserve workflow rows, permanent subject tombstones and conservative execution budgets. They gate startup, are restartable in bounded batches and reject malformed stored contracts. Both operational migrations verify their current stored contracts even when their ledgers are Complete. Notification lookup has one active participant-aware shape; no legacy dual interpreter is introduced. Cleanup rows lacking the new proof metadata, including legacy Complete rows, are reopened for broker fencing and fresh retention barriers.
+
+Before activation stop old interview writers and revoke their nontransactional topic-write credentials. Configure separate command/result publishers and a prefix-scoped fencer; verify migrations, fencing and physical retention on the target environment before declaring erasure complete. Rolling back the application does not roll back migrated budgets or restore the old cleanup proof. Existing local data is preserved; a deployed maintenance migration is outside this local refactoring task. See [current acceptance criteria](specs/hiring-workflow-recovery.md).

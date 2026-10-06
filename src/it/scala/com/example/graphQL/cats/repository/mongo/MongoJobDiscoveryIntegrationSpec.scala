@@ -58,7 +58,7 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
         )
         first <- success(repository.nearbyJobs(query, 7))
         _ = assertEquals(first.map(_.job.id), values.take(7).map(_.id))
-        cursor = NearbyJobCursor(first.last.distanceKm, first.last.job.id.value.toString, query.fingerprint)
+        cursor = NearbyJobCursor(first.last.distanceKm, first.last.job.id, query.fingerprint)
         rest <- success(repository.nearbyJobs(query.copy(after = Some(cursor)), 30))
         _ = assertEquals((first ++ rest).map(_.job.id), values.take(24).map(_.id))
         _ = assert((first ++ rest).forall(value => value.distanceKm > 0d && value.distanceKm < 1d))

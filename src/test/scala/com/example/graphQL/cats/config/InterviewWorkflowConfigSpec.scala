@@ -16,13 +16,20 @@ class InterviewWorkflowConfigSpec extends FunSuite {
       orchestratorUsername = Some("orchestrator"),
       orchestratorPassword = Some("test-one"),
       workerUsername = Some("worker"),
-      workerPassword = Some("test-two")
+      workerPassword = Some("test-two"),
+      fencerUsername = Some("fencer"),
+      fencerPassword = Some("test-three")
     )
     assert(KafkaConfigValidation.validInterview(configured).isValid)
     assert(
       KafkaConfigValidation.validInterview(configured.copy(workerUsername = configured.orchestratorUsername)).isInvalid
     )
     assert(KafkaConfigValidation.validInterview(configured.copy(claimSeconds = 10)).isInvalid)
+    assert(KafkaConfigValidation.validInterview(configured.copy(fencerPassword = None)).isInvalid)
+    assert(KafkaConfigValidation.validInterview(configured.copy(fencerUsername = configured.workerUsername)).isInvalid)
+    assert(
+      KafkaConfigValidation.validInterview(configured.copy(fencerUsername = configured.orchestratorUsername)).isInvalid
+    )
     assert(KafkaConfigValidation.validInterview(configured, kafkaEnabled = false).isInvalid)
     assert(KafkaConfigValidation.validInterview(configured, operationalPrincipals = List("worker")).isInvalid)
     assert(KafkaConfigValidation.validInterview(configured.copy(providerTimeoutSeconds = 30)).isInvalid)

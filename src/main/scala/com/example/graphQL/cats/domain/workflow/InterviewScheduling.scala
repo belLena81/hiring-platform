@@ -54,7 +54,6 @@ enum InterviewWorkflowEvent {
   case ReservationReleased
   case ReservationReleaseOutcomeUnknown
   case NotificationDelivered(participant: InterviewParticipant)
-  case NotificationRejected(participant: InterviewParticipant)
   case NotificationOutcomeUnknown(participant: InterviewParticipant)
   case NotificationLookupFound(participant: InterviewParticipant)
   case NotificationLookupAbsent(participant: InterviewParticipant)
@@ -68,8 +67,7 @@ enum InterviewWorkflowCommand {
   case LookupStatusCommitReceipt(workflowId: InterviewWorkflowId)
   case ReleaseCalendarSlot(idempotencyKey: String)
   case Notify(participant: InterviewParticipant, idempotencyKey: String)
-  case LookupNotificationReceipt(idempotencyKey: String)
-  case Retry(step: String)
+  case LookupNotificationReceipt(participant: InterviewParticipant, idempotencyKey: String)
   case RequireRepair(reason: String)
 }
 
@@ -96,8 +94,8 @@ object InterviewWorkflow {
       command: InterviewWorkflowCommand
   ): Boolean = {
     val notification = command match {
-      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_) => true
-      case _                                                                                             => false
+      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_, _) => true
+      case _                                                                                                => false
     }
     val expectedPhase = command match {
       case InterviewWorkflowCommand.ReserveCalendarSlot(_) | InterviewWorkflowCommand.LookupCalendarReservation(_) =>
@@ -106,7 +104,7 @@ object InterviewWorkflow {
           InterviewWorkflowCommand.LookupStatusCommitReceipt(_) =>
         InterviewWorkflowPhase.StatusCommitPending
       case InterviewWorkflowCommand.ReleaseCalendarSlot(_) => InterviewWorkflowPhase.CompensationPending
-      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_) =>
+      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_, _) =>
         InterviewWorkflowPhase.NotificationsPending
       case _ => InterviewWorkflowPhase.RepairRequired
     }
@@ -152,7 +150,8 @@ object InterviewWorkflow {
       expectedRevision: Long,
       event: InterviewWorkflowEvent
   ): Either[InterviewWorkflowError, (InterviewWorkflow, List[InterviewWorkflowCommand])] =
-    if (workflow.revision != expectedRevision) Left(InterviewWorkflowError.StaleRevision)
+    if (workflow.revision != expectedRevision || expectedRevision == Long.MaxValue)
+      Left(InterviewWorkflowError.StaleRevision)
     else
       transition(workflow, event).map { case (phase, notified, commands) =>
         (workflow.copy(revision = workflow.revision + 1L, phase = phase, notified = notified), commands)
@@ -301,14 +300,6 @@ object InterviewWorkflow {
         val next =
           if (delivered.size == 2) InterviewWorkflowPhase.Completed else InterviewWorkflowPhase.NotificationsPending
         Right((next, delivered, Nil))
-      case (InterviewWorkflowPhase.NotificationsPending, InterviewWorkflowEvent.NotificationRejected(participant)) =>
-        Right(
-          (
-            InterviewWorkflowPhase.NotificationsPending,
-            workflow.notified,
-            List(InterviewWorkflowCommand.Retry(s"notify:${participant.toString}"))
-          )
-        )
       case (
             InterviewWorkflowPhase.NotificationsPending,
             InterviewWorkflowEvent.NotificationOutcomeUnknown(participant)
@@ -317,7 +308,7 @@ object InterviewWorkflow {
           (
             InterviewWorkflowPhase.NotificationsPending,
             workflow.notified,
-            List(InterviewWorkflowCommand.LookupNotificationReceipt(notifyKey(participant)))
+            List(InterviewWorkflowCommand.LookupNotificationReceipt(participant, notifyKey(participant)))
           )
         )
       case (InterviewWorkflowPhase.NotificationsPending, InterviewWorkflowEvent.NotificationLookupFound(participant)) =>

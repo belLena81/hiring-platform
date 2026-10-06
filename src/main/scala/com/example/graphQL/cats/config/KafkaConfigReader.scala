@@ -47,5 +47,7 @@ private[config] final case class RawInterviewRuntimeConfig(
     claimSeconds: Int = 60,
     preCommitDeadlineSeconds: Int = 300,
     replayRetentionSeconds: Long = 604800L,
-    completedDedupRetentionSeconds: Long = 691200L
+    completedDedupRetentionSeconds: Long = 691200L,
+    fencerUsername: Option[String] = None,
+    fencerPassword: Option[String] = None
 ) derives ConfigReader

@@ -1,18 +1,22 @@
 package com.example.graphQL.cats.runtime
 
-import com.example.graphQL.cats.service.port.{InterviewMessage, InterviewTransport}
-
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaConfig
 import com.example.graphQL.cats.infrastructure.kafka.*
 import com.example.graphQL.cats.repository.mongo.{MongoInterviewSubjectCleanup, MongoInterviewWorkflowRepository}
-import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.application.{InterviewWorkflowWorker, InterviewWorkerSettings}
-import com.example.graphQL.cats.service.port.{FakeInterviewCalendarProvider, FakeInterviewNotificationProvider}
-import org.bson.Document
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.Diagnostics.*
+import com.example.graphQL.cats.service.application.{
+  InterviewWorkflowWorker,
+  InterviewWorkerSettings,
+  InterviewSubjectCleanupWorker
+}
+import com.example.graphQL.cats.service.port.*
+import fs2.Stream
 import scala.concurrent.duration.*
 
-/** Local scheduling shares Mongo clients but has separate Kafka service principals and resource ownership. */
+/** Each publisher generation owns its initialized producers; consumers retain independent offset lifetimes. */
 private[runtime] object InterviewSchedulingRuntime {
   def resource(
       config: KafkaConfig,
@@ -27,9 +31,18 @@ private[runtime] object InterviewSchedulingRuntime {
         settings.orchestratorUsername,
         settings.orchestratorPassword,
         settings.workerUsername,
-        settings.workerPassword
+        settings.workerPassword,
+        settings.fencerUsername,
+        settings.fencerPassword
       ) match {
-        case (Some(orchestratorUsername), Some(orchestratorPassword), Some(workerUsername), Some(workerPassword)) =>
+        case (
+              Some(orchestratorUsername),
+              Some(orchestratorPassword),
+              Some(workerUsername),
+              Some(workerPassword),
+              Some(fencerUsername),
+              Some(fencerPassword)
+            ) =>
           val worker = new InterviewWorkflowWorker(
             repository,
             FakeInterviewCalendarProvider.durable(repository),
@@ -45,72 +58,72 @@ private[runtime] object InterviewSchedulingRuntime {
               settings.replayRetentionSeconds.seconds
             )
           )
+          val commandConfig = InterviewKafkaConfig(
+            config.bootstrapServers,
+            orchestratorUsername,
+            orchestratorPassword,
+            config.saslSecurityProtocol,
+            worker = false
+          )
+          val resultConfig = InterviewKafkaConfig(
+            config.bootstrapServers,
+            workerUsername,
+            workerPassword,
+            config.saslSecurityProtocol,
+            worker = true
+          )
+          def receive(handler: InterviewMessage => IO[Boolean])(value: Either[String, InterviewMessage]): IO[Boolean] =
+            value.fold(
+              identity => IO.realTimeInstant.flatMap(at => repository.quarantine(identity, at).value.map(_.isRight)),
+              handler
+            )
+          def generation: Stream[IO, Unit] = Stream
+            .resource(
+              (
+                InterviewKafkaRuntime.publisherResource(commandConfig),
+                InterviewKafkaRuntime.publisherResource(resultConfig)
+              ).tupled
+            )
+            .flatMap { case (commands, results) =>
+              val routing = new InterviewTransport {
+                private def owner(message: InterviewMessage): InterviewTransport =
+                  if (message.result.isDefined) results else commands
+                def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
+                  owner(message).generationFor(message)
+                def publish(message: InterviewMessage): IO[Unit] = owner(message).publish(message)
+              }
+              Stream.repeatEval(worker.publishDue(routing)).metered(1.second)
+            }
+            .handleErrorWith { error =>
+              Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))) ++ Stream
+                .sleep_[IO](settings.retryBaseSeconds.seconds)
+            }
           for {
-            orchestrator <- InterviewKafkaRuntime.resource(
-              InterviewKafkaConfig(
-                config.bootstrapServers,
-                orchestratorUsername,
-                orchestratorPassword,
-                config.saslSecurityProtocol,
-                false
-              ),
-              diagnostics
-            ) {
-              case Right(message) => worker.receiveResult(message)
-              case Left(identity) =>
-                IO.realTimeInstant.flatMap(at => repository.quarantine(identity, at).value.map(_.isRight))
-            }
-            transport <- InterviewKafkaRuntime.resource(
-              InterviewKafkaConfig(
-                config.bootstrapServers,
-                workerUsername,
-                workerPassword,
-                config.saslSecurityProtocol,
-                true
-              ),
-              diagnostics
-            ) {
-              case Right(message) => worker.receiveCommand(message)
-              case Left(identity) =>
-                IO.realTimeInstant.flatMap(at => repository.quarantine(identity, at).value.map(_.isRight))
-            }
+            _ <- InterviewKafkaRuntime.consumerResource(commandConfig, diagnostics)(receive(worker.receiveResult))
+            _ <- InterviewKafkaRuntime.consumerResource(resultConfig, diagnostics)(receive(worker.receiveCommand))
             retention <- InterviewKafkaRetention.resource(
               config.bootstrapServers,
               orchestratorUsername,
               orchestratorPassword,
               config.saslSecurityProtocol
             )
-            routing = new InterviewTransport {
-              def publish(message: InterviewMessage): IO[Unit] =
-                if (message.result.isDefined) transport.publish(message) else orchestrator.publish(message)
-            }
-            _ <- worker.publisher(routing)
-            // A claim, a timed provider call and an acknowledged Kafka send must all drain before barrier capture.
-            _ <- cleanup.resource(
-              (settings.claimSeconds.toLong + settings.providerTimeoutSeconds.toLong + 30L).seconds,
-              retention.capture.map(
-                _.toList.map(value =>
-                  new Document("topic", value.topic)
-                    .append("partition", Int.box(value.partition))
-                    .append("endOffset", Long.box(value.endOffset))
-                )
-              ),
-              rows =>
-                retention.passed(
-                  rows
-                    .map(row =>
-                      InterviewRetentionBarrier(
-                        row.getString("topic"),
-                        row.getInteger("partition").intValue(),
-                        row.getLong("endOffset").longValue()
-                      )
-                    )
-                    .toVector
-                ),
+            fencer <- InterviewProducerFencer.resource(
+              config.bootstrapServers,
+              fencerUsername,
+              fencerPassword,
+              config.saslSecurityProtocol,
               diagnostics
             )
+            _ <- Resource.make(Stream.suspend(generation).repeat.compile.drain.start)(_.cancel)
+            _ <- new InterviewSubjectCleanupWorker(
+              cleanup,
+              fencer,
+              retention.capture,
+              retention.passed,
+              diagnostics
+            ).resource
           } yield ()
-        case _ => Resource.eval(IO.raiseError(new IllegalArgumentException("interview Kafka credentials unavailable")))
+        case _ => Resource.eval(IO.raiseError(new IllegalStateException("interview credentials were not validated")))
       }
   }
 }

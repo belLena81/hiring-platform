@@ -51,6 +51,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
     for {
       outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)
       transport = new InterviewTransport {
+        private val commandGeneration =
+          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
+        private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+        override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
+          if (message.result.nonEmpty) resultGeneration else commandGeneration
         override def publish(message: InterviewMessage): IO[Unit] = outgoing.update(_ :+ message)
       }
       _ <- worker.publishDue(transport)
@@ -248,7 +253,10 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
         repair <- drive(repository, failingWorker, value.id, Set(InterviewWorkflowPhase.RepairRequired))
         candidateKey = s"${value.id.value}:notify:Candidate"
         attempts <- success(
-          repository.attemptCount(value.id, InterviewWorkflowCommand.LookupNotificationReceipt(candidateKey))
+          repository.attemptCount(
+            value.id,
+            InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Candidate, candidateKey)
+          )
         )
         committed <- success(repository.hasHiringReceipt(value.id))
         kept <- calendar.lookup(value.id).value
@@ -260,7 +268,10 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
         _ <- success(repository.repair(repair, repair.revision, UUID.randomUUID(), now, admin.id))
         completed <- drive(repository, recoveredWorker, value.id, Set(InterviewWorkflowPhase.Completed))
         newAttempts <- success(
-          repository.attemptCount(value.id, InterviewWorkflowCommand.LookupNotificationReceipt(candidateKey))
+          repository.attemptCount(
+            value.id,
+            InterviewWorkflowCommand.LookupNotificationReceipt(InterviewParticipant.Candidate, candidateKey)
+          )
         )
         candidateReceipt <- notification.lookup(candidateKey).value
       } yield {
@@ -309,6 +320,11 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
         )
         outgoing <- Ref.of[IO, Vector[InterviewMessage]](Vector.empty)
         transport = new InterviewTransport {
+          private val commandGeneration =
+            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
+          private val resultGeneration = InterviewPublisherGeneration(InterviewPublisherRole.Worker, UUID.randomUUID())
+          override def generationFor(message: InterviewMessage): InterviewPublisherGeneration =
+            if (message.result.nonEmpty) resultGeneration else commandGeneration
           override def publish(message: InterviewMessage): IO[Unit] = outgoing.update(_ :+ message)
         }
         _ <- worker.publishDue(transport)
@@ -333,13 +349,22 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
           )
           .value
         _ = assert(fencedEffect.isLeft)
-        _ <- IO.sleep(5.millis)
-        barrier = new org.bson.Document("topic", "hiring.interview-commands")
-          .append("partition", Int.box(0))
-          .append("endOffset", Long.box(1))
-        _ <- cleanup.runOnce(1.millis, IO.pure(List(barrier)), _ => IO.pure(false))
-        _ <- IO.sleep(5.millis)
-        _ <- cleanup.runOnce(1.millis, IO.pure(List(barrier)), _ => IO.pure(false))
+        barriers = Vector(
+          com.example.graphQL.cats.service.port.InterviewRetentionBarrier("hiring.interview-commands", 0, 1L),
+          com.example.graphQL.cats.service.port.InterviewRetentionBarrier("hiring.interview-results", 0, 1L)
+        )
+        cleaner = new com.example.graphQL.cats.service.application.InterviewSubjectCleanupWorker(
+          cleanup,
+          new InterviewPublisherFencer {
+            override def fence(ids: Vector[String]): RepositoryIO[Unit] = RepositoryIO.fromEither(Right(()))
+          },
+          IO.pure(barriers),
+          _ => IO.pure(false),
+          Diagnostics.noop
+        )
+        _ <- success(cleaner.runOnce)
+        _ <- success(cleaner.runOnce)
+        _ <- success(cleaner.runOnce)
         commandAcknowledged <- worker.receiveCommand(command)
         resultAcknowledged <- worker.receiveResult(result)
         pending <- cleanup.complete(value.candidateId)

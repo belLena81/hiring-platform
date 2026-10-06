@@ -1,10 +1,20 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
+import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.{InterviewMessage, InterviewStep, InterviewResult, InterviewTransport}
+import com.example.graphQL.cats.service.port.{
+  InterviewMessage,
+  InterviewStep,
+  InterviewResult,
+  InterviewTransport,
+  InterviewPublisherRole,
+  InterviewPublisherGeneration,
+  InterviewProducerGenerationFenced
+}
 import fs2.kafka.*
+import fs2.kafka.producer.MkProducer
 import io.circe.{Decoder, Encoder}
 import io.circe.generic.semiauto.*
 import io.circe.parser.decode
@@ -61,7 +71,11 @@ object InterviewKafkaRuntime {
       diagnostics: Diagnostics
   )(
       receive: Either[String, InterviewMessage] => IO[Boolean]
-  ): Resource[IO, InterviewTransport] = {
+  ): Resource[IO, InterviewTransport] =
+    consumerResource(config, diagnostics)(receive) *> publisherResource(config)
+
+  /** Producer initialization completes before the immutable generation is exposed for Mongo authorization. */
+  def publisherResource(config: InterviewKafkaConfig): Resource[IO, InterviewTransport] = {
     val properties = OperationalEventKafkaRuntime.saslProperties(
       Some(config.username),
       Some(config.password),
@@ -70,12 +84,76 @@ object InterviewKafkaRuntime {
     val producerSettings = properties.foldLeft(
       ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
         .withBootstrapServers(config.bootstrapServers)
+        .withCloseTimeout(5.seconds)
         .withProperty(ProducerConfig.ACKS_CONFIG, "all")
         .withProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
         .withProperty(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, "65536")
         .withProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000")
         .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
     ) { case (current, (key, value)) => current.withProperty(key, value) }
+    val role = if (config.worker) InterviewPublisherRole.Worker else InterviewPublisherRole.Orchestrator
+    val output = if (config.worker) InterviewMessageCodec.ResultsTopic else InterviewMessageCodec.CommandsTopic
+    for {
+      id <- Resource.eval(IO.randomUUID)
+      generation = InterviewPublisherGeneration(role, id)
+      producer <- initializedProducer(
+        TransactionalProducerSettings(generation.transactionalId, producerSettings),
+        MkProducer.mkProducerForSync[IO]
+      )
+    } yield new InterviewTransport {
+      def generationFor(_message: InterviewMessage): InterviewPublisherGeneration = generation
+      def publish(message: InterviewMessage): IO[Unit] = {
+        val bytes = InterviewMessageCodec.bytes(message)
+        if (bytes.length > 65536) IO.raiseError(new IllegalArgumentException("interview record exceeds size limit"))
+        else
+          producer
+            .produceWithoutOffsets(ProducerRecords.one(ProducerRecord(output, message.workflowId.toString, bytes)))
+            .void
+            .handleErrorWith { error =>
+              if (OperationalEventKafkaRuntime.isProducerFenced(error))
+                IO.raiseError(InterviewProducerGenerationFenced(error))
+              else IO.raiseError(error)
+            }
+      }
+    }
+  }
+
+  /** fs2-kafka installs its close finalizer after initTransactions; retain ownership until that succeeds. */
+  private[kafka] def initializedProducer(
+      settings: TransactionalProducerSettings[IO, String, Array[Byte]],
+      factory: MkProducer[IO]
+  ): Resource[IO, TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]]] =
+    Resource
+      .make(Ref.of[IO, Option[KafkaByteProducer]](None)) { pending =>
+        pending
+          .getAndSet(None)
+          .flatMap(
+            _.traverse_(producer =>
+              IO.blocking(
+                producer.close(java.time.Duration.ofMillis(settings.producerSettings.closeTimeout.toMillis))
+              )
+            )
+          )
+      }
+      .flatMap { pending =>
+        given MkProducer[IO] = new MkProducer[IO] {
+          def apply[G[_]](value: ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] =
+            factory(value).flatTap(producer => pending.set(Some(producer)))
+        }
+        // Mask the finalizer handoff so cancellation cannot leave both owners responsible for closing.
+        Resource
+          .make(
+            TransactionalKafkaProducer.resource(settings).allocated.flatTap(_ => pending.set(None))
+          )(_._2)
+          .map(_._1)
+      }
+
+  /** Consumers have independent lifetimes so replacing a fenced producer does not reset their offset frontier. */
+  def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics)(
+      receive: Either[String, InterviewMessage] => IO[Boolean]
+  ): Resource[IO, Unit] = {
+    val properties =
+      OperationalEventKafkaRuntime.saslProperties(Some(config.username), Some(config.password), config.protocol)
     val consumerSettings = properties.foldLeft(
       ConsumerSettings(Deserializer[IO, String], Deserializer[IO, Array[Byte]])
         .withBootstrapServers(config.bootstrapServers)
@@ -85,7 +163,6 @@ object InterviewKafkaRuntime {
         .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
     ) { case (current, (key, value)) => current.withProperty(key, value) }
     val input = if (config.worker) InterviewMessageCodec.CommandsTopic else InterviewMessageCodec.ResultsTopic
-    val output = if (config.worker) InterviewMessageCodec.ResultsTopic else InterviewMessageCodec.CommandsTopic
     val consumer = KafkaConsumer.stream(consumerSettings).subscribeTo(input).records.evalMap { message =>
       val parsed = InterviewMessageCodec
         .parse(message.record.value)
@@ -103,18 +180,8 @@ object InterviewKafkaRuntime {
         }))
       )(message.offset.commit)
     }
-    for {
-      producer <- KafkaProducer.resource(producerSettings)
-      _ <- Resource.make(
-        OperationalEventKafkaRuntime.resilientStream(diagnostics, consumer, 1.second).compile.drain.start
-      )(_.cancel)
-    } yield new InterviewTransport {
-      def publish(message: InterviewMessage): IO[Unit] = {
-        val bytes = InterviewMessageCodec.bytes(message)
-        if (bytes.length > 65536) IO.raiseError(new IllegalArgumentException("interview record exceeds size limit"))
-        else
-          producer.produce(ProducerRecords.one(ProducerRecord(output, message.workflowId.toString, bytes))).flatten.void
-      }
-    }
+    Resource
+      .make(OperationalEventKafkaRuntime.resilientStream(diagnostics, consumer, 1.second).compile.drain.start)(_.cancel)
+      .void
   }
 }

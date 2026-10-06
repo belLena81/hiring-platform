@@ -1,55 +1,52 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
-import com.example.graphQL.cats.service.port.RepositoryIO
-import com.example.graphQL.cats.service.{RepositoryError, Diagnostics, LogEvent, LogFields}
-import com.example.graphQL.cats.service.Diagnostics.*
+import com.example.graphQL.cats.domain.workflow.{
+  InterviewSubjectCleanup,
+  InterviewCleanupState,
+  InterviewRetentionBarrier
+}
+import com.example.graphQL.cats.service.port.{InterviewSubjectCleanupRepository, InterviewCleanupUpdate, RepositoryIO}
+import com.example.graphQL.cats.service.{RepositoryError, Diagnostics}
 import mongo4cats.client.ClientSession
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 import com.mongodb.client.model.{Sorts, UpdateOptions}
 import java.time.Instant
-import java.util.Date
+import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
-import scala.concurrent.duration.*
 
-/** Persistent deletion work. A public receipt cannot complete until both workflow topics have physically expired. */
-final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO]) {
+/** Durable deletion evidence. Broker fencing precedes barrier capture in the application worker. */
+final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostics: Diagnostics = Diagnostics.noop)
+    extends InterviewSubjectCleanupRepository {
   private val queue = Mongo4catsCollections.documents(database, MongoCollections.InterviewSubjectCleanup)
   private val workflows = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflows)
+  private val RelatedCollections = List(
+    MongoCollections.InterviewWorkflows,
+    MongoCollections.InterviewWorkflowCommands,
+    MongoCollections.InterviewWorkflowInbox,
+    MongoCollections.FakeInterviewCalendarReservations,
+    MongoCollections.FakeInterviewNotificationReceipts
+  )
+  private val ProducerIdsField = "interviewTransactionalIds"
 
+  /** Called within account deletion after its permanent subject fence is marked deleted. */
   def enqueue(subject: UserId, now: Instant, session: Option[ClientSession[IO]]): RepositoryIO[Unit] =
-    RepositoryIO
-      .lift(
-        List(
-          MongoCollections.InterviewWorkflows,
-          MongoCollections.InterviewWorkflowCommands,
-          MongoCollections.InterviewWorkflowInbox,
-          MongoCollections.FakeInterviewCalendarReservations,
-          MongoCollections.FakeInterviewNotificationReceipts
-        ).traverse(name =>
-          MongoSessionOperations
-            .findOne(Mongo4catsCollections.documents(database, name), session, subjectFilter(subject.value.toString))
-        ).map(_.exists(_.nonEmpty))
+    for {
+      fence <- RepositoryIO.lift(
+        MongoSessionOperations.findOne(
+          Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences),
+          session,
+          MongoFilter.eq(MongoFields.Id, subject.value.toString)
+        )
       )
-      .flatMap {
-        case false =>
-          RepositoryIO
-            .lift(
-              MongoSessionOperations.findOne(
-                Mongo4catsCollections.documents(database, MongoCollections.FakeInterviewCalendarParticipantLocks),
-                session,
-                MongoFilter.eq("_id", subject.value.toString)
-              )
-            )
-            .map(_.nonEmpty)
-        case true => RepositoryIO.fromEither(Right(true))
-      }
-      .flatMap {
-        case false => RepositoryIO.fromEither(Right(()))
-        case true  =>
+      ids <- RepositoryIO.fromEither(producerIds(fence))
+      attributable <- hasAttributableData(subject, session)
+      _ <-
+        if (!attributable && ids.isEmpty) RepositoryIO.fromEither(Right(()))
+        else
           RepositoryIO
             .lift(
               MongoSessionOperations.updateOne(
@@ -57,85 +54,175 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO]) {
                 session,
                 MongoFilter.eq(MongoFields.Id, subject.value.toString),
                 MongoUpdate.combine(
-                  MongoUpdate.setOnInsert(MongoFields.Id, subject.value.toString),
                   MongoUpdate.setOnInsert("state", "Pending"),
-                  MongoUpdate.setOnInsert("requestedAt", Date.from(now))
+                  MongoUpdate.setOnInsert("revision", Long.box(0L)),
+                  MongoUpdate.setOnInsert("requestedAt", Date.from(now)),
+                  MongoUpdate.setOnInsert(ProducerIdsField, ids.asJava)
                 ),
                 new UpdateOptions().upsert(true)
               )
             )
-            .flatMap {
-              case Some(value) if value.wasAcknowledged() => RepositoryIO.fromEither(Right(()))
-              case _ => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+            .subflatMap {
+              case Some(value) if value.wasAcknowledged() => Right(())
+              case _                                      => Left(RepositoryError.MissingWriteResult)
             }
-      }
-
-  def complete(subject: UserId): IO[Boolean] =
-    MongoSessionOperations
-      .findOne(queue, None, MongoFilter.eq(MongoFields.Id, subject.value.toString))
-      .map(_.forall(_.getString("state") == "Complete"))
-
-  /** Callback capture occurs after claims, provider calls and Kafka delivery have drained. */
-  def runOnce(drain: FiniteDuration, capture: IO[List[Document]], passed: List[Document] => IO[Boolean]): IO[Unit] =
-    for {
-      now <- IO.realTimeInstant
-      pending <- queue.flatMap(
-        _.find(MongoFilter.ne("state", "Complete").bson).sort(Sorts.ascending("requestedAt")).limit(32).all
-      )
-      _ <- pending.toList.traverse_ { row =>
-        val subject = row.getString("_id")
-        val filter = MongoFilter.eq("_id", subject)
-        val drained = !now.isBefore(row.getDate("requestedAt").toInstant.plusMillis(drain.toMillis))
-        if (!drained) IO.unit
-        else if (row.getString("state") == "Pending")
-          purge(subject) *> IO.realTimeInstant.flatMap(purgedAt =>
-            MongoSessionOperations
-              .updateOne(
-                queue,
-                None,
-                filter,
-                MongoUpdate
-                  .combine(MongoUpdate.set("state", "Purged"), MongoUpdate.set("purgedAt", Date.from(purgedAt)))
-              )
-              .void
-          )
-        else if (row.getString("state") == "Purged") {
-          val effectsDrained = !now.isBefore(row.getDate("purgedAt").toInstant.plusMillis(drain.toMillis))
-          if (!effectsDrained) IO.unit
-          else
-            purge(subject) *> capture.flatMap { barriers =>
-              MongoSessionOperations
-                .updateOne(
-                  queue,
-                  None,
-                  filter,
-                  MongoUpdate.combine(MongoUpdate.set("state", "Cleaned"), MongoUpdate.set("barriers", barriers.asJava))
-                )
-                .void
-            }
-        } else {
-          val barriers = Option(row.getList("barriers", classOf[Document])).fold(List.empty[Document])(_.asScala.toList)
-          if (barriers.isEmpty) IO.raiseError(new IllegalStateException("interview retention barrier missing"))
-          else
-            passed(barriers).flatMap {
-              case false => IO.unit
-              case true  =>
-                purge(subject) *> MongoSessionOperations
-                  .updateOne(
-                    queue,
-                    None,
-                    filter,
-                    MongoUpdate.combine(
-                      MongoUpdate.set("state", "Complete"),
-                      MongoUpdate.unset("barriers"),
-                      MongoUpdate.set("completedAt", Date.from(now))
-                    )
-                  )
-                  .void
-            }
-        }
-      }
     } yield ()
+
+  private def producerIds(fence: Option[Document]): Either[RepositoryError, Vector[String]] = fence match {
+    case None                                                      => Right(Vector.empty)
+    case Some(document) if !document.containsKey(ProducerIdsField) => Right(Vector.empty)
+    case Some(document)                                            =>
+      MongoInterviewCleanupCodec
+        .stringVector(document, ProducerIdsField)
+        .flatMap(values =>
+          InterviewSubjectCleanup.validateProducerIds(values).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+  }
+
+  private def hasAttributableData(subject: UserId, session: Option[ClientSession[IO]]): RepositoryIO[Boolean] =
+    RepositoryIO
+      .lift(
+        RelatedCollections
+          .traverse(name =>
+            MongoSessionOperations.findOne(
+              Mongo4catsCollections.documents(database, name),
+              session,
+              subjectFilter(subject.value.toString)
+            )
+          )
+          .map(_.exists(_.nonEmpty))
+      )
+      .flatMap {
+        case true  => RepositoryIO.fromEither(Right(true))
+        case false =>
+          RepositoryIO
+            .lift(
+              MongoSessionOperations.findOne(
+                Mongo4catsCollections.documents(database, MongoCollections.FakeInterviewCalendarParticipantLocks),
+                session,
+                MongoFilter.eq(MongoFields.Id, subject.value.toString)
+              )
+            )
+            .map(_.nonEmpty)
+      }
+
+  override def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]] = guard("interviewCleanup.find") {
+    RepositoryIO
+      .lift(MongoSessionOperations.findOne(queue, None, MongoFilter.eq(MongoFields.Id, subject.value.toString)))
+      .flatMap(_.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decode(row))))
+  }
+
+  /** Malformed evidence cannot certify public deletion completion. */
+  def complete(subject: UserId): IO[Boolean] = find(subject).value.map {
+    case Right(None)        => true
+    case Right(Some(value)) =>
+      value.state match {
+        case InterviewCleanupState.Complete(_) => true
+        case _                                 => false
+      }
+    case Left(_) => false
+  }
+
+  override def pending: RepositoryIO[Vector[InterviewSubjectCleanup]] = guard("interviewCleanup.pending") {
+    RepositoryIO
+      .lift(
+        queue.flatMap(
+          _.find(MongoFilter.ne("state", "Complete").bson)
+            .sort(Sorts.ascending("requestedAt", MongoFields.Id))
+            .limit(32)
+            .all
+        )
+      )
+      .flatMap(_.toVector.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decode(row))))
+  }
+
+  override def transition(
+      expected: InterviewSubjectCleanup,
+      next: InterviewSubjectCleanup
+  ): RepositoryIO[InterviewCleanupUpdate] =
+    guard("interviewCleanup.transition") {
+      val immutableInputs = expected.subjectId == next.subjectId && expected.requestedAt == next.requestedAt &&
+        expected.transactionalIds == next.transactionalIds && expected.revision < Long.MaxValue &&
+        next.revision == expected.revision + 1L
+      val forward = (expected.state, next.state) match {
+        case (InterviewCleanupState.Pending, InterviewCleanupState.ProducersFenced)          => true
+        case (InterviewCleanupState.ProducersFenced, InterviewCleanupState.MongoPurged)      => true
+        case (InterviewCleanupState.MongoPurged, InterviewCleanupState.AwaitingRetention(_)) => true
+        case (InterviewCleanupState.AwaitingRetention(_), InterviewCleanupState.Complete(_)) => true
+        case _                                                                               => false
+      }
+      for {
+        _ <- RepositoryIO.fromEither(
+          InterviewSubjectCleanup.validate(expected).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- RepositoryIO.fromEither(
+          InterviewSubjectCleanup.validate(next).leftMap(_ => RepositoryError.InvalidStoredData)
+        )
+        _ <- RepositoryIO.fromEither(Either.cond(immutableInputs && forward, (), RepositoryError.InvalidStoredData))
+        result <- RepositoryIO
+          .lift(
+            MongoSessionOperations.updateOne(
+              queue,
+              None,
+              MongoFilter.and(
+                MongoFilter.eq(MongoFields.Id, expected.subjectId.value.toString),
+                MongoFilter.eq("revision", Long.box(expected.revision)),
+                MongoFilter.eq("state", stateName(expected.state))
+              ),
+              stateUpdate(next)
+            )
+          )
+          .subflatMap {
+            case Some(value) if !value.wasAcknowledged()    => Left(RepositoryError.MissingWriteResult)
+            case Some(value) if value.getMatchedCount == 1L => Right(InterviewCleanupUpdate.Applied)
+            case Some(_)                                    => Right(InterviewCleanupUpdate.StaleRevision)
+            case None                                       => Left(RepositoryError.MissingWriteResult)
+          }
+      } yield result
+    }
+
+  private def stateUpdate(value: InterviewSubjectCleanup): MongoUpdate = {
+    val common =
+      List(MongoUpdate.set("revision", Long.box(value.revision)), MongoUpdate.set("state", stateName(value.state)))
+    val detail = value.state match {
+      case InterviewCleanupState.AwaitingRetention(barriers) =>
+        List(
+          MongoUpdate.set(
+            "barriers",
+            barriers
+              .map(barrier =>
+                new Document("topic", barrier.topic)
+                  .append("partition", Int.box(barrier.partition))
+                  .append("endOffset", Long.box(barrier.endOffset))
+              )
+              .asJava
+          )
+        )
+      case InterviewCleanupState.Complete(at) =>
+        List(MongoUpdate.unset("barriers"), MongoUpdate.set("completedAt", Date.from(at)))
+      case _ => List.empty
+    }
+    MongoUpdate.combine((common ++ detail)*)
+  }
+
+  private def stateName(value: InterviewCleanupState): String = value match {
+    case InterviewCleanupState.Pending              => "Pending"
+    case InterviewCleanupState.ProducersFenced      => "ProducersFenced"
+    case InterviewCleanupState.MongoPurged          => "MongoPurged"
+    case InterviewCleanupState.AwaitingRetention(_) => "AwaitingRetention"
+    case InterviewCleanupState.Complete(_)          => "Complete"
+  }
+
+  private def guard[A](operation: String)(effect: RepositoryIO[A]): RepositoryIO[A] =
+    MongoRepositorySupport.repositoryGuard(diagnostics, operation)(effect)(_ => Left(RepositoryError.Unavailable))
+
+  override def absent(subject: UserId): RepositoryIO[Boolean] = guard("interviewCleanup.absent") {
+    hasAttributableData(subject, None).map(value => !value)
+  }
+
+  override def purge(subject: UserId): RepositoryIO[Unit] = guard("interviewCleanup.purge") {
+    RepositoryIO.lift(purgeData(subject.value.toString))
+  }
 
   private def subjectFilter(subject: String): MongoFilter = MongoFilter.or(
     MongoFilter.eq("initiatedBy", subject),
@@ -143,10 +230,15 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO]) {
     MongoFilter.eq("recruiterId", subject),
     MongoFilter.eq("recipientId", subject),
     MongoFilter.eq("subjectIds", subject),
-    MongoFilter.eq("participants", subject)
+    MongoFilter.eq("participants", subject),
+    // Request receipts retain their initiating subject in this existing intrinsic identity after workflow TTL.
+    MongoFilter.and(
+      MongoFilter.gte(MongoFields.Id, s"request:$subject:"),
+      MongoFilter.lt(MongoFields.Id, s"request:$subject;")
+    )
   )
 
-  private def purge(subject: String): IO[Unit] = {
+  private def purgeData(subject: String): IO[Unit] = {
     val subjectPredicate = subjectFilter(subject)
     def batch: IO[Unit] = List(
       MongoCollections.InterviewWorkflows,
@@ -159,7 +251,11 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO]) {
         .map(_.toList)
     ).map(_.flatten)
       .flatMap { found =>
-        val ids = found.toList.flatMap(row => Option(row.getString("workflowId")).orElse(Option(row.getString("_id"))))
+        val ids = found.toList.flatMap(row =>
+          Option(row.getString("workflowId"))
+            .orElse(Option(row.getString("requestWorkflowId")))
+            .orElse(Option(row.getString("_id")))
+        )
         if (ids.isEmpty) IO.unit
         else {
           val byWorkflow = MongoFilter.or(MongoFilter.in("workflowId", ids), subjectPredicate)
@@ -198,24 +294,69 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO]) {
         .void
   }
 
-  def resource(
-      drain: FiniteDuration,
-      capture: IO[List[Document]],
-      passed: List[Document] => IO[Boolean],
-      diagnostics: Diagnostics
-  ): Resource[IO, Unit] =
-    Resource
-      .make(
-        fs2.Stream
-          .repeatEval(
-            runOnce(drain, capture, passed).handleErrorWith(error =>
-              diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
-            )
-          )
-          .metered(1.second)
-          .compile
-          .drain
-          .start
-      )(_.cancel)
-      .void
+}
+
+private[mongo] object MongoInterviewCleanupCodec {
+  private val ProducerIdsField = "interviewTransactionalIds"
+
+  def decode(row: Document): Either[RepositoryError, InterviewSubjectCleanup] = for {
+    id <- string(row, MongoFields.Id).flatMap(value =>
+      Either
+        .catchNonFatal(UUID.fromString(value))
+        .leftMap(_ => RepositoryError.InvalidStoredData)
+        .flatMap(id => Either.cond(id.toString == value, id, RepositoryError.InvalidStoredData))
+    )
+    revision <- long(row, "revision")
+    requested <- instant(row, "requestedAt")
+    ids <- stringVector(row, ProducerIdsField)
+    name <- string(row, "state")
+    state <- name match {
+      case "Pending"           => Right(InterviewCleanupState.Pending)
+      case "ProducersFenced"   => Right(InterviewCleanupState.ProducersFenced)
+      case "MongoPurged"       => Right(InterviewCleanupState.MongoPurged)
+      case "AwaitingRetention" => barriers(row).map(InterviewCleanupState.AwaitingRetention.apply)
+      case "Complete"          => instant(row, "completedAt").map(InterviewCleanupState.Complete.apply)
+      case _                   => Left(RepositoryError.InvalidStoredData)
+    }
+    value <- InterviewSubjectCleanup
+      .validate(InterviewSubjectCleanup(UserId(id), revision, requested, ids, state))
+      .leftMap(_ => RepositoryError.InvalidStoredData)
+  } yield value
+
+  private def barriers(row: Document): Either[RepositoryError, Vector[InterviewRetentionBarrier]] =
+    Option(row.get("barriers"))
+      .collect { case values: java.util.List[?] => values.asScala.toVector }
+      .toRight(RepositoryError.InvalidStoredData)
+      .flatMap(_.traverse {
+        case document: Document =>
+          for {
+            topic <- string(document, "topic")
+            partition <- Option(document.get("partition"))
+              .collect { case number: java.lang.Integer => number.intValue() }
+              .toRight(RepositoryError.InvalidStoredData)
+            offset <- long(document, "endOffset")
+          } yield InterviewRetentionBarrier(topic, partition, offset)
+        case _ => Left(RepositoryError.InvalidStoredData)
+      })
+
+  private def string(row: Document, field: String): Either[RepositoryError, String] =
+    Option(row.get(field)).collect { case value: String => value }.toRight(RepositoryError.InvalidStoredData)
+
+  private def long(row: Document, field: String): Either[RepositoryError, Long] =
+    Option(row.get(field))
+      .collect { case value: java.lang.Long => value.longValue() }
+      .toRight(RepositoryError.InvalidStoredData)
+
+  private def instant(row: Document, field: String): Either[RepositoryError, Instant] =
+    Option(row.get(field)).collect { case value: Date => value.toInstant }.toRight(RepositoryError.InvalidStoredData)
+
+  def stringVector(row: Document, field: String): Either[RepositoryError, Vector[String]] =
+    Option(row.get(field))
+      .collect { case values: java.util.List[?] => values.asScala.toVector }
+      .toRight(RepositoryError.InvalidStoredData)
+      .flatMap(_.traverse {
+        case value: String => Right(value)
+        case _             => Left(RepositoryError.InvalidStoredData)
+      })
+
 }
