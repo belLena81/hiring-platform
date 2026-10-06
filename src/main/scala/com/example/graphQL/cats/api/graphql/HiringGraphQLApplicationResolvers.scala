@@ -60,8 +60,7 @@ private[graphql] object HiringGraphQLApplicationResolvers {
             cursor => CursorCodec.decode[ApplicationEventCursor](cursor, now)
           )
         )
-        _ <- raiseOnUseCaseError(hiring.readModel.canViewApplication(actor, applicationId))
-        values <- raiseOnUseCaseError(hiring.readModel.applicationHistory(applicationId, pageRequest))
+        values <- raiseOnUseCaseError(hiring.readModel.applicationHistory(actor, applicationId, pageRequest))
       } yield eventConnection(values, requested, now)
     }
 

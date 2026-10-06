@@ -56,7 +56,12 @@ object TestGraphQLSupport {
       def jobs(ids: List[JobId]) = unsupported
       def application(id: ApplicationId) = unsupported
       def canViewApplication(actor: ActorContext, applicationId: ApplicationId) = unsupported
-      def applicationHistory(applicationId: ApplicationId, page: ApplicationEventPageRequest) = unsupported
+      def relatedUsers(actor: ActorContext, keys: List[com.example.graphQL.cats.service.read.UserRelationKey]) =
+        unsupported
+      def relatedJobs(actor: ActorContext, keys: List[com.example.graphQL.cats.service.read.JobRelationKey]) =
+        unsupported
+      def applicationHistory(actor: ActorContext, applicationId: ApplicationId, page: ApplicationEventPageRequest) =
+        unsupported
     },
     new JobUseCases {
       def createJob(request: IdempotencyRequest, actor: ActorContext, input: CreateJobInput) = unsupported

@@ -6,7 +6,6 @@ import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.domain.model.{
-  AccountStatus,
   CandidateAvailabilityStatus,
   EntityEmbedding,
   JobStatus,
@@ -16,6 +15,7 @@ import com.example.graphQL.cats.domain.model.{
   UserRole
 }
 import com.example.graphQL.cats.service.auth.ActorAuthorization
+import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseIO, UseCaseIO as UseCase}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.pagination.PageSize
@@ -154,7 +154,7 @@ final class SemanticSearchService(
           case value => Right(value)
         }
       )
-      _ <- UseCase.fromEither(validateCandidateFilters(filters))
+      parsedFilters <- UseCase.fromEither(validateCandidateFilters(filters))
       results <- job.embedding match {
         case Some(embedding)
             if embedding.meta.model == embeddingModel &&
@@ -180,7 +180,7 @@ final class SemanticSearchService(
                     )
                   )
                 ).flatMap(values =>
-                  validateCandidateHits(actor, jobId, embedding.meta, filters, values).map(values =>
+                  validateCandidateHits(actor, jobId, embedding.meta, parsedFilters, values).map(values =>
                     values
                       .take(first.value)
                       .map(value =>
@@ -193,7 +193,7 @@ final class SemanticSearchService(
               )
             case None =>
               vectorSearch(search.candidateMatches(query)).flatMap(values =>
-                validateCandidateHits(actor, jobId, embedding.meta, filters, values).map(values =>
+                validateCandidateHits(actor, jobId, embedding.meta, parsedFilters, values).map(values =>
                   values
                     .take(first.value)
                     .map(value =>
@@ -233,23 +233,21 @@ final class SemanticSearchService(
         )
         .flatMap { _ =>
           val ids = hits.map(_.job.id).distinct
-          searchRead(jobs.findMany(ids)).map { currentJobs =>
-            val byId = currentJobs.iterator.map(job => job.id -> job).toMap
-            hits.flatMap { hit =>
-              byId
-                .get(hit.job.id)
-                .filter { job =>
-                  job.status == JobStatus.Open &&
-                  job.embedding.exists(embedding =>
-                    embedding.meta == hit.meta &&
-                      embedding.meta.model == embeddingModel &&
-                      embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job))
-                  ) &&
-                  filter.city.forall(_ == job.location.city) &&
-                  filter.skills.subsetOf(job.skills) &&
-                  filter.createdAfter.forall(after => !job.createdAt.isBefore(after))
-                }
-                .map(job => hit.copy(job = job))
+          UseCase.fromEither(HiringReadScope.validated(actor, currentActor, authorization)).flatMap { scope =>
+            searchRead(
+              search.authorizedJobEligibility(
+                scope,
+                ids,
+                expectedActorEmbedding.map(_ => CandidateSearchEligibility.fromUser(currentActor))
+              )
+            ).map { currentJobs =>
+              val byId = currentJobs.iterator.map(value => value.job.id -> value).toMap
+              hits.flatMap { hit =>
+                byId
+                  .get(hit.job.id)
+                  .filter(value => SearchEligibilityPolicy.job(value, hit.meta, embeddingModel, filter))
+                  .map(value => hit.copy(job = value.job))
+              }
             }
           }
         }
@@ -259,7 +257,7 @@ final class SemanticSearchService(
       actor: ActorContext,
       jobId: JobId,
       queryMeta: com.example.graphQL.cats.domain.model.EmbeddingMeta,
-      filters: CandidateMatchFilters,
+      filters: CandidateEligibilityFilters,
       hits: List[RankedCandidate]
   ): UseCaseIO[List[RankedCandidate]] =
     for {
@@ -288,37 +286,27 @@ final class SemanticSearchService(
           UseCaseError.Search(SearchError.StaleEmbedding("job"))
         )
       )
-      currentUsers <- searchRead(users.findMany(hits.map(_.candidate.id).distinct))
+      scope <- UseCase.fromEither(HiringReadScope.validated(actor, currentActor, authorization))
+      currentUsers <- searchRead(
+        search.authorizedCandidateEligibility(
+          scope,
+          JobSearchEligibility.fromJob(currentJob),
+          hits.map(_.candidate.id).distinct
+        )
+      )
     } yield {
       val byId = currentUsers.iterator.map(user => user.id -> user).toMap
       hits.flatMap { hit =>
         byId
           .get(hit.candidate.id)
-          .filter { user =>
-            user.role == UserRole.Candidate && user.accountStatus == AccountStatus.Active &&
-            user.candidateProfile.exists { profile =>
-              val metadataIsCurrent = user.embedding.exists(embedding =>
-                embedding.meta == hit.meta && embedding.meta.model == embeddingModel &&
-                  embedding.meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
-              )
-              val publicMatch =
-                filters.requiredSkills.forall(required => profile.skills.exists(_.trim.equalsIgnoreCase(required.trim)))
-              val privateMatch = !profile.recruiterSearchOptIn || (
-                filters.countryCanonical
-                  .forall(value => profile.currentResidence.exists(_.country.trim.equalsIgnoreCase(value.trim))) &&
-                  filters.cityCanonical.forall(value =>
-                    profile.currentResidence.flatMap(_.city).exists(_.trim.equalsIgnoreCase(value.trim))
-                  ) &&
-                  filters.availabilityStatus.forall(value => profile.availabilityStatus.exists(_.toString == value))
-              )
-              metadataIsCurrent && publicMatch && privateMatch
-            }
-          }
+          .filter(value => SearchEligibilityPolicy.candidate(value, hit.meta, embeddingModel, filters))
           .map(_ => hit)
       }
     }
 
-  private def validateCandidateFilters(filters: CandidateMatchFilters): Either[UseCaseError, Unit] =
+  private def validateCandidateFilters(
+      filters: CandidateMatchFilters
+  ): Either[UseCaseError, CandidateEligibilityFilters] =
     val validSkills = filters.requiredSkills.size <= 100 && filters.requiredSkills.forall(skill =>
       skill.trim.nonEmpty && skill.trim.length <= 256
     )
@@ -333,7 +321,13 @@ final class SemanticSearchService(
       Left(UseCaseError.Search(SearchError.InvalidFilter("residence")))
     else if (!validAvailability)
       Left(UseCaseError.Search(SearchError.InvalidFilter("availabilityStatus")))
-    else Right(())
+    else
+      Right(
+        CandidateEligibilityFilters(
+          filters,
+          filters.availabilityStatus.flatMap(value => CandidateAvailabilityStatus.values.find(_.toString == value))
+        )
+      )
 
   private def resolveCandidate(actor: ActorContext): UseCaseIO[User] =
     authorization.resolve(actor).subflatMap { user =>

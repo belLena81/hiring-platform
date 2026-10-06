@@ -249,3 +249,7 @@ Operational (MongoDB, low-latency GraphQL) and analytical workloads are kept sep
 6. Domain modeling & state transitions
 7. Vector & hybrid semantic search
 8. Practical RAG/AI integration
+
+### MongoDB and retrieval evidence
+
+Phase 8 now includes scoped application/history and nested reads, minimized authoritative search eligibility, ordinary index verification/recovery tests and a reproducible local operational baseline. The [Phase 8 specification](docs/specs/mongodb-vector-retrieval-optimization.md) records criterion-level results and the [first iteration latency plan](docs/specs/mongodb-vector-retrieval-optimization.md#first-iteration-latency-plan). Generated evidence stays in ignored `.local/data/`. Actual Atlas branch execution and paired ANN/exact measurements require secure `ATLAS_TEST_URI`; missing access and skipped live tests are blocked gates. These local changes do not close measured optimization acceptance or later embedding architecture work.

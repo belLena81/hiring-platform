@@ -38,3 +38,13 @@ Detailed query, index, stale-result and verification requirements belong to [Mon
 - Compare before/after query plans, examined/returned counts where available, p50/p95/p99, throughput, errors, index write/storage overhead and provider token/request cost. Require independent review and real search-capable integration evidence, including stale embeddings, deletion/consent changes and provider outage recovery. No Atlas provisioning, paid benchmark or index replacement is authorized by this roadmap.
 
 The tuning options follow MongoDB's [vector query documentation](https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-search-stage/) and [quantization guidance](https://www.mongodb.com/docs/atlas/atlas-vector-search/vector-quantization/). Verify capabilities against the actual deployment at implementation time.
+
+## Current bounded authorization and eligibility reads
+
+Operational application/history queries use a validated `HiringReadScope` and check the persisted active actor together with authorized parent selection inside MongoDB. Recruiter application queries select the owned job before joining applications; history selects the authorized application before events. Nested keys carry parent and related IDs and use request-local fetchers. Candidate access to a closed historical job/recruiter requires that candidate’s own application relationship.
+
+Search services retain typed input and current actor/query-entity prechecks. The final eligibility selection independently gates the active actor and, for candidate matching, the owned open job and its source/embedding snapshot. Recommendation selection also gates the current candidate query source. Hit IDs are distinct and bounded by the branch-result budget; inclusion projections exclude embedding vectors and candidate email/resume references. Pure eligibility policy compares current source hashes, metadata, status, consent and supplied filters, preserving surviving rank before final `first` truncation.
+
+The local operational baseline suite records production command shapes/counts and sanitized execution statistics at concurrency 1 and 8 under `.local/data/mongodb-access-evaluation/`. Full operational document hydration remains explicitly recorded where retained. Explain index names include winning and rejected plans; resource and vector-index telemetry is marked unavailable. Ordinary index setup verifies ordered keys, unique/sparse/partial/TTL definitions, preserves integrity indexes on mismatch, and supports repeated/interrupted execution.
+
+See the [Phase 8 evidence specification](specs/mongodb-vector-retrieval-optimization.md) for current verification and deferred Atlas/performance gates; this architecture description alone is not runtime acceptance.

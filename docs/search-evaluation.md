@@ -31,3 +31,15 @@ The application continues to write Voyage embeddings through its durable work qu
 ## Current evidence
 
 `SearchEvaluationMetrics` implements Recall@K and NDCG@K for offline run analysis. The recorded evidence contains no authorized live Atlas benchmark or Automated Embedding run. It establishes no live latency, recall, throughput, resource, or cost result; verify environment availability before any newly authorized benchmark.
+
+## Production hiring retrieval gate
+
+The opt-in `AtlasHiringSearchIntegrationSpec` uses a fresh `search_evaluation_hiring_` nonce database and fabricated hiring vectors. It exercises the production vector and application RRF branches, consent true/false/absent, missing private fields, inactive accounts, model/skill predicates, bounded eligibility projections and production service validation. Separate native rank/score fusion and reranking tests are capability gates: unsupported stages fail their gate rather than selecting a fallback. Setup verifies definitions and readiness for all four job/candidate vector/lexical indexes.
+
+```bash
+sbt 'IntegrationTest / testOnly com.example.graphQL.cats.repository.mongo.AtlasHiringSearchIntegrationSpec'
+```
+
+Configure `ATLAS_TEST_URI` securely before this explicit gate. Its absence skips the live tests and remains blocked acceptance, even when the ordinary local integration suite succeeds. Each test drops only its own nonce database, including on failure or cancellation. Initial ingestion polling is separate from the synchronized post-retrieval Mongo closure check; that check does not prove observed asynchronous Atlas index lag. A separate 30-second bounded observation records whether a stale hit and its later removal were observed in `.local/data/search-evaluation/closure-lag-*.json`; immediate removal or timeout leaves that lag gate open. Actual native execution and index-lag observation remain open until actual supported deployment runs supply evidence.
+
+The [first iteration latency plan](specs/mongodb-vector-retrieval-optimization.md#first-iteration-latency-plan) defines concurrency 1/8, `k=7`, 20 paired queries, first-pass/warmup reporting and telemetry limits. Numerical optimization targets will be proposed from the baseline and agreed before adoption.

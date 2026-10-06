@@ -98,7 +98,10 @@ trait MutationReceiptRepository {
   ): RepositoryIO[MutationReceiptExecution[A, E]]
 }
 
+import com.example.graphQL.cats.service.read.*
+
 trait UserRepository {
+  def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]]
   def find(id: UserId): RepositoryIO[Option[User]]
   def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]]
   def findMany(ids: List[UserId]): RepositoryIO[List[User]]
@@ -255,6 +258,7 @@ object AnalyticsReportSnapshotPublisher {
 }
 
 trait JobRepository {
+  def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]]
   def find(id: JobId): RepositoryIO[Option[Job]]
   def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]]
   def findMany(ids: List[JobId]): RepositoryIO[List[Job]]
@@ -329,6 +333,21 @@ enum EmbeddingError {
   * size.
   */
 trait SemanticSearchRepository {
+  def authorizedJobEligibility(
+      scope: com.example.graphQL.cats.service.read.HiringReadScope,
+      ids: List[JobId],
+      queryCandidate: Option[com.example.graphQL.cats.service.search.CandidateSearchEligibility]
+  ): RepositoryIO[List[com.example.graphQL.cats.service.search.JobSearchEligibility]]
+  def authorizedCandidateEligibility(
+      scope: com.example.graphQL.cats.service.read.HiringReadScope,
+      queryJob: com.example.graphQL.cats.service.search.JobSearchEligibility,
+      ids: List[UserId]
+  ): RepositoryIO[List[com.example.graphQL.cats.service.search.CandidateSearchEligibility]]
+
+  def jobEligibility(ids: List[JobId]): RepositoryIO[List[com.example.graphQL.cats.service.search.JobSearchEligibility]]
+  def candidateEligibility(
+      ids: List[UserId]
+  ): RepositoryIO[List[com.example.graphQL.cats.service.search.CandidateSearchEligibility]]
   def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
   def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
   def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]]
@@ -431,9 +450,10 @@ object SearchSessionRepository {
 
 trait ApplicationRepository {
   def find(id: ApplicationId): RepositoryIO[Option[Application]]
-  def findByCandidate(candidateId: UserId, page: ApplicationPageRequest): RepositoryIO[List[Application]]
-  def findByJob(jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]]
+  def findByCandidate(scope: HiringReadScope, page: ApplicationPageRequest): RepositoryIO[List[Application]]
+  def findByJob(scope: HiringReadScope, jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]]
   def history(
+      scope: HiringReadScope,
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
   ): RepositoryIO[List[ApplicationEvent]]

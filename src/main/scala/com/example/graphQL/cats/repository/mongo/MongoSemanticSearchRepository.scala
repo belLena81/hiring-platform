@@ -3,12 +3,13 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.parse as parseIdentifier
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO, SemanticSearchRepository}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.service.search.*
+import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.Filters
 import mongo4cats.database.MongoDatabase
@@ -39,6 +40,142 @@ final class MongoSemanticSearchRepository(
       if (values.size > maximum) IO.raiseError(new IllegalStateException("Mongo result exceeded configured limit"))
       else IO.pure(values)
     }
+
+  private def metadataFilter(meta: EmbeddingMeta): Bson = Filters.and(
+    Filters.eq(MongoFields.EmbeddingMetaModel, meta.model),
+    Filters.eq(s"${MongoFields.EmbeddingMeta}.${MongoFields.SourceHash}", meta.sourceHash),
+    Filters.eq(s"${MongoFields.EmbeddingMeta}.${MongoFields.UpdatedAt}", java.util.Date.from(meta.updatedAt))
+  )
+
+  override def authorizedJobEligibility(
+      scope: HiringReadScope,
+      ids: List[JobId],
+      queryCandidate: Option[CandidateSearchEligibility]
+  ): RepositoryIO[List[JobSearchEligibility]] = {
+    val queryGate = queryCandidate.toList.flatMap { candidate =>
+      (candidate.profile, candidate.metadata) match {
+        case (Some(profile), Some(meta)) =>
+          List(
+            MongoAuthorizedReadQueries.matching(
+              Filters.and(
+                metadataFilter(meta),
+                Filters.eq(MongoFields.ProfileSkills, profile.skills.toList.sorted.asJava),
+                Filters.eq(MongoFields.ProfileExperienceSummary, profile.experienceSummary.orNull)
+              )
+            )
+          )
+        case _ => List(MongoAuthorizedReadQueries.matching(Filters.expr(new Document("$eq", List(1, 0).asJava))))
+      }
+    }
+    authorizedEligibility(
+      MongoCollections.Users,
+      ids.map(_.value.toString),
+      List(
+        MongoAuthorizedReadQueries.matching(
+          Filters.and(
+            Filters.eq(MongoFields.Id, scope.userId.value.toString),
+            Filters.eq(MongoFields.Role, UserRole.Candidate.toString)
+          )
+        )
+      ) ++
+        MongoAuthorizedReadQueries.actor(scope) ++ queryGate,
+      MongoCollections.Jobs,
+      MongoSearchEligibilityCodecs.jobFields
+    )(MongoSearchEligibilityCodecs.job)
+  }
+
+  override def authorizedCandidateEligibility(
+      scope: HiringReadScope,
+      queryJob: JobSearchEligibility,
+      ids: List[UserId]
+  ): RepositoryIO[List[CandidateSearchEligibility]] = {
+    val source = queryJob.job
+    val embeddingGate =
+      queryJob.metadata.map(metadataFilter).getOrElse(Filters.expr(new Document("$eq", List(1, 0).asJava)))
+    val parentGate = Filters.and(
+      Filters.eq(MongoFields.Id, source.id.value.toString),
+      MongoAuthorizedReadQueries.managedJob(scope),
+      Filters.eq(MongoFields.Status, JobStatus.Open.toString),
+      embeddingGate,
+      Filters.eq(MongoFields.Title, source.title),
+      Filters.eq(MongoFields.Description, source.description),
+      Filters.eq(MongoFields.Requirements, source.requirements.asJava),
+      Filters.eq(MongoFields.Skills, source.skills.toList.sorted.asJava)
+    )
+    authorizedEligibility(
+      MongoCollections.Jobs,
+      ids.map(_.value.toString),
+      List(MongoAuthorizedReadQueries.matching(parentGate)) ++ MongoAuthorizedReadQueries.actor(scope),
+      MongoCollections.Users,
+      MongoSearchEligibilityCodecs.candidateFields
+    )(MongoSearchEligibilityCodecs.candidate)
+  }
+
+  private def authorizedEligibility[A](
+      parentCollection: String,
+      ids: List[String],
+      parentGate: List[Document],
+      selectedCollection: String,
+      fields: List[String]
+  )(decode: Document => Either[RepositoryError, A]): RepositoryIO[List[A]] = {
+    val selected = ids.distinct
+    if (selected.size > branchLimit) RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+    else if (selected.isEmpty) RepositoryIO.fromEither(Right(Nil))
+    else
+      MongoRepositorySupport.repositoryGuard(diagnostics, "semanticSearch.authorizedEligibility") {
+        val child = List(
+          MongoAuthorizedReadQueries.matching(Filters.in(MongoFields.Id, selected.asJava)),
+          new Document("$limit", selected.size),
+          new Document("$project", MongoSearchEligibilityCodecs.projection(fields))
+        )
+        val pipeline = parentGate ++ List(
+          new Document(
+            "$lookup",
+            new Document("from", selectedCollection)
+              .append("pipeline", child.asJava)
+              .append("as", "eligibleHits")
+          ),
+          MongoAuthorizedReadQueries.unwind("eligibleHits"),
+          MongoAuthorizedReadQueries.replace("eligibleHits")
+        )
+        RepositoryIO
+          .lift(Mongo4catsCollections.documents(database, parentCollection).flatMap { collection =>
+            collectWithin(collection.aggregate[Document](pipeline).boundedStream(32), selected.size)
+          })
+          .subflatMap(_.traverse(decode))
+      }(_ => Left(RepositoryError.Unavailable))
+  }
+
+  override def jobEligibility(ids: List[JobId]): RepositoryIO[List[JobSearchEligibility]] =
+    eligibility(MongoCollections.Jobs, ids.map(_.value.toString), MongoSearchEligibilityCodecs.jobFields)(
+      MongoSearchEligibilityCodecs.job
+    )
+
+  override def candidateEligibility(ids: List[UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
+    eligibility(MongoCollections.Users, ids.map(_.value.toString), MongoSearchEligibilityCodecs.candidateFields)(
+      MongoSearchEligibilityCodecs.candidate
+    )
+
+  private def eligibility[A](collection: String, ids: List[String], fields: List[String])(
+      decode: Document => Either[RepositoryError, A]
+  ): RepositoryIO[List[A]] = {
+    val selected = ids.distinct
+    if (selected.size > branchLimit) RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+    else if (selected.isEmpty) RepositoryIO.fromEither(Right(Nil))
+    else
+      MongoRepositorySupport.repositoryGuard(diagnostics, "semanticSearch.eligibility") {
+        RepositoryIO
+          .lift(Mongo4catsCollections.documents(database, collection).flatMap { source =>
+            val pipeline = List(
+              new Document("$match", new Document(MongoFields.Id, new Document("$in", selected.asJava))),
+              new Document("$limit", selected.size),
+              new Document("$project", MongoSearchEligibilityCodecs.projection(fields))
+            )
+            collectWithin(source.aggregate[Document](pipeline).boundedStream(32), selected.size)
+          })
+          .subflatMap(_.traverse(decode))
+      }(_ => Left(RepositoryError.Unavailable))
+  }
 
   override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
     rankedJobs(query, query.filter)

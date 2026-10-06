@@ -15,7 +15,7 @@ import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.mongodb.MongoWriteException
+import com.mongodb.{MongoException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts}
 import scala.jdk.CollectionConverters.*
 import java.time.Instant
@@ -155,6 +155,18 @@ private[mongo] object MongoRepositorySupport {
     result.handleErrorWith { error =>
       reportFailure(diagnostics, operation, error).as(map(error))
     }
+
+  /** Preserve retry labels within an active transaction; the owning runner sanitizes final failure. */
+  def transactionGuard[A](
+      diagnostics: Diagnostics,
+      operation: String,
+      session: Option[ClientSession[IO]]
+  )(result: RepositoryIO[A])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
+    RepositoryIO.fromIOEither(result.value.handleErrorWith {
+      case error: MongoException if session.nonEmpty && error.hasErrorLabel("TransientTransactionError") =>
+        IO.raiseError(error)
+      case error => reportFailure(diagnostics, operation, error).as(map(error))
+    })
 
   def repositoryGuard[A](
       diagnostics: Diagnostics,

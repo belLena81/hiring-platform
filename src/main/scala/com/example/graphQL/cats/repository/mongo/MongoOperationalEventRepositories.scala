@@ -287,7 +287,7 @@ final class MongoOperationalEventOutboxRepository(
           case None        => RepositoryIO.fromEither(Right(None))
           case Some(claim) =>
             subjectIsDeleted(session, claim).flatMap {
-              case true  => RepositoryIO.lift(suppressDeletedClaim(session, claim, now)).as(None)
+              case true  => suppressDeletedClaim(session, claim, now).as(None)
               case false => acquireSubjectLeases(session, claim, transactionalId, now, leaseUntil).as(Some(claim))
             }
         }
@@ -324,7 +324,7 @@ final class MongoOperationalEventOutboxRepository(
         .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id))
         .returnDocument(ReturnDocument.AFTER)
       MongoRepositorySupport
-        .repositoryGuard(diagnostics, "outbox.claimOne")(
+        .transactionGuard(diagnostics, "outbox.claimOne", session)(
           RepositoryIO
             .lift(
               outbox
@@ -365,7 +365,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoUpdate.addToSet(MongoFields.TransactionalIds, transactionalId)
       )
       MongoRepositorySupport
-        .repositoryGuard(diagnostics, "outbox.acquireSubjectLease")(
+        .transactionGuard(diagnostics, "outbox.acquireSubjectLease", session)(
           RepositoryIO
             .lift(
               subjectFences
@@ -399,7 +399,7 @@ final class MongoOperationalEventOutboxRepository(
       MongoFilter.eq(MongoFields.AccountStatus, "Deleted")
     )
     MongoRepositorySupport
-      .repositoryGuard(diagnostics, "outbox.subjectIsDeleted")(
+      .transactionGuard(diagnostics, "outbox.subjectIsDeleted", session)(
         RepositoryIO
           .lift(
             MongoSessionOperations
@@ -413,7 +413,7 @@ final class MongoOperationalEventOutboxRepository(
       session: Option[ClientSession[IO]],
       claim: ClaimedOperationalEvent,
       now: Instant
-  ): IO[Unit] = {
+  ): RepositoryIO[Unit] = {
     val filter = MongoFilter.and(
       MongoFilter.eq(MongoFields.Id, claim.event.eventId.toString),
       MongoFilter.eq(MongoFields.State, "InFlight"),
@@ -427,14 +427,12 @@ final class MongoOperationalEventOutboxRepository(
       MongoUpdate.unset(MongoFields.LeaseToken),
       MongoUpdate.unset(MongoFields.LeaseUntil)
     )
-    MongoRepositorySupport.guard(diagnostics, "outbox.suppressDeletedClaim")(
-      MongoSessionOperations
-        .updateOne(outbox, session, filter, update)
-        .flatMap {
-          case Some(result) if result.getMatchedCount == 1L => IO.unit
-          case _ => IO.raiseError(new IllegalStateException("could not suppress deleted-subject outbox event"))
-        }
-    )(_ => ())
+    MongoRepositorySupport.transactionGuard(diagnostics, "outbox.suppressDeletedClaim", session)(
+      RepositoryIO.lift(MongoSessionOperations.updateOne(outbox, session, filter, update)).subflatMap {
+        case Some(result) if result.getMatchedCount == 1L => Right(())
+        case _                                            => Left(RepositoryError.Conflict)
+      }
+    )(_ => Left(RepositoryError.Unavailable))
   }
 
   private def releaseSubjectLeases(leaseToken: String): RepositoryIO[Unit] =

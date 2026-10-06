@@ -179,8 +179,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      users = ServiceFixtures.InMemoryUsers(usersRef)
-      jobs = ServiceFixtures.InMemoryJobs(jobsRef)
+      users = ServiceFixtures.InMemoryUsers(
+        usersRef,
+        Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
+      )
+      jobs = ServiceFixtures.InMemoryJobs(
+        jobsRef,
+        relationLookup = Some(ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
@@ -250,8 +256,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       eventsRef <- Ref.of[IO, Vector[com.example.graphQL.cats.domain.model.ApplicationEvent]](Vector.empty)
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Ready) }
-      users = ServiceFixtures.InMemoryUsers(usersRef)
-      jobs = ServiceFixtures.InMemoryJobs(jobsRef)
+      users = ServiceFixtures.InMemoryUsers(
+        usersRef,
+        Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
+      )
+      jobs = ServiceFixtures.InMemoryJobs(
+        jobsRef,
+        relationLookup = Some(ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
@@ -306,8 +318,14 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       createErrorRef <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
       setupChecks <- Ref.of[IO, Int](0)
       probe = new DatabaseProbe { def check: IO[ProbeResult] = IO.pure(ProbeResult.Unavailable) }
-      users = ServiceFixtures.InMemoryUsers(usersRef)
-      jobs = ServiceFixtures.InMemoryJobs(jobsRef)
+      users = ServiceFixtures.InMemoryUsers(
+        usersRef,
+        Some(ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
+      )
+      jobs = ServiceFixtures.InMemoryJobs(
+        jobsRef,
+        relationLookup = Some(ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
       applications = ServiceFixtures.InMemoryApplications(applicationsRef, eventsRef, createErrorRef)
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),

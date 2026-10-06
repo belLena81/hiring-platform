@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.IO
 import cats.data.EitherT
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
@@ -15,6 +15,8 @@ import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 
 import java.util.Date
+import org.bson.Document
+import com.example.graphQL.cats.service.read.HiringReadScope
 
 final class MongoApplicationRepository private (
     database: MongoDatabase[IO],
@@ -39,21 +41,60 @@ final class MongoApplicationRepository private (
       }(_ => Left(RepositoryError.Unavailable))
 
   override def findByCandidate(
-      candidateId: UserId,
+      scope: HiringReadScope,
       page: ApplicationPageRequest
-  ): RepositoryIO[List[Application]] =
-    findMany(baseFilter(MongoFields.CandidateId, candidateId.value.toString, page), page)
+  ): RepositoryIO[List[Application]] = {
+    import MongoAuthorizedReadQueries.*
+    if (scope.role != UserRole.Candidate) RepositoryIO.fromEither(Right(Nil))
+    else {
+      val pipeline = List(matching(baseFilter(MongoFields.CandidateId, scope.userId.value.toString, page).bson)) ++
+        actor(scope) ++ List(new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)))
+      documents(database, MongoCollections.Applications, pipeline, page.pageSize.value, diagnostics)
+        .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readApplication)))
+    }
+  }
 
-  override def findByJob(jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]] =
-    findMany(baseFilter(MongoFields.JobId, jobId.value.toString, page), page)
+  override def findByJob(
+      scope: HiringReadScope,
+      jobId: JobId,
+      page: ApplicationPageRequest
+  ): RepositoryIO[List[Application]] = {
+    import MongoAuthorizedReadQueries.*
+    val inner = List(
+      matching(baseFilter(MongoFields.JobId, jobId.value.toString, page).bson),
+      new Document("$sort", new Document(MongoFields.CreatedAt, -1).append(MongoFields.Id, -1)),
+      new Document("$limit", page.pageSize.value)
+    )
+    val pipeline = List(matching(Filters.and(Filters.eq(MongoFields.Id, jobId.value.toString), managedJob(scope)))) ++
+      actor(scope) ++ List(
+        lookup(MongoCollections.Applications, MongoFields.Id, MongoFields.JobId, "selected", inner),
+        unwind("selected"),
+        replace("selected")
+      )
+    documents(database, MongoCollections.Jobs, pipeline, page.pageSize.value, diagnostics)
+      .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readApplication)))
+  }
 
   override def history(
+      scope: HiringReadScope,
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
-  ): RepositoryIO[List[ApplicationEvent]] =
-    MongoKeysetPaging.page(events, eventFilter(applicationId, page), MongoFields.OccurredAt, page.pageSize)(
-      MongoHiringCodecs.readEvent
-    )(diagnostics)
+  ): RepositoryIO[List[ApplicationEvent]] = {
+    import MongoAuthorizedReadQueries.*
+    val inner = List(
+      matching(eventFilter(applicationId, page).bson),
+      new Document("$sort", new Document(MongoFields.OccurredAt, -1).append(MongoFields.Id, -1)),
+      new Document("$limit", page.pageSize.value)
+    )
+    val pipeline = List(matching(Filters.eq(MongoFields.Id, applicationId.value.toString))) ++ actor(scope) ++
+      applicationAccess(scope) ++ List(
+        lookup(MongoCollections.ApplicationEvents, MongoFields.Id, MongoFields.ApplicationId, "selected", inner),
+        unwind("selected"),
+        replace("selected")
+      )
+    documents(database, MongoCollections.Applications, pipeline, page.pageSize.value, diagnostics)
+      .subflatMap(values => MongoStoredDocumentDecoding.values(values.map(MongoHiringCodecs.readEvent)))
+  }
 
   override def createForOpenJob(
       observedJob: Versioned[Job],
@@ -146,14 +187,6 @@ final class MongoApplicationRepository private (
       }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
       _ <- insertOperationalEvents(outbox, session, operationalEvents, application.updatedAt, diagnostics)
     } yield ()
-
-  private def findMany(
-      filter: MongoFilter,
-      page: ApplicationPageRequest
-  ): RepositoryIO[List[Application]] =
-    MongoKeysetPaging.page(collection, filter, MongoFields.CreatedAt, page.pageSize)(MongoHiringCodecs.readApplication)(
-      diagnostics
-    )
 
   private def baseFilter(field: String, id: String, page: ApplicationPageRequest): MongoFilter = {
     val statusFilter = page.status.map(status => MongoFilter.eq(MongoFields.Status, status.toString))

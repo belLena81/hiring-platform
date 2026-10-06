@@ -737,4 +737,241 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
       Some(UserProfile.Recruiter(RecruiterProfile("Hiring Co", Some("Lead Recruiter")))),
       now
     )
+  test("authorized application selection preserves tied pagination and rejects changed relationships") {
+    import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus}
+    import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, ApplicationEventId}
+    import com.example.graphQL.cats.domain.pagination.*
+    import com.example.graphQL.cats.service.{ActorContext, HiringReadService}
+    import com.example.graphQL.cats.service.auth.ActorAuthorization
+    import com.example.graphQL.cats.service.read.*
+    val pageSize = PageSize.fromInt(2).fold(errors => fail(errors.toString), identity)
+    replicaSet.use { instance =>
+      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        client.getDatabase(s"authorized_hiring_${UUID.randomUUID()}").flatMap { database =>
+          val recruiter = User(
+            UserId(UUID.randomUUID()),
+            None,
+            "Recruiter",
+            UserRole.Recruiter,
+            Some(UserProfile.Recruiter(RecruiterProfile("Synthetic employer", None))),
+            now
+          )
+          val otherRecruiter = recruiter.copy(id = UserId(UUID.randomUUID()), name = "Other recruiter")
+          val candidate = User(
+            UserId(UUID.randomUUID()),
+            None,
+            "Candidate",
+            UserRole.Candidate,
+            Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Synthetic experience"), None))),
+            now
+          )
+          val otherCandidate = candidate.copy(id = UserId(UUID.randomUUID()), name = "Other candidate")
+          val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+          val original = job(JobId(UUID.randomUUID()), recruiter.id)
+          val applicants = List(
+            candidate,
+            candidate.copy(id = UserId(UUID.randomUUID()), name = "Second applicant"),
+            candidate.copy(id = UserId(UUID.randomUUID()), name = "Third applicant")
+          )
+          val applications = List(1L, 2L, 3L).zip(applicants).map { case (value, applicant) =>
+            Application.create(ApplicationId(new UUID(0L, value)), applicant.id, original.id, now)
+          }
+          val history = List(1L, 2L, 3L).map(value =>
+            ApplicationEvent(
+              ApplicationEventId(new UUID(1L, value)),
+              applications.head.id,
+              None,
+              ApplicationStatus.Created,
+              candidate.id,
+              now,
+              None,
+              None
+            )
+          )
+          val users =
+            MongoUserRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+          val jobs =
+            MongoJobRepository.transactional(database, client, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+          val repository = MongoApplicationRepository.transactional(database, client, Diagnostics.noop)
+          val read = HiringReadService(users, jobs, repository)
+          def scope(user: User): HiringReadScope = HiringReadScope
+            .validated(ActorContext(user.id, user.role), user, ActorAuthorization(users))
+            .fold(error => fail(error.toString), identity)
+          val recruiterScope = scope(recruiter)
+          val candidateScope = scope(candidate)
+          val adminScope = scope(admin)
+          val appPage = ApplicationPageRequest(None, None, pageSize)
+          val eventPage = ApplicationEventPageRequest(None, pageSize)
+          for {
+            _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
+            _ <- (List(recruiter, otherRecruiter, otherCandidate, admin) ++ applicants)
+              .traverse_(user => users.insert(user).value.flatMap(requireResult))
+            _ <- jobs
+              .createWithEvents(original, now, Nil, MutationWriteContext.directWrite)
+              .value
+              .flatMap(requireResult)
+            _ <- applications.traverse_(application =>
+              MongoRepositoryTestSupport
+                .first(
+                  database
+                    .getCollection(MongoCollections.Applications)
+                    .insertOne(MongoHiringCodecs.application(application))
+                )
+                .void
+            )
+            _ <- history.traverse_(event =>
+              MongoRepositoryTestSupport
+                .first(
+                  database.getCollection(MongoCollections.ApplicationEvents).insertOne(MongoHiringCodecs.event(event))
+                )
+                .void
+            )
+            first <- repository.findByJob(recruiterScope, original.id, appPage).value.flatMap(requireResult)
+            next <- repository
+              .findByJob(
+                recruiterScope,
+                original.id,
+                appPage.copy(cursor = first.lastOption.map(value => ApplicationCursor(value.createdAt, value.id)))
+              )
+              .value
+              .flatMap(requireResult)
+            empty <- repository
+              .findByJob(
+                recruiterScope,
+                original.id,
+                appPage.copy(cursor = next.lastOption.map(value => ApplicationCursor(value.createdAt, value.id)))
+              )
+              .value
+              .flatMap(requireResult)
+            filtered <- repository
+              .findByJob(recruiterScope, original.id, appPage.copy(status = Some(ApplicationStatus.Hired)))
+              .value
+              .flatMap(requireResult)
+            own <- repository.findByCandidate(candidateScope, appPage).value.flatMap(requireResult)
+            unrelated <- repository.findByCandidate(scope(otherCandidate), appPage).value.flatMap(requireResult)
+            eventFirst <- repository
+              .history(candidateScope, applications.head.id, eventPage)
+              .value
+              .flatMap(requireResult)
+            eventNext <- repository
+              .history(
+                candidateScope,
+                applications.head.id,
+                eventPage
+                  .copy(cursor = eventFirst.lastOption.map(value => ApplicationEventCursor(value.occurredAt, value.id)))
+              )
+              .value
+              .flatMap(requireResult)
+            denied <- repository
+              .history(scope(otherRecruiter), applications.head.id, eventPage)
+              .value
+              .flatMap(requireResult)
+            adminHistory <- repository.history(adminScope, applications.head.id, eventPage).value.flatMap(requireResult)
+            _ <- read
+              .canViewApplication(ActorContext(recruiter.id, recruiter.role), applications.head.id)
+              .value
+              .flatMap(value => value.fold(error => IO.raiseError(new AssertionError(error.toString)), IO.pure))
+            // Ownership changes after the precheck, before the final repository selection.
+            _ <- MongoRepositoryTestSupport
+              .first(
+                database
+                  .getCollection(MongoCollections.Jobs)
+                  .flatMap(
+                    _.updateOne(
+                      Filters.eq(MongoFields.Id, original.id.value.toString),
+                      new Document(
+                        "$set",
+                        new Document(MongoFields.RecruiterId, otherRecruiter.id.value.toString)
+                          .append(MongoFields.Status, JobStatus.Closed.toString)
+                          .append(MongoFields.ClosedAt, Date.from(now))
+                      )
+                    )
+                  )
+              )
+              .void
+            reassigned <- repository.findByJob(recruiterScope, original.id, appPage).value.flatMap(requireResult)
+            reassignedHistory <- repository
+              .history(recruiterScope, applications.head.id, eventPage)
+              .value
+              .flatMap(requireResult)
+            adminApplications <- repository.findByJob(adminScope, original.id, appPage).value.flatMap(requireResult)
+            historical <- jobs
+              .relatedJobs(candidateScope, List(JobRelationKey(applications.head.id, original.id)))
+              .value
+              .flatMap(requireResult)
+            historicalRecruiter <- users
+              .relatedUsers(candidateScope, List(UserRelationKey.JobRecruiter(original.id, otherRecruiter.id)))
+              .value
+              .flatMap(requireResult)
+            forgedCandidate <- users
+              .relatedUsers(
+                candidateScope,
+                List(UserRelationKey.ApplicationCandidate(applications.head.id, otherCandidate.id))
+              )
+              .value
+              .flatMap(requireResult)
+            forgedJob <- jobs
+              .relatedJobs(candidateScope, List(JobRelationKey(applications.head.id, JobId(UUID.randomUUID()))))
+              .value
+              .flatMap(requireResult)
+            mixedCandidateKeys = List(
+              UserRelationKey.ApplicationCandidate(applications.head.id, otherCandidate.id),
+              UserRelationKey.ApplicationCandidate(applications.head.id, candidate.id)
+            )
+            mixedCandidates <- users.relatedUsers(candidateScope, mixedCandidateKeys).value.flatMap(requireResult)
+            mixedJobKeys = List(
+              JobRelationKey(applications.head.id, JobId(UUID.randomUUID())),
+              JobRelationKey(applications.head.id, original.id)
+            )
+            mixedJobs <- jobs.relatedJobs(candidateScope, mixedJobKeys).value.flatMap(requireResult)
+            wrongRecruiter <- users
+              .relatedUsers(candidateScope, List(UserRelationKey.JobRecruiter(original.id, recruiter.id)))
+              .value
+              .flatMap(requireResult)
+            _ <- MongoRepositoryTestSupport
+              .first(
+                database
+                  .getCollection(MongoCollections.Users)
+                  .flatMap(
+                    _.updateOne(
+                      Filters.eq(MongoFields.Id, candidate.id.value.toString),
+                      new Document("$set", new Document(MongoFields.AccountStatus, AccountStatus.Deleted.toString))
+                    )
+                  )
+              )
+              .void
+            revoked <- repository.history(candidateScope, applications.head.id, eventPage).value.flatMap(requireResult)
+            revokedRelation <- jobs
+              .relatedJobs(candidateScope, List(JobRelationKey(applications.head.id, original.id)))
+              .value
+              .flatMap(requireResult)
+          } yield {
+            assertEquals(first.map(_.id), applications.reverse.take(2).map(_.id))
+            assertEquals(next.map(_.id), applications.take(1).map(_.id))
+            assertEquals(empty, Nil)
+            assertEquals(filtered, Nil)
+            assertEquals(own.map(_.id), List(applications.head.id))
+            assertEquals(unrelated, Nil)
+            assertEquals(eventFirst.map(_.id), history.reverse.take(2).map(_.id))
+            assertEquals(eventNext.map(_.id), history.take(1).map(_.id))
+            assertEquals(denied, Nil)
+            assertEquals(adminHistory.map(_.id), eventFirst.map(_.id))
+            assertEquals(reassigned, Nil)
+            assertEquals(reassignedHistory, Nil)
+            assertEquals(adminApplications.map(_.id), first.map(_.id))
+            assertEquals(historical.map(_.value.id), List(original.id))
+            assertEquals(historicalRecruiter.map(_.value.id), List(otherRecruiter.id))
+            assertEquals(forgedCandidate, Nil)
+            assertEquals(forgedJob, Nil)
+            assertEquals(wrongRecruiter, Nil)
+            assertEquals(mixedCandidates.map(_.key), mixedCandidateKeys.drop(1))
+            assertEquals(mixedJobs.map(_.key), mixedJobKeys.drop(1))
+            assertEquals(revoked, Nil)
+            assertEquals(revokedRelation, Nil)
+          }
+        }
+      }
+    }
+  }
+
 }

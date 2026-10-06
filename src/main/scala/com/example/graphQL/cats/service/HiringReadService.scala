@@ -8,12 +8,25 @@ import com.example.graphQL.cats.service.protocol.{HiringReadModel, UseCaseIO, Us
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.domain.pagination.ApplicationEventPageRequest
 
+import com.example.graphQL.cats.service.read.*
+
 final class HiringReadService(
     users: UserRepository,
     jobs: JobRepository,
     applications: ApplicationRepository
 ) extends HiringReadModel {
   private val authorization = ActorAuthorization(users)
+
+  private def scope(actor: ActorContext): UseCaseIO[HiringReadScope] =
+    read(users.find(actor.userId))
+      .subflatMap(_.toRight(UseCaseError.Authentication(AuthenticationError.Unauthorized)))
+      .subflatMap(HiringReadScope.validated(actor, _, authorization))
+
+  override def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]): UseCaseIO[List[RelatedUser]] =
+    scope(actor).flatMap(current => read(users.relatedUsers(current, keys.distinct)))
+
+  override def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseIO[List[RelatedJob]] =
+    scope(actor).flatMap(current => read(jobs.relatedJobs(current, keys.distinct)))
 
   override def user(id: UserId): UseCaseIO[Option[User]] =
     read(users.find(id))
@@ -60,10 +73,15 @@ final class HiringReadService(
     } yield ()
 
   override def applicationHistory(
+      actor: ActorContext,
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
   ): UseCaseIO[List[ApplicationEvent]] =
-    read(applications.history(applicationId, page))
+    for {
+      _ <- canViewApplication(actor, applicationId)
+      current <- scope(actor)
+      values <- read(applications.history(current, applicationId, page))
+    } yield values
 
   private def read[A](value: RepositoryIO[A]): UseCaseIO[A] =
     UseCase.repository(value)

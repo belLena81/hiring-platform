@@ -3,6 +3,7 @@ package com.example.graphQL.cats.service
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
 import cats.effect.Ref
+import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.{
   ApplicationRepository,
   JobRepository,
@@ -14,6 +15,7 @@ import com.example.graphQL.cats.service.port.{
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
+  AccountStatus,
   Application,
   ApplicationEvent,
   CandidateProfile,
@@ -76,7 +78,81 @@ private[cats] object ServiceFixtures {
 
   val createdApplication: Application = Application.create(applicationId, candidateId, jobId, now)
 
+  import com.example.graphQL.cats.service.read.*
+
+  def userRelations(
+      users: Ref[IO, Map[UserId, User]],
+      jobs: Ref[IO, Map[JobId, Job]],
+      applications: Ref[IO, Map[ApplicationId, Application]]
+  )(scope: HiringReadScope, keys: List[UserRelationKey]): IO[List[RelatedUser]] =
+    (users.get, jobs.get, applications.get).mapN { (currentUsers, currentJobs, currentApplications) =>
+      val active = currentUsers
+        .get(scope.userId)
+        .exists(user =>
+          user.role == scope.role && user.accountStatus == AccountStatus.Active && (user.role != UserRole.Admin || user.adminSingleton)
+        )
+      def ownApplication(application: Application): Boolean = scope.role match {
+        case UserRole.Admin     => true
+        case UserRole.Candidate => application.candidateId == scope.userId
+        case UserRole.Recruiter => currentJobs.get(application.jobId).exists(_.recruiterId == scope.userId)
+      }
+      keys.distinct.filter(_ => active).flatMap { key =>
+        val eligible = key match {
+          case UserRelationKey.ApplicationCandidate(id, userId) =>
+            currentApplications
+              .get(id)
+              .exists(application => application.candidateId == userId && ownApplication(application))
+          case UserRelationKey.JobRecruiter(id, userId) =>
+            currentJobs
+              .get(id)
+              .exists(job =>
+                job.recruiterId == userId &&
+                  (job.status == JobStatus.Open || scope.role == UserRole.Admin || (scope.role == UserRole.Recruiter && job.recruiterId == scope.userId) ||
+                    currentApplications.values.exists(application =>
+                      application.jobId == job.id && application.candidateId == scope.userId && scope.role == UserRole.Candidate
+                    ))
+              )
+        }
+        val userId = key match {
+          case UserRelationKey.ApplicationCandidate(_, id) => id
+          case UserRelationKey.JobRecruiter(_, id)         => id
+        }
+        Option.when(eligible)(currentUsers.get(userId).map(RelatedUser(key, _))).flatten
+      }
+    }
+
+  def jobRelations(
+      users: Ref[IO, Map[UserId, User]],
+      jobs: Ref[IO, Map[JobId, Job]],
+      applications: Ref[IO, Map[ApplicationId, Application]]
+  )(scope: HiringReadScope, keys: List[JobRelationKey]): IO[List[RelatedJob]] =
+    (users.get, jobs.get, applications.get).mapN { (currentUsers, currentJobs, currentApplications) =>
+      val active = currentUsers
+        .get(scope.userId)
+        .exists(user =>
+          user.role == scope.role && user.accountStatus == AccountStatus.Active && (user.role != UserRole.Admin || user.adminSingleton)
+        )
+      keys.distinct
+        .filter(_ => active)
+        .flatMap(key =>
+          currentApplications
+            .get(key.applicationId)
+            .filter(application =>
+              application.jobId == key.jobId && (scope.role match {
+                case UserRole.Admin     => true
+                case UserRole.Candidate => application.candidateId == scope.userId
+                case UserRole.Recruiter => currentJobs.get(application.jobId).exists(_.recruiterId == scope.userId)
+              })
+            )
+            .flatMap(_ => currentJobs.get(key.jobId))
+            .map(RelatedJob(key, _))
+        )
+    }
+
   private[cats] trait VersionedUserRepositoryTestAdapter extends UserRepository {
+    override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+
     override def findVersioned(id: UserId): RepositoryIO[Option[Versioned[User]]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
         find(id).value.map(_.map(_.map(Versioned(_, 0L))))
@@ -101,9 +177,16 @@ private[cats] object ServiceFixtures {
       ref.get.map(values => ids.distinct.flatMap(values.get))
   }
 
-  final class InMemoryUsers(protected val ref: Ref[IO, Map[UserId, User]])
-      extends UserRepository
+  final class InMemoryUsers(
+      protected val ref: Ref[IO, Map[UserId, User]],
+      relationLookup: Option[(HiringReadScope, List[UserRelationKey]) => IO[List[RelatedUser]]] = None
+  ) extends UserRepository
       with RefBackedLookup[UserId, User] {
+    override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] =
+      relationLookup.fold(RepositoryIO.fromEither[List[RelatedUser]](Left(RepositoryError.Unavailable)))(lookup =>
+        RepositoryIO.lift(lookup(scope, keys))
+      )
+
     override def find(id: UserId): RepositoryIO[Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findOne(id).map(Right(_)))
 
@@ -139,9 +222,15 @@ private[cats] object ServiceFixtures {
 
   final class InMemoryJobs(
       protected val ref: Ref[IO, Map[JobId, Job]],
-      operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None
+      operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
+      relationLookup: Option[(HiringReadScope, List[JobRelationKey]) => IO[List[RelatedJob]]] = None
   ) extends JobRepository
       with RefBackedLookup[JobId, Job] {
+    override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] =
+      relationLookup.fold(RepositoryIO.fromEither[List[RelatedJob]](Left(RepositoryError.Unavailable)))(lookup =>
+        RepositoryIO.lift(lookup(scope, keys))
+      )
+
     override def find(id: JobId): RepositoryIO[Option[Job]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findOne(id).map(Right(_)))
 
@@ -275,20 +364,22 @@ private[cats] object ServiceFixtures {
       events: Ref[IO, Vector[ApplicationEvent]],
       nextCreateError: Ref[IO, Option[RepositoryError]],
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
-      nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None
+      nextOperationalEventError: Option[Ref[IO, Option[RepositoryError]]] = None,
+      jobLookup: JobId => IO[Option[Job]] = id =>
+        IO.pure(Option.when(id == ServiceFixtures.openJob.id)(ServiceFixtures.openJob))
   ) extends ApplicationRepository {
     override def find(id: ApplicationId): RepositoryIO[Option[Application]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(applications.get.map(_.get(id)).map(Right(_)))
 
     override def findByCandidate(
-        candidateId: UserId,
+        scope: HiringReadScope,
         page: ApplicationPageRequest
     ): RepositoryIO[List[Application]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
       applications.get
         .map(
           _.values
             .filter(application =>
-              application.candidateId == candidateId &&
+              scope.role == UserRole.Candidate && application.candidateId == scope.userId &&
                 matches(page)(application) &&
                 keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(
                   _.createdAt,
@@ -301,30 +392,51 @@ private[cats] object ServiceFixtures {
         .map(Right(_))
     )
 
-    override def findByJob(jobId: JobId, page: ApplicationPageRequest): RepositoryIO[List[Application]] =
+    override def findByJob(
+        scope: HiringReadScope,
+        jobId: JobId,
+        page: ApplicationPageRequest
+    ): RepositoryIO[List[Application]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-        applications.get
-          .map(
-            _.values
-              .filter(application =>
-                application.jobId == jobId &&
-                  matches(page)(application) &&
-                  keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(
-                    _.createdAt,
-                    _.id.value.toString
+        jobLookup(jobId).flatMap {
+          case Some(job)
+              if scope.role == UserRole.Admin || (scope.role == UserRole.Recruiter && job.recruiterId == scope.userId) =>
+            applications.get
+              .map(
+                _.values
+                  .filter(application =>
+                    application.jobId == jobId &&
+                      matches(page)(application) &&
+                      keysetAfter(page.cursor.map(cursor => cursor.createdAt -> cursor.id.value.toString))(application)(
+                        _.createdAt,
+                        _.id.value.toString
+                      )
                   )
+                  .toList
               )
-              .toList
-          )
-          .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
-          .map(Right(_))
+              .map(keysetPage(_, page.pageSize.value)(_.createdAt, _.id.value.toString))
+              .map(Right(_))
+          case _ => IO.pure(Right(Nil))
+        }
       )
 
     override def history(
+        scope: HiringReadScope,
         applicationId: ApplicationId,
         page: ApplicationEventPageRequest
     ): RepositoryIO[List[ApplicationEvent]] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(
-      events.get
+      applications.get
+        .flatMap(values =>
+          values
+            .get(applicationId)
+            .traverse(application =>
+              jobLookup(application.jobId).map(job =>
+                scope.role == UserRole.Admin || (scope.role == UserRole.Candidate && application.candidateId == scope.userId) ||
+                  (scope.role == UserRole.Recruiter && job.exists(_.recruiterId == scope.userId))
+              )
+            )
+        )
+        .flatMap(allowed => events.get.map(_.filter(_ => allowed.contains(true))))
         .map(
           _.filter(event =>
             event.applicationId == applicationId &&

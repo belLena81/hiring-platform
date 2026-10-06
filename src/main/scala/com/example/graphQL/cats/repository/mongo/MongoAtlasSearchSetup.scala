@@ -94,10 +94,10 @@ private[mongo] object MongoAtlasSearchSetup {
         MongoCollections.Jobs,
         new SearchIndexModel(config.jobLexicalIndex, lexicalDefinition, SearchIndexType.search())
       )
-    ).sequence_.void *> awaitCandidateSearchIndexes(database, config)
+    ).sequence_.void *> awaitSearchIndexes(database, config)
   }
 
-  private def awaitCandidateSearchIndexes(
+  private def awaitSearchIndexes(
       database: MongoHiringSetup.SetupDatabase,
       config: AtlasSearchIndexConfig
   ): IO[Unit] = {
@@ -114,7 +114,7 @@ private[mongo] object MongoAtlasSearchSetup {
     val deadline = IO.monotonic.map(_ + config.readyTimeoutMillis.millis)
     def indexDocuments(collectionName: String): IO[List[Document]] =
       MongoAtlasSearchAdmin.listIndexes(database.underlying, collectionName, 100)
-    def validVector(index: Document): Boolean = {
+    def validVector(index: Document, requiredFilters: Set[String]): Boolean = {
       val definition = Option(index.get("latestDefinition", classOf[Document]))
         .orElse(Option(index.get("definition", classOf[Document])))
       val fields = definition
@@ -124,7 +124,7 @@ private[mongo] object MongoAtlasSearchSetup {
       val filters =
         fields.filter(_.getString("type") == MongoFields.Filter).flatMap(field => Option(field.getString("path"))).toSet
       val vector = fields.filter(_.getString("type") == "vector")
-      candidateVectorFilters.subsetOf(filters) && vector.size == 1 && vector.headOption.exists(field =>
+      requiredFilters.subsetOf(filters) && vector.size == 1 && vector.headOption.exists(field =>
         field.getString("path") == MongoFields.Embedding &&
           Option(field.getInteger("numDimensions")).contains(config.dimension) &&
           field.getString("similarity") == "cosine"
@@ -165,7 +165,27 @@ private[mongo] object MongoAtlasSearchSetup {
         }
         poll
       }
-    await(config.candidateVectorIndex, MongoCollections.Users, validVector) *>
+    val jobFilters = Set(
+      MongoFields.Status,
+      MongoFields.LocationCity,
+      MongoFields.Skills,
+      MongoFields.CreatedAt,
+      MongoFields.RecruiterId,
+      MongoFields.EmbeddingMetaModel
+    )
+    def validJobLexical(index: Document): Boolean = {
+      val definition = Option(index.get("latestDefinition", classOf[Document]))
+        .orElse(Option(index.get("definition", classOf[Document])))
+      val mappings = definition.flatMap(value => Option(value.get("mappings", classOf[Document])))
+      val fields = mappings.flatMap(value => Option(value.get("fields", classOf[Document])))
+      mappings.exists(_.getBoolean("dynamic", true) == false) && fields.exists(value =>
+        List(MongoFields.Title, MongoFields.Description, MongoFields.Requirements, MongoFields.Skills)
+          .forall(name => Option(value.get(name, classOf[Document])).exists(_.getString("type") == "string"))
+      )
+    }
+    await(config.jobVectorIndex, MongoCollections.Jobs, index => validVector(index, jobFilters)) *>
+      await(config.jobLexicalIndex, MongoCollections.Jobs, validJobLexical) *>
+      await(config.candidateVectorIndex, MongoCollections.Users, index => validVector(index, candidateVectorFilters)) *>
       await(config.candidateLexicalIndex, MongoCollections.Users, validLexical)
   }
 }

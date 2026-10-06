@@ -30,6 +30,8 @@ import com.example.graphQL.cats.service.UseCaseError
 import com.example.graphQL.cats.service.events.SearchSessionHandoff
 import org.typelevel.otel4s.trace.{SpanContext, Tracer}
 
+import com.example.graphQL.cats.service.read.*
+
 final case class HiringGraphQLServices(
     readModel: HiringReadModel,
     jobService: JobUseCases,
@@ -110,6 +112,12 @@ final class RequestContext private (
 
   private[graphql] def reportExecutionFailure(error: Throwable): IO[Unit] =
     parameters.diagnostics.emit(LogEvent.RuntimeFailed, parameters.requestId, fields = LogFields.failure(error))
+
+  def relatedUsers(keys: List[UserRelationKey]): HiringGraphQLResult[List[RelatedUser]] =
+    authenticatedActor.flatMap(actor => read(parameters.hiring.readModel.relatedUsers(actor, keys.distinct)))
+
+  def relatedJobs(keys: List[JobRelationKey]): HiringGraphQLResult[List[RelatedJob]] =
+    authenticatedActor.flatMap(actor => read(parameters.hiring.readModel.relatedJobs(actor, keys.distinct)))
 
   def users(ids: List[UserId]): HiringGraphQLResult[List[User]] =
     read(parameters.hiring.readModel.users(ids.distinct))

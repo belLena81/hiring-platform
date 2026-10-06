@@ -549,6 +549,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       delegate: InMemoryJobs,
       writeResult: Deferred[IO, Either[RepositoryError, Unit]]
   ) extends JobRepository {
+    override def relatedJobs(
+        scope: com.example.graphQL.cats.service.read.HiringReadScope,
+        keys: List[com.example.graphQL.cats.service.read.JobRelationKey]
+    ) = delegate.relatedJobs(scope, keys)
+
     override def find(id: Identifiers.JobId): RepositoryIO[Option[Job]] = delegate.find(id)
 
     override def findVersioned(

@@ -642,9 +642,18 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       )
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
-      users = RecordingUsers(usersRef, userBatches)
-      jobs = InMemoryJobs(jobsRef)
-      applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
+      users = RecordingUsers(usersRef, userBatches, jobsRef, applicationsRef)
+      jobs = InMemoryJobs(
+        jobsRef,
+        relationLookup =
+          Some(com.example.graphQL.cats.service.ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
+      applications = InMemoryApplications(
+        applicationsRef,
+        eventsRef,
+        nextCreateError,
+        jobLookup = id => jobsRef.get.map(_.get(id))
+      )
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
         com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
@@ -1023,9 +1032,21 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map.empty)
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       nextCreateError <- Ref.of[IO, Option[RepositoryError]](None)
-      users = InMemoryUsers(usersRef)
-      jobs = InMemoryJobs(jobsRef)
-      applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
+      users = InMemoryUsers(
+        usersRef,
+        Some(com.example.graphQL.cats.service.ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
+      )
+      jobs = InMemoryJobs(
+        jobsRef,
+        relationLookup =
+          Some(com.example.graphQL.cats.service.ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
+      applications = InMemoryApplications(
+        applicationsRef,
+        eventsRef,
+        nextCreateError,
+        jobLookup = id => jobsRef.get.map(_.get(id))
+      )
       searchService = SemanticSearchService(
         users,
         jobs,
@@ -1073,9 +1094,21 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       applicationsRef <- Ref.of[IO, Map[ApplicationId, Application]](Map(application.id -> application))
       eventsRef <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
       nextCreateError <- Ref.of[IO, Option[com.example.graphQL.cats.service.RepositoryError]](None)
-      users = InMemoryUsers(usersRef)
-      jobs = InMemoryJobs(jobsRef)
-      applications = InMemoryApplications(applicationsRef, eventsRef, nextCreateError)
+      users = InMemoryUsers(
+        usersRef,
+        Some(com.example.graphQL.cats.service.ServiceFixtures.userRelations(usersRef, jobsRef, applicationsRef))
+      )
+      jobs = InMemoryJobs(
+        jobsRef,
+        relationLookup =
+          Some(com.example.graphQL.cats.service.ServiceFixtures.jobRelations(usersRef, jobsRef, applicationsRef))
+      )
+      applications = InMemoryApplications(
+        applicationsRef,
+        eventsRef,
+        nextCreateError,
+        jobLookup = id => jobsRef.get.map(_.get(id))
+      )
       services = HiringGraphQLServices(
         HiringReadService(users, jobs, applications),
         com.example.graphQL.cats.service.TestHiringServices.job(users, jobs),
@@ -1096,8 +1129,20 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
   private final class RecordingUsers(
       ref: Ref[IO, Map[UserId, User]],
-      batches: Ref[IO, Vector[List[UserId]]]
+      batches: Ref[IO, Vector[List[UserId]]],
+      jobs: Ref[IO, Map[JobId, Job]],
+      applications: Ref[IO, Map[ApplicationId, Application]]
   ) extends com.example.graphQL.cats.service.ServiceFixtures.VersionedUserRepositoryTestAdapter {
+    override def relatedUsers(
+        scope: com.example.graphQL.cats.service.read.HiringReadScope,
+        keys: List[com.example.graphQL.cats.service.read.UserRelationKey]
+    ) =
+      com.example.graphQL.cats.service.port.RepositoryIO.lift(
+        com.example.graphQL.cats.service.ServiceFixtures
+          .userRelations(ref, jobs, applications)(scope, keys)
+          .flatTap(values => batches.update(_ :+ values.map(_.value.id)))
+      )
+
     override def find(id: UserId): RepositoryIO[Option[User]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map(_.get(id)).map(Right(_)))
 
@@ -1123,6 +1168,33 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
   }
 
   private final case class FakeSemanticSearchRepository(jobs: List[RankedJob]) extends SemanticSearchRepository {
+    override def authorizedJobEligibility(
+        scope: com.example.graphQL.cats.service.read.HiringReadScope,
+        ids: List[com.example.graphQL.cats.domain.model.Identifiers.JobId],
+        expected: Option[com.example.graphQL.cats.service.search.CandidateSearchEligibility]
+    ) =
+      if (scope.role == UserRole.Candidate) jobEligibility(ids)
+      else com.example.graphQL.cats.service.port.RepositoryIO.fromEither(Right(Nil))
+    override def authorizedCandidateEligibility(
+        scope: com.example.graphQL.cats.service.read.HiringReadScope,
+        expected: com.example.graphQL.cats.service.search.JobSearchEligibility,
+        ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]
+    ) =
+      com.example.graphQL.cats.service.port.RepositoryIO
+        .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
+
+    override def jobEligibility(ids: List[com.example.graphQL.cats.domain.model.Identifiers.JobId]) =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromEither(
+        Right(
+          jobs
+            .filter(hit => ids.contains(hit.job.id))
+            .map(hit => com.example.graphQL.cats.service.search.JobSearchEligibility.fromJob(hit.job))
+        )
+      )
+    override def candidateEligibility(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]) =
+      com.example.graphQL.cats.service.port.RepositoryIO
+        .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
+
     override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
 

@@ -2,7 +2,9 @@ package com.example.graphQL.cats.service.search
 
 import com.example.graphQL.cats.AccountValueFixtures.email
 import cats.effect.IO
-import cats.effect.Ref
+import cats.effect.{Ref, Deferred}
+import cats.syntax.all.*
+import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, SearchError, UseCaseError}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.ServiceFixtures.*
@@ -302,7 +304,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         Map(recruiterId -> recruiter, candidateId -> candidateWithProfile.copy(embedding = Some(embedding)))
       )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
         override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
@@ -381,7 +383,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
       staleSourceCandidate = orderedUsers.last
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
         override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
@@ -429,7 +431,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> embeddedJob))
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(
             jobsRef.update(_.updated(jobId, embeddedJob.copy(status = JobStatus.Closed))).as(Right(List(hit)))
@@ -468,7 +470,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(firstJobId -> firstJob, secondJobId -> secondJob))
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(
             jobsRef
@@ -542,7 +544,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         List(recruiter, ineligible, eligible, nextEligible).map(user => user.id -> user).toMap
       )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
         override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
@@ -575,7 +577,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
         override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
@@ -612,7 +614,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         Map(candidateId -> candidateWithProfile.copy(embedding = Some(embedding)))
       )
       jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> embeddedJob))
-      search = new SemanticSearchRepository {
+      search = new RetrievalSearchRepository {
         override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
           RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
         override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
@@ -675,13 +677,408 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
+  test("candidate validation observes synchronized deletion, private changes and embedding changes") {
+    val original = candidateWithProfile.copy(embedding = Some(embedding))
+    val mutations: List[(String, Map[Identifiers.UserId, User] => Map[Identifiers.UserId, User])] = List(
+      "deletion" -> (_.removed(candidateId)),
+      "consent" -> (_.updated(
+        candidateId,
+        original.copy(profile = Some(UserProfile.Candidate(profile.copy(recruiterSearchOptIn = true))))
+      )),
+      "private fields" -> (_.updated(
+        candidateId,
+        original.copy(profile =
+          Some(
+            UserProfile.Candidate(
+              profile.copy(
+                recruiterSearchOptIn = true,
+                currentResidence = Some(CandidateResidence("Cyprus", Some("Limassol")))
+              )
+            )
+          )
+        )
+      )),
+      "source" -> (_.updated(
+        candidateId,
+        original.copy(profile = Some(UserProfile.Candidate(profile.copy(experienceSummary = Some("changed")))))
+      )),
+      "model" -> (_.updated(
+        candidateId,
+        original.copy(embedding = Some(embedding.copy(meta = meta.copy(model = "different"))))
+      ))
+    )
+    mutations.traverse_ { case (label, mutate) =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter, candidateId -> original))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(jobEmbedding))))
+        entered <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        hit = RankedCandidate(
+          CandidateSearchHit(candidateId, original.name, profile.skills, profile.experienceSummary),
+          0.9,
+          SearchMode.VECTOR,
+          meta,
+          searchId
+        )
+        search = new RetrievalSearchRepository {
+          def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = RepositoryIO.fromEither(Right(Nil))
+          def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+            RepositoryIO.fromEither(Right(Nil))
+          def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+            RepositoryIO.lift(entered.complete(()).void *> release.get.as(List(hit)))
+        }
+        service = semanticService(
+          new InMemoryUsers(usersRef),
+          new InMemoryJobs(jobsRef),
+          FakeEmbeddingService.unused,
+          search
+        )
+        fiber <- service
+          .candidateMatches(
+            ActorContext(recruiterId, UserRole.Recruiter),
+            jobId,
+            None,
+            CandidateMatchFilters(Nil, Some("cyprus"), Some("nicosia"), None),
+            pageSize,
+            searchId
+          )
+          .value
+          .start
+        _ <- entered.get
+        _ <- usersRef.update(mutate)
+        _ <- release.complete(())
+        result <- fiber.joinWithNever
+      } yield assertEquals(result, Right(Nil), label)
+    }
+  }
+
+  test("job validation observes synchronized deletion and source or model changes") {
+    val original = openJob.copy(embedding = Some(jobEmbedding))
+    val mutations: List[Map[Identifiers.JobId, Job] => Map[Identifiers.JobId, Job]] = List(
+      _.removed(jobId),
+      _.updated(jobId, original.copy(description = "changed source")),
+      _.updated(jobId, original.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(model = "different")))))
+    )
+    mutations.traverse_ { mutate =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> original))
+        entered <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        hit = RankedJob(original, 0.9, SearchMode.HYBRID, jobMeta, searchId)
+        search = new RetrievalSearchRepository {
+          def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+            RepositoryIO.lift(entered.complete(()).void *> release.get.as(List(hit)))
+          def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+            RepositoryIO.fromEither(Right(Nil))
+          def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+            RepositoryIO.fromEither(Right(Nil))
+        }
+        service = semanticService(
+          new InMemoryUsers(usersRef),
+          new InMemoryJobs(jobsRef),
+          FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), configuredModel, 2))),
+          search
+        )
+        fiber <- service
+          .semanticJobSearch(
+            ActorContext(candidateId, UserRole.Candidate),
+            "Scala",
+            JobSearchFilter(None, Set.empty, None),
+            pageSize,
+            searchId
+          )
+          .value
+          .start
+        _ <- entered.get
+        _ <- jobsRef.update(mutate)
+        _ <- release.complete(())
+        result <- fiber.joinWithNever
+      } yield assertEquals(result, Right(Nil))
+    }
+  }
+
+  test("candidate validation rechecks synchronized ownership reassignment") {
+    val owned = openJob.copy(embedding = Some(jobEmbedding))
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> owned))
+      entered <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      search = new RetrievalSearchRepository {
+        def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = RepositoryIO.fromEither(Right(Nil))
+        def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+          RepositoryIO.fromEither(Right(Nil))
+        def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+          RepositoryIO.lift(entered.complete(()).void *> release.get.as(Nil))
+      }
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService.unused,
+        search
+      )
+      fiber <- service
+        .candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+        .value
+        .start
+      _ <- entered.get
+      _ <- jobsRef.update(_.updated(jobId, owned.copy(recruiterId = Identifiers.UserId(UUID.randomUUID()))))
+      _ <- release.complete(())
+      result <- fiber.joinWithNever
+    } yield assertEquals(result, Left(UseCaseError.Domain(DomainError.Forbidden)))
+  }
+
+  test("authoritative eligibility failures are sanitized and canceled reads release their resources") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+      entered <- Deferred[IO, Unit]
+      released <- Ref.of[IO, Boolean](false)
+      idsSeen <- Ref.of[IO, List[Identifiers.JobId]](Nil)
+      hit = RankedJob(openJob.copy(embedding = Some(jobEmbedding)), 0.9, SearchMode.HYBRID, jobMeta, searchId)
+      repository = new SemanticSearchRepository {
+        def authorizedJobEligibility(
+            scope: HiringReadScope,
+            ids: List[Identifiers.JobId],
+            expected: Option[CandidateSearchEligibility]
+        ): RepositoryIO[List[JobSearchEligibility]] = jobEligibility(ids)
+        def authorizedCandidateEligibility(
+            scope: HiringReadScope,
+            expected: JobSearchEligibility,
+            ids: List[Identifiers.UserId]
+        ): RepositoryIO[List[CandidateSearchEligibility]] = candidateEligibility(ids)
+
+        def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+          RepositoryIO.fromEither(Right(List(hit, hit)))
+        def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
+          RepositoryIO.fromEither(Right(Nil))
+        def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+          RepositoryIO.fromEither(Right(Nil))
+        def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
+          RepositoryIO.fromEither(Right(Nil))
+        def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] = RepositoryIO.lift(
+          idsSeen.set(ids) *> (entered.complete(()).void *> IO.never[List[JobSearchEligibility]])
+            .guarantee(released.set(true))
+        )
+      }
+      users = new InMemoryUsers(usersRef)
+      jobs = new InMemoryJobs(jobsRef)
+      embedder = FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), configuredModel, 2)))
+      service = SemanticSearchService(users, jobs, embedder, repository, configuredModel)
+      fiber <- service
+        .semanticJobSearch(
+          ActorContext(candidateId, UserRole.Candidate),
+          "Scala",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
+        .start
+      _ <- entered.get
+      _ <- fiber.cancel
+      cleanup <- released.get
+      selected <- idsSeen.get
+      failing = new SemanticSearchRepository {
+        def authorizedJobEligibility(
+            scope: HiringReadScope,
+            ids: List[Identifiers.JobId],
+            expected: Option[CandidateSearchEligibility]
+        ): RepositoryIO[List[JobSearchEligibility]] = jobEligibility(ids)
+        def authorizedCandidateEligibility(
+            scope: HiringReadScope,
+            expected: JobSearchEligibility,
+            ids: List[Identifiers.UserId]
+        ): RepositoryIO[List[CandidateSearchEligibility]] = candidateEligibility(ids)
+
+        def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = repository.searchJobs(query)
+        def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = repository.recommendedJobs(query)
+        def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+          repository.candidateMatches(query)
+        def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
+          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+        def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] =
+          RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+      }
+      result <- SemanticSearchService(users, jobs, embedder, failing, configuredModel)
+        .semanticJobSearch(
+          ActorContext(candidateId, UserRole.Candidate),
+          "Scala",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
+    } yield {
+      assert(cleanup)
+      assertEquals(selected, List(jobId))
+      assertEquals(result, Left(UseCaseError.Search(SearchError.VectorSearchUnavailable)))
+    }
+  }
+
+  test("final candidate selection gates reassignment, deactivation and query changes after service prechecks") {
+    val original = openJob.copy(embedding = Some(jobEmbedding))
+    List("ownership", "actor", "source", "model", "closed").traverse_ { mutation =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+          Map(recruiterId -> recruiter, candidateId -> candidateWithProfile.copy(embedding = Some(embedding)))
+        )
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> original))
+        entered <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        hit = RankedCandidate(
+          CandidateSearchHit(candidateId, candidate.name, profile.skills, profile.experienceSummary),
+          0.9,
+          SearchMode.VECTOR,
+          meta,
+          searchId
+        )
+        service = semanticService(
+          new InMemoryUsers(usersRef),
+          new InMemoryJobs(jobsRef),
+          FakeEmbeddingService.unused,
+          FakeSearchRepository(candidates = List(hit)),
+          beforeCandidateSelection = entered.complete(()).void *> release.get
+        )
+        fiber <- service
+          .candidateMatches(ActorContext(recruiterId, UserRole.Recruiter), jobId, pageSize, searchId)
+          .value
+          .start
+        _ <- entered.get
+        _ <- mutation match {
+          case "actor" =>
+            usersRef.update(
+              _.updated(recruiterId, recruiter.copy(accountStatus = AccountStatus.Deleted, profile = None))
+            )
+          case "ownership" =>
+            jobsRef.update(_.updated(jobId, original.copy(recruiterId = Identifiers.UserId(UUID.randomUUID()))))
+          case "source" => jobsRef.update(_.updated(jobId, original.copy(description = "Changed query source")))
+          case "model"  =>
+            jobsRef.update(
+              _.updated(
+                jobId,
+                original.copy(embedding = Some(jobEmbedding.copy(meta = jobMeta.copy(model = "different"))))
+              )
+            )
+          case _ => jobsRef.update(_.updated(jobId, original.copy(status = JobStatus.Closed)))
+        }
+        _ <- release.complete(())
+        result <- fiber.joinWithNever
+      } yield assertEquals(result, Right(Nil), mutation)
+    }
+  }
+
+  test("final job selection gates actor deactivation after service precheck") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(jobEmbedding))))
+      entered <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      hit = RankedJob(openJob.copy(embedding = Some(jobEmbedding)), 0.9, SearchMode.HYBRID, jobMeta, searchId)
+      service = semanticService(
+        new InMemoryUsers(usersRef),
+        new InMemoryJobs(jobsRef),
+        FakeEmbeddingService(Right(EmbeddingVector(List(0.1f, 0.2f), configuredModel, 2))),
+        FakeSearchRepository(jobs = List(hit)),
+        beforeJobSelection = entered.complete(()).void *> release.get
+      )
+      fiber <- service
+        .semanticJobSearch(
+          ActorContext(candidateId, UserRole.Candidate),
+          "Scala",
+          JobSearchFilter(None, Set.empty, None),
+          pageSize,
+          searchId
+        )
+        .value
+        .start
+      _ <- entered.get
+      _ <- usersRef.update(
+        _.updated(candidateId, candidateWithProfile.copy(accountStatus = AccountStatus.Deleted, profile = None))
+      )
+      _ <- release.complete(())
+      result <- fiber.joinWithNever
+    } yield assertEquals(result, Right(Nil))
+  }
+
   private def semanticService(
       users: UserRepository,
       jobs: JobRepository,
       embeddings: EmbeddingService,
-      search: SemanticSearchRepository
+      search: SemanticSearchRepository,
+      beforeJobSelection: IO[Unit] = IO.unit,
+      beforeCandidateSelection: IO[Unit] = IO.unit
   ): SemanticSearchService =
-    SemanticSearchService(users, jobs, embeddings, search, embeddingModel = configuredModel)
+    SemanticSearchService(
+      users,
+      jobs,
+      embeddings,
+      new SemanticSearchRepository {
+        private def persistedActor(scope: HiringReadScope): RepositoryIO[Option[User]] =
+          users
+            .find(scope.userId)
+            .map(_.filter(user => user.role == scope.role && user.accountStatus == AccountStatus.Active))
+        def authorizedJobEligibility(
+            scope: HiringReadScope,
+            ids: List[Identifiers.JobId],
+            expected: Option[CandidateSearchEligibility]
+        ): RepositoryIO[List[JobSearchEligibility]] =
+          RepositoryIO.lift(beforeJobSelection).flatMap(_ => persistedActor(scope)).flatMap {
+            case Some(user)
+                if user.role == UserRole.Candidate && expected.forall(_ == CandidateSearchEligibility.fromUser(user)) =>
+              jobEligibility(ids)
+            case _ => RepositoryIO.fromEither(Right(Nil))
+          }
+        def authorizedCandidateEligibility(
+            scope: HiringReadScope,
+            expected: JobSearchEligibility,
+            ids: List[Identifiers.UserId]
+        ): RepositoryIO[List[CandidateSearchEligibility]] =
+          RepositoryIO
+            .lift(beforeCandidateSelection)
+            .flatMap(_ =>
+              (persistedActor(scope), jobs.find(expected.job.id))
+                .mapN((actor, job) =>
+                  actor.exists(user =>
+                    user.role == UserRole.Admin || user.role == UserRole.Recruiter && job
+                      .exists(_.recruiterId == user.id)
+                  ) &&
+                    job.exists(current =>
+                      current.status == JobStatus.Open && JobSearchEligibility.fromJob(current) == expected
+                    )
+                )
+                .flatMap(allowed => if (allowed) candidateEligibility(ids) else RepositoryIO.fromEither(Right(Nil)))
+            )
+        def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = search.searchJobs(query)
+        def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = search.recommendedJobs(query)
+        def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+          search.candidateMatches(query)
+        def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] =
+          jobs.findMany(ids).map(_.map(JobSearchEligibility.fromJob))
+        def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
+          users.findMany(ids).map(_.map(CandidateSearchEligibility.fromUser))
+      },
+      embeddingModel = configuredModel
+    )
+
+  private trait RetrievalSearchRepository extends SemanticSearchRepository {
+    def authorizedJobEligibility(
+        scope: HiringReadScope,
+        ids: List[Identifiers.JobId],
+        expected: Option[CandidateSearchEligibility]
+    ): RepositoryIO[List[JobSearchEligibility]] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+    def authorizedCandidateEligibility(
+        scope: HiringReadScope,
+        expected: JobSearchEligibility,
+        ids: List[Identifiers.UserId]
+    ): RepositoryIO[List[CandidateSearchEligibility]] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+
+    def jobEligibility(ids: List[Identifiers.JobId]): RepositoryIO[List[JobSearchEligibility]] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+    def candidateEligibility(ids: List[Identifiers.UserId]): RepositoryIO[List[CandidateSearchEligibility]] =
+      RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+  }
 
   private final case class FakeEmbeddingService(result: Either[EmbeddingError, EmbeddingVector])
       extends EmbeddingService {
@@ -701,7 +1098,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
   private final case class FakeSearchRepository(
       jobs: List[RankedJob] = Nil,
       candidates: List[RankedCandidate] = Nil
-  ) extends SemanticSearchRepository {
+  ) extends RetrievalSearchRepository {
     override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
 
@@ -714,7 +1111,7 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
 
   private final case class RecordingSearchRepository(
       queries: Ref[IO, Vector[VectorSearchQuery]]
-  ) extends SemanticSearchRepository {
+  ) extends RetrievalSearchRepository {
     override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(queries.update(_ :+ query).as(Right(Nil)))
 

@@ -15,6 +15,7 @@ import mongo4cats.collection.MongoCollection
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
+import com.example.graphQL.cats.service.read.*
 import java.time.Instant
 import scala.util.chaining.*
 import java.util.Date
@@ -75,6 +76,73 @@ final class MongoUserRepository(
 
   override def findMany(ids: List[UserId]): RepositoryIO[List[User]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readUser)(diagnostics)
+
+  override def relatedUsers(scope: HiringReadScope, keys: List[UserRelationKey]): RepositoryIO[List[RelatedUser]] = {
+    import MongoAuthorizedReadQueries.*
+    val distinct = keys.distinct
+    val candidates = distinct.collect { case key: UserRelationKey.ApplicationCandidate => key }
+    val recruiters = distinct.collect { case key: UserRelationKey.JobRecruiter => key }
+    def select[K <: UserRelationKey](
+        requested: List[K],
+        parentCollection: String,
+        relatedField: String,
+        predicate: K => org.bson.conversions.Bson,
+        access: List[Document],
+        matches: (K, Document) => Boolean
+    ): RepositoryIO[List[RelatedUser]] =
+      if (requested.isEmpty) RepositoryIO.fromEither(Right(Nil))
+      else {
+        val pipeline = List(matching(Filters.or(requested.map(predicate)*))) ++ actor(scope) ++ access ++ List(
+          lookup(MongoCollections.Users, relatedField, MongoFields.Id, "related"),
+          unwind("related")
+        )
+        documents(database, parentCollection, pipeline, requested.size, diagnostics).subflatMap(values =>
+          MongoStoredDocumentDecoding.values(
+            values.flatMap(document =>
+              requested
+                .find(key => matches(key, document))
+                .map(key =>
+                  MongoHiringCodecs
+                    .readUser(document.get("related", classOf[Document]))
+                    .map(user => RelatedUser(key, user))
+                )
+            )
+          )
+        )
+      }
+    for {
+      candidateUsers <- select[UserRelationKey.ApplicationCandidate](
+        candidates,
+        MongoCollections.Applications,
+        MongoFields.CandidateId,
+        key =>
+          Filters.and(
+            Filters.eq(MongoFields.Id, key.applicationId.value.toString),
+            Filters.eq(MongoFields.CandidateId, key.userId.value.toString)
+          ),
+        applicationAccess(scope),
+        (key, document) =>
+          document.getString(MongoFields.Id) == key.applicationId.value.toString && document.getString(
+            MongoFields.CandidateId
+          ) == key.userId.value.toString
+      )
+      recruiterUsers <- select[UserRelationKey.JobRecruiter](
+        recruiters,
+        MongoCollections.Jobs,
+        MongoFields.RecruiterId,
+        key =>
+          Filters.and(
+            Filters.eq(MongoFields.Id, key.jobId.value.toString),
+            Filters.eq(MongoFields.RecruiterId, key.userId.value.toString)
+          ),
+        jobAccess(scope),
+        (key, document) =>
+          document.getString(MongoFields.Id) == key.jobId.value.toString && document.getString(
+            MongoFields.RecruiterId
+          ) == key.userId.value.toString
+      )
+    } yield candidateUsers ++ recruiterUsers
+  }
 
   override def updateEmbedding(id: UserId, embedding: EntityEmbedding): RepositoryIO[Unit] =
     findVersioned(id).flatMap {

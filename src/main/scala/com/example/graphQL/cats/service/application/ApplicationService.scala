@@ -101,7 +101,15 @@ final class ApplicationService(
       _ <- UseCase.fromEither(
         Either.cond(user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
       )
-      applications <- UseCase.repository(this.applications.findByCandidate(user.id, page))
+      persisted <- UseCase
+        .repository(users.find(actor.userId))
+        .subflatMap(
+          _.toRight(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized))
+        )
+      scope <- UseCase.fromEither(
+        com.example.graphQL.cats.service.read.HiringReadScope.validated(actor, persisted, authorization)
+      )
+      applications <- UseCase.repository(this.applications.findByCandidate(scope, page))
     } yield applications
 
   def jobApplications(
@@ -110,7 +118,17 @@ final class ApplicationService(
       page: ApplicationPageRequest
   ): UseCaseIO[List[Application]] =
     authorizedJobs.manage(actor, jobId) { job =>
-      UseCase.repository(applications.findByJob(job.id, page))
+      for {
+        user <- UseCase
+          .repository(users.find(actor.userId))
+          .subflatMap(
+            _.toRight(UseCaseError.Authentication(com.example.graphQL.cats.service.AuthenticationError.Unauthorized))
+          )
+        scope <- UseCase.fromEither(
+          com.example.graphQL.cats.service.read.HiringReadScope.validated(actor, user, authorization)
+        )
+        values <- UseCase.repository(applications.findByJob(scope, job.id, page))
+      } yield values
     }
 
   override def changeStatus(

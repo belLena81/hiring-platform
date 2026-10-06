@@ -15,7 +15,11 @@ import com.example.graphQL.cats.service.{ActorContext, AuthenticatedActor, Searc
 import com.example.graphQL.cats.service.job.{CreateJobInput, UpdateJobInput}
 import java.util.UUID
 
+import com.example.graphQL.cats.service.read.*
+
 trait HiringReadModel {
+  def relatedUsers(actor: ActorContext, keys: List[UserRelationKey]): UseCaseIO[List[RelatedUser]]
+  def relatedJobs(actor: ActorContext, keys: List[JobRelationKey]): UseCaseIO[List[RelatedJob]]
   def user(id: com.example.graphQL.cats.domain.model.Identifiers.UserId): UseCaseIO[Option[User]]
   def viewer(actor: ActorContext): UseCaseIO[AuthenticatedActor]
   def users(ids: List[com.example.graphQL.cats.domain.model.Identifiers.UserId]): UseCaseIO[List[User]]
@@ -26,6 +30,7 @@ trait HiringReadModel {
   def application(id: ApplicationId): UseCaseIO[Option[Application]]
   def canViewApplication(actor: ActorContext, applicationId: ApplicationId): UseCaseIO[Unit]
   def applicationHistory(
+      actor: ActorContext,
       applicationId: ApplicationId,
       page: ApplicationEventPageRequest
   ): UseCaseIO[List[ApplicationEvent]]

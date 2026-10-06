@@ -14,6 +14,8 @@ import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
 
+import com.example.graphQL.cats.service.read.*
+import org.bson.Document
 import java.time.Instant
 import scala.util.chaining.*
 
@@ -48,6 +50,45 @@ final class MongoJobRepository(
 
   override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)(diagnostics)
+
+  override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] = {
+    import MongoAuthorizedReadQueries.*
+    val requested = keys.distinct
+    if (requested.isEmpty) RepositoryIO.fromEither(Right(Nil))
+    else {
+      val pipeline = List(
+        matching(
+          Filters.or(
+            requested.map(key =>
+              Filters.and(
+                Filters.eq(MongoFields.Id, key.applicationId.value.toString),
+                Filters.eq(MongoFields.JobId, key.jobId.value.toString)
+              )
+            )*
+          )
+        )
+      ) ++
+        actor(scope) ++ applicationAccess(scope) ++ List(
+          lookup(MongoCollections.Jobs, MongoFields.JobId, MongoFields.Id, "related"),
+          unwind("related")
+        )
+      documents(database, MongoCollections.Applications, pipeline, requested.size, diagnostics).subflatMap(values =>
+        MongoStoredDocumentDecoding.values(
+          values.flatMap(document =>
+            requested
+              .find(key =>
+                key.applicationId.value.toString == document.getString(
+                  MongoFields.Id
+                ) && key.jobId.value.toString == document.getString(MongoFields.JobId)
+              )
+              .map(key =>
+                MongoHiringCodecs.readJob(document.get("related", classOf[Document])).map(job => RelatedJob(key, job))
+              )
+          )
+        )
+      )
+    }
+  }
 
   override def findOpen(
       filter: JobSearchFilter,

@@ -187,7 +187,17 @@ private[graphql] object HiringGraphQLTypes {
       simple("status", jobStatus)(_.status),
       instantField("createdAt", _.createdAt),
       instantField("updatedAt", _.updatedAt),
-      Field("recruiter", OptionType(userType), resolve = context => usersFetcher.deferOpt(context.value.recruiterId))
+      Field(
+        "recruiter",
+        OptionType(userType),
+        resolve = context =>
+          usersFetcher
+            .deferOpt(
+              com.example.graphQL.cats.service.read.UserRelationKey
+                .JobRecruiter(context.value.id, context.value.recruiterId)
+            )
+            .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+      )
     )
   )
   lazy val applicationType: ObjectType[RequestContext, Application] = ObjectType(
@@ -197,8 +207,25 @@ private[graphql] object HiringGraphQLTypes {
       simple("status", applicationStatus)(_.status),
       instantField("createdAt", _.createdAt),
       instantField("updatedAt", _.updatedAt),
-      Field("candidate", OptionType(userType), resolve = context => usersFetcher.deferOpt(context.value.candidateId)),
-      Field("job", OptionType(jobType), resolve = context => jobsFetcher.deferOpt(context.value.jobId))
+      Field(
+        "candidate",
+        OptionType(userType),
+        resolve = context =>
+          usersFetcher
+            .deferOpt(
+              com.example.graphQL.cats.service.read.UserRelationKey
+                .ApplicationCandidate(context.value.id, context.value.candidateId)
+            )
+            .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+      ),
+      Field(
+        "job",
+        OptionType(jobType),
+        resolve = context =>
+          jobsFetcher
+            .deferOpt(com.example.graphQL.cats.service.read.JobRelationKey(context.value.id, context.value.jobId))
+            .map(_.map(_.value))(using context.ctx.effectAdapter.deferredExecutionContext)
+      )
     )
   )
   lazy val applicationEventType: ObjectType[RequestContext, ApplicationEvent] =
