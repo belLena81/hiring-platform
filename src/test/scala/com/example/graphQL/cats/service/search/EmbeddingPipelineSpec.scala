@@ -279,6 +279,55 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
+  test("embedding worker reports a durable completion failure without marking the claim complete") {
+    for {
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+      calls <- Ref.of[IO, Int](0)
+      observed <- Ref.of[IO, List[LogEvent]](Nil)
+      clock <- Ref.of[IO, Instant](now)
+      work <- InMemoryEmbeddingWorkRepository.create
+      key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+      _ <- successful(work.enqueue(key, now))
+      interruptedWork = new EmbeddingWorkRepository {
+        override def enqueue(value: EmbeddingWorkKey, at: Instant): RepositoryIO[Unit] = work.enqueue(value, at)
+        override def claim(
+            workerId: String,
+            at: Instant,
+            leaseUntil: Instant
+        ): RepositoryIO[Option[ClaimedEmbeddingWork]] =
+          work.claim(workerId, at, leaseUntil)
+        override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
+          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+        override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] =
+          work.retry(claim, availableAt)
+        override def fail(
+            claim: ClaimedEmbeddingWork,
+            failure: EmbeddingWorkFailure,
+            at: Instant
+        ): RepositoryIO[Unit] = work.fail(claim, failure, at)
+      }
+      diagnostics = new Diagnostics {
+        override def event(event: LogEvent, requestId: Option[String], fields: => Map[LogField, String]): IO[Unit] =
+          observed.update(_ :+ event)
+      }
+      _ <- controlledWorker(
+        interruptedWork,
+        InMemoryUsers(usersRef),
+        InMemoryJobs(jobsRef),
+        CountingEmbeddingService(calls),
+        clock,
+        retryDelay = 1.hour,
+        diagnostics = diagnostics
+      ).use(wakeups => wakeups.offer(()) *> waitFor(observed.get.map(_.contains(LogEvent.EmbeddingProcessingFailed))))
+      events <- observed.get
+      stored <- work.snapshot
+    } yield {
+      assertEquals(events, List(LogEvent.EmbeddingProcessingFailed))
+      assertEquals(stored.get(key.value).map(_.state), Some("Processing"))
+    }
+  }
+
   test("embedding worker reports unexpected processing failure and records retry exhaustion") {
     val provider = new EmbeddingService {
       override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
@@ -891,7 +940,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       jobs: JobRepository,
       provider: EmbeddingService,
       clock: Ref[IO, Instant],
-      retryDelay: FiniteDuration = 1.hour
+      retryDelay: FiniteDuration = 1.hour,
+      diagnostics: Diagnostics = Diagnostics.noop
   ): Resource[IO, Queue[IO, Unit]] =
     Resource.eval(Queue.bounded[IO, Unit](8)).flatMap { wakeups =>
       val worker = new EmbeddingPipeline(
@@ -907,7 +957,7 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
         30.seconds,
         clock.get,
         "fixture-worker",
-        Diagnostics.noop
+        diagnostics
       )
       Resource.make(worker.stream.compile.drain.start)(_.cancel).as(wakeups)
     }

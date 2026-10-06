@@ -121,22 +121,8 @@ final class MongoInterviewWorkflowRepository(
     }
 
   private def eligibleCommand(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean = {
-    val notification = command.command match {
-      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_) => true
-      case _                                                                                             => false
-    }
-    val phase = command.command match {
-      case InterviewWorkflowCommand.ReserveCalendarSlot(_) | InterviewWorkflowCommand.LookupCalendarReservation(_) =>
-        InterviewWorkflowPhase.ReservationPending
-      case InterviewWorkflowCommand.CommitAcceptedToInterview(_) |
-          InterviewWorkflowCommand.LookupStatusCommitReceipt(_) =>
-        InterviewWorkflowPhase.StatusCommitPending
-      case InterviewWorkflowCommand.ReleaseCalendarSlot(_) => InterviewWorkflowPhase.CompensationPending
-      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_) =>
-        InterviewWorkflowPhase.NotificationsPending
-      case _ => InterviewWorkflowPhase.RepairRequired
-    }
-    command.state != InterviewWorkflowCommandState.Superseded && workflow.phase == phase && (workflow.revision == command.revision || (notification && command.revision <= workflow.revision))
+    command.state != InterviewWorkflowCommandState.Superseded &&
+    InterviewWorkflow.commandIsApplicable(workflow, command.revision, command.command)
   }
 
   override def authorizePublication(claim: ClaimedInterviewWorkflowCommand, now: Instant): RepositoryIO[Boolean] =
@@ -236,6 +222,7 @@ final class MongoInterviewWorkflowRepository(
                 MongoFilter.eq(RevisionField, command.revision),
                 MongoFilter.eq(OwnerField, claim.owner),
                 MongoFilter.eq(FencingTokenField, claim.fencingToken.toString),
+                MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
                 MongoFilter.gt(LeaseUntilField, Date.from(now)),
                 MongoFilter.exists("result", false)
               ),
@@ -374,7 +361,7 @@ final class MongoInterviewWorkflowRepository(
                   .append(MongoFields.ApplicationId, workflow.applicationId.value.toString)
                   .append(MongoFields.PreviousStatus, ApplicationStatus.Accepted.toString)
                   .append(MongoFields.NewStatus, ApplicationStatus.Interview.toString)
-                  .append(MongoFields.ActorId, workflow.recruiterId.value.toString)
+                  .append(MongoFields.ActorId, workflow.initiatedBy.value.toString)
                   .append(MongoFields.OccurredAt, Date.from(now))
                 _ <- insert(
                   session,
@@ -392,7 +379,7 @@ final class MongoInterviewWorkflowRepository(
                   workflow.applicationId,
                   Some(ApplicationStatus.Accepted),
                   ApplicationStatus.Interview,
-                  workflow.recruiterId,
+                  workflow.initiatedBy,
                   now,
                   None,
                   None
@@ -780,7 +767,13 @@ final class MongoInterviewWorkflowRepository(
                                     MongoFilter.eq(WorkflowIdField, workflow.id.value.toString),
                                     MongoFilter.lte(RevisionField, expectedRevision)
                                   ),
-                                  MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Superseded.toString)
+                                  MongoUpdate.combine(
+                                    MongoUpdate
+                                      .set(CommandStateField, InterviewWorkflowCommandState.Superseded.toString),
+                                    MongoUpdate.unset(OwnerField),
+                                    MongoUpdate.unset(FencingTokenField),
+                                    MongoUpdate.unset(LeaseUntilField)
+                                  )
                                 )
                               )
                               .void

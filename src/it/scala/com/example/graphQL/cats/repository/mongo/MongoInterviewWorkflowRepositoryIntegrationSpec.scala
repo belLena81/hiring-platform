@@ -434,6 +434,191 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
     }
   }
 
+  test("Admin initiated interview scheduling attributes the hiring history and outbox to the Admin") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val target = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
+      val admin = User(
+        UserId(UUID.randomUUID()),
+        None,
+        "Scheduling audit admin",
+        UserRole.Admin,
+        None,
+        now,
+        adminSingleton = true
+      )
+      val initiated = target.copy(initiatedBy = admin.id)
+      val eventId =
+        UUID.nameUUIDFromBytes(s"${initiated.id.value}:status".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- seedSubjects(fixture.database, target)
+        _ <- Mongo4catsCollections
+          .documents(fixture.database, MongoCollections.Users)
+          .flatMap(_.insertOne(MongoHiringCodecs.user(admin)))
+        _ <- success(
+          repository.create(
+            initiated,
+            InterviewWorkflow.initialCommand(initiated),
+            initiated.idempotencyKey,
+            MutationReceiptFingerprint.fromCanonicalInput("admin-initiated-workflow"),
+            now
+          )
+        )
+        _ <- providerSuccess(
+          calendar.reserve(
+            initiated.id,
+            s"${initiated.id.value}:reserve",
+            initiated.candidateId,
+            initiated.recruiterId,
+            initiated.interval,
+            now
+          )
+        )
+        pending = InterviewWorkflow
+          .decide(initiated, initiated.revision, InterviewWorkflowEvent.ReservationConfirmed)
+          .fold(error => fail(s"Transition: $error"), identity)
+        _ <- success(repository.advance(pending._1, initiated.revision, "reserved", pending._2, now))
+        _ <- success(repository.commitHiring(pending._1, now))
+        history <- MongoRepositoryTestSupport.findOne(
+          fixture.database,
+          MongoCollections.ApplicationEvents,
+          MongoFilter.eq(MongoFields.Id, eventId.toString).bson
+        )
+        outbox <- MongoRepositoryTestSupport.findOne(
+          fixture.database,
+          MongoCollections.EventOutbox,
+          MongoFilter.eq(MongoFields.Id, eventId.toString).bson
+        )
+      } yield {
+        assertEquals(history.map(_.getString(MongoFields.ActorId)), Some(admin.id.value.toString))
+        assertEquals(outbox.map(_.getString(MongoFields.ActorId)), Some(admin.id.value.toString))
+      }
+    }
+  }
+
+  test("repair fences an in-flight notification result from its superseded live claim") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
+      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      val notifications = FakeInterviewNotificationProvider.durable(repository)
+      val worker = new com.example.graphQL.cats.service.application.InterviewWorkflowWorker(
+        repository,
+        calendar,
+        notifications,
+        com.example.graphQL.cats.service.application.InterviewWorkerSettings(
+          "repair-race-worker",
+          100.millis,
+          60.seconds,
+          10.seconds,
+          5,
+          1.second,
+          30.seconds
+        )
+      )
+      def stableId(identity: String): UUID =
+        UUID.nameUUIDFromBytes(identity.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- seedSubjects(fixture.database, value)
+        _ <- success(
+          repository.create(
+            value,
+            InterviewWorkflow.initialCommand(value),
+            value.idempotencyKey,
+            MutationReceiptFingerprint.fromCanonicalInput("repair-completion-race"),
+            now
+          )
+        )
+        claimedAt <- IO.realTimeInstant
+        reservePublished <- success(
+          repository.claimDueCommands("repair-race-publisher", claimedAt, claimedAt.plusSeconds(60), 1)
+        ).flatMap(value => IO.fromOption(value.headOption)(new AssertionError("Missing reservation publication")))
+        _ <- success(repository.markPublished(reservePublished, claimedAt))
+        reserveExecution <- success(
+          repository.claimExecution(reservePublished.record, "repair-race-worker", claimedAt, claimedAt.plusSeconds(60))
+        ).flatMap(value => IO.fromOption(value)(new AssertionError("Missing reservation execution")))
+        _ <- providerSuccess(
+          calendar.reserve(
+            value.id,
+            s"${value.id.value}:reserve",
+            value.candidateId,
+            value.recruiterId,
+            value.interval,
+            claimedAt,
+            Some(reserveExecution)
+          )
+        )
+        _ <- success(repository.recordResult(reserveExecution, InterviewCommandResult.Succeeded, claimedAt))
+        reservationResult = InterviewMessage(
+          stableId(s"${stableId(reserveExecution.record.stepId)}:result"),
+          value.id.value,
+          reserveExecution.record.stepId,
+          InterviewStep.Reserve,
+          reserveExecution.record.revision,
+          stableId(reserveExecution.record.stepId),
+          value.preCommitDeadline,
+          Some(InterviewResult.Succeeded),
+          reserveExecution.record.occurredAt
+        )
+        _ <- worker.receiveResult(reservationResult).map(assert(_))
+        statusPending <- success(repository.findForAdmin(value.id)).flatMap(value =>
+          IO.fromOption(value)(new AssertionError("Missing status-commit workflow"))
+        )
+        _ <- success(repository.commitHiring(statusPending, claimedAt))
+        notificationPublished <- success(
+          repository.claimDueCommands("repair-race-publisher", claimedAt, claimedAt.plusSeconds(60), 16)
+        ).flatMap(commands =>
+          IO.fromOption(commands.find(_.record.command match {
+            case InterviewWorkflowCommand.Notify(InterviewParticipant.Candidate, _) => true
+            case _                                                                  => false
+          }))(new AssertionError("Missing candidate notification publication"))
+        )
+        _ <- success(repository.markPublished(notificationPublished, claimedAt))
+        notificationExecution <- success(
+          repository.claimExecution(
+            notificationPublished.record,
+            "repair-race-worker",
+            claimedAt,
+            claimedAt.plusSeconds(60)
+          )
+        ).flatMap(value => IO.fromOption(value)(new AssertionError("Missing notification execution")))
+        _ <- providerSuccess(
+          notifications.notify(
+            value.id,
+            value.candidateId,
+            InterviewParticipant.Candidate,
+            s"${value.id.value}:notify:Candidate",
+            claimedAt,
+            Some(notificationExecution)
+          )
+        )
+        notifying <- success(repository.findForAdmin(value.id)).flatMap(value =>
+          IO.fromOption(value)(new AssertionError("Missing notification workflow"))
+        )
+        failed = InterviewWorkflow
+          .decide(notifying, notifying.revision, InterviewWorkflowEvent.RetryExhausted("notification"))
+          .fold(error => fail(s"Transition: $error"), identity)
+        _ <- success(repository.advance(failed._1, notifying.revision, "exhausted", failed._2, claimedAt))
+        repaired <- success(
+          repository.repair(failed._1, failed._1.revision, UUID.randomUUID(), claimedAt, value.recruiterId)
+        )
+        lateResult <- repository.recordResult(notificationExecution, InterviewCommandResult.Succeeded, claimedAt).value
+        command <- success(repository.findCommand(value.id, notificationExecution.record.stepId))
+        repairedStored <- success(repository.findForAdmin(value.id))
+      } yield {
+        assertEquals(lateResult, Left(RepositoryError.Conflict))
+        assertEquals(command.map(_.state), Some(InterviewWorkflowCommandState.Superseded))
+        assertEquals(repaired.phase, InterviewWorkflowPhase.NotificationsPending)
+        assertEquals(repaired.notified, Set.empty)
+        assertEquals(repairedStored.map(_.phase), Some(InterviewWorkflowPhase.NotificationsPending))
+        assertEquals(repairedStored.map(_.notified), Some(Set.empty))
+      }
+    }
+  }
+
   test("expired execution tokens cannot reserve and stale release cannot remove a committed reservation") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)

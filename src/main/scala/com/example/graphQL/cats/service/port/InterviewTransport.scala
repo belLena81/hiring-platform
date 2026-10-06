@@ -12,6 +12,16 @@ enum InterviewResult {
   case Succeeded, Rejected, OutcomeUnknown, Found, Absent
 }
 
+object InterviewResult {
+  def fromCommandResult(value: InterviewCommandResult): InterviewResult = value match {
+    case InterviewCommandResult.Succeeded      => Succeeded
+    case InterviewCommandResult.Rejected       => Rejected
+    case InterviewCommandResult.OutcomeUnknown => OutcomeUnknown
+    case InterviewCommandResult.Found          => Found
+    case InterviewCommandResult.Absent         => Absent
+  }
+}
+
 /** A coordination envelope: participant identities and scheduling details stay in MongoDB. */
 final case class InterviewMessage(
     messageId: UUID,

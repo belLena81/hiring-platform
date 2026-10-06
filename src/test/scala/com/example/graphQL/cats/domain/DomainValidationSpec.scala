@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.domain
 
-import com.example.graphQL.cats.domain.error.DomainValidationError.{BlankField, EmptyCollection}
+import com.example.graphQL.cats.domain.error.DomainValidationError.{BlankField, EmptyCollection, InvalidCoordinates}
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location, User, UserRole}
 import java.time.Instant
@@ -76,6 +76,48 @@ class DomainValidationSpec extends FunSuite {
     assert(GeoPoint.validate(90.01, 33.4).isLeft)
     assert(GeoPoint.validate(35.2, Double.NaN).isLeft)
     assert(Location.validate("Cyprus", "Nicosia", remote = false, Some(GeoPoint(35.2, 181d))).isInvalid)
+  }
+
+  test("job validation retains accepted location coordinates") {
+    val point = GeoPoint(35.2, 33.4)
+    val result = Job.validate(
+      jobId,
+      userId,
+      "Scala Developer",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect"),
+      Location("Cyprus", "Nicosia", remote = false, Some(point)),
+      JobStatus.Open,
+      now,
+      now
+    )
+
+    assertEquals(result.toEither.map(_.location.coordinates), Right(Some(point)))
+  }
+
+  test("job validation rejects invalid coordinates and accumulates independent field errors") {
+    List(
+      GeoPoint(90.01, 33.4),
+      GeoPoint(35.2, 181d),
+      GeoPoint(Double.NaN, 33.4),
+      GeoPoint(35.2, Double.PositiveInfinity)
+    ).foreach { point =>
+      val result = Job.validate(
+        jobId,
+        userId,
+        " ",
+        "Build services",
+        List("Scala"),
+        Set("Cats Effect"),
+        Location("Cyprus", "Nicosia", remote = false, Some(point)),
+        JobStatus.Open,
+        now,
+        now
+      )
+
+      assertEquals(result.leftMap(_.toList).toEither, Left(List(BlankField("title"), InvalidCoordinates)))
+    }
   }
 
   test("valid job validation preserves ADT status and normalized text") {

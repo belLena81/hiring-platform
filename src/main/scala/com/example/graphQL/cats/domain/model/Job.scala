@@ -78,7 +78,7 @@ object Job {
       validateText("description", description, FieldLimits.LongTextMaxChars),
       validateRequirements(requirements),
       validateNonEmptyValues("skills", skills),
-      Location.validate(location.country, location.city, location.remote)
+      Location.validate(location.country, location.city, location.remote, location.coordinates)
     ).mapN { (validTitle, validDescription, validRequirements, validSkills, validLocation) =>
       Job(
         id,

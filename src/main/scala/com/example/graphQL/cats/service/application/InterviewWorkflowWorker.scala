@@ -52,7 +52,7 @@ final class InterviewWorkflowWorker(
                 claim.record.revision,
                 if (claim.record.result.nonEmpty) commandId else workflow.id.value,
                 workflow.preCommitDeadline,
-                claim.record.result.map(value => InterviewResult.valueOf(value.toString)),
+                claim.record.result.map(InterviewResult.fromCommandResult),
                 claim.record.occurredAt
               )
               Clock[IO].realTimeInstant
@@ -101,17 +101,8 @@ final class InterviewWorkflowWorker(
     )
 
   private def applicable(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean = {
-    val expectedPhase = step(command.command) match {
-      case InterviewStep.Reserve | InterviewStep.LookupReservation => InterviewWorkflowPhase.ReservationPending
-      case InterviewStep.CommitHiring | InterviewStep.LookupCommit => InterviewWorkflowPhase.StatusCommitPending
-      case InterviewStep.Release                                   => InterviewWorkflowPhase.CompensationPending
-      case InterviewStep.NotifyCandidate | InterviewStep.NotifyRecruiter | InterviewStep.LookupNotifyCandidate |
-          InterviewStep.LookupNotifyRecruiter =>
-        InterviewWorkflowPhase.NotificationsPending
-      case InterviewStep.RequireRepair => InterviewWorkflowPhase.RepairRequired
-    }
-    command.state != InterviewWorkflowCommandState.Superseded && workflow.phase == expectedPhase &&
-    (command.revision == workflow.revision || expectedPhase == InterviewWorkflowPhase.NotificationsPending)
+    command.state != InterviewWorkflowCommandState.Superseded &&
+    InterviewWorkflow.commandIsApplicable(workflow, command.revision, command.command)
   }
 
   private def withinReplayWindow(message: InterviewMessage)(process: IO[Boolean]): IO[Boolean] =
@@ -177,7 +168,7 @@ final class InterviewWorkflowWorker(
                   .flatMap { result =>
                     Clock[IO].realTimeInstant.flatMap(at =>
                       repository
-                        .recordResult(claim, InterviewCommandResult.valueOf(result.toString), at)
+                        .recordResult(claim, InterviewCommandResult.fromTransportResult(result), at)
                         .value
                         .map(_.isRight)
                     )

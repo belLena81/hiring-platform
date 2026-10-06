@@ -75,8 +75,11 @@ final class EmbeddingPipeline(
   private def claimNext: IO[Option[ClaimedEmbeddingWork]] =
     now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis)).value).flatMap {
       case Right(claim) => IO.pure(claim)
-      case Left(_)      => IO.pure(None)
+      case Left(_)      => reportRepositoryFailure.as(None)
     }
+
+  private def reportRepositoryFailure: IO[Unit] =
+    diagnostics.emit(LogEvent.EmbeddingProcessingFailed)
 
   private enum ProcessingOutcome {
     case Completed, Retry
@@ -103,11 +106,20 @@ final class EmbeddingPipeline(
     ).flatMap { result =>
       result.fold(identity, identity) match {
         case ProcessingOutcome.Retry =>
-          now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _).value).void
+          now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _).value).flatMap {
+            case Right(_) => IO.unit
+            case Left(_)  => reportRepositoryFailure
+          }
         case ProcessingOutcome.Completed =>
-          work.complete(claim).value.void
+          work.complete(claim).value.flatMap {
+            case Right(_) => IO.unit
+            case Left(_)  => reportRepositoryFailure
+          }
         case ProcessingOutcome.Terminal(failure) =>
-          now.flatMap(work.fail(claim, failure, _).value).void
+          now.flatMap(work.fail(claim, failure, _).value).flatMap {
+            case Right(_) => IO.unit
+            case Left(_)  => reportRepositoryFailure
+          }
       }
     }
 

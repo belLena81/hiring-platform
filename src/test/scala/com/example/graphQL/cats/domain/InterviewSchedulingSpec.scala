@@ -3,6 +3,7 @@ package com.example.graphQL.cats.domain
 import com.example.graphQL.cats.domain.model.ApplicationStatus
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, UserId}
 import com.example.graphQL.cats.domain.workflow.*
+import com.example.graphQL.cats.service.port.{InterviewCommandResult, InterviewResult}
 import java.time.Instant
 import java.util.UUID
 import munit.FunSuite
@@ -80,6 +81,28 @@ class InterviewSchedulingSpec extends FunSuite {
       ),
       Left(InterviewWorkflowError.ApplicationMustBeAccepted)
     )
+  }
+
+  test("command applicability fences by phase and revision while allowing outstanding notification revisions") {
+    val base = workflow()
+    val reserve = InterviewWorkflowCommand.ReserveCalendarSlot("reserve")
+    val notify = InterviewWorkflowCommand.Notify(InterviewParticipant.Candidate, "notify")
+    val reservationPending = base.copy(revision = 3L, phase = InterviewWorkflowPhase.ReservationPending)
+    val notificationsPending = base.copy(revision = 4L, phase = InterviewWorkflowPhase.NotificationsPending)
+
+    assert(InterviewWorkflow.commandIsApplicable(reservationPending, 3L, reserve))
+    assert(!InterviewWorkflow.commandIsApplicable(reservationPending, 2L, reserve))
+    assert(!InterviewWorkflow.commandIsApplicable(reservationPending, 3L, notify))
+    assert(InterviewWorkflow.commandIsApplicable(notificationsPending, 3L, notify))
+    assert(InterviewWorkflow.commandIsApplicable(notificationsPending, 4L, notify))
+    assert(!InterviewWorkflow.commandIsApplicable(notificationsPending, 5L, notify))
+  }
+
+  test("Saga result conversion is exhaustive and round trips through the transport boundary") {
+    InterviewCommandResult.values.foreach { result =>
+      val transport = InterviewResult.fromCommandResult(result)
+      assertEquals(InterviewCommandResult.fromTransportResult(transport), result)
+    }
   }
 
   test("reservation commits before the guarded status transition and notifications") {

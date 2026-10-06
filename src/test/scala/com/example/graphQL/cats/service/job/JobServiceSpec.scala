@@ -17,8 +17,9 @@ import com.example.graphQL.cats.domain.pagination.{JobPageRequest, PageSize}
 import com.example.graphQL.cats.service.ServiceFixtures.*
 import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.domain.error.DomainError
+import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, Location, User, UserRole}
+import com.example.graphQL.cats.domain.model.{GeoPoint, Job, JobStatus, Location, User, UserRole}
 import com.example.graphQL.cats.service.events.OperationalEventType
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -115,6 +116,95 @@ class JobServiceSpec extends CatsEffectSuite {
       assertEquals(created.map(_.id), Right(jobId))
       assertEquals(rejected, Left(UseCaseError.Domain(DomainError.Forbidden)))
       assertEquals(updated.map(_.id), Right(jobId))
+    }
+  }
+
+  test("createJob and updateJob preserve caller coordinates in their results and persisted jobs") {
+    val initialPoint = GeoPoint(35.2, 33.4)
+    val updatedPoint = GeoPoint(34.7, 33.0)
+    val input = CreateJobInput(
+      "New role",
+      "Build services",
+      List("Scala"),
+      Set("Cats Effect"),
+      Location("Cyprus", "Nicosia", remote = false, Some(initialPoint)),
+      JobStatus.Open
+    )
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map.empty)
+      service <- deterministicService(InMemoryUsers(users), InMemoryJobs(jobs), List(now, later), List(jobId.value))
+      created <- service
+        .createJob(request("create-with-coordinates"), ActorContext(recruiterId, UserRole.Recruiter), input)
+        .value
+      storedAfterCreate <- jobs.get
+      updated <- service
+        .updateJob(
+          request("update-with-coordinates"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          jobId,
+          UpdateJobInput(
+            input.title,
+            input.description,
+            input.requirements,
+            input.skills,
+            input.location.copy(coordinates = Some(updatedPoint))
+          )
+        )
+        .value
+      storedAfterUpdate <- jobs.get
+    } yield {
+      assertEquals(created.map(_.location.coordinates), Right(Some(initialPoint)))
+      assertEquals(storedAfterCreate.get(jobId).flatMap(_.location.coordinates), Some(initialPoint))
+      assertEquals(updated.map(_.location.coordinates), Right(Some(updatedPoint)))
+      assertEquals(storedAfterUpdate.get(jobId).flatMap(_.location.coordinates), Some(updatedPoint))
+    }
+  }
+
+  test("createJob and updateJob reject invalid coordinates without changing persisted jobs") {
+    val initialPoint = GeoPoint(35.2, 33.4)
+    val existing = openJob.copy(location = Location("Cyprus", "Nicosia", remote = false, Some(initialPoint)))
+    val invalidLocation = existing.location.copy(coordinates = Some(GeoPoint(35.2, 181d)))
+    val expectedError =
+      UseCaseError.ValidationFailed(cats.data.NonEmptyList.one(DomainValidationError.InvalidCoordinates))
+    for {
+      users <- Ref.of[IO, Map[UserId, User]](Map(recruiterId -> recruiter))
+      jobs <- Ref.of[IO, Map[JobId, Job]](Map(jobId -> existing))
+      service <- deterministicService(
+        InMemoryUsers(users),
+        InMemoryJobs(jobs),
+        List(now, later),
+        List(new UUID(0L, 99L))
+      )
+      created <- service
+        .createJob(
+          request("create-invalid-coordinates"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          CreateJobInput(
+            existing.title,
+            existing.description,
+            existing.requirements,
+            existing.skills,
+            invalidLocation,
+            JobStatus.Open
+          )
+        )
+        .value
+      storedAfterCreate <- jobs.get
+      updated <- service
+        .updateJob(
+          request("update-invalid-coordinates"),
+          ActorContext(recruiterId, UserRole.Recruiter),
+          jobId,
+          UpdateJobInput(existing.title, existing.description, existing.requirements, existing.skills, invalidLocation)
+        )
+        .value
+      storedAfterUpdate <- jobs.get
+    } yield {
+      assertEquals(created, Left(expectedError))
+      assertEquals(storedAfterCreate, Map(jobId -> existing))
+      assertEquals(updated, Left(expectedError))
+      assertEquals(storedAfterUpdate, Map(jobId -> existing))
     }
   }
 

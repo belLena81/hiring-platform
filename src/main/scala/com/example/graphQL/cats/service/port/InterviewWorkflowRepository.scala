@@ -20,6 +20,16 @@ enum InterviewWorkflowCommandState {
 
 enum InterviewCommandResult { case Succeeded, Rejected, OutcomeUnknown, Found, Absent }
 
+object InterviewCommandResult {
+  def fromTransportResult(value: InterviewResult): InterviewCommandResult = value match {
+    case InterviewResult.Succeeded      => Succeeded
+    case InterviewResult.Rejected       => Rejected
+    case InterviewResult.OutcomeUnknown => OutcomeUnknown
+    case InterviewResult.Found          => Found
+    case InterviewResult.Absent         => Absent
+  }
+}
+
 final case class InterviewWorkflowCommandRecord(
     workflowId: InterviewWorkflowId,
     stepId: String,

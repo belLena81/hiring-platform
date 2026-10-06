@@ -218,3 +218,10 @@ Final Scala fingerprint: `cd6bb78a5356aa26ab8522c20859f0451319d672e47f3dad4b054e
 Final independent Code Reviewer **PASS**, Security Engineer **PASS**, and QA **PASS** for the authorized follow-up. Local tooling and policy readiness are complete; the user explicitly keeps human judgment review pending. Actual Atlas/semantic relevance/privacy/billing observations and ranking adoption remain open.
 
 Historical HSE source/regression applicability was reviewed against the current local suites. This does not close blanket historical HSE QA: HSE-01 still lacks criterion-specific runtime tests for interrupted migration 002 restart and malformed residence/status/consent verification. That pre-existing gap and all HSE live gates remain separate from this follow-up; no migration behavior was changed here.
+
+### Review remediation checkpoint (2026-10-06)
+
+- `Job.validate` now forwards optional coordinates to `Location.validate`; valid coordinates survive create/update and invalid/nonfinite values produce typed validation errors without persisting a change. Four regression cases were first run red (19 existing pass, 4 fail), then passed after the correction.
+- Embedding queue claim and completion/failure persistence errors now emit the existing generic processing diagnostic. They do not mark a claim complete; lease expiry and durable retry/reclaim remain the recovery path. No work content or identifiers are logged.
+- Evaluation capability differences between capture, report and assessment remain explicit because they have different execution contracts. Atlas execution, human judgment approval, malformed migration fixture coverage and repository codec extraction remain outside this remediation.
+- Final Java 17 format checks and 533/533 root unit tests pass after the embedding diagnostic regression was added. Independent Code Reviewer, Security Engineer and QA verdicts are PASS for these local changes. No Atlas execution, provider request or semantic/relevance conclusion is implied.

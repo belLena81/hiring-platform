@@ -88,6 +88,32 @@ final case class InterviewWorkflow(
 )
 
 object InterviewWorkflow {
+
+  /** Pure command fencing policy shared by the worker and persistence adapter. */
+  def commandIsApplicable(
+      workflow: InterviewWorkflow,
+      commandRevision: Long,
+      command: InterviewWorkflowCommand
+  ): Boolean = {
+    val notification = command match {
+      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_) => true
+      case _                                                                                             => false
+    }
+    val expectedPhase = command match {
+      case InterviewWorkflowCommand.ReserveCalendarSlot(_) | InterviewWorkflowCommand.LookupCalendarReservation(_) =>
+        InterviewWorkflowPhase.ReservationPending
+      case InterviewWorkflowCommand.CommitAcceptedToInterview(_) |
+          InterviewWorkflowCommand.LookupStatusCommitReceipt(_) =>
+        InterviewWorkflowPhase.StatusCommitPending
+      case InterviewWorkflowCommand.ReleaseCalendarSlot(_) => InterviewWorkflowPhase.CompensationPending
+      case InterviewWorkflowCommand.Notify(_, _) | InterviewWorkflowCommand.LookupNotificationReceipt(_) =>
+        InterviewWorkflowPhase.NotificationsPending
+      case _ => InterviewWorkflowPhase.RepairRequired
+    }
+    workflow.phase == expectedPhase &&
+    (workflow.revision == commandRevision || (notification && commandRevision <= workflow.revision))
+  }
+
   def initialCommand(workflow: InterviewWorkflow): InterviewWorkflowCommand =
     InterviewWorkflowCommand.ReserveCalendarSlot(s"${workflow.id.value}:reserve")
 
