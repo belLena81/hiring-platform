@@ -85,6 +85,8 @@ final case class InterviewWorkflow(
     initiatedBy: UserId
 )
 
+final case class InterviewWorkflowDecision(workflow: InterviewWorkflow, commands: List[InterviewWorkflowCommand])
+
 object InterviewWorkflow {
 
   /** Pure command fencing policy shared by the worker and persistence adapter. */
@@ -149,12 +151,15 @@ object InterviewWorkflow {
       workflow: InterviewWorkflow,
       expectedRevision: Long,
       event: InterviewWorkflowEvent
-  ): Either[InterviewWorkflowError, (InterviewWorkflow, List[InterviewWorkflowCommand])] =
+  ): Either[InterviewWorkflowError, InterviewWorkflowDecision] =
     if (workflow.revision != expectedRevision || expectedRevision == Long.MaxValue)
       Left(InterviewWorkflowError.StaleRevision)
     else
       transition(workflow, event).map { case (phase, notified, commands) =>
-        (workflow.copy(revision = workflow.revision + 1L, phase = phase, notified = notified), commands)
+        InterviewWorkflowDecision(
+          workflow.copy(revision = workflow.revision + 1L, phase = phase, notified = notified),
+          commands
+        )
       }
 
   private def transition(

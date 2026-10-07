@@ -140,8 +140,8 @@ private[graphql] object HiringGraphQLSearchResolvers {
       val matchFilter = context.arg(candidateMatchFilterArgument)
       val candidateFilters = CandidateMatchFilters(
         matchFilter.flatMap(_.requiredSkills).getOrElse(Nil),
-        matchFilter.flatMap(_.country).map(_.trim.toLowerCase(java.util.Locale.ROOT)),
-        matchFilter.flatMap(_.city).map(_.trim.toLowerCase(java.util.Locale.ROOT)),
+        matchFilter.flatMap(_.country),
+        matchFilter.flatMap(_.city),
         matchFilter.flatMap(_.availabilityStatus).map(_.toString)
       )
       for {

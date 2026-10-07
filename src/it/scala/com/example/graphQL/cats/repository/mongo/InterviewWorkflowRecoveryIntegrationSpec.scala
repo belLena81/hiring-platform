@@ -128,6 +128,80 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
     }
   }
 
+  test("Admin repair reconciles a released reservation without reopening it or extending its deadline") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val calendar = FakeInterviewCalendarProvider.durable(repository)
+      for {
+        now <- IO.realTimeInstant.map(_.truncatedTo(java.time.temporal.ChronoUnit.MILLIS))
+        value = workflow(now)
+        afterDeadline = value.preCommitDeadline.plusSeconds(1)
+        clock <- Ref.of[IO, Instant](afterDeadline)
+        worker = new InterviewWorkflowWorker(
+          repository,
+          calendar,
+          FakeInterviewNotificationProvider.durable(repository),
+          settings,
+          Diagnostics.noop,
+          currentTime = clock.getAndUpdate(_.plusSeconds(1))
+        )
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- InterviewSchedulingFixtures.seed(fixture.database, List(value), now)
+        _ <- success(
+          repository.create(
+            value,
+            InterviewWorkflow.initialCommand(value),
+            value.idempotencyKey,
+            MutationReceiptFingerprint.fromCanonicalInput("released-reservation-repair"),
+            now
+          )
+        )
+        reservation <- calendar
+          .reserve(value.id, s"${value.id.value}:reserve", value.candidateId, value.recruiterId, value.interval, now)
+          .value
+        _ = assert(reservation.isRight)
+        compensated <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired), remaining = 50)
+        released <- calendar.lookup(value.id).value
+        _ = assert(released.toOption.flatten.flatMap(_.releasedAt).nonEmpty)
+        repaired <- success(
+          repository.repair(
+            compensated,
+            compensated.revision,
+            UUID.randomUUID(),
+            afterDeadline,
+            UserId(UUID.randomUUID())
+          )
+        )
+        finalState <- drive(repository, worker, value.id, Set(InterviewWorkflowPhase.RepairRequired), remaining = 50)
+        retained <- calendar.lookup(value.id).value
+        committed <- success(repository.hasHiringReceipt(value.id))
+        reservationCount <- MongoRepositoryTestSupport.count(
+          fixture.database,
+          MongoCollections.FakeInterviewCalendarReservations
+        )
+        historyCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.ApplicationEvents)
+        outboxCount <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.EventOutbox)
+        application <- MongoRepositoryTestSupport.findOne(
+          fixture.database,
+          MongoCollections.Applications,
+          MongoFilter.eq(MongoFields.Id, value.applicationId.value.toString).bson
+        )
+      } yield {
+        assertEquals(repaired.phase, InterviewWorkflowPhase.ReservationPending)
+        assertEquals(repaired.preCommitDeadline, value.preCommitDeadline)
+        assertEquals(finalState.preCommitDeadline, value.preCommitDeadline)
+        assertEquals(finalState.phase, InterviewWorkflowPhase.RepairRequired)
+        assert(finalState.revision > repaired.revision)
+        assertEquals(retained, released)
+        assertEquals(reservationCount, 1L)
+        assert(!committed)
+        assertEquals(historyCount, 0L)
+        assertEquals(outboxCount, 0L)
+        assertEquals(application.map(_.getString(MongoFields.Status)), Some(ApplicationStatus.Accepted.toString))
+      }
+    }
+  }
+
   test("compensation exhausts five durable attempts and retains uncertain reservation for visible repair") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)

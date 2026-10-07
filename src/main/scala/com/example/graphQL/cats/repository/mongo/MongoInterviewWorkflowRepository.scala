@@ -8,6 +8,13 @@ import com.example.graphQL.cats.domain.model.Identifiers.ApplicationEventId
 import com.example.graphQL.cats.domain.policy.ApplicationLifecycle
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.domain.workflow.*
+import com.example.graphQL.cats.service.application.{
+  InterviewExecutionPolicy,
+  InterviewExecutionAdmission,
+  InterviewExecutionLease,
+  InterviewExecutionLeaseDisposition,
+  InterviewExecutionBudgetDisposition
+}
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
 import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
@@ -92,113 +99,111 @@ final class MongoInterviewWorkflowRepository(
                   case None           => RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.AlreadyHandled))
                   case Some(document) =>
                     RepositoryIO.fromEither(decodeCommandRecord(document)).flatMap { stored =>
-                      if (stored.result.nonEmpty || !eligibleCommand(workflow, stored))
-                        RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.AlreadyHandled))
-                      else if (stored.state == InterviewWorkflowCommandState.Executing) {
-                        val identity = for {
-                          owner <- string(document, OwnerField)
-                          token <- string(document, FencingTokenField).flatMap(uuid)
-                          until <- instant(document, LeaseUntilField)
-                        } yield (owner, token, until)
-                        RepositoryIO.fromEither(identity).flatMap {
-                          case (_, _, until) if until.isAfter(now) =>
-                            RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.Busy))
-                          case (owner, token, _) =>
-                            guardWrite(
-                              commands,
-                              session,
-                              MongoFilter.and(
-                                MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
-                                MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                                MongoFilter.eq(OwnerField, owner),
-                                MongoFilter.eq(FencingTokenField, token.toString),
-                                MongoFilter.lte(LeaseUntilField, Date.from(now)),
-                                MongoFilter.exists("result", false)
-                              ),
-                              MongoUpdate.combine(
-                                MongoUpdate.set("result", InterviewCommandResult.OutcomeUnknown.toString),
-                                MongoUpdate
-                                  .set(CommandStateField, InterviewWorkflowCommandState.ResultPending.toString),
-                                MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
-                                MongoUpdate.unset(OwnerField),
-                                MongoUpdate.unset(FencingTokenField),
-                                MongoUpdate.unset(LeaseUntilField)
-                              )
-                            )
-                              .as(InterviewExecutionClaimOutcome.ReconciliationQueued)
-                        }
-                      } else if (
-                        stored.state != InterviewWorkflowCommandState.Published && stored.state != InterviewWorkflowCommandState.Claimed && stored.state != InterviewWorkflowCommandState.Pending
-                      )
-                        RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.AlreadyHandled))
-                      else
-                        executionAttemptCount(stored.workflowId, stored.command, session).flatMap { consumed =>
-                          // Migrated queued commands already own a conservatively charged slot.
-                          val additional = if (stored.executionAttempts == 0) 1 else 0
-                          if (consumed + additional > maxAttempts.toLong)
-                            applyRepair(
-                              session,
-                              workflow,
-                              InterviewAdvanceCause.ExecutionExhausted(stored.stepId),
-                              "execution_exhausted",
-                              now
-                            ) *>
-                              guardWrite(
-                                commands,
-                                session,
-                                MongoFilter.and(
-                                  MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
-                                  MongoFilter.eq(CommandStateField, stored.state.toString)
-                                ),
-                                MongoUpdate.combine(
-                                  MongoUpdate
-                                    .set(CommandStateField, InterviewWorkflowCommandState.RepairRequired.toString),
-                                  MongoUpdate.set(FailureCodeField, "execution_exhausted"),
-                                  MongoUpdate.unset(OwnerField),
-                                  MongoUpdate.unset(FencingTokenField),
-                                  MongoUpdate.unset(LeaseUntilField)
-                                )
-                              )
-                                .as(InterviewExecutionClaimOutcome.RepairRequired)
-                          else
-                            guardWrite(
-                              commands,
-                              session,
-                              MongoFilter.and(
-                                MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
-                                MongoFilter.eq(RevisionField, stored.revision),
-                                MongoFilter.eq(CommandStateField, stored.state.toString)
-                              ),
-                              MongoUpdate.combine(
-                                MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
-                                MongoUpdate.set(OwnerField, workerId),
-                                MongoUpdate.set(FencingTokenField, token.toString),
-                                MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil)),
-                                MongoUpdate.inc("executionAttempts", additional)
-                              )
-                            )
-                              .as(
-                                InterviewExecutionClaimOutcome.Acquired(
-                                  ClaimedInterviewWorkflowCommand(
-                                    stored.copy(executionAttempts = stored.executionAttempts + additional),
-                                    workerId,
-                                    token,
-                                    leaseUntil
+                      InterviewExecutionPolicy.admission(workflow, stored) match {
+                        case InterviewExecutionAdmission.AlreadyHandled =>
+                          RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.AlreadyHandled))
+                        case InterviewExecutionAdmission.InspectLease => {
+                          val identity = for {
+                            owner <- string(document, OwnerField)
+                            token <- string(document, FencingTokenField).flatMap(uuid)
+                            until <- instant(document, LeaseUntilField)
+                          } yield InterviewExecutionLease(owner, token, until)
+                          RepositoryIO.fromEither(identity).flatMap { lease =>
+                            InterviewExecutionPolicy.lease(lease, now) match {
+                              case InterviewExecutionLeaseDisposition.Busy =>
+                                RepositoryIO.fromEither(Right(InterviewExecutionClaimOutcome.Busy))
+                              case InterviewExecutionLeaseDisposition.Reconcile =>
+                                guardWrite(
+                                  commands,
+                                  session,
+                                  MongoFilter.and(
+                                    MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                    MongoFilter.eq(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
+                                    MongoFilter.eq(OwnerField, lease.owner),
+                                    MongoFilter.eq(FencingTokenField, lease.token.toString),
+                                    MongoFilter.lte(LeaseUntilField, Date.from(now)),
+                                    MongoFilter.exists("result", false)
+                                  ),
+                                  MongoUpdate.combine(
+                                    MongoUpdate.set("result", InterviewCommandResult.OutcomeUnknown.toString),
+                                    MongoUpdate
+                                      .set(CommandStateField, InterviewWorkflowCommandState.ResultPending.toString),
+                                    MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
+                                    MongoUpdate.unset(OwnerField),
+                                    MongoUpdate.unset(FencingTokenField),
+                                    MongoUpdate.unset(LeaseUntilField)
                                   )
                                 )
-                              )
+                                  .as(InterviewExecutionClaimOutcome.ReconciliationQueued)
+                            }
+                          }
                         }
+                        case InterviewExecutionAdmission.CheckBudget => {
+                          executionAttemptCount(stored.workflowId, stored.command, session).flatMap { consumed =>
+                            InterviewExecutionPolicy.budget(stored, consumed, maxAttempts) match {
+                              case InterviewExecutionBudgetDisposition.RequireRepair =>
+                                applyRepair(
+                                  session,
+                                  workflow,
+                                  InterviewAdvanceCause.ExecutionExhausted(stored.stepId),
+                                  "execution_exhausted",
+                                  now
+                                ) *>
+                                  guardWrite(
+                                    commands,
+                                    session,
+                                    MongoFilter.and(
+                                      MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                      MongoFilter.eq(CommandStateField, stored.state.toString)
+                                    ),
+                                    MongoUpdate.combine(
+                                      MongoUpdate
+                                        .set(CommandStateField, InterviewWorkflowCommandState.RepairRequired.toString),
+                                      MongoUpdate.set(FailureCodeField, "execution_exhausted"),
+                                      MongoUpdate.unset(OwnerField),
+                                      MongoUpdate.unset(FencingTokenField),
+                                      MongoUpdate.unset(LeaseUntilField)
+                                    )
+                                  )
+                                    .as(InterviewExecutionClaimOutcome.RepairRequired)
+                              case InterviewExecutionBudgetDisposition.Acquire(additional) =>
+                                guardWrite(
+                                  commands,
+                                  session,
+                                  MongoFilter.and(
+                                    MongoFilter.eq(MongoFields.Id, commandId(stored.workflowId, stored.stepId)),
+                                    MongoFilter.eq(RevisionField, stored.revision),
+                                    MongoFilter.eq(CommandStateField, stored.state.toString)
+                                  ),
+                                  MongoUpdate.combine(
+                                    MongoUpdate
+                                      .set(CommandStateField, InterviewWorkflowCommandState.Executing.toString),
+                                    MongoUpdate.set(OwnerField, workerId),
+                                    MongoUpdate.set(FencingTokenField, token.toString),
+                                    MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil)),
+                                    MongoUpdate.inc("executionAttempts", additional)
+                                  )
+                                )
+                                  .as(
+                                    InterviewExecutionClaimOutcome.Acquired(
+                                      ClaimedInterviewWorkflowCommand(
+                                        stored.copy(executionAttempts = stored.executionAttempts + additional),
+                                        workerId,
+                                        token,
+                                        leaseUntil
+                                      )
+                                    )
+                                  )
+                            }
+                          }
+                        }
+                      }
                     }
                 }
               } yield outcome
           }
         }
       }
-
-  private def eligibleCommand(workflow: InterviewWorkflow, command: InterviewWorkflowCommandRecord): Boolean = {
-    command.state != InterviewWorkflowCommandState.Superseded &&
-    InterviewWorkflow.commandIsApplicable(workflow, command.revision, command.command)
-  }
 
   override def authorizePublication(
       claim: ClaimedInterviewWorkflowCommand,
@@ -557,19 +562,19 @@ final class MongoInterviewWorkflowRepository(
                     MongoFilter.eq(RevisionField, workflow.revision)
                   ),
                   MongoUpdate.combine(
-                    MongoUpdate.set(RevisionField, next._1.revision),
-                    MongoUpdate.set("phase", next._1.phase.toString)
+                    MongoUpdate.set(RevisionField, next.workflow.revision),
+                    MongoUpdate.set("phase", next.workflow.phase.toString)
                   )
                 )
-                _ <- next._2.zipWithIndex.traverse_ { case (command, ordinal) =>
+                _ <- next.commands.zipWithIndex.traverse_ { case (command, ordinal) =>
                   insert(
                     session,
                     commands,
                     commandDocument(
                       InterviewWorkflowCommandRecord(
                         workflow.id,
-                        stepId(workflow.id, next._1.revision, ordinal),
-                        next._1.revision,
+                        stepId(workflow.id, next.workflow.revision, ordinal),
+                        next.workflow.revision,
                         command,
                         InterviewWorkflowCommandState.Pending,
                         0,
@@ -623,7 +628,7 @@ final class MongoInterviewWorkflowRepository(
                   .repair(workflow, expectedRevision, committed)
                   .leftMap(_ => RepositoryError.Conflict)
               )
-              .flatMap { case (next, emitted) =>
+              .flatMap { case InterviewWorkflowDecision(next, emitted) =>
                 advance(next, expectedRevision, InterviewAdvanceCause.AdminRepair(requestKey, actorId), emitted, now)
                   .flatMap {
                     case InterviewWorkflowAdvanceResult.Applied             => RepositoryIO.fromEither(Right(next))
@@ -1082,7 +1087,7 @@ final class MongoInterviewWorkflowRepository(
           .decide(workflow, workflow.revision, InterviewWorkflowEvent.RetryExhausted(reason))
           .leftMap(_ => RepositoryError.Conflict)
       )
-      .flatMap { case (next, emitted) =>
+      .flatMap { case InterviewWorkflowDecision(next, emitted) =>
         guardWrite(
           workflows,
           session,

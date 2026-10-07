@@ -5,15 +5,7 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{ActorContext, SearchError, UseCaseError}
 import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
-import com.example.graphQL.cats.domain.model.{
-  CandidateAvailabilityStatus,
-  EntityEmbedding,
-  JobStatus,
-  SearchMode,
-  SearchableText,
-  User,
-  UserRole
-}
+import com.example.graphQL.cats.domain.model.{EntityEmbedding, JobStatus, SearchMode, SearchableText, User, UserRole}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.protocol.{SearchUseCases, UseCaseIO, UseCaseIO as UseCase}
@@ -154,7 +146,9 @@ final class SemanticSearchService(
           case value => Right(value)
         }
       )
-      parsedFilters <- UseCase.fromEither(validateCandidateFilters(filters))
+      validatedFilters <- UseCase.fromEither(
+        ValidatedCandidateMatchFilters.from(filters).toEither.leftMap(errors => UseCaseError.Search(errors.head))
+      )
       results <- job.embedding match {
         case Some(embedding)
             if embedding.meta.model == embeddingModel &&
@@ -167,7 +161,7 @@ final class SemanticSearchService(
             SearchMode.VECTOR,
             embedding.meta.model,
             searchId,
-            candidateFilters = filters
+            candidateFilters = validatedFilters
           )
           normalizedQuery match {
             case Some(text) =>
@@ -180,7 +174,7 @@ final class SemanticSearchService(
                     )
                   )
                 ).flatMap(values =>
-                  validateCandidateHits(actor, jobId, embedding.meta, parsedFilters, values).map(values =>
+                  validateCandidateHits(actor, jobId, embedding.meta, validatedFilters, values).map(values =>
                     values
                       .take(first.value)
                       .map(value =>
@@ -193,7 +187,7 @@ final class SemanticSearchService(
               )
             case None =>
               vectorSearch(search.candidateMatches(query)).flatMap(values =>
-                validateCandidateHits(actor, jobId, embedding.meta, parsedFilters, values).map(values =>
+                validateCandidateHits(actor, jobId, embedding.meta, validatedFilters, values).map(values =>
                   values
                     .take(first.value)
                     .map(value =>
@@ -257,7 +251,7 @@ final class SemanticSearchService(
       actor: ActorContext,
       jobId: JobId,
       queryMeta: com.example.graphQL.cats.domain.model.EmbeddingMeta,
-      filters: CandidateEligibilityFilters,
+      filters: ValidatedCandidateMatchFilters,
       hits: List[RankedCandidate]
   ): UseCaseIO[List[RankedCandidate]] =
     for {
@@ -303,31 +297,6 @@ final class SemanticSearchService(
           .map(_ => hit)
       }
     }
-
-  private def validateCandidateFilters(
-      filters: CandidateMatchFilters
-  ): Either[UseCaseError, CandidateEligibilityFilters] =
-    val validSkills = filters.requiredSkills.size <= 100 && filters.requiredSkills.forall(skill =>
-      skill.trim.nonEmpty && skill.trim.length <= 256
-    )
-    val validLocations = List(filters.countryCanonical, filters.cityCanonical).flatten.forall(value =>
-      value.trim.nonEmpty && value.trim.length <= 256
-    ) && (filters.cityCanonical.isEmpty || filters.countryCanonical.nonEmpty)
-    val validAvailability =
-      filters.availabilityStatus.forall(value => CandidateAvailabilityStatus.values.exists(_.toString == value))
-    if (!validSkills)
-      Left(UseCaseError.Search(SearchError.InvalidFilter("requiredSkills")))
-    else if (!validLocations)
-      Left(UseCaseError.Search(SearchError.InvalidFilter("residence")))
-    else if (!validAvailability)
-      Left(UseCaseError.Search(SearchError.InvalidFilter("availabilityStatus")))
-    else
-      Right(
-        CandidateEligibilityFilters(
-          filters,
-          filters.availabilityStatus.flatMap(value => CandidateAvailabilityStatus.values.find(_.toString == value))
-        )
-      )
 
   private def resolveCandidate(actor: ActorContext): UseCaseIO[User] =
     authorization.resolve(actor).subflatMap { user =>

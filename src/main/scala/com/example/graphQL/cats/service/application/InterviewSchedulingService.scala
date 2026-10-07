@@ -19,7 +19,9 @@ final class InterviewSchedulingService(
     jobs: JobRepository,
     applications: ApplicationRepository,
     workflows: InterviewWorkflowRepository,
-    preCommitWindow: FiniteDuration
+    preCommitWindow: FiniteDuration,
+    currentTime: IO[Instant] = Clock[IO].realTimeInstant,
+    nextWorkflowId: IO[InterviewWorkflowId] = IO.randomUUID.map(InterviewWorkflowId.apply)
 ) {
   private val authorization = ActorAuthorization(users)
 
@@ -51,13 +53,13 @@ final class InterviewSchedulingService(
         case Some(existing) => UseCase.pure(existing)
         case None           =>
           for {
-            now <- UseCase.liftIO(Clock[IO].realTimeInstant)
+            now <- UseCase.liftIO(currentTime)
             interval <- UseCase.fromEither(
               InterviewInterval
                 .validate(startsAt, endsAt, now)
                 .leftMap(_ => UseCaseError.Search(SearchError.InvalidFilter("interviewInterval")))
             )
-            id <- UseCase.liftIO(IO.randomUUID.map(InterviewWorkflowId.apply))
+            id <- UseCase.liftIO(nextWorkflowId)
             acceptedDeadline = now.plusMillis(preCommitWindow.toMillis)
             deadline = if (acceptedDeadline.isBefore(interval.startsAt)) acceptedDeadline else interval.startsAt
             workflow <- UseCase.fromEither(
@@ -112,7 +114,7 @@ final class InterviewSchedulingService(
       user <- authorization.resolve(actor)
       _ <- UseCase.fromEither(Either.cond(user.role == UserRole.Admin, (), UseCaseError.Domain(DomainError.Forbidden)))
       workflow <- inspect(actor, id)
-      now <- UseCase.liftIO(Clock[IO].realTimeInstant)
+      now <- UseCase.liftIO(currentTime)
       repaired <- UseCase.repository(workflows.repair(workflow, expectedRevision, idempotencyKey, now, user.id))
     } yield repaired
 }

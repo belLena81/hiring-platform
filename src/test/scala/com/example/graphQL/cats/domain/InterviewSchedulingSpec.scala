@@ -37,7 +37,7 @@ class InterviewSchedulingSpec extends FunSuite {
       current: InterviewWorkflow,
       revision: Long,
       event: InterviewWorkflowEvent
-  ): (InterviewWorkflow, List[InterviewWorkflowCommand]) =
+  ): InterviewWorkflowDecision =
     right(InterviewWorkflow.decide(current, revision, event))
 
   test("interval requires a future start and an end after the start") {
@@ -111,43 +111,52 @@ class InterviewSchedulingSpec extends FunSuite {
       InterviewWorkflow.initialCommand(started),
       InterviewWorkflowCommand.ReserveCalendarSlot(s"${workflowId.value}:reserve")
     )
-    val (statusPending, statusCommands) = decide(started, 0L, InterviewWorkflowEvent.ReservationConfirmed)
+    val InterviewWorkflowDecision(statusPending, statusCommands) =
+      decide(started, 0L, InterviewWorkflowEvent.ReservationConfirmed)
     assertEquals(statusPending.phase, InterviewWorkflowPhase.StatusCommitPending)
     assertEquals(statusCommands, List(InterviewWorkflowCommand.CommitAcceptedToInterview(ApplicationStatus.Accepted)))
 
-    val (notifying, notificationCommands) = decide(statusPending, 1L, InterviewWorkflowEvent.StatusCommitted)
+    val InterviewWorkflowDecision(notifying, notificationCommands) =
+      decide(statusPending, 1L, InterviewWorkflowEvent.StatusCommitted)
     assertEquals(notifying.phase, InterviewWorkflowPhase.NotificationsPending)
     assertEquals(notificationCommands.size, 2)
     assert(notificationCommands.forall(_.isInstanceOf[InterviewWorkflowCommand.Notify]))
   }
 
   test("status rejection compensates the reservation and exposes repair after release") {
-    val statusPending = decide(workflow(), 0L, InterviewWorkflowEvent.ReservationConfirmed)._1
-    val (compensating, commands) = decide(statusPending, 1L, InterviewWorkflowEvent.StatusCommitRejected)
+    val statusPending = decide(workflow(), 0L, InterviewWorkflowEvent.ReservationConfirmed).workflow
+    val InterviewWorkflowDecision(compensating, commands) =
+      decide(statusPending, 1L, InterviewWorkflowEvent.StatusCommitRejected)
     assertEquals(compensating.phase, InterviewWorkflowPhase.CompensationPending)
     assertEquals(commands.size, 1)
     assert(commands.head.isInstanceOf[InterviewWorkflowCommand.ReleaseCalendarSlot])
 
-    val (repair, repairCommands) = decide(compensating, 2L, InterviewWorkflowEvent.ReservationReleased)
+    val InterviewWorkflowDecision(repair, repairCommands) =
+      decide(compensating, 2L, InterviewWorkflowEvent.ReservationReleased)
     assertEquals(repair.phase, InterviewWorkflowPhase.RepairRequired)
     assert(repairCommands.head.isInstanceOf[InterviewWorkflowCommand.RequireRepair])
   }
 
   test("uncertain external outcomes are reconciled before retry or compensation") {
-    val (reserving, calendarLookup) = decide(workflow(), 0L, InterviewWorkflowEvent.ReservationOutcomeUnknown)
+    val InterviewWorkflowDecision(reserving, calendarLookup) =
+      decide(workflow(), 0L, InterviewWorkflowEvent.ReservationOutcomeUnknown)
     assertEquals(reserving.phase, InterviewWorkflowPhase.ReservationPending)
     assertEquals(calendarLookup, List(InterviewWorkflowCommand.LookupCalendarReservation(workflowId)))
-    val (statusPending, statusCommit) = decide(reserving, 1L, InterviewWorkflowEvent.ReservationLookupFound)
+    val InterviewWorkflowDecision(statusPending, statusCommit) =
+      decide(reserving, 1L, InterviewWorkflowEvent.ReservationLookupFound)
     assertEquals(statusCommit, List(InterviewWorkflowCommand.CommitAcceptedToInterview(ApplicationStatus.Accepted)))
 
-    val (checkingStatus, statusLookup) = decide(statusPending, 2L, InterviewWorkflowEvent.StatusCommitOutcomeUnknown)
+    val InterviewWorkflowDecision(checkingStatus, statusLookup) =
+      decide(statusPending, 2L, InterviewWorkflowEvent.StatusCommitOutcomeUnknown)
     assertEquals(statusLookup, List(InterviewWorkflowCommand.LookupStatusCommitReceipt(workflowId)))
-    val (compensating, releaseCommands) = decide(checkingStatus, 3L, InterviewWorkflowEvent.StatusLookupAbsent)
+    val InterviewWorkflowDecision(compensating, releaseCommands) =
+      decide(checkingStatus, 3L, InterviewWorkflowEvent.StatusLookupAbsent)
     assertEquals(compensating.phase, InterviewWorkflowPhase.StatusCommitPending)
     assertEquals(releaseCommands.size, 1)
 
-    val (notifying, commands) = decide(statusPending, 2L, InterviewWorkflowEvent.StatusCommitted)
-    val (checkingReceipt, lookupCommands) = decide(
+    val InterviewWorkflowDecision(notifying, commands) =
+      decide(statusPending, 2L, InterviewWorkflowEvent.StatusCommitted)
+    val InterviewWorkflowDecision(checkingReceipt, lookupCommands) = decide(
       notifying,
       3L,
       InterviewWorkflowEvent.NotificationOutcomeUnknown(InterviewParticipant.Candidate)
@@ -160,17 +169,17 @@ class InterviewSchedulingSpec extends FunSuite {
 
   test("both independent notification receipts are required for completion") {
     val notifications = decide(
-      decide(workflow(), 0L, InterviewWorkflowEvent.ReservationConfirmed)._1,
+      decide(workflow(), 0L, InterviewWorkflowEvent.ReservationConfirmed).workflow,
       1L,
       InterviewWorkflowEvent.StatusCommitted
-    )._1
-    val (firstReceipt, _) = decide(
+    ).workflow
+    val InterviewWorkflowDecision(firstReceipt, _) = decide(
       notifications,
       2L,
       InterviewWorkflowEvent.NotificationDelivered(InterviewParticipant.Candidate)
     )
     assertEquals(firstReceipt.phase, InterviewWorkflowPhase.NotificationsPending)
-    val (complete, commands) = decide(
+    val InterviewWorkflowDecision(complete, commands) = decide(
       firstReceipt,
       3L,
       InterviewWorkflowEvent.NotificationDelivered(InterviewParticipant.Recruiter)
@@ -244,10 +253,10 @@ class InterviewSchedulingSpec extends FunSuite {
       notified = Set(InterviewParticipant.Candidate)
     )
     val result = InterviewWorkflowPolicy.repair(repair, 4L, true)
-    assertEquals(result.map(_._1.phase), Right(InterviewWorkflowPhase.NotificationsPending))
-    assertEquals(result.map(_._1.notified), Right(Set(InterviewParticipant.Candidate)))
+    assertEquals(result.map(_.workflow.phase), Right(InterviewWorkflowPhase.NotificationsPending))
+    assertEquals(result.map(_.workflow.notified), Right(Set(InterviewParticipant.Candidate)))
     assertEquals(
-      result.map(_._2),
+      result.map(_.commands),
       Right(
         List(
           InterviewWorkflowCommand.LookupNotificationReceipt(

@@ -28,12 +28,6 @@ object CandidateSearchEligibility {
     )
 }
 
-/** Parsed once at the input boundary; eligibility decisions use the closed availability enum. */
-final case class CandidateEligibilityFilters(
-    filters: CandidateMatchFilters,
-    availability: Option[CandidateAvailabilityStatus]
-)
-
 object SearchEligibilityPolicy {
   def job(current: JobSearchEligibility, retrieved: EmbeddingMeta, model: String, filter: JobSearchFilter): Boolean =
     current.job.status == JobStatus.Open && current.metadata.exists(meta =>
@@ -45,7 +39,7 @@ object SearchEligibilityPolicy {
       current: CandidateSearchEligibility,
       retrieved: EmbeddingMeta,
       model: String,
-      requested: CandidateEligibilityFilters
+      requested: ValidatedCandidateMatchFilters
   ): Boolean =
     current.role == UserRole.Candidate && current.accountStatus == AccountStatus.Active && current.profile.exists {
       profile =>
@@ -53,14 +47,20 @@ object SearchEligibilityPolicy {
           meta == retrieved && meta.model == model &&
             meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
         )
-        val publicMatch = requested.filters.requiredSkills.forall(required =>
-          profile.skills.exists(_.trim.equalsIgnoreCase(required.trim))
-        )
-        val privateMatch = !profile.recruiterSearchOptIn || (requested.filters.countryCanonical
-          .forall(value => profile.currentResidence.exists(_.country.trim.equalsIgnoreCase(value.trim))) &&
-          requested.filters.cityCanonical
-            .forall(value => profile.currentResidence.flatMap(_.city).exists(_.trim.equalsIgnoreCase(value.trim))) &&
-          requested.availability.forall(value => profile.availabilityStatus.contains(value)))
+        val skills = profile.skills.map(ValidatedCandidateMatchFilters.canonical)
+        val publicMatch = requested.requiredSkills.forall(skills.contains)
+        val privateMatch = !profile.recruiterSearchOptIn || (requested.countryCanonical
+          .forall(value =>
+            profile.currentResidence
+              .exists(residence => ValidatedCandidateMatchFilters.canonical(residence.country) == value)
+          ) &&
+          requested.cityCanonical
+            .forall(value =>
+              profile.currentResidence
+                .flatMap(_.city)
+                .exists(city => ValidatedCandidateMatchFilters.canonical(city) == value)
+            ) &&
+          requested.availabilityStatus.forall(value => profile.availabilityStatus.contains(value)))
         fresh && publicMatch && privateMatch
     }
 }

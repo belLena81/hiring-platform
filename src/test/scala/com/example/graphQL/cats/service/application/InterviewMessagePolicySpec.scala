@@ -76,7 +76,7 @@ final class InterviewMessagePolicySpec extends FunSuite {
       Left(InterviewMessageRejection.Inconsistent)
     )
     assertEquals(
-      InterviewMessagePolicy.expiredDecision(Some(workflow), Some(stored), mismatched).map(_._1.phase),
+      InterviewMessagePolicy.expiredDecision(Some(workflow), Some(stored), mismatched).map(_.workflow.phase),
       Right(InterviewWorkflowPhase.RepairRequired)
     )
   }

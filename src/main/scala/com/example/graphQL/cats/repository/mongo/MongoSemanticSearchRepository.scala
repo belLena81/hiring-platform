@@ -243,9 +243,6 @@ final class MongoSemanticSearchRepository(
       Option.when(query.candidateFilters.requiredSkills.nonEmpty)(
         Filters.and(
           query.candidateFilters.requiredSkills
-            .map(_.trim.toLowerCase(java.util.Locale.ROOT))
-            .distinct
-            .sorted
             .map(Filters.eq(MongoFields.ProfileSkillsCanonical, _))*
         )
       )
@@ -253,11 +250,11 @@ final class MongoSemanticSearchRepository(
     Filters.and(filters*)
   }
 
-  private def privateCandidateFilters(filters: CandidateMatchFilters): List[Bson] = {
+  private def privateCandidateFilters(filters: ValidatedCandidateMatchFilters): List[Bson] = {
     val requested = List(
       filters.countryCanonical.map(value => Filters.eq(MongoFields.ProfileCurrentResidenceCountryCanonical, value)),
       filters.cityCanonical.map(value => Filters.eq(MongoFields.ProfileCurrentResidenceCityCanonical, value)),
-      filters.availabilityStatus.map(value => Filters.eq(MongoFields.ProfileAvailabilityStatus, value))
+      filters.availabilityStatus.map(value => Filters.eq(MongoFields.ProfileAvailabilityStatus, value.toString))
     ).flatten
     Option
       .when(requested.nonEmpty)(

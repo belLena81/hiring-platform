@@ -84,7 +84,7 @@ final case class VectorSearchQuery(
     model: String,
     searchId: UUID,
     candidateQueryVector: Option[List[Float]] = None,
-    candidateFilters: CandidateMatchFilters = CandidateMatchFilters.empty
+    candidateFilters: ValidatedCandidateMatchFilters = ValidatedCandidateMatchFilters.empty
 )
 
 final case class CandidateMatchFilters(

@@ -72,9 +72,14 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("recruiter candidate matching embeds trimmed query text and forwards structured filters") {
+  test("recruiter candidate matching normalizes direct service filters before retrieval") {
     val filters =
-      CandidateMatchFilters(List("Scala", "MongoDB"), Some("cyprus"), Some("nicosia"), Some("AVAILABLE_NOW"))
+      CandidateMatchFilters(
+        List(" Scala ", "MongoDB", "SCALA"),
+        Some(" CYPRUS "),
+        Some(" Nicosia "),
+        Some("AVAILABLE_NOW")
+      )
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
         Map(recruiterId -> recruiter, candidateId -> candidateWithProfile.copy(embedding = Some(embedding)))
@@ -102,7 +107,9 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
       assertEquals(result, Right(Nil))
       assertEquals(recorded.map(_.lexicalQuery), Vector(Some("Scala backend")))
       assertEquals(recorded.map(_.candidateQueryVector), Vector(Some(List(0.3f, 0.4f))))
-      assertEquals(recorded.map(_.candidateFilters), Vector(filters))
+      assertEquals(recorded.map(_.candidateFilters.requiredSkills), Vector(List("mongodb", "scala")))
+      assertEquals(recorded.map(_.candidateFilters.countryCanonical), Vector(Some("cyprus")))
+      assertEquals(recorded.map(_.candidateFilters.cityCanonical), Vector(Some("nicosia")))
     }
   }
 
@@ -313,12 +320,70 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
           RecordingSearchRepository(retrievalQueries)
         )
         result <- service
-          .candidateMatches(actor, jobId, Some("Scala backend"), CandidateMatchFilters.empty, pageSize, searchId)
+          .candidateMatches(
+            actor,
+            jobId,
+            Some("Scala backend"),
+            CandidateMatchFilters(Nil, None, None, Some("invalid")),
+            pageSize,
+            searchId
+          )
           .value
         calls <- providerCalls.get
         queries <- retrievalQueries.get
       } yield {
         assertEquals(result.left.toOption, Some(UseCaseError.Domain(expected)))
+        assertEquals(calls, 0)
+        assertEquals(queries, Vector.empty)
+      }
+    }
+  }
+
+  test("invalid candidate filters reject before provider or retrieval and retain error precedence") {
+    val scenarios = List(
+      (
+        CandidateMatchFilters(Nil, None, None, Some("invalid")),
+        "Scala",
+        SearchError.InvalidFilter("availabilityStatus")
+      ),
+      (CandidateMatchFilters(Nil, Some(" "), None, Some("invalid")), "Scala", SearchError.InvalidFilter("residence")),
+      (
+        CandidateMatchFilters(List(" "), Some(" "), None, Some("invalid")),
+        "Scala",
+        SearchError.InvalidFilter("requiredSkills")
+      ),
+      (
+        CandidateMatchFilters(Nil, None, None, Some("invalid")),
+        "a" * (SearchableText.QueryMaxChars + 1),
+        SearchError.InputTooLarge("query", SearchableText.QueryMaxChars)
+      )
+    )
+    scenarios.traverse_ { case (filters, query, expected) =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(recruiterId -> recruiter))
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(jobEmbedding))))
+        providerCalls <- Ref.of[IO, Int](0)
+        retrievalQueries <- Ref.of[IO, Vector[VectorSearchQuery]](Vector.empty)
+        service = semanticService(
+          new InMemoryUsers(usersRef),
+          new InMemoryJobs(jobsRef),
+          CountingEmbeddingService(providerCalls),
+          RecordingSearchRepository(retrievalQueries)
+        )
+        result <- service
+          .candidateMatches(
+            ActorContext(recruiterId, UserRole.Recruiter),
+            jobId,
+            Some(query),
+            filters,
+            pageSize,
+            searchId
+          )
+          .value
+        calls <- providerCalls.get
+        queries <- retrievalQueries.get
+      } yield {
+        assertEquals(result, Left(UseCaseError.Search(expected)))
         assertEquals(calls, 0)
         assertEquals(queries, Vector.empty)
       }

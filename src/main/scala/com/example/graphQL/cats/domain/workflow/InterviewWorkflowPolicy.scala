@@ -39,7 +39,7 @@ object InterviewWorkflowPolicy {
       workflow: InterviewWorkflow,
       expectedRevision: Long,
       hiringCommitted: Boolean
-  ): Either[InterviewWorkflowError, (InterviewWorkflow, List[InterviewWorkflowCommand])] =
+  ): Either[InterviewWorkflowError, InterviewWorkflowDecision] =
     if (workflow.revision != expectedRevision || expectedRevision == Long.MaxValue)
       Left(InterviewWorkflowError.StaleRevision)
     else if (workflow.phase != InterviewWorkflowPhase.RepairRequired)
@@ -56,7 +56,7 @@ object InterviewWorkflowPolicy {
                 .LookupNotificationReceipt(participant, s"${workflow.id.value}:notify:$participant")
             )
         else List(InterviewWorkflowCommand.LookupCalendarReservation(workflow.id))
-      Right((workflow.copy(revision = expectedRevision + 1L, phase = phase), commands))
+      Right(InterviewWorkflowDecision(workflow.copy(revision = expectedRevision + 1L, phase = phase), commands))
     }
 
   def publicationDisposition(

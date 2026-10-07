@@ -142,7 +142,7 @@ final class InterviewWorkflowWorker(
           } yield (command, workflow)).value.flatMap {
             case Right((command, workflow)) =>
               InterviewMessagePolicy.expiredDecision(workflow, command, message) match {
-                case Right((next, commands)) =>
+                case Right(InterviewWorkflowDecision(next, commands)) =>
                   repository
                     .advance(
                       next,
@@ -232,8 +232,8 @@ final class InterviewWorkflowWorker(
               case Right(count) => {
                 val selected = InterviewMessagePolicy.resultEvent(message, count, settings.maxAttempts)
                 selected.flatMap(ev => InterviewWorkflow.decide(workflow, workflow.revision, ev).toOption) match {
-                  case None                   => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
-                  case Some((next, commands)) =>
+                  case None => quarantineMessage(message, InterviewMessageRejection.InvalidTransition)
+                  case Some(InterviewWorkflowDecision(next, commands)) =>
                     currentTime.flatMap { now =>
                       val available = InterviewMessagePolicy.retryAvailableAt(
                         message.result,

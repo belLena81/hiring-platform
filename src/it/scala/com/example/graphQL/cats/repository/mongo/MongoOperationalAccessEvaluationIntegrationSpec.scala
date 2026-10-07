@@ -14,7 +14,12 @@ import com.example.graphQL.cats.service.events.{
 }
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.read.{HiringReadScope, JobRelationKey, UserRelationKey}
-import com.example.graphQL.cats.service.search.{CandidateMatchFilters, JobSearchFilter, VectorSearchQuery}
+import com.example.graphQL.cats.service.search.{
+  CandidateMatchFilters,
+  JobSearchFilter,
+  ValidatedCandidateMatchFilters,
+  VectorSearchQuery
+}
 import io.circe.Json
 import io.circe.parser.parse
 import munit.CatsEffectSuite
@@ -622,7 +627,9 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
         SearchMode.VECTOR,
         model,
         support.deterministicId("consent-query"),
-        candidateFilters = CandidateMatchFilters(List("scala"), Some("cyprus"), Some("nicosia"), Some("AVAILABLE_NOW"))
+        candidateFilters = ValidatedCandidateMatchFilters
+          .from(CandidateMatchFilters(List("scala"), Some("cyprus"), Some("nicosia"), Some("AVAILABLE_NOW")))
+          .fold(errors => fail(errors.toString), identity)
       )
       for {
         _ <- values.traverse_ { case (_, document) =>

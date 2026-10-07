@@ -3,7 +3,12 @@ package com.example.graphQL.cats.repository.mongo
 import com.example.graphQL.cats.domain.model.SearchMode
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
-import com.example.graphQL.cats.service.search.{CandidateMatchFilters, JobSearchFilter, VectorSearchQuery}
+import com.example.graphQL.cats.service.search.{
+  CandidateMatchFilters,
+  JobSearchFilter,
+  ValidatedCandidateMatchFilters,
+  VectorSearchQuery
+}
 import munit.FunSuite
 import org.bson.Document
 import com.mongodb.MongoClientSettings
@@ -28,7 +33,9 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     "voyage-4-lite",
     UUID.fromString("00000000-0000-0000-0000-000000000901"),
     Some(List(0.3f, 0.4f)),
-    CandidateMatchFilters(List(" Scala "), Some("cy"), Some("nicosia"), Some("AVAILABLE_NOW"))
+    ValidatedCandidateMatchFilters
+      .from(CandidateMatchFilters(List(" Scala ", "SCALA"), Some(" CY "), Some(" Nicosia "), Some("AVAILABLE_NOW")))
+      .fold(errors => fail(errors.toString), identity)
   )
 
   private def repository(
@@ -131,6 +138,12 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assert(filterJson.contains("profile.currentResidence.countryCanonical"))
     assert(filterJson.contains("profile.availabilityStatus"))
     assert(filterJson.contains("skillsCanonical"))
+    assert(filterJson.contains("scala"))
+    assert(filterJson.contains("nicosia"))
+    assert(filterJson.contains("AVAILABLE_NOW"))
+    assertEquals(bsonJson(jobVector.get("filter", classOf[org.bson.conversions.Bson])), filterJson)
+    assertEquals(bsonJson(queryVector.get("filter", classOf[org.bson.conversions.Bson])), filterJson)
+    assertEquals(bsonJson(lexical(1).get("$match", classOf[org.bson.conversions.Bson])), filterJson)
     assertEquals(lexical.head.get("$search", classOf[Document]).getString("index"), "candidates_lexical")
     assertEquals(
       lexical.head

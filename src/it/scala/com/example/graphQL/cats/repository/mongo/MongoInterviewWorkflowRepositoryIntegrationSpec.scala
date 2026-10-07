@@ -133,25 +133,25 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         )
         advanced <- success(
           workflowRepository.advance(
-            next._1,
+            next.workflow,
             0L,
             InterviewAdvanceCause.ResultReceipt("result-reservation-1"),
-            next._2,
+            next.commands,
             now.plusSeconds(2)
           )
         )
         duplicateInbox <- success(
           workflowRepository.advance(
-            next._1,
+            next.workflow,
             0L,
             InterviewAdvanceCause.ResultReceipt("result-reservation-1"),
-            next._2,
+            next.commands,
             now.plusSeconds(3)
           )
         )
         stale <- success(
           workflowRepository.advance(
-            next._1,
+            next.workflow,
             0L,
             InterviewAdvanceCause.ResultReceipt("different-message"),
             Nil,
@@ -355,14 +355,14 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .fold(error => fail(s"Invalid policy transition: $error"), identity)
         _ <- success(
           workflowRepository.advance(
-            statusPending._1,
+            statusPending.workflow,
             0L,
             InterviewAdvanceCause.ResultReceipt("reserved"),
-            statusPending._2,
+            statusPending.commands,
             now
           )
         )
-        _ <- success(workflowRepository.commitHiring(statusPending._1, now))
+        _ <- success(workflowRepository.commitHiring(statusPending.workflow, now))
         delivered <- providerSuccess(
           notification.notify(
             value.id,
@@ -517,10 +517,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
-            pending._1,
+            pending.workflow,
             initiated.revision,
             InterviewAdvanceCause.ResultReceipt("reserved"),
-            pending._2,
+            pending.commands,
             now
           )
         )
@@ -544,8 +544,8 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           expectedChange.feedback,
           expectedChange.reason
         )
-        _ <- success(repository.commitHiring(pending._1, now))
-        _ <- success(repository.commitHiring(pending._1, now.plusSeconds(1)))
+        _ <- success(repository.commitHiring(pending.workflow, now))
+        _ <- success(repository.commitHiring(pending.workflow, now.plusSeconds(1)))
         saved <- success(applications.find(initiated.applicationId))
         history <- MongoRepositoryTestSupport.findOne(
           fixture.database,
@@ -576,7 +576,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         )
         current <- success(repository.findForAdmin(initiated.id))
         expectedWorkflow = InterviewWorkflow
-          .decide(pending._1, pending._1.revision, InterviewWorkflowEvent.StatusCommitted)
+          .decide(pending.workflow, pending.workflow.revision, InterviewWorkflowEvent.StatusCommitted)
           .fold(error => fail(s"Transition: $error"), identity)
       } yield {
         assertEquals(saved, Some(expectedApplication))
@@ -589,7 +589,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         assertEquals(outboxCount, 1L)
         assertEquals(receiptCount, 1L)
         assertEquals(notificationCount, 2L)
-        assertEquals(current, Some(expectedWorkflow._1))
+        assertEquals(current, Some(expectedWorkflow.workflow))
       }
     }
   }
@@ -707,15 +707,15 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
-            failed._1,
+            failed.workflow,
             notifying.revision,
             InterviewAdvanceCause.ResultReceipt("exhausted"),
-            failed._2,
+            failed.commands,
             claimedAt
           )
         )
         repaired <- success(
-          repository.repair(failed._1, failed._1.revision, UUID.randomUUID(), claimedAt, value.recruiterId)
+          repository.repair(failed.workflow, failed.workflow.revision, UUID.randomUUID(), claimedAt, value.recruiterId)
         )
         lateResult <- repository.recordResult(notificationExecution, InterviewCommandResult.Succeeded, claimedAt).value
         command <- success(repository.findCommand(value.id, notificationExecution.record.stepId))
@@ -770,17 +770,17 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .fold(error => fail(s"Invalid transition: $error"), identity)
         _ <- success(
           repository.advance(
-            statusPending._1,
+            statusPending.workflow,
             0L,
             InterviewAdvanceCause.ResultReceipt("reservation-result"),
-            statusPending._2,
+            statusPending.commands,
             currentAt
           )
         )
-        unknownCommit <- success(repository.commitHiring(statusPending._1, currentAt)) *>
+        unknownCommit <- success(repository.commitHiring(statusPending.workflow, currentAt)) *>
           IO.raiseError[Unit](new IllegalStateException("simulated response loss after durable hiring commit")).attempt
         receipt <- success(repository.hasHiringReceipt(value.id))
-        duplicateCommit <- repository.commitHiring(statusPending._1, currentAt).value
+        duplicateCommit <- repository.commitHiring(statusPending.workflow, currentAt).value
         staleRelease <- calendar.release(s"${value.id.value}:release", currentAt, Some(first)).value
         reserveAfterCommit <- calendar
           .reserve(value.id, key, value.candidateId, value.recruiterId, value.interval, currentAt)
@@ -859,9 +859,15 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .decide(value, 0L, InterviewWorkflowEvent.ReservationConfirmed)
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
-          repository.advance(pending._1, 0L, InterviewAdvanceCause.ResultReceipt("reserved"), pending._2, now)
+          repository.advance(
+            pending.workflow,
+            0L,
+            InterviewAdvanceCause.ResultReceipt("reserved"),
+            pending.commands,
+            now
+          )
         )
-        _ <- success(repository.commitHiring(pending._1, now))
+        _ <- success(repository.commitHiring(pending.workflow, now))
         notifying <- success(repository.findForAdmin(value.id)).flatMap(value =>
           IO.fromOption(value)(new AssertionError("Missing workflow"))
         )
@@ -879,20 +885,22 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
-            failed._1,
+            failed.workflow,
             notifying.revision,
             InterviewAdvanceCause.ResultReceipt("exhausted"),
-            failed._2,
+            failed.commands,
             now
           )
         )
         repaired <- service
-          .repair(ActorContext(admin.id, UserRole.Admin), value.id, failed._1.revision, repairKey)
+          .repair(ActorContext(admin.id, UserRole.Admin), value.id, failed.workflow.revision, repairKey)
           .value
           .flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repair: $error")), IO.pure))
-        replay <- service.repair(ActorContext(admin.id, UserRole.Admin), value.id, failed._1.revision, repairKey).value
+        replay <- service
+          .repair(ActorContext(admin.id, UserRole.Admin), value.id, failed.workflow.revision, repairKey)
+          .value
         stale <- service
-          .repair(ActorContext(admin.id, UserRole.Admin), value.id, failed._1.revision - 1L, UUID.randomUUID())
+          .repair(ActorContext(admin.id, UserRole.Admin), value.id, failed.workflow.revision - 1L, UUID.randomUUID())
           .value
         found <- providerSuccess(notifications.lookup(delivered.idempotencyKey))
         candidateConfirmed = InterviewWorkflow
@@ -904,10 +912,10 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
-            candidateConfirmed._1,
+            candidateConfirmed.workflow,
             repaired.revision,
             InterviewAdvanceCause.ResultReceipt("candidate-lookup"),
-            candidateConfirmed._2,
+            candidateConfirmed.commands,
             now
           )
         )
@@ -922,17 +930,17 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         )
         completed = InterviewWorkflow
           .decide(
-            candidateConfirmed._1,
-            candidateConfirmed._1.revision,
+            candidateConfirmed.workflow,
+            candidateConfirmed.workflow.revision,
             InterviewWorkflowEvent.NotificationDelivered(InterviewParticipant.Recruiter)
           )
           .fold(error => fail(s"Transition: $error"), identity)
         _ <- success(
           repository.advance(
-            completed._1,
-            candidateConfirmed._1.revision,
+            completed.workflow,
+            candidateConfirmed.workflow.revision,
             InterviewAdvanceCause.ResultReceipt("recruiter-result"),
-            completed._2,
+            completed.commands,
             now
           )
         )
@@ -956,7 +964,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         assertEquals(repaired.phase, InterviewWorkflowPhase.NotificationsPending)
         assertEquals(replay.map(_.id), Right(repaired.id))
         assertEquals(stale, Left(UseCaseError.Repository(RepositoryError.Conflict)))
-        assertEquals(completed._1.phase, InterviewWorkflowPhase.Completed)
+        assertEquals(completed.workflow.phase, InterviewWorkflowPhase.Completed)
         assert(
           stored
             .flatMap(doc => Option(doc.getDate(MongoFields.RetentionExpiresAt)))
@@ -1003,7 +1011,13 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           .toOption
           .getOrElse(fail("policy"))
         _ <- success(
-          repository.advance(pending._1, 0L, InterviewAdvanceCause.ResultReceipt("reserved"), pending._2, now)
+          repository.advance(
+            pending.workflow,
+            0L,
+            InterviewAdvanceCause.ResultReceipt("reserved"),
+            pending.commands,
+            now
+          )
         )
         due <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(3600), 16))
         commit <- IO.fromOption(
@@ -1012,7 +1026,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         _ <- success(repository.markPublished(commit, now))
         executing <- success(repository.claimExecution(commit.record, "worker", now, now.plusSeconds(3600), 5))
           .flatMap(executionClaim)
-        _ <- success(repository.commitHiring(pending._1, now, Some(executing)))
+        _ <- success(repository.commitHiring(pending.workflow, now, Some(executing)))
         _ <- success(repository.recordResult(executing, InterviewCommandResult.Succeeded, now))
         result <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(3600), 16)).flatMap(claims =>
           IO.fromOption(claims.find(_.record.stepId == commit.record.stepId))(new AssertionError("Missing result"))

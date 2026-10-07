@@ -133,7 +133,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     model,
     UUID.randomUUID(),
     Option.when(lexical)(vector),
-    filters
+    ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
   )
 
   private def live(body: MongoDatabase[IO] => IO[Unit]): IO[Unit] = IO.defer {

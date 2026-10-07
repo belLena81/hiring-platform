@@ -2,7 +2,7 @@
 
 ## Authorized outcome
 
-Status: complete for the approved local functional cleanup and policy refactoring. Historical BWR-01 through BWR-05 evidence below belongs to the earlier local implementation; it does not certify BWR-06 through BWR-11. The user approved the follow-up plan on October 6, 2026.
+Status: BWR-01 through BWR-11 are complete for their recorded local scope. The user approved the additional pure functional refactoring below on October 6, 2026; BWR-12 through BWR-17 are complete for the approved local scope on October 7, with independent Code, Security and final QA PASS.
 
 Retain pure embedding preparation, aggregate lifecycle programs and capability-specific Saga decisions. Correct provider vector validation, isolate subject cleanup failures, connect worker diagnostics and reuse the application lifecycle during interview commits. Preserve public GraphQL/event contracts, typed IO/EitherT ports, stored schemas, transaction/fencing boundaries and provider idempotency keys. No dependency, migration, deployment, real provider activation or ranking adoption is authorized.
 
@@ -94,3 +94,40 @@ sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 'IntegrationTest / test'
 Full integration exited 0: reported 121 total, 117 passed and four Atlas skipped. Two older opt-in operational Compose cases returned without executing their disabled bodies, leaving 115 executed successes. This includes 20 cleanup, four recovery, two Kafka restart, four publication fencing and the 32-interview/two-worker/restart drill. Independent final QA PASS for BWR-06 through BWR-11 after final source, criteria, logs and snapshot audit. Atlas/live provider/deployed acceptance remains separate. No commit, deployment, dependency or stored-schema change.
 
 Closure: independent final QA confirmed the final tests and reviewed scope against the saved baseline. The initial repository/runtime fixes remain preserved; changed baseline files are confined to authorized paths. The disposable broker containers/network were removed; the two pre-existing analytics workers remain running. Final diff whitespace check passed, no files are staged, and logs/generated credentials remain ignored. These bounded local checks establish neither deployed activation nor latency/SLO acceptance.
+
+## Pure search and interview decisions
+
+The approved follow-up preserves the public GraphQL, raw candidate-filter request, event, cursor and stored contracts. It introduces no dependency, migration, deployment or generic workflow framework. Pure policies use immutable typed observations; services and adapters own `IO`, resources, trusted authorization and atomic writes. Workload is the existing bounded local fixtures, with no performance or relevance claim.
+
+| ID | Observable acceptance | Required evidence | Status |
+| --- | --- | --- | --- |
+| BWR-12 | Execution admission is pure and staged over fresh stored commands; handled records precede lease decoding, equality expires a lease, expired execution reconciles without recharge, and prepaid slots retain their exact budget semantics. | Characterization/policy tests and real Mongo execution/concurrency regressions. | PASS: six pure policy cases and 16 real workflow Mongo cases, including reclaimed/prepaid/concurrent intent guards. |
+| BWR-13 | A single validated candidate-filter value supplies retrieval and eligibility; skills/residence use consistent Locale.ROOT canonicalization and availability is parsed once. Original skill count/trimmed-length and blank-input limits remain enforced; residence bounds apply to canonical values, matching the existing GraphQL path and standardizing direct service calls. Consent and outward error precedence remain explicit. Invalid filters invoke neither provider nor retrieval. | Direct service normalization regression, Unicode agreement, invalid/combined input and consent tests; Mongo predicate/discovery and GraphQL fixtures. | PASS: seven pure validation cases, 24 service and nine fusion cases; full unit GraphQL fixtures and four discovery/three operational-access integrations pass. Four live Atlas cases remain skipped. |
+| BWR-14 | Scheduling time and workflow-ID generation are injected reusable IO effects; replay evaluates neither and fresh Mongo deadline checks remain authoritative. | Deterministic deadline, millisecond fingerprint, replay and recording-effect tests. | PASS: four deterministic service cases include submillisecond request fingerprinting; real Mongo workflow/recovery deadline guards pass. |
+| BWR-15 | Named workflow decisions replace Saga transition tuples without changing revisions, command order, stable keys, messages or StateT aggregate representation. | Domain/worker characterization and real workflow/recovery integrations. | PASS: 15 domain, seven message-policy and 11 worker cases; 16 workflow Mongo and five recovery integrations pass. |
+| BWR-16 | Admin repair reconciles existing effects without reopening a released reservation or extending the deadline; compensation followed by repair remains bounded and creates no additional reservation, hiring receipt, history or status event. | Real Mongo compensation/repair regression. | PASS: new compensated-reservation repair case in the five-case real Mongo recovery suite. |
+| BWR-17 | Final source passes local tests/formatting/full integrations and independent Code, Security and final QA review. | Java 17 commands with executed/skipped/disabled counts and separate verdicts. | PASS: 619 units, 116 executed integrations and formatting; independent Code Reviewer, Security Engineer and final QA each PASS. |
+
+Execution ownership: workflow owner edits interview policies, service, adapter and callers/tests; search owner edits candidate filter contracts, normalization, adapters and callers/tests; coordinator owns documentation and serialized SBT checks. Each reviewer excludes their own authored code. The current task starts from a clean checkout. Historical BWR evidence is not evidence for these new criteria.
+
+Validation choices: count raw skill entries before deduplication and reject supplied blanks; canonical skills are trimmed, ROOT-lowercased, distinct and sorted. Residence length is checked on its normalized canonical value. Error precedence remains requiredSkills, residence, availabilityStatus, after existing authorization/job/query checks. Execution observations and budget reads stay within the existing transaction; only deterministic decisions move to the pure application policy. Verification logs belong under ignored `.local/logs/`.
+
+Implementation checkpoint (October 7): both slices are implemented. Focused Java 17 checks pass 83/83 tests and integration compilation; configured formatting was applied. The attempted pre-implementation normalization red was blocked by the sandbox's sbt boot-lock permissions. The escalated rerun began after production edits and initially failed on a missing test syntax import, subsequently fixed; no behavioral red is claimed. Scheduling replay now checks submillisecond inputs against the exact millisecond receipt fingerprint without evaluating clock/ID effects. Independent source Code Reviewer and Security Engineer verdicts are PASS; final full checks and QA remain pending. Focused log: `.local/logs/pure-functional-refactor-focused.log`.
+
+Final functional evidence (October 7):
+
+```bash
+sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 test scalafmtCheckAll scalafmtSbtCheck
+```
+
+Result: 619/619 units, zero failures/errors/ignored, both configured formatting checks PASS. Eight project skills validate separately. Unit log: `.local/logs/pure-functional-refactor-unit.log`.
+
+Full integration ran with the task-owned broker project `hiring-pure-functional-proof`, proof root `.local/data/pure-functional-interview-proof`, its ignored runtime environment exported, `INTERVIEW_KAFKA_PROOF_ROOT` selected and `ATLAS_TEST_URI` unset:
+
+```bash
+sbt -java-home /usr/lib/jvm/java-17-openjdk-amd64 'IntegrationTest / test'
+```
+
+Result: exit 0, reported 122 total / 118 passed / four Atlas skipped. Two older opt-in operational Compose bodies were disabled, leaving 116 executed successes. Coverage includes 16 workflow Mongo, five recovery, 20 subject cleanup, four embedding, four publication fencing, two Kafka restart and the 32-interview/two-worker/two-restart drill. Expected occupied-port and ProducerFencedException observations belong to passing lifecycle/fencing cases. No performance/SLO, real provider, live Atlas or deployed retention acceptance is inferred. Integration log: `.local/logs/pure-functional-refactor-integration.log`; final source/test hashes: `.local/logs/pure-functional-refactor-source.sha256`.
+
+Independent Code Reviewer and Security Engineer refreshed separate PASS verdicts after final formatting and the submillisecond replay regression. Independent final QA PASS for BWR-12 through BWR-17 after checking final source/test mapping, logs, all 27 source/test hashes, disabled-gate sources, local documentation references, whitespace and the empty index. No author approved their own implementation. The disposable Kafka containers/network were removed with successful task-scoped Compose teardown; root's container audit confirms the two pre-existing analytics workers remain. QA's additional network audit waited on sandbox approval and was aborted; the completed teardown/root audit supplies cleanup evidence without another Docker operation. Generated logs/configuration remain ignored. No commit, deployment, dependency or stored-schema change.

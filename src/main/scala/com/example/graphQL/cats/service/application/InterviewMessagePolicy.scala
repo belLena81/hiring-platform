@@ -87,7 +87,7 @@ object InterviewMessagePolicy {
       workflow: Option[InterviewWorkflow],
       command: Option[InterviewWorkflowCommandRecord],
       message: InterviewMessage
-  ): Either[InterviewMessageRejection, (InterviewWorkflow, List[InterviewWorkflowCommand])] =
+  ): Either[InterviewMessageRejection, InterviewWorkflowDecision] =
     (workflow, command) match {
       // Expired admission intentionally does not use the timely acknowledgment or result-equality shortcuts.
       case (Some(current), Some(stored)) if applicable(current, stored) && identityMatches(current, stored, message) =>

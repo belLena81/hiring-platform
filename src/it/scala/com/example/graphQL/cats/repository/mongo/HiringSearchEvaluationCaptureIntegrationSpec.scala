@@ -76,17 +76,14 @@ class HiringSearchEvaluationCaptureIntegrationSpec extends munit.FunSuite {
     SearchEvaluationFixtures.queries.filter(_.useCase != SearchEvaluationUseCase.Recommendations).foreach { fixture =>
       val eligible = if (fixture.useCase == SearchEvaluationUseCase.RecruiterMatching) {
         val filters = HiringSearchEvaluationCorpus.candidateFilter(fixture)
-        val parsed = CandidateEligibilityFilters(
-          filters,
-          filters.availabilityStatus.flatMap(value => CandidateAvailabilityStatus.values.find(_.toString == value))
-        )
+        val validated = ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
         HiringSearchEvaluationCorpus.candidates.flatMap { user =>
           val source = HiringSearchEvaluationCorpus.candidateDocument(user)
           val selection = MongoSearchEligibilityCodecs.candidate(source)
           selection.toOption
             .filter(value =>
               value.metadata.exists(meta =>
-                SearchEligibilityPolicy.candidate(value, meta, HiringSearchEvaluationCorpus.Model, parsed)
+                SearchEligibilityPolicy.candidate(value, meta, HiringSearchEvaluationCorpus.Model, validated)
               )
             )
             .map(_.id.value.toString)
@@ -115,14 +112,16 @@ class HiringSearchEvaluationCaptureIntegrationSpec extends munit.FunSuite {
       .find(_.queryId == "RecruiterMatching-3")
       .getOrElse(fail("Missing selective fixture"))
     val filters = HiringSearchEvaluationCorpus.candidateFilter(fixture).copy(requiredSkills = Nil)
-    val parsed = CandidateEligibilityFilters(filters, Some(CandidateAvailabilityStatus.AVAILABLE_NOW))
+    val validated = ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
     val ids = HiringSearchEvaluationCorpus.candidates.flatMap { user =>
       MongoSearchEligibilityCodecs
         .candidate(HiringSearchEvaluationCorpus.candidateDocument(user))
         .toOption
         .filter(value =>
           value.metadata
-            .exists(meta => SearchEligibilityPolicy.candidate(value, meta, HiringSearchEvaluationCorpus.Model, parsed))
+            .exists(meta =>
+              SearchEligibilityPolicy.candidate(value, meta, HiringSearchEvaluationCorpus.Model, validated)
+            )
         )
         .map(_.id.value.toString)
     }
