@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.port.{
   OperationalEventOutboxRepository,
   RepositoryIO
 }
-import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
+import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields, LogField}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.events.OperationalEventJson
 import fs2.Stream
@@ -75,8 +75,10 @@ object OperationalEventKafkaRuntime {
         val transactionalId = "hiring-publisher-" + id.toString
         Stream
           .resource(
-            GuardedTransactionalProducer
-              .resource(TransactionalProducerSettings(transactionalId, settings), MkProducer.mkProducerForSync[IO])
+            observedGeneration(transactionalId, diagnostics)(
+              GuardedTransactionalProducer
+                .resource(TransactionalProducerSettings(transactionalId, settings), MkProducer.mkProducerForSync[IO])
+            )
           )
           .flatMap { producer =>
             resilientStream(
@@ -98,6 +100,25 @@ object OperationalEventKafkaRuntime {
 
     background(Stream.suspend(generation).repeat)
   }
+
+  /** The outer finalizer reports release only after the acquired producer has actually closed. */
+  private[kafka] def observedGeneration[A](
+      transactionalId: String,
+      diagnostics: Diagnostics
+  )(producer: Resource[IO, A]): Resource[IO, A] =
+    Resource
+      .makeFull[IO, (A, IO[Unit])](poll =>
+        poll(producer.allocated).flatTap(_ =>
+          diagnostics
+            .emit(LogEvent.ProducerGenerationStarted, fields = Map(LogField.TransactionalId -> transactionalId))
+        )
+      ) { case (_, release) =>
+        release *> diagnostics.emit(
+          LogEvent.ProducerGenerationClosed,
+          fields = Map(LogField.TransactionalId -> transactionalId)
+        )
+      }
+      .map(_._1)
 
   private def publishBatch(
       config: KafkaConfig,

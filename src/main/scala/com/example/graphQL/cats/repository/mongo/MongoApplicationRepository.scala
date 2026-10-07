@@ -97,7 +97,7 @@ final class MongoApplicationRepository private (
   }
 
   override def createForOpenJob(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent
   ): RepositoryIO[Unit] =
@@ -106,7 +106,7 @@ final class MongoApplicationRepository private (
     else submitWithRetry(observedJob, application, initialEvent, remainingRetries = 2)
 
   def createForOpenJobWithEvents(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
@@ -117,7 +117,7 @@ final class MongoApplicationRepository private (
       submitWithRetry(observedJob, application, initialEvent, operationalEvents, remainingRetries = 2)
 
   override def createForOpenJobWithEvents(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
@@ -207,7 +207,7 @@ final class MongoApplicationRepository private (
   }
 
   private def submitWithRetry(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       remainingRetries: Int
@@ -215,7 +215,7 @@ final class MongoApplicationRepository private (
     submitWithRetry(observedJob, application, initialEvent, Nil, remainingRetries)
 
   private def submitWithRetry(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
@@ -223,7 +223,7 @@ final class MongoApplicationRepository private (
   ): RepositoryIO[Unit] =
     submitOnce(observedJob, application, initialEvent, operationalEvents).leftFlatMap {
       case RepositoryError.Conflict if remainingRetries > 0 =>
-        currentOpenJob(observedJob.value.id).flatMap {
+        currentOpenJob(observedJob.id).flatMap {
           case Some(current) =>
             submitWithRetry(current, application, initialEvent, operationalEvents, remainingRetries - 1)
           case None => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
@@ -232,18 +232,18 @@ final class MongoApplicationRepository private (
     }
 
   private def isConsistentSubmit(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent
   ): Boolean =
-    observedJob.value.id == application.jobId &&
+    observedJob.id == application.jobId &&
       initialEvent.applicationId == application.id &&
       initialEvent.previousStatus.isEmpty &&
       initialEvent.newStatus == ApplicationStatus.Created &&
       initialEvent.actorId == application.candidateId
 
   private def submitOnce(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope]
@@ -255,15 +255,15 @@ final class MongoApplicationRepository private (
       }(mapWrite)
 
   private def submitOnceWithSession(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       operationalEvents: List[OperationalEventEnvelope],
       session: Option[ClientSession[IO]]
   ): RepositoryIO[Unit] =
     val guardFilter = MongoFilter.and(
-      MongoFilter.eq(MongoFields.Id, observedJob.value.id.value.toString),
-      MongoFilter.eq(MongoFields.Version, observedJob.version),
+      MongoFilter.eq(MongoFields.Id, observedJob.id.value.toString),
+      MongoFilter.eq(MongoFields.Version, observedJob.revision),
       MongoFilter.lt(MongoFields.Version, Long.MaxValue),
       MongoFilter.eq(MongoFields.Status, JobStatus.Open.toString)
     )
@@ -299,15 +299,21 @@ final class MongoApplicationRepository private (
       _ <- insertOperationalEvents(outbox, session, operationalEvents, application.createdAt, diagnostics)
     } yield ()
 
-  private def currentOpenJob(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
+  private def currentOpenJob(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.findOpenJob") {
         RepositoryIO
-          .lift(jobs.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .lift(
+            jobs.flatMap(
+              _.find(Filters.eq(MongoFields.Id, id.value.toString))
+                .projection(MongoJobSubmissionSnapshotCodec.projection)
+                .first
+            )
+          )
           .subflatMap(document =>
             MongoStoredDocumentDecoding
-              .repository(document.traverse(MongoHiringCodecs.readVersionedJob))
-              .map(_.filter(_.value.status == JobStatus.Open))
+              .repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
+              .map(_.filter(_.status == JobStatus.Open))
           )
       }(_ => Left(RepositoryError.Unavailable))
 

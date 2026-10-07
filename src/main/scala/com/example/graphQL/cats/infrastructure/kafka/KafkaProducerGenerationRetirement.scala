@@ -10,22 +10,30 @@ import java.util.UUID
 
 /** Explicit operator action; initializing the same transactional ID confirms fencing of the previous epoch. */
 object KafkaProducerGenerationRetirement {
-  def credentials(config: KafkaConfig, id: String): Either[RepositoryError, (String, String)] = {
-    val choices = List(
-      ("hiring-publisher-", config.publisher.saslUsername, config.publisher.saslPassword),
-      ("hiring-interview-orchestrator-", config.interview.orchestratorUsername, config.interview.orchestratorPassword),
-      ("hiring-interview-worker-", config.interview.workerUsername, config.interview.workerPassword)
-    )
-    choices.find { case (prefix, _, _) => id.startsWith(prefix) }.toRight(RepositoryError.InvalidStoredData).flatMap {
-      case (prefix, Some(user), Some(password)) =>
-        val suffix = id.substring(prefix.length)
-        Either
-          .catchNonFatal(UUID.fromString(suffix))
-          .leftMap(_ => RepositoryError.InvalidStoredData)
-          .flatMap(uuid => Either.cond(uuid.toString == suffix, user -> password, RepositoryError.InvalidStoredData))
-      case _ => Left(RepositoryError.InvalidStoredData)
+  private val Prefixes = List("hiring-publisher-", "hiring-interview-orchestrator-", "hiring-interview-worker-")
+
+  def canonicalPrefix(id: String): Either[RepositoryError, String] =
+    Prefixes.find(id.startsWith).toRight(RepositoryError.InvalidStoredData).flatMap { prefix =>
+      val suffix = id.substring(prefix.length)
+      Either
+        .catchNonFatal(UUID.fromString(suffix))
+        .leftMap(_ => RepositoryError.InvalidStoredData)
+        .flatMap(uuid => Either.cond(uuid.toString == suffix, prefix, RepositoryError.InvalidStoredData))
     }
-  }
+
+  def credentials(config: KafkaConfig, id: String): Either[RepositoryError, (String, String)] =
+    canonicalPrefix(id).flatMap { prefix =>
+      val configured = prefix match {
+        case "hiring-publisher-"              => config.publisher.saslUsername -> config.publisher.saslPassword
+        case "hiring-interview-orchestrator-" =>
+          config.interview.orchestratorUsername -> config.interview.orchestratorPassword
+        case _ => config.interview.workerUsername -> config.interview.workerPassword
+      }
+      configured match {
+        case (Some(user), Some(password)) => Right(user -> password)
+        case _                            => Left(RepositoryError.InvalidStoredData)
+      }
+    }
 
   def fence(config: KafkaConfig, id: String): RepositoryIO[Unit] =
     RepositoryIO.fromEither(credentials(config, id)).flatMap { case (user, password) =>

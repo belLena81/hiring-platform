@@ -8,6 +8,8 @@ Migration `014_deleted_account_embeddings` removes vectors and metadata retained
 
 Operational storage cutovers require stopping incompatible application and analytics writers. New migrations preserve producer attribution in separate bounded records and establish strict workflow validators. They do not authorize a data reset. Local implementation and test evidence do not establish Atlas performance, relevance, real-provider acceptance or deployed phase completion.
 
+The current [search and publication reliability slice](docs/specs/hiring-search-publication-reliability.md) validates embedding model provenance, projects application-admission reads, drains full workflow publication batches and isolates account-deletion recovery. Use `scripts/run-local-tests.sh recovery` for the recovery drill; it owns temporary Mongo/Kafka namespaces and a synthetic API process on the verified test stack. Ordinary tests reuse cached pinned images and tmpfs services; server-wide failpoints/restarts remain dedicated. Live Atlas runners additionally require `ATLAS_TEST_DISPOSABLE=true` and exact comma-separated `ATLAS_TEST_ALLOWED_HOSTS` matching the test URI, with a restricted test account.
+
 
 Backend-only hiring management platform built with **Scala 3, Sangria GraphQL, Cats Effect, and MongoDB**.
 

@@ -10,6 +10,7 @@ import com.example.graphQL.cats.domain.model.{
   ApplicationEvent,
   EntityEmbedding,
   Job,
+  JobSubmissionSnapshot,
   User,
   PasswordHash,
   UserPageRequest,
@@ -270,6 +271,7 @@ trait JobRepository {
   def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]]
   def find(id: JobId): RepositoryIO[Option[Job]]
   def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]]
+  def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]]
   def findMany(ids: List[JobId]): RepositoryIO[List[Job]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]]
   def nearbyJobs(scope: HiringReadScope, query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]]
@@ -337,6 +339,11 @@ enum EmbeddingInputType {
 
 final case class EmbeddingInput(text: String, inputType: EmbeddingInputType)
 final case class EmbeddingVector(values: List[Float], model: String, dimension: Int)
+
+object EmbeddingVector {
+  def validateModel(vector: EmbeddingVector, expectedModel: String): Either[EmbeddingError, EmbeddingVector] =
+    Either.cond(vector.model == expectedModel, vector, EmbeddingError.InvalidResponse)
+}
 
 enum EmbeddingError {
   case ProviderUnavailable
@@ -472,12 +479,12 @@ trait ApplicationRepository {
       page: ApplicationEventPageRequest
   ): RepositoryIO[List[ApplicationEvent]]
   def createForOpenJob(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent
   ): RepositoryIO[Unit]
   def createForOpenJobWithEvents(
-      observedJob: Versioned[Job],
+      observedJob: JobSubmissionSnapshot,
       application: Application,
       initialEvent: ApplicationEvent,
       events: List[OperationalEventEnvelope],

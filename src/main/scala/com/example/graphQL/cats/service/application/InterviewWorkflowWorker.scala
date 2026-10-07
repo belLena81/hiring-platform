@@ -8,6 +8,22 @@ import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.service.application.InterviewMessagePolicy.{stableId, step}
 import scala.concurrent.duration.*
 
+enum InterviewPublicationPass {
+  case Full, Idle, Deferred
+}
+
+object InterviewWorkflowWorker {
+
+  /** A full bounded pass yields and continues; idle or deferred work waits before polling again. */
+  private[application] def publicationLoop(
+      publish: IO[InterviewPublicationPass],
+      pollInterval: FiniteDuration
+  ): fs2.Stream[IO, Unit] = fs2.Stream.repeatEval(publish.flatMap {
+    case InterviewPublicationPass.Full => IO.cede
+    case _                             => IO.sleep(pollInterval)
+  })
+}
+
 final case class InterviewWorkerSettings(
     workerId: String,
     pollInterval: FiniteDuration,
@@ -33,6 +49,9 @@ final class InterviewWorkflowWorker(
   private enum PublicationOutcome {
     case Published, LeaseLost, CoordinationUnavailable
   }
+  private enum PublicationStep {
+    case Published, Idle, Deferred
+  }
 
   private def report(operation: String): IO[Unit] =
     diagnostics.emit(LogEvent.MongoRepositoryFailed, fields = Map(LogField.SpanName -> operation))
@@ -45,20 +64,31 @@ final class InterviewWorkflowWorker(
 
   def publisher(transport: InterviewTransport): Resource[IO, Unit] =
     Resource
-      .make((publishDue(transport).handleErrorWith {
-        case fenced: InterviewProducerGenerationFenced => IO.raiseError(fenced)
-        case _                                         => report("interviewWorkflow.publisher")
-      } *> IO.sleep(settings.pollInterval)).foreverM.start)(_.cancel)
+      .make(publicationStream(transport).compile.drain.start)(_.cancel)
       .void
 
-  def publishDue(transport: InterviewTransport): IO[Unit] = {
-    def drain(remaining: Int): IO[Unit] =
-      if (remaining <= 0) IO.unit
-      else publishNext(transport).flatMap(more => if (more) drain(remaining - 1) else IO.unit)
+  def publicationStream(transport: InterviewTransport): fs2.Stream[IO, Unit] =
+    InterviewWorkflowWorker.publicationLoop(
+      publishDue(transport).handleErrorWith {
+        case fenced: InterviewProducerGenerationFenced => IO.raiseError(fenced)
+        case _ => report("interviewWorkflow.publisher").as(InterviewPublicationPass.Deferred)
+      },
+      settings.pollInterval
+    )
+
+  def publishDue(transport: InterviewTransport): IO[InterviewPublicationPass] = {
+    def drain(remaining: Int): IO[InterviewPublicationPass] =
+      if (remaining <= 0) IO.pure(InterviewPublicationPass.Full)
+      else
+        publishNext(transport).flatMap {
+          case PublicationStep.Published => drain(remaining - 1)
+          case PublicationStep.Idle      => IO.pure(InterviewPublicationPass.Idle)
+          case PublicationStep.Deferred  => IO.pure(InterviewPublicationPass.Deferred)
+        }
     drain(settings.publicationBatchSize)
   }
 
-  private def publishNext(transport: InterviewTransport): IO[Boolean] =
+  private def publishNext(transport: InterviewTransport): IO[PublicationStep] =
     for {
       now <- currentTime
       claimed <- observe(
@@ -147,7 +177,11 @@ final class InterviewWorkflowWorker(
           case _ => IO.pure(false)
         }
       }
-    } yield results.contains(true)
+    } yield claimed match {
+      case Some(Nil)                   => PublicationStep.Idle
+      case _ if results.contains(true) => PublicationStep.Published
+      case _                           => PublicationStep.Deferred
+    }
 
   private def publishWithLease(
       transport: InterviewTransport,

@@ -51,9 +51,9 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
   override def run(args: List[String]): IO[ExitCode] = parse(args) match {
     case Left(message)   => IO.println(message).as(ExitCode.Error)
     case Right(settings) =>
-      sys.env.get("ATLAS_TEST_URI") match {
-        case None => IO.println("ATLAS_TEST_URI is required after explicit disposable Atlas opt-in").as(ExitCode.Error)
-        case Some(uri) =>
+      com.example.hiring.testing.DisposableAtlas.authorizedUri(sys.env) match {
+        case Left(message) => IO.println(message).as(ExitCode.Error)
+        case Right(uri)    =>
           MongoDatabaseProbe
             .clientResource(uri)
             .use { client =>

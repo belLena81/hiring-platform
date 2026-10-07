@@ -68,7 +68,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
     def int(name: String, default: Int): Either[String, Int] =
       values.get(name).fold[Either[String, Int]](Right(default))(value => value.toIntOption.toRight(s"Invalid --$name"))
     for {
-      uri <- sys.env.get("ATLAS_TEST_URI").toRight("Set ATLAS_TEST_URI for an authorized disposable Atlas deployment.")
+      uri <- com.example.hiring.testing.DisposableAtlas.authorizedUri(sys.env)
       database <- values.get("database").toRight("Supply --database for the disposable evaluation collection.")
       output <- values.get("output").toRight("Supply --output directory for JSON run records.")
       sourceRevision <- values

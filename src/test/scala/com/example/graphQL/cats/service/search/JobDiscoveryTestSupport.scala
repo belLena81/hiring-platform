@@ -29,6 +29,7 @@ private[cats] object JobDiscoveryTestSupport {
       relatedJobs,
       find,
       findVersioned,
+      findSubmissionSnapshot,
       findMany,
       findOpen,
       findAll,

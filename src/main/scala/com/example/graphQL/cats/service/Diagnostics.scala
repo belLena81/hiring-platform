@@ -10,6 +10,10 @@ enum LogLevel {
 }
 
 enum LogEvent(val category: String, val component: String, val message: String, val level: LogLevel) {
+  case ProducerGenerationStarted
+      extends LogEvent("PRODUCER_GENERATION_STARTED", "KAFKA", "Producer generation initialized", LogLevel.Info)
+  case ProducerGenerationClosed
+      extends LogEvent("PRODUCER_GENERATION_CLOSED", "KAFKA", "Producer generation resources released", LogLevel.Info)
   case ConfigInvalid extends LogEvent("CONFIG_INVALID", "CONFIG", "Application configuration rejected", LogLevel.Error)
   case MongoUnavailable
       extends LogEvent("MONGO_UNAVAILABLE", "READINESS", "Database readiness check failed", LogLevel.Warn)
@@ -48,6 +52,7 @@ enum LogEvent(val category: String, val component: String, val message: String, 
 }
 
 enum LogField(val key: String, val sensitive: Boolean = false) {
+  case TransactionalId extends LogField("transactionalId")
   case Method extends LogField("method")
   case Route extends LogField("route")
   case Status extends LogField("status")
@@ -117,6 +122,10 @@ object LogFields {
   }
 
   def validPublic(field: LogField, value: String): Boolean = field match {
+    case LogField.TransactionalId =>
+      value.matches(
+        "hiring-(publisher|interview-orchestrator|interview-worker)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+      )
     case LogField.Method => Set("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "OTHER").contains(value)
     case LogField.Route  => HiringHttpPaths.public.contains(value) || value == "_unmatched"
     case LogField.Status => value.toIntOption.exists(status => status >= 100 && status <= 599)

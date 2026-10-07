@@ -49,7 +49,7 @@ private[runtime] object InterviewSchedulingRuntime {
             FakeInterviewNotificationProvider.durable(repository),
             InterviewWorkerSettings(
               "interview-local",
-              1.second,
+              settings.publicationPollIntervalMs.millis,
               settings.claimSeconds.seconds,
               settings.providerTimeoutSeconds.seconds,
               settings.maxAttempts,
@@ -91,8 +91,8 @@ private[runtime] object InterviewSchedulingRuntime {
           def generation: Stream[IO, Unit] = Stream
             .resource(
               (
-                InterviewKafkaRuntime.publisherResource(commandConfig),
-                InterviewKafkaRuntime.publisherResource(resultConfig)
+                InterviewKafkaRuntime.publisherResource(commandConfig, diagnostics),
+                InterviewKafkaRuntime.publisherResource(resultConfig, diagnostics)
               ).tupled
             )
             .flatMap { case (commands, results) =>
@@ -103,7 +103,7 @@ private[runtime] object InterviewSchedulingRuntime {
                   owner(message).generationFor(message)
                 def publish(message: InterviewMessage): IO[Unit] = owner(message).publish(message)
               }
-              Stream.repeatEval(worker.publishDue(routing)).metered(1.second)
+              worker.publicationStream(routing)
             }
             .handleErrorWith { error =>
               Stream.eval(diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))) ++ Stream

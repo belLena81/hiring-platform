@@ -31,6 +31,8 @@ GraphQL, cursor, operational-event, and embedding contracts therefore have one a
 
 ## Other contracts and data
 
+The search/publication reliability slice changes internal application-admission ports to a projected ID/status/revision snapshot and adds validated workflow polling configuration; persisted job revisions, public GraphQL/event shapes and applied migrations remain unchanged. Embedding provider model mismatches now fail before use. Candidate outbox indexes are measured on disposable namespaces and require a new repeatable migration only if adoption gates pass; a rejected candidate changes no production index.
+
 GraphQL SDL, cursors, operational-event payloads, and embedding metadata describe only the active shape. No legacy API/event readers or compatibility window are maintained. A contract change updates its implementation, SDL fixture, executable operations, and this document together. The aggregate revision is independent from schema, cursor, event, embedding-model, and analytics-run versions.
 
 Critical integrity remains enforced by MongoDB uniqueness and transactional identity, ownership, status, and state predicates. Resetting local data does not relax authorization, lifecycle, duplicate-application, or closed-job invariants.

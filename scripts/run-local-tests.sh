@@ -3,9 +3,9 @@ set -euo pipefail
 umask 077
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
-usage() { printf 'Usage: %s start|test [suite-glob ...]|analytics [suite-glob ...]|interview|retention|status|stop\n' "$0" >&2; }
+usage() { printf 'Usage: %s start|test [suite-glob ...]|analytics [suite-glob ...]|interview|retention|recovery|status|stop\n' "$0" >&2; }
 case "${1:-}" in
-  start|test|analytics|interview|retention|status|stop) ;;
+  start|test|analytics|interview|retention|recovery|status|stop) ;;
   *) usage; exit 2 ;;
 esac
 if [[ "${1:-}" == test || "${1:-}" == analytics ]]; then
@@ -158,6 +158,15 @@ for root in runs.iterdir():
     with lock.open('a+') as owner:
         try:fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:continue
+        process_lock=root/'process.lock'
+        if process_lock.is_symlink():raise SystemExit('Process ownership lock must not be a symlink')
+        process_owner=None
+        if process_lock.exists():
+            process_owner=process_lock.open('a+')
+            try:fcntl.flock(process_owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:
+                process_owner.close()
+                continue
         identity=root/'service.json'
         if not identity.exists():continue
         if identity.is_symlink() or json.loads(identity.read_text())!={'nonce':m['nonce'],'project':m['project']}:continue
@@ -182,8 +191,11 @@ for root in runs.iterdir():
                     kafka('/opt/kafka/bin/kafka-acls.sh --bootstrap-server kafka:9092 --command-config "$f" --remove --force --topic '+name)
                 marker.unlink()
         remaining={entry.name for entry in root.iterdir()}
-        if remaining=={'service.json','owner.lock'}:
-            identity.unlink();lock.unlink();root.rmdir()
+        if remaining <= {'service.json','owner.lock','process.lock'}:
+            identity.unlink();lock.unlink()
+            process_lock.unlink(missing_ok=True)
+            if process_owner is not None:process_owner.close()
+            root.rmdir()
 PY_CLEAN
 }
 start() {
@@ -225,6 +237,12 @@ for root in runs.iterdir():
     with lock.open('a+') as handle:
         try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:raise SystemExit('An owned test run is active; refuse to stop its services')
+        process_lock=root/'process.lock'
+        if process_lock.is_symlink():raise SystemExit('Invalid process ownership lock')
+        if process_lock.exists():
+            with process_lock.open('a+') as process_owner:
+                try:fcntl.flock(process_owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:raise SystemExit('An owned API process is active; refuse to stop its services')
 PY_STOP
     compose down --volumes >"$log_root/stop.log" 2>&1
     python3 - "$config_root" "$registry_root" <<'PY_DELETE'
@@ -243,7 +261,7 @@ for directory in runs.iterdir():
         entries=list(directory.iterdir())
         def owned(entry):
             if entry.is_symlink() or not entry.is_file():return False
-            if entry.name in ('owner.lock','service.json'):return True
+            if entry.name in ('owner.lock','service.json','process.lock'):return True
             if entry.suffix=='.database':return bool(re.fullmatch('hiring_test_[a-f0-9]{32}',entry.read_text())) and entry.name==entry.read_text()+'.database'
             if entry.suffix=='.kafka':
                 data=json.loads(entry.read_text())
@@ -256,7 +274,7 @@ for name in ('manifest.json','compose.env','project','current.json','initialized
 PY_DELETE
     printf 'Removed only %s; cached images remain.\n' "$test_project"
     ;;
-  test|analytics|interview|retention)
+  test|analytics|interview|retention|recovery)
     start
     run_id="$(python3 -c 'import secrets;print(secrets.token_hex(16))')"
     run_root="$registry_root/$run_id"
@@ -271,13 +289,26 @@ PY_RUN
     export HIRING_TEST_MANIFEST="$config_root/manifest.json" HIRING_TEST_WORKSPACE="$repo_root" HIRING_TEST_RUN_REGISTRY="$run_root"
     # Never delete unregistered resources. Java Resource finalizers remove successful registrations.
     flock -u 9
-    build_target="$build_root/root"
-    if [[ "$1" == analytics ]]; then build_target="$build_root/analytics"; fi
-    exec 7>"$build_target/owner.lock"
-    flock 7
     java_args=()
     if [[ -n "${HIRING_TEST_JAVA_HOME:-}" ]]; then java_args=(-java-home "$HIRING_TEST_JAVA_HOME"); fi
+    if [[ "$1" == recovery ]]; then
+      # The API classpath and analytics process share this run's root ownership lock.
+      # Acquire root before analytics consistently; no nested sbt builds in the test JVM.
+      exec 6>"$build_root/root/owner.lock"
+      flock 6
+      sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_root/root" compile 'export Compile / fullClasspath' >"$log_root/recovery-classpath.log" 2>&1
+      export HIRING_RECOVERY_CLASSPATH_FILE="$log_root/recovery-classpath.log"
+      export HIRING_ACCOUNT_DELETION_RECOVERY_EVIDENCE=true
+    fi
+    build_target="$build_root/root"
+    if [[ "$1" == analytics || "$1" == recovery ]]; then build_target="$build_root/analytics"; fi
+    exec 7>"$build_target/owner.lock"
+    flock 7
     case "$1" in
+      recovery)
+        cd analytics
+        sbt "${java_args[@]}" "-Dhiring.test.buildRoot=$build_target" 'it:testOnly *AccountDeletionRecoveryIntegrationSpec'
+        ;;
       analytics)
         cd analytics
         if (( $# > 1 )); then

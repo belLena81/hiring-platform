@@ -3,6 +3,28 @@ package com.example.graphQL.cats.config
 import munit.FunSuite
 
 class InterviewWorkflowConfigSpec extends FunSuite {
+  test("publication polling accepts only the bounded interval and defaults to one second") {
+    List(100, 1000, 60000).foreach { interval =>
+      assertEquals(
+        KafkaConfigValidation
+          .validInterview(
+            RawInterviewRuntimeConfig(publicationPollIntervalMs = Some(interval))
+          )
+          .toOption
+          .map(_.publicationPollIntervalMs),
+        Some(interval)
+      )
+    }
+    List(Int.MinValue, 0, 99, 60001, Int.MaxValue).foreach { interval =>
+      assert(
+        KafkaConfigValidation
+          .validInterview(
+            RawInterviewRuntimeConfig(publicationPollIntervalMs = Some(interval))
+          )
+          .isInvalid
+      )
+    }
+  }
   test("disabled workflow defaults preserve existing operational Kafka configuration") {
     assertEquals(
       KafkaConfigValidation.validInterview(RawInterviewRuntimeConfig()).toOption,

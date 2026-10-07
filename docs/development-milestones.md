@@ -1,5 +1,7 @@
 # Development Milestones
 
+The approved [search and publication reliability slice](specs/hiring-search-publication-reliability.md) implements embedding provenance, projected admission, isolated recovery/Atlas guards, bounded publication scheduling and measured scaling candidates. Local checks passed 701 root units, 161 root integrations, 477 analytics units, 41 analytics integrations, four measurement tests, safe service reuse and the isolated recovery drill. Paired measurements retained submission projection and immediate full-batch publication, and rejected both outbox partial-index candidates. Independent final QA and refreshed review of the last recovery-fixture corrections remain blocked by the agent thread limit; existing Atlas, relevance, provider and deployed acceptance gates remain open.
+
 ## Hiring event and test reliability
 
 The [current local refactoring specification](specs/hiring-event-and-test-reliability.md) tracks minimized event contracts, bounded publication, atomic receipt deduplication, audited cleanup validation/indexing and reusable isolated test services. Its criterion-level verification and independent reviews are separate from historical Phase 8–11 evidence. It does not close Atlas, human relevance, provider or deployed retention/availability gates. Its approved local refinement is verified: 678 root and 477 analytics unit passes, 155 root and 41 analytics integration passes, twelve explicit external/opt-in skips, both formatting gates and independent Code, Security and final QA PASS.

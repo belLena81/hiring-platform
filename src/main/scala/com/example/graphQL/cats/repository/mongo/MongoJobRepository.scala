@@ -49,6 +49,21 @@ final class MongoJobRepository(
           )
       )(_ => Left(RepositoryError.Unavailable))
 
+  override def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
+    MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.findSubmissionSnapshot")(
+      RepositoryIO
+        .lift(
+          collection.flatMap(
+            _.find(Filters.eq(MongoFields.Id, id.value.toString))
+              .projection(MongoJobSubmissionSnapshotCodec.projection)
+              .first
+          )
+        )
+        .subflatMap(document =>
+          MongoStoredDocumentDecoding.repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
+        )
+    )(_ => Left(RepositoryError.Unavailable))
+
   override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
     MongoKeysetPaging.byId(collection, ids.map(_.value.toString))(MongoHiringCodecs.readJob)(diagnostics)
 

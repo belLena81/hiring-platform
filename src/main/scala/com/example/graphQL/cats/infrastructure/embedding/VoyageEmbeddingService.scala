@@ -80,7 +80,7 @@ final class VoyageEmbeddingService(
       .map { item =>
         val values = item.embedding
         Either.cond(
-          values.size == dimension && values.forall(_.isFinite),
+          values.size == dimension && values.forall(_.isFinite) && response.model.forall(_ == model),
           EmbeddingVector(values, response.model.getOrElse(model), values.size),
           EmbeddingError.InvalidResponse
         )

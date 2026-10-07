@@ -63,9 +63,12 @@ private[config] object KafkaConfigValidation {
         .cond(
           raw.publicationBatchSize.getOrElse(16) >= 1 && raw.publicationBatchSize.getOrElse(
             16
-          ) <= 64 && raw.clockSkewToleranceMillis.getOrElse(5000) >= 0 && raw.clockSkewToleranceMillis.getOrElse(
-            5000
-          ) <= 60000 &&
+          ) <= 64 && raw.publicationPollIntervalMs.getOrElse(1000) >= 100 &&
+            raw.publicationPollIntervalMs.getOrElse(1000) <= 60000 && raw.clockSkewToleranceMillis.getOrElse(
+              5000
+            ) >= 0 && raw.clockSkewToleranceMillis.getOrElse(
+              5000
+            ) <= 60000 &&
             validInterviewTransportNames(raw) && raw.partitionConcurrency.getOrElse(4) >= 1 && raw.partitionConcurrency
               .getOrElse(
                 4
@@ -102,6 +105,7 @@ private[config] object KafkaConfigValidation {
         raw.fencerUsername,
         raw.fencerPassword,
         raw.publicationBatchSize.getOrElse(16),
+        raw.publicationPollIntervalMs.getOrElse(1000),
         raw.clockSkewToleranceMillis.getOrElse(5000),
         raw.partitionConcurrency.getOrElse(4),
         com.example.graphQL.cats.domain.workflow.InterviewTopicPair(raw.commandsTopic, raw.resultsTopic),

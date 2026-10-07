@@ -113,10 +113,12 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
     }
   }
 
-  test("VHS-AC02 semantic job search filters with the configured model when provider returns a canonical model") {
+  test("a mismatched provider model cannot reach job or candidate retrieval") {
     for {
-      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidateWithProfile))
-      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map.empty)
+      usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+        Map(candidateId -> candidateWithProfile, recruiterId -> recruiter)
+      )
+      jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob.copy(embedding = Some(jobEmbedding))))
       queries <- Ref.of[IO, Vector[VectorSearchQuery]](Vector.empty)
       service = semanticService(
         new InMemoryUsers(usersRef),
@@ -134,11 +136,22 @@ final class SemanticSearchServiceSpec extends CatsEffectSuite {
         )
         .value
       recorded <- queries.get
+      candidateResult <- service
+        .candidateMatches(
+          ActorContext(recruiterId, UserRole.Recruiter),
+          jobId,
+          Some("scala backend"),
+          CandidateMatchFilters.empty,
+          pageSize,
+          searchId
+        )
+        .value
+      candidateQueries <- queries.get
     } yield {
-      assertEquals(result, Right(Nil))
-      assertEquals(recorded.map(_.model), Vector(configuredModel))
-      assertEquals(recorded.map(_.mode), Vector(SearchMode.HYBRID))
-      assertEquals(recorded.map(_.lexicalQuery), Vector(Some("scala backend")))
+      assertEquals(result, Left(UseCaseError.Search(SearchError.ProviderUnavailable)))
+      assertEquals(candidateResult, Left(UseCaseError.Search(SearchError.ProviderUnavailable)))
+      assertEquals(recorded, Vector.empty)
+      assertEquals(candidateQueries, Vector.empty)
     }
   }
 

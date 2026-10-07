@@ -21,6 +21,7 @@ import com.example.graphQL.cats.domain.model.{
   CandidateProfile,
   EntityEmbedding,
   Job,
+  JobSubmissionSnapshot,
   JobStatus,
   Location,
   RecruiterProfile,
@@ -238,6 +239,9 @@ private[cats] object ServiceFixtures {
     override def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]] =
       com.example.graphQL.cats.service.port.RepositoryIO
         .fromIOEither(findOne(id).map(value => Right(value.map(Versioned(_, 0L)))))
+
+    override def findSubmissionSnapshot(id: JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
+      findVersioned(id).map(_.map(job => JobSubmissionSnapshot(job.value.id, job.value.status, job.version)))
 
     override def findMany(ids: List[JobId]): RepositoryIO[List[Job]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(findAll(ids).map(Right(_)))
@@ -550,21 +554,21 @@ private[cats] object ServiceFixtures {
       )
 
     override def createForOpenJob(
-        observedJob: Versioned[Job],
+        observedJob: JobSubmissionSnapshot,
         application: Application,
         initialEvent: ApplicationEvent
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO
       .fromIOEither(nextCreateError.modify(error => (None, error)) flatMap {
         case Some(error) => IO.pure(Left(error))
         case None
-            if observedJob.value.status == JobStatus.Open && observedJob.value.id == application.jobId &&
+            if observedJob.status == JobStatus.Open && observedJob.id == application.jobId &&
               initialEvent.applicationId == application.id =>
           create(application, initialEvent).value
         case None => IO.pure(Left(RepositoryError.Conflict))
       })
 
     override def createForOpenJobWithEvents(
-        observedJob: Versioned[Job],
+        observedJob: JobSubmissionSnapshot,
         application: Application,
         initialEvent: ApplicationEvent,
         outboxEvents: List[OperationalEventEnvelope],

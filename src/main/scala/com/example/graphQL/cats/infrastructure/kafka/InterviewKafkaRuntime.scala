@@ -77,10 +77,13 @@ object InterviewKafkaRuntime {
   )(
       receive: Either[String, InterviewMessage] => IO[Boolean]
   ): Resource[IO, InterviewTransport] =
-    consumerResource(config, diagnostics)(receive) *> publisherResource(config)
+    consumerResource(config, diagnostics)(receive) *> publisherResource(config, diagnostics)
 
   /** Producer initialization completes before the immutable generation is exposed for Mongo authorization. */
-  def publisherResource(config: InterviewKafkaConfig): Resource[IO, InterviewTransport] = {
+  def publisherResource(
+      config: InterviewKafkaConfig,
+      diagnostics: Diagnostics = Diagnostics.noop
+  ): Resource[IO, InterviewTransport] = {
     val properties = OperationalEventKafkaRuntime.saslProperties(
       Some(config.username),
       Some(config.password),
@@ -101,9 +104,11 @@ object InterviewKafkaRuntime {
     for {
       id <- Resource.eval(IO.randomUUID)
       generation = InterviewPublisherGeneration(role, id)
-      producer <- initializedProducer(
-        TransactionalProducerSettings(generation.transactionalId, producerSettings),
-        MkProducer.mkProducerForSync[IO]
+      producer <- OperationalEventKafkaRuntime.observedGeneration(generation.transactionalId, diagnostics)(
+        initializedProducer(
+          TransactionalProducerSettings(generation.transactionalId, producerSettings),
+          MkProducer.mkProducerForSync[IO]
+        )
       )
     } yield new InterviewTransport {
       def generationFor(_message: InterviewMessage): InterviewPublisherGeneration = generation

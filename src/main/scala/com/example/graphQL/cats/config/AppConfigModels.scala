@@ -243,6 +243,7 @@ final case class InterviewRuntimeConfig(
     fencerUsername: Option[String] = None,
     fencerPassword: Option[String] = None,
     publicationBatchSize: Int = 16,
+    publicationPollIntervalMs: Int = 1000,
     clockSkewToleranceMillis: Int = 5000,
     partitionConcurrency: Int = 4,
     topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =

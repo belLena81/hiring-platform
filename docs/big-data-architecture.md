@@ -6,6 +6,8 @@ The [reliability specification](specs/hiring-retrieval-publication-reliability.m
 
 Erasure fences and checkpoints bounded producer batches before advancing barriers or physical cleanup. Active producer attribution has no TTL. Failed broker fencing retains pending work. Generation retirement must stop the selected process, initialize the same canonical transactional ID to obtain broker fencing, then checkpoint fenced registrations. Existing analytics retention and physical deletion gates remain required; operational success alone does not prove lakehouse erasure.
 
+Account-deletion recovery runs through `scripts/run-local-tests.sh recovery` using manifest-verified test services, generated database/topic namespaces, synthetic keys and a Resource-owned local API process. It does not use developer `.env`, application databases or durable proof directories. [Search/publication reliability](specs/hiring-search-publication-reliability.md) owns the new local recovery evidence; deployed erasure gates remain separate.
+
 
 ## Current delivery status
 

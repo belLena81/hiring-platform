@@ -1,5 +1,13 @@
 # MongoDB design
 
+### Measured admission and publication access
+
+The October 7 [bounded local comparison](specs/hiring-search-publication-reliability.md) retained strict ID/status/revision submission projection: read throughput improved 66–283% across three pairs at concurrency 1/8, with worst write p95 growth 8.8%. Popular-job concurrency-eight writes still encounter expected revision conflicts; the atomic Open/revision guard remains authoritative. These are synthetic repository measurements, not API or deployed SLOs.
+
+Retryable/InFlight partial-index candidates for the native OR outbox claim failed all twelve adoption comparisons. Index growth was 18.4–23.4%, with inconsistent read benefit and shared-recruiter write regressions up to 91%; production indexes remain unchanged. Exact facets and geographic pages were observed on 256 jobs/257 skills only. That dataset does not establish high-volume saturation or justify weaker facet semantics.
+
+Concurrency-eight baseline cohorts recorded about 4200 claim attempts for approximately 500 completed publications, versus 500 attempts at concurrency one; durable subject leases reconcile to zero after each cohort. Scaling must account for contention and scan amplification, not only index selection. Keep subject/deletion fencing and the fair bounded claim scan until a separately measured protocol change demonstrates equivalent safety.
+
 ## Retrieval and workflow integrity cutover
 
 See [the reliability specification](specs/hiring-retrieval-publication-reliability.md) for current acceptance evidence. Migration `012_attributable_producer_registrations` transfers existing producer attribution before removing growing fence/cleanup arrays. Active registrations never expire; only broker-confirmed fenced rows receive retention expiry. Cleanup traverses 64 records per batch. Stop incompatible writers before startup; preserve the database and verify the completed migration and strict validators before restarting analytics.
@@ -11,6 +19,10 @@ Cleanup sweeps retain a finite identifier ceiling and per-record failure isolati
 For embedding work, inspect with `sbt 'runMain com.example.graphQL.cats.repository.mongo.EmbeddingWorkRepair <admin-id> <Job|CandidateProfile> <entity-id>'`; append the inspected generation to repair failed work. The transaction requires an active singleton Admin and uses generation compare-and-set. Deletion removes candidate embedding values and metadata atomically; all writes retain active Candidate and observed-revision predicates.
 
 Normal retirement uses `sbt 'runMain com.example.graphQL.cats.repository.mongo.ProducerGenerationRetirementMain <transactional-id>'`. Stop the selected producer generation first and configure the matching publisher/fencer principal. The command validates its canonical prefix and UUID, obtains broker fencing, then checkpoints registrations in batches of 64. Running it against a live generation fences that process; it must restart with a new identity. A failed broker operation leaves attribution active; producer close alone does not authorize TTL.
+
+Read-only inventory uses the same entrypoint with `list` and an optional returned continuation; each page reads at most 64 registrations and may repeat a generation across subjects. Startup/close diagnostics identify canonical generation IDs without subject data. Stop and prevent automatic restart of the selected publisher before retiring exact IDs; uncertain ownership requires stopping all relevant publishers. Repeat retirement after an interrupted checkpoint. No age-based Active-row expiry is permitted.
+
+Application-admission reads project only `_id`, `status` and the canonical nonnegative BSON-long `version` into a strict immutable snapshot. Submission still writes the job revision/status guard transactionally with application, history and outbox. Popular-job and shared-subject serialization remain deliberate correctness boundaries; the [current comparison](specs/hiring-search-publication-reliability.md) records measured limits and candidate-index outcomes before adoption.
 
 The shared permit bounds four costly retrieval operations, rather than four driver commands. RRF can execute two job or three candidate branches per admitted operation, allowing up to twelve branch aggregates at the default bound; authoritative hydration has separate bounded batch size and deadlines. Measure this fan-out before increasing admission.
 

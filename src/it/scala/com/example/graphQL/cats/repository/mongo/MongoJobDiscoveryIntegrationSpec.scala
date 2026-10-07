@@ -1,104 +1,17 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
+import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.search.*
 import com.mongodb.client.model.{Filters, Updates}
-import java.time.Instant
 import java.util.UUID
 import org.bson.Document
 import scala.jdk.CollectionConverters.*
-import scala.concurrent.duration.*
 
-final class MongoJobDiscoveryIntegrationSpec extends MongoIntegrationSuite {
-  // Server-wide timeout failpoints require an isolated instance with test commands enabled.
-  override protected def dedicatedMongo: Boolean = true
-  override val munitIOTimeout: FiniteDuration = 5.minutes
-  private val now = Instant.parse("2026-10-06T12:00:00Z")
-  private val center = GeoPoint(35.1856d, 33.3823d)
-  private val filter = JobSearchFilter(None, Set.empty, None)
-  private def job(index: Int, point: Option[GeoPoint] = Some(center), remote: Boolean = false): Job =
-    Job(
-      JobId(new UUID(0L, index.toLong)),
-      UserId(new UUID(1L, 1L)),
-      "Engineer",
-      "Build hiring",
-      List("Scala"),
-      Set("Scala", s"Skill$index"),
-      Location("Cyprus", "Nicosia", remote, point),
-      JobStatus.Open,
-      now,
-      now
-    )
-  private def discoveryResource = mongoResource.evalMap { fixture =>
-    val actor = com.example.graphQL.cats.service.ServiceFixtures.candidate
-    val users = MongoUserRepository.transactional(
-      fixture.database,
-      fixture.client,
-      MongoEmbeddingWorkEnqueuer.disabled,
-      Diagnostics.noop
-    )
-    for {
-      _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
-      _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Users, MongoHiringCodecs.user(actor))
-      policy <- DiscoveryQueryPolicy.create(2.seconds, 4)
-      scope <- IO.fromEither(
-        com.example.graphQL.cats.service.read.HiringReadScope
-          .validated(
-            com.example.graphQL.cats.service.ActorContext(actor.id, actor.role),
-            actor,
-            com.example.graphQL.cats.service.auth.ActorAuthorization(users)
-          )
-          .leftMap(error => new AssertionError(error.toString))
-      )
-    } yield (fixture, policy, scope)
-  }
-  private def success[A](effect: RepositoryIO[A]): IO[A] =
-    effect.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failed: $error")), IO.pure))
-
-  test("real Mongo maxTimeMS exhaustion returns typed unavailable for nearby jobs and exact facets") {
-    discoveryResource.use { case (fixture, policy, scope) =>
-      val repository = MongoJobRepository.transactional(
-        fixture.database,
-        fixture.client,
-        MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop,
-        Some(policy)
-      )
-      for {
-        _ <- MongoRepositoryTestSupport.insertOne(
-          fixture.database,
-          MongoCollections.Jobs,
-          MongoHiringCodecs.job(job(1))
-        )
-        admin <- fixture.client.getDatabase("admin")
-        _ <- Resource
-          .make(
-            MongoAccessEvaluationSupport
-              .command(admin, new Document("configureFailPoint", "maxTimeAlwaysTimeOut").append("mode", "alwaysOn"))
-              .void
-          )(_ =>
-            MongoAccessEvaluationSupport
-              .command(admin, new Document("configureFailPoint", "maxTimeAlwaysTimeOut").append("mode", "off"))
-              .void
-          )
-          .use { _ =>
-            for {
-              nearby <- repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2).value
-              facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
-              _ = assertEquals(nearby, Left(RepositoryError.Unavailable))
-              _ = assertEquals(facets, Left(RepositoryError.Unavailable))
-            } yield ()
-          }
-        recovered <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2))
-        _ = assertEquals(recovered.map(_.job.id), List(job(1).id))
-      } yield ()
-    }
-  }
+final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
 
   test(
     "authoritative discovery distinguishes empty jobs from a revoked cached actor, including cursors beyond radius"

@@ -12,6 +12,55 @@ import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
 final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
+  test("full publication passes continue immediately while idle and deferred passes wait") {
+    for {
+      calls <- Ref.of[IO, Int](0)
+      third <- Deferred[IO, Unit]
+      publish = calls.getAndUpdate(_ + 1).flatMap {
+        case 0 | 1 => IO.pure(InterviewPublicationPass.Full)
+        case _     => third.complete(()).void.as(InterviewPublicationPass.Idle)
+      }
+      fiber <- InterviewWorkflowWorker.publicationLoop(publish, 1.day).compile.drain.start
+      _ <- third.get.timeout(2.seconds).guarantee(fiber.cancel)
+      count <- calls.get
+    } yield assertEquals(count, 3)
+  }
+
+  test("idle and deferred passes sleep instead of repeatedly claiming") {
+    List(InterviewPublicationPass.Idle, InterviewPublicationPass.Deferred).traverse_ { outcome =>
+      for {
+        calls <- Ref.of[IO, Int](0)
+        entered <- Deferred[IO, Unit]
+        fiber <- InterviewWorkflowWorker
+          .publicationLoop(
+            calls.update(_ + 1) *> entered.complete(()).void.as(outcome),
+            1.day
+          )
+          .compile
+          .drain
+          .start
+        _ <- entered.get *> IO.sleep(30.millis)
+        _ <- fiber.cancel
+        count <- calls.get
+      } yield assertEquals(count, 1)
+    }
+  }
+
+  test("a continuously full publication loop remains cancellable") {
+    for {
+      entered <- Deferred[IO, Unit]
+      fiber <- InterviewWorkflowWorker
+        .publicationLoop(
+          entered.complete(()).void.as(InterviewPublicationPass.Full),
+          1.day
+        )
+        .compile
+        .drain
+        .start
+      _ <- entered.get
+      _ <- fiber.cancel.timeout(2.seconds)
+    } yield ()
+  }
   private val repository = new TestInterviewWorkflowRepository
 
   private def unexpectedProvider[A]: InterviewProviderIO[A] =
@@ -47,6 +96,58 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       throw new AssertionError("No publication should be prepared after a failed claim")
     override def publish(message: InterviewMessage) =
       IO.raiseError(new AssertionError("No publication should follow a failed claim"))
+  }
+
+  test("a bounded successful publication pass reports full, then idle after remaining work drains") {
+    for {
+      remaining <- Ref.of[IO, Int](3)
+      sent <- Ref.of[IO, Int](0)
+      record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 77L), observedAt.plusSeconds(60))
+      store = new TestInterviewWorkflowRepository {
+        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+          RepositoryIO.lift(remaining.modify(n => (math.max(0, n - 1), if (n > 0) List(claim) else Nil)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+        override def authorizePublication(
+            value: ClaimedInterviewWorkflowCommand,
+            generation: InterviewPublisherGeneration,
+            now: Instant
+        ) = RepositoryIO.fromEither(Right(true))
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+          RepositoryIO.fromEither(Right(true))
+        override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
+          RepositoryIO.fromEither(Right(()))
+      }
+      sender = new InterviewTransport {
+        def generationFor(value: InterviewMessage) =
+          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 78L))
+        def publish(value: InterviewMessage) = sent.update(_ + 1)
+      }
+      worker = new InterviewWorkflowWorker(
+        store,
+        calendar,
+        notifications,
+        InterviewWorkerSettings(
+          "worker",
+          1.second,
+          60.seconds,
+          10.seconds,
+          5,
+          1.second,
+          30.seconds,
+          publicationBatchSize = 2
+        ),
+        Diagnostics.noop,
+        IO.pure(observedAt)
+      )
+      first <- worker.publishDue(sender)
+      second <- worker.publishDue(sender)
+      count <- sent.get
+    } yield {
+      assertEquals(first, InterviewPublicationPass.Full)
+      assertEquals(second, InterviewPublicationPass.Idle)
+      assertEquals(count, 3)
+    }
   }
 
   test(

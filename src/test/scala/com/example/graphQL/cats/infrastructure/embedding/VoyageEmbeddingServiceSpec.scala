@@ -65,6 +65,44 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
     service.embed(input).map(result => assertEquals(result, Left(EmbeddingError.ProviderUnavailable)))
   }
 
+  List(EmbeddingInputType.Document, EmbeddingInputType.Query).foreach { kind =>
+    test(s"rejects a same-dimensional response from another model for $kind") {
+      val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+        IO.pure(jsonResponse(Status.Ok, """{"data":[{"embedding":[0.1,0.2]}],"model":"another-model"}"""))
+      }
+      val service = new VoyageEmbeddingService(
+        Client.fromHttpApp[IO](app),
+        "test-key",
+        endpoint,
+        "voyage-4-lite",
+        2,
+        1.second,
+        diagnostics = Diagnostics.noop
+      )
+      service
+        .embed(input.copy(inputType = kind))
+        .map(result => assertEquals(result, Left(EmbeddingError.InvalidResponse)))
+    }
+  }
+
+  test("an absent response model preserves the configured model") {
+    val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+      IO.pure(jsonResponse(Status.Ok, """{"data":[{"embedding":[0.1,0.2]}]}"""))
+    }
+    val service = new VoyageEmbeddingService(
+      Client.fromHttpApp[IO](app),
+      "test-key",
+      endpoint,
+      "voyage-4-lite",
+      2,
+      1.second,
+      diagnostics = Diagnostics.noop
+    )
+    service
+      .embed(input)
+      .map(result => assertEquals(result, Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))))
+  }
+
   test("maps malformed or dimension-mismatched responses to invalid response") {
     val malformedApp: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
       IO.pure(jsonResponse(Status.Ok, "not-json"))

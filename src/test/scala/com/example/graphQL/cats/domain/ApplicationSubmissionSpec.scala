@@ -5,9 +5,8 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.{
   CandidateProfile,
-  Job,
+  JobSubmissionSnapshot,
   JobStatus,
-  Location,
   RecruiterProfile,
   User,
   UserProfile,
@@ -41,18 +40,7 @@ class ApplicationSubmissionSpec extends FunSuite {
     Some(UserProfile.Recruiter(RecruiterProfile("Acme", None))),
     now
   )
-  private val openJob = Job(
-    jobId,
-    recruiterId,
-    "Senior Scala Developer",
-    "Build backend services",
-    List("Scala"),
-    Set("Scala"),
-    Location("Ukraine", "Kyiv", remote = true),
-    JobStatus.Open,
-    now,
-    now
-  )
+  private val openJob = JobSubmissionSnapshot(jobId, JobStatus.Open, 0L)
 
   test("candidate can create an application for an open job") {
     val result = ApplicationSubmission.create(candidate, openJob, applicationId, now)

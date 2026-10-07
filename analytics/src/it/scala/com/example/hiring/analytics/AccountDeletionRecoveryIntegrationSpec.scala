@@ -32,6 +32,7 @@ import java.net.URI
 import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Path}
+import com.example.hiring.testing.{KafkaTestNamespace, LocalTestServices, RecoveryApiProcess}
 import java.time.Duration
 import java.util.{Date, UUID}
 import java.util.Properties
@@ -43,18 +44,131 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
   override val munitTimeout: FiniteDuration = 10.minutes
 
   private val enabled = sys.env.get("HIRING_ACCOUNT_DELETION_RECOVERY_EVIDENCE").contains("true")
-  private val topic = "hiring.operational-events"
-  private val brokers = "127.0.0.1:9092"
-  private val mongoUri = "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
-
   private def required(name: String): String =
     sys.env.get(name).filter(_.nonEmpty).getOrElse(fail(s"$name is required for recovery evidence"))
 
-  private def resources: Resource[IO, (MongoClient, CatsMongoClient[IO], SparkSession, Path)] =
+  private def apiProcess(manifest: LocalTestServices.Manifest, database: String, root: Path): Resource[IO, String] = {
+    val prepare = IO.blocking {
+      val workspace = Path.of(manifest.workspace)
+      val classpathFile = Path.of(required("HIRING_RECOVERY_CLASSPATH_FILE")).toRealPath()
+      require(
+        classpathFile.startsWith(workspace.resolve(".local/logs/test-services")),
+        "API classpath must belong to the isolated test wrapper"
+      )
+      val classpath = Files
+        .readAllLines(classpathFile)
+        .asScala
+        .find(line => !line.startsWith("[") && line.contains("/target/") && line.contains(".jar"))
+        .getOrElse(throw new IllegalArgumentException("Missing compiled API classpath"))
+      val socket = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+      val port = try socket.getLocalPort
+      finally socket.close()
+      val config = root.resolve("api.conf")
+      val secret = UUID.randomUUID().toString + UUID.randomUUID().toString
+      val contents = s"""include classpath("application.conf")
+                           |mongo.uri = "${manifest.mongoUri}"
+                           |mongo.database = "$database"
+                           |mongo.reset-on-start = false
+                           |http.host = "127.0.0.1"
+                           |http.port = $port
+                           |auth.jwt.hs256-secret = "$secret"
+                           |kafka.enabled = false
+                           |vector-search.enabled = false
+                           |kafka.interview.enabled = false
+                           |""".stripMargin
+      Files.writeString(config, contents)
+      Files.setPosixFilePermissions(config, java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"))
+      val builder = new ProcessBuilder(
+        RecoveryApiProcess.command(
+          List(
+            Path.of(System.getProperty("java.home"), "bin", "java").toString,
+            "-Dotel.sdk.disabled=true",
+            s"-Dconfig.file=$config",
+            "-cp",
+            classpath,
+            "com.example.graphQL.cats.Main"
+          )
+        )*
+      )
+      builder.directory(workspace.toFile)
+      // Inherited application/provider configuration cannot override synthetic fixture configuration.
+      builder.environment().clear()
+      builder
+        .redirectErrorStream(true)
+        .redirectOutput(
+          workspace.resolve(".local/logs/test-services").resolve(root.getFileName.toString + "-api.log").toFile
+        )
+      (builder, s"http://127.0.0.1:$port")
+    }
+    Resource.eval(prepare).flatMap { case (builder, url) =>
+      Resource
+        .make(IO.blocking(builder.start())) { process =>
+          IO.blocking {
+            process.destroy()
+            if (!process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+              process.destroyForcibly()
+              process.waitFor()
+            }
+          }.void
+        }
+        .evalMap { process =>
+          val ready = IO
+            .blocking {
+              require(process.isAlive, "Isolated recovery API exited before readiness")
+              val request =
+                HttpRequest.newBuilder(URI.create(url + "/ready")).timeout(Duration.ofSeconds(2)).GET().build()
+              HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).statusCode() == 200
+            }
+            .handleErrorWith(error => if (process.isAlive) IO.pure(false) else IO.raiseError(error))
+          eventually(ready)(identity).timeout(90.seconds).as(url)
+        }
+    }
+  }
+
+  private def resources: Resource[
+    IO,
+    (
+        MongoClient,
+        CatsMongoClient[IO],
+        SparkSession,
+        Path,
+        CatsMongoDatabase[IO],
+        KafkaTestNamespace.Namespace,
+        String,
+        String
+    )
+  ] =
     for {
-      client <- Resource.fromAutoCloseable(IO.blocking(MongoClients.create(mongoUri)))
-      reactiveClient <- CatsMongoClient.fromConnectionString[IO](mongoUri)
-      root <- Resource.make(IO.blocking(Files.createTempDirectory("account-deletion-recovery-")))(deleteTree)
+      manifest <- Resource.eval(
+        LocalTestServices.manifest.flatMap(
+          _.liftTo[IO](new IllegalArgumentException("Recovery requires the isolated test manifest"))
+        )
+      )
+      _ <- Resource.eval(LocalTestServices.verifiedMongo(manifest))
+      namespace <- KafkaTestNamespace.resource.evalMap(
+        _.liftTo[IO](new IllegalArgumentException("Recovery requires an isolated Kafka namespace"))
+      )
+      client <- Resource.fromAutoCloseable(IO.blocking(MongoClients.create(manifest.mongoUri)))
+      reactiveClient <- CatsMongoClient.fromConnectionString[IO](manifest.mongoUri)
+      database <- LocalTestServices.database(reactiveClient)
+      root <- Resource.make(
+        IO.blocking(
+          Files.createTempDirectory(
+            Path.of(manifest.workspace).resolve(".local/data/test-services"),
+            "account-deletion-recovery-"
+          )
+        )
+      )(deleteTree)
+      nonce <- Resource.eval(IO.randomUUID.map(_.toString.replace("-", "")))
+      _ <- Resource.eval(
+        IO.blocking(
+          client
+            .getDatabase(database.name)
+            .getCollection("account_deletion_recovery_fixture")
+            .insertOne(new Document("_id", database.name).append("nonce", nonce).append("state", "Prepared"))
+        )
+      )
+      api <- apiProcess(manifest, database.name, root)
       spark <- Resource.make(IO.blocking {
         SparkSession
           .builder()
@@ -65,7 +179,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
           .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
           .getOrCreate()
       })(session => IO.blocking(session.stop()))
-    } yield (client, reactiveClient, spark, root)
+    } yield (client, reactiveClient, spark, root, database, namespace, api, nonce)
 
   private def deleteTree(root: Path): IO[Unit] = IO.blocking {
     val paths = Files.walk(root)
@@ -82,10 +196,18 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
         .getCollection("outbox_subject_fences")
         .replaceOne(
           new Document("_id", subjectId),
-          new Document("_id", subjectId)
-            .append("deleted", false)
-            .append("transactionalIds", java.util.List.of(transactionalId)),
+          new Document("_id", subjectId).append("deleted", false),
           new ReplaceOptions().upsert(true)
+        )
+      database
+        .getCollection("producer_registrations")
+        .insertOne(
+          new Document("_id", s"$subjectId:$transactionalId")
+            .append("subjectId", subjectId)
+            .append("transactionalId", transactionalId)
+            .append("kind", "Operational")
+            .append("state", "Active")
+            .append("registeredAt", java.util.Date.from(java.time.Instant.now()))
         )
       database
         .getCollection("event_outbox")
@@ -97,10 +219,14 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
         )
     }
 
-  private def openPublisherTransaction(transactionalId: String, subjectId: String): IO[KafkaProducer[String, String]] =
+  private def openPublisherTransaction(
+      transactionalId: String,
+      subjectId: String,
+      namespace: KafkaTestNamespace.Namespace
+  ): IO[KafkaProducer[String, String]] =
     IO.blocking {
       val properties = new Properties()
-      properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers)
+      properties.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, namespace.manifest.kafkaBootstrap)
       properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
       properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, classOf[StringSerializer].getName)
       properties.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId)
@@ -109,14 +235,14 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       properties.put("sasl.mechanism", "PLAIN")
       properties.put(
         "sasl.jaas.config",
-        s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"hiring_publisher_v2\" password=\"${required("KAFKA_PUBLISHER_V2_PASSWORD")}\";"
+        s"org.apache.kafka.common.security.plain.PlainLoginModule required username=\"hiring_publisher_v2\" password=\"${namespace.manifest.publisherPassword}\";"
       )
       val producer = new KafkaProducer[String, String](properties)
       try {
         producer.initTransactions()
         producer.beginTransaction()
         producer
-          .send(new ProducerRecord(topic, subjectId, s"in-flight-deletion-fixture-$subjectId"))
+          .send(new ProducerRecord(namespace.events, subjectId, s"in-flight-deletion-fixture-$subjectId"))
           .get(30, java.util.concurrent.TimeUnit.SECONDS)
         producer
       } catch {
@@ -235,7 +361,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
         )
     }
 
-  private def status(apiBase: String, receiptId: String): IO[String] = IO.blocking {
+  private def status(apiBase: String, receiptId: String, token: String): IO[String] = IO.blocking {
     val endpoint = URI.create(apiBase.stripSuffix("/") + "/graphql")
     val body = new Document(
       "query",
@@ -245,6 +371,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       .newBuilder(endpoint)
       .header("Content-Type", "application/json")
       .header("Accept", "application/json")
+      .header("Authorization", s"Bearer $token")
       .timeout(java.time.Duration.ofSeconds(10))
       .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
       .build()
@@ -268,207 +395,226 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
   ) {
     if (enabled) {
 
-      val databaseName = required("HIRING_ACCOUNT_DELETION_RECOVERY_DATABASE")
-      assert(
-        databaseName.matches("account_deletion_recovery_[0-9a-f]{32}"),
-        "recovery evidence requires a unique disposable database name"
-      )
-      val apiBase = required("HIRING_ACCOUNT_DELETION_RECOVERY_API_URL")
-      val ownershipNonce = required("HIRING_ACCOUNT_DELETION_RECOVERY_NONCE")
-      assert(ownershipNonce.matches("[0-9a-f]{32}"), "recovery evidence requires a generated ownership nonce")
-      assert(
-        apiBase.matches("http://127[.]0[.]0[.]1:[0-9]{1,5}"),
-        "recovery evidence requires a local API endpoint"
-      )
-      val reader = KafkaConnection(brokers, Some("analytics_reader"), Some(required("KAFKA_READER_PASSWORD")))
-      val fencer = KafkaConnection(brokers, Some("analytics_fencer"), Some(required("KAFKA_FENCER_PASSWORD")))
-      val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(required("HIRING_ANALYTICS_HMAC_SECRET_BASE64"))
       val transactionalId = "hiring-publisher-recovery-" + UUID.randomUUID().toString
-
-      val test = resources.use { case (client, reactiveClient, spark, root) =>
-        val database = client.getDatabase(databaseName)
-        val reactiveDatabase: CatsMongoDatabase[IO] = reactiveClient.getDatabase(databaseName).unsafeRunSync()
-        val store = AnalyticsErasureWorkerTestSupport.stores(reactiveClient, reactiveDatabase)
-        val publisher = new MongoAnalyticsReportPublisher[IO](
-          reactiveClient,
-          reactiveDatabase,
-          operational = AnalyticsTestOperationalConfig.operational
-        )
-        for {
-          claimedFixture <- IO.blocking(
-            database
-              .getCollection("account_deletion_recovery_fixture")
-              .findOneAndUpdate(
-                new Document("_id", databaseName).append("nonce", ownershipNonce).append("state", "Prepared"),
-                new Document("$set", new Document("state", "Running"))
-              ) != null
+      val test = resources.use {
+        case (client, reactiveClient, spark, root, reactiveDatabase, namespace, apiBase, ownershipNonce) =>
+          val databaseName = reactiveDatabase.name
+          assert(databaseName.matches("hiring_test_[0-9a-f]{32}"), "recovery requires a generated test database")
+          val database = client.getDatabase(databaseName)
+          val topic = namespace.events
+          val reader = KafkaConnection(
+            namespace.manifest.kafkaBootstrap,
+            Some("analytics_reader"),
+            Some(namespace.manifest.readerPassword),
+            securityProtocol = com.example.hiring.analytics.config.KafkaSecurityProtocol.SaslPlaintext,
+            allowPlaintext = true
           )
-          _ <- IO.raiseWhen(!claimedFixture)(new AssertionError("recovery database is not owned by this harness"))
-          (candidateToken, requestId) <- bootstrapCandidateFixtureAndLogin(apiBase, database)
-          _ <- seedOutboxWork(database, requestId, transactionalId)
-          result <- Resource
-            .make(openPublisherTransaction(transactionalId, requestId))(producer =>
-              IO.blocking(producer.close(Duration.ofSeconds(5)))
+          val fencer = KafkaConnection(
+            namespace.manifest.kafkaBootstrap,
+            Some("analytics_fencer"),
+            Some(namespace.manifest.fencerPassword),
+            securityProtocol = com.example.hiring.analytics.config.KafkaSecurityProtocol.SaslPlaintext,
+            allowPlaintext = true
+          )
+          val syntheticHmac = java.util.Base64.getEncoder
+            .encodeToString((UUID.randomUUID().toString + UUID.randomUUID().toString).getBytes(StandardCharsets.UTF_8))
+          val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromBase64(syntheticHmac)
+          val store = AnalyticsErasureWorkerTestSupport.stores(reactiveClient, reactiveDatabase)
+          val publisher = new MongoAnalyticsReportPublisher[IO](
+            reactiveClient,
+            reactiveDatabase,
+            operational = AnalyticsTestOperationalConfig.operational
+          )
+          for {
+            claimedFixture <- IO.blocking(
+              database
+                .getCollection("account_deletion_recovery_fixture")
+                .findOneAndUpdate(
+                  new Document("_id", databaseName).append("nonce", ownershipNonce).append("state", "Prepared"),
+                  new Document("$set", new Document("state", "Running"))
+                ) != null
             )
-            .use { inFlightProducer =>
-              for {
-                clockOffset <- Ref.of[IO, FiniteDuration](scala.concurrent.duration.Duration.Zero)
-                retentionReady <- Ref.of[IO, Boolean](false)
-                attempt <- Ref.of[IO, Int](0)
-                firstFailure <- Deferred[IO, Unit]
-                secondStarted <- Deferred[IO, Unit]
-                continueSecond <- Deferred[IO, Unit]
-                clock = new Clock[IO] {
-                  override val applicative: Applicative[IO] = Applicative[IO]
-                  override def monotonic: IO[FiniteDuration] = IO.monotonic
-                  override def realTime: IO[FiniteDuration] =
-                    (IO.realTime, clockOffset.get).mapN(_ + _)
-                }
-                retention = new KafkaRetention[IO] {
-                  override def capture(): IO[KafkaRetentionBarrier] =
-                    KafkaRetentionAdapter.capture(
-                      reader,
-                      AnalyticsTopic.from(topic).toOption.get,
-                      AnalyticsBatchTestSupport.driverExecution
-                    )
-                  override def retentionPassed(barrier: KafkaRetentionBarrier): IO[Boolean] =
-                    retentionReady.get
-                }
-                producerFencer = new TransactionalProducerFencer[IO] {
-                  override def fence(connection: KafkaConnection, ids: Vector[String]): IO[Unit] =
-                    attempt.updateAndGet(_ + 1).flatMap {
-                      case 1 =>
-                        val invalid = connection.copy(saslPassword = connection.saslPassword.map(_ + "-invalid"))
-                        KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
-                          .fence(invalid, ids)
-                          .attempt
-                          .flatMap {
-                            case Left(error)
-                                if Iterator
-                                  .iterate(error)(_.getCause)
-                                  .takeWhile(_ != null)
-                                  .exists(_.isInstanceOf[AuthenticationException]) =>
-                              firstFailure.complete(()) *> IO.raiseError(error)
-                            case _ => IO.raiseError(new AssertionError("bad fencer credentials were not rejected"))
-                          }
-                      case 2 =>
-                        secondStarted
-                          .complete(()) *> continueSecond.get *> KafkaProducerFencer[IO](
-                          AnalyticsBatchTestSupport.driverExecution
-                        ).fence(connection, ids)
-                      case _ => IO.raiseError(new AssertionError("unexpected additional fence attempt"))
-                    }
-                }
-                worker = AnalyticsErasureWorkerTestSupport.worker(
-                  spark,
-                  reactiveDatabase,
-                  store,
-                  reader,
-                  fencer,
-                  topic,
-                  IntegrationAnalyticsLakehousePaths.unsafe(root.toUri.toString.stripSuffix("/")),
-                  pseudonymizer,
-                  publisher,
-                  clock = clock,
-                  leaseDuration = 4.seconds,
-                  pollInterval = 200.millis,
-                  producerFencer = producerFencer,
-                  kafkaRetention = Some(retention)
-                )
-                _ <- Resource.make(worker.run.start)(_.cancel).use { _ =>
-                  for {
-                    _ <- eventually(
-                      IO.blocking(
-                        database
-                          .getCollection("analytics_worker_heartbeats")
-                          .find(new Document("_id", "analytics-erasure").append("state", "Ready"))
-                          .first()
+            _ <- IO.raiseWhen(!claimedFixture)(new AssertionError("recovery database is not owned by this harness"))
+            (candidateToken, requestId) <- bootstrapCandidateFixtureAndLogin(apiBase, database)
+            _ <- seedOutboxWork(database, requestId, transactionalId)
+            result <- Resource
+              .make(openPublisherTransaction(transactionalId, requestId, namespace))(producer =>
+                IO.blocking(producer.close(Duration.ofSeconds(5)))
+              )
+              .use { inFlightProducer =>
+                for {
+                  clockOffset <- Ref.of[IO, FiniteDuration](scala.concurrent.duration.Duration.Zero)
+                  retentionReady <- Ref.of[IO, Boolean](false)
+                  attempt <- Ref.of[IO, Int](0)
+                  firstFailure <- Deferred[IO, Unit]
+                  secondStarted <- Deferred[IO, Unit]
+                  continueSecond <- Deferred[IO, Unit]
+                  clock = new Clock[IO] {
+                    override val applicative: Applicative[IO] = Applicative[IO]
+                    override def monotonic: IO[FiniteDuration] = IO.monotonic
+                    override def realTime: IO[FiniteDuration] =
+                      (IO.realTime, clockOffset.get).mapN(_ + _)
+                  }
+                  retention = new KafkaRetention[IO] {
+                    override def capture(): IO[KafkaRetentionBarrier] =
+                      KafkaRetentionAdapter.capture(
+                        reader,
+                        AnalyticsTopic.from(topic).toOption.get,
+                        AnalyticsBatchTestSupport.driverExecution
                       )
-                    )(_ != null).timeout(60.seconds)
-                    receiptId <- deleteAccount(apiBase, candidateToken)
-                    request <- IO.blocking(
-                      database
-                        .getCollection("analytics_erasure_requests")
-                        .find(new Document("_id", requestId))
-                        .first()
-                    )
-                    _ = assert(request != null, "deleteMyAccount did not create the worker request")
-                    _ = assert(request.getString("receiptId") == receiptId, "deleteMyAccount receipt binding mismatch")
-                    capturedIds = Option(request.getList("transactionalIds", classOf[String]))
-                      .fold(Vector.empty[String])(_.asScala.toVector)
-                    _ = assert(
-                      capturedIds.contains(transactionalId),
-                      "deleteMyAccount did not capture the subject fence"
-                    )
-                    subjectFence <- IO.blocking(
-                      database
-                        .getCollection("outbox_subject_fences")
-                        .find(new Document("_id", requestId))
-                        .first()
-                    )
-                    _ = assert(subjectFence != null && subjectFence.getBoolean("deleted", false))
-                    tombstoned <- IO.blocking(
-                      database
-                        .getCollection("users")
-                        .find(new Document("_id", requestId).append("accountStatus", "Deleted"))
-                        .first() != null
-                    )
-                    _ = assert(tombstoned, "deleteMyAccount did not tombstone the account")
-                    _ <- firstFailure.get.timeout(60.seconds)
-                    _ <- secondStarted.get.timeout(60.seconds)
-                    pending <- status(apiBase, receiptId)
-                    _ = assertEquals(pending, "PENDING")
-                    barrier <- store.barrier.readBarrier(AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId))
-                    _ = assertEquals(barrier, None)
-                    outboxBefore <- IO.blocking(database.getCollection("event_outbox").countDocuments())
-                    _ = assertEquals(outboxBefore, 1L)
-                    _ <- continueSecond.complete(())
-                    _ <- eventually(
-                      IO.blocking(
+                    override def retentionPassed(barrier: KafkaRetentionBarrier): IO[Boolean] =
+                      retentionReady.get
+                  }
+                  producerFencer = new TransactionalProducerFencer[IO] {
+                    override def fence(connection: KafkaConnection, ids: Vector[String]): IO[Unit] =
+                      attempt.updateAndGet(_ + 1).flatMap {
+                        case 1 =>
+                          val invalid = connection.copy(saslPassword = connection.saslPassword.map(_ + "-invalid"))
+                          KafkaProducerFencer[IO](AnalyticsBatchTestSupport.driverExecution)
+                            .fence(invalid, ids)
+                            .attempt
+                            .flatMap {
+                              case Left(error)
+                                  if Iterator
+                                    .iterate(error)(_.getCause)
+                                    .takeWhile(_ != null)
+                                    .exists(_.isInstanceOf[AuthenticationException]) =>
+                                firstFailure.complete(()) *> IO.raiseError(error)
+                              case _ => IO.raiseError(new AssertionError("bad fencer credentials were not rejected"))
+                            }
+                        case 2 =>
+                          secondStarted
+                            .complete(()) *> continueSecond.get *> KafkaProducerFencer[IO](
+                            AnalyticsBatchTestSupport.driverExecution
+                          ).fence(connection, ids)
+                        case _ => IO.raiseError(new AssertionError("unexpected additional fence attempt"))
+                      }
+                  }
+                  worker = AnalyticsErasureWorkerTestSupport.worker(
+                    spark,
+                    reactiveDatabase,
+                    store,
+                    reader,
+                    fencer,
+                    topic,
+                    IntegrationAnalyticsLakehousePaths.unsafe(root.toUri.toString.stripSuffix("/")),
+                    pseudonymizer,
+                    publisher,
+                    clock = clock,
+                    leaseDuration = 4.seconds,
+                    pollInterval = 200.millis,
+                    producerFencer = producerFencer,
+                    kafkaRetention = Some(retention)
+                  )
+                  _ <- Resource.make(worker.run.start)(_.cancel).use { _ =>
+                    for {
+                      _ <- eventually(
+                        IO.blocking(
+                          database
+                            .getCollection("analytics_worker_heartbeats")
+                            .find(new Document("_id", "analytics-erasure").append("state", "Ready"))
+                            .first()
+                        )
+                      )(_ != null).timeout(60.seconds)
+                      receiptId <- deleteAccount(apiBase, candidateToken)
+                      request <- IO.blocking(
                         database
                           .getCollection("analytics_erasure_requests")
                           .find(new Document("_id", requestId))
                           .first()
                       )
-                    )(row =>
-                      row != null && row.getString("phase") == ErasurePhase.DeltaPurged.toString && row.getDate(
-                        "resumeAfter"
-                      ) != null
-                    ).timeout(4.minutes)
-                    savedBarrier <- store.barrier.readBarrier(
-                      AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)
-                    )
-                    _ = assert(
-                      savedBarrier
-                        .exists(value => AnalyticsTopic.unwrap(value.topic) == topic && value.partitions.nonEmpty)
-                    )
-                    _ <- assertPublisherTransactionFenced(inFlightProducer)
-                    _ <- retentionReady.set(true)
-                    _ <- clockOffset.set(31.days)
-                    complete <- eventually(status(apiBase, receiptId))(_ == "COMPLETE").timeout(4.minutes)
-                    _ = assertEquals(complete, "COMPLETE")
-                    completionCount <- IO.blocking(
-                      database
-                        .getCollection("analytics_erasure_completions")
-                        .countDocuments(new Document("receiptId", receiptId))
-                    )
-                    _ = assertEquals(completionCount, 1L)
-                    outboxAfter <- IO.blocking(database.getCollection("event_outbox").countDocuments())
-                    _ = assertEquals(outboxAfter, 0L)
-                    control <- IO.blocking(
-                      database
-                        .getCollection("analytics_report_control")
-                        .find(new Document("_id", "analytics-report"))
-                        .first()
-                    )
-                    _ = assertEquals(control.getString("state"), "Published")
-                    fenceAttempts <- attempt.get
-                    _ = assertEquals(fenceAttempts, 2)
-                  } yield ()
-                }
-              } yield ()
-            }
-        } yield result
+                      _ = assert(request != null, "deleteMyAccount did not create the worker request")
+                      _ = assert(
+                        request.getString("receiptId") == receiptId,
+                        "deleteMyAccount receipt binding mismatch"
+                      )
+                      registration <- IO.blocking(
+                        database
+                          .getCollection("producer_registrations")
+                          .find(
+                            new Document("subjectId", requestId)
+                              .append("transactionalId", transactionalId)
+                              .append("kind", "Operational")
+                              .append("state", "Active")
+                          )
+                          .first()
+                      )
+                      _ = assert(
+                        registration != null && !request.containsKey("transactionalIds"),
+                        "deleteMyAccount did not preserve active producer attribution"
+                      )
+                      subjectFence <- IO.blocking(
+                        database
+                          .getCollection("outbox_subject_fences")
+                          .find(new Document("_id", requestId))
+                          .first()
+                      )
+                      _ = assert(subjectFence != null && subjectFence.getBoolean("deleted", false))
+                      tombstoned <- IO.blocking(
+                        database
+                          .getCollection("users")
+                          .find(new Document("_id", requestId).append("accountStatus", "Deleted"))
+                          .first() != null
+                      )
+                      _ = assert(tombstoned, "deleteMyAccount did not tombstone the account")
+                      _ <- firstFailure.get.timeout(60.seconds)
+                      _ <- secondStarted.get.timeout(60.seconds)
+                      pending <- status(apiBase, receiptId, candidateToken)
+                      _ = assertEquals(pending, "PENDING")
+                      barrier <- store.barrier.readBarrier(
+                        AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)
+                      )
+                      _ = assertEquals(barrier, None)
+                      outboxBefore <- IO.blocking(database.getCollection("event_outbox").countDocuments())
+                      _ = assertEquals(outboxBefore, 1L)
+                      _ <- continueSecond.complete(())
+                      _ <- eventually(
+                        IO.blocking(
+                          database
+                            .getCollection("analytics_erasure_requests")
+                            .find(new Document("_id", requestId))
+                            .first()
+                        )
+                      )(row =>
+                        row != null && row.getString("phase") == ErasurePhase.DeltaPurged.toString && row.getDate(
+                          "resumeAfter"
+                        ) != null
+                      ).timeout(4.minutes)
+                      savedBarrier <- store.barrier.readBarrier(
+                        AnalyticsErasureWorkerTestSupport.accountSubjectId(requestId)
+                      )
+                      _ = assert(
+                        savedBarrier
+                          .exists(value => AnalyticsTopic.unwrap(value.topic) == topic && value.partitions.nonEmpty)
+                      )
+                      _ <- assertPublisherTransactionFenced(inFlightProducer)
+                      _ <- retentionReady.set(true)
+                      _ <- clockOffset.set(31.days)
+                      complete <- eventually(status(apiBase, receiptId, candidateToken))(_ == "COMPLETE")
+                        .timeout(4.minutes)
+                      _ = assertEquals(complete, "COMPLETE")
+                      completionCount <- IO.blocking(
+                        database
+                          .getCollection("analytics_erasure_completions")
+                          .countDocuments(new Document("receiptId", receiptId))
+                      )
+                      _ = assertEquals(completionCount, 1L)
+                      outboxAfter <- IO.blocking(database.getCollection("event_outbox").countDocuments())
+                      _ = assertEquals(outboxAfter, 0L)
+                      control <- IO.blocking(
+                        database
+                          .getCollection("analytics_report_control")
+                          .find(new Document("_id", "analytics-report"))
+                          .first()
+                      )
+                      _ = assertEquals(control.getString("state"), "Published")
+                      fenceAttempts <- attempt.get
+                      _ = assertEquals(fenceAttempts, 2)
+                    } yield ()
+                  }
+                } yield ()
+              }
+          } yield result
       }
       test.unsafeRunSync()
     }

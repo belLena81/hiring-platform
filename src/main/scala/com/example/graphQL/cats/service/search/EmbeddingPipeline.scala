@@ -285,16 +285,22 @@ final class EmbeddingPipeline(
     case EmbeddingPreparation.DocumentTooLarge =>
       RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge)))
     case EmbeddingPreparation.Prepared(text, hash) =>
-      RepositoryIO.lift(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Document))).flatMap {
-        case Left(EmbeddingError.ProviderUnavailable) => RepositoryIO.fromEither(Right(ProcessingOutcome.Retry))
-        case Left(EmbeddingError.InvalidResponse)     =>
-          RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse)))
-        case Right(vector) =>
-          RepositoryIO.lift(now).flatMap { instant =>
-            persist(EntityEmbedding(vector.values, EmbeddingMeta(model, hash, instant)))
-              .as(ProcessingOutcome.Completed)
-          }
-      }
+      RepositoryIO
+        .lift(
+          embeddings
+            .embed(EmbeddingInput(text, EmbeddingInputType.Document))
+            .map(_.flatMap(EmbeddingVector.validateModel(_, model)))
+        )
+        .flatMap {
+          case Left(EmbeddingError.ProviderUnavailable) => RepositoryIO.fromEither(Right(ProcessingOutcome.Retry))
+          case Left(EmbeddingError.InvalidResponse)     =>
+            RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse)))
+          case Right(vector) =>
+            RepositoryIO.lift(now).flatMap { instant =>
+              persist(EntityEmbedding(vector.values, EmbeddingMeta(model, hash, instant)))
+                .as(ProcessingOutcome.Completed)
+            }
+        }
   }
 }
 

@@ -144,9 +144,9 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
 
   private def live(body: (MongoDatabase[IO], DiscoveryQueryPolicy) => IO[Unit]): IO[Unit] = IO.defer {
     assume(sys.env.contains("ATLAS_TEST_URI"), "BLOCKED: ATLAS_TEST_URI absent; live Atlas gate not executed")
-    database(sys.env("ATLAS_TEST_URI")).use(db =>
-      DiscoveryQueryPolicy.create(2.seconds, 4).flatMap(policy => body(db, policy))
-    )
+    IO.fromEither(
+      com.example.hiring.testing.DisposableAtlas.authorizedUri(sys.env).left.map(new IllegalArgumentException(_))
+    ).flatMap(database(_).use(db => DiscoveryQueryPolicy.create(2.seconds, 4).flatMap(policy => body(db, policy))))
   }
 
   private def observeClosureLag(repo: MongoSemanticSearchRepository, job: Job): IO[Unit] = {

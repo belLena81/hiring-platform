@@ -52,6 +52,7 @@ private[config] final case class RawInterviewRuntimeConfig(
     fencerUsername: Option[String] = None,
     fencerPassword: Option[String] = None,
     publicationBatchSize: Option[Int] = None,
+    publicationPollIntervalMs: Option[Int] = None,
     clockSkewToleranceMillis: Option[Int] = None,
     partitionConcurrency: Option[Int] = None,
     commandsTopic: String = "hiring.interview-commands",

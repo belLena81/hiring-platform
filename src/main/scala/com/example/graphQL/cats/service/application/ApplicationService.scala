@@ -67,13 +67,13 @@ final class ApplicationService(
           Either.cond(candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
         )
         job <- UseCase
-          .repository(jobs.findVersioned(jobId))
+          .repository(jobs.findSubmissionSnapshot(jobId))
           .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
         now <- UseCase.liftIO(clock.realTimeInstant)
         applicationId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationId(uuid)))
         eventId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
         application <- UseCase.fromEither(
-          ApplicationSubmission.create(candidate, job.value, applicationId, now).widenUseCase
+          ApplicationSubmission.create(candidate, job, applicationId, now).widenUseCase
         )
         initialEvent = ApplicationEvent(
           eventId,

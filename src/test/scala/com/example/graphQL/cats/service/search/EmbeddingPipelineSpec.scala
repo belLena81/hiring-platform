@@ -240,6 +240,45 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
+  test("a mismatched provider model is terminal and cannot persist job or candidate vectors") {
+    List(EmbeddingWork.JobChanged(jobId), EmbeddingWork.CandidateProfileChanged(candidateId)).traverse_ { change =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](
+          Map(
+            candidateId -> candidate.copy(
+              profile = Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Backend engineer"), None)))
+            )
+          )
+        )
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        work <- InMemoryEmbeddingWorkRepository.create
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        clock <- Ref.of[IO, Instant](now)
+        provider = new EmbeddingService {
+          override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+            IO.pure(Right(EmbeddingVector(List(0.1f, 0.2f), "another-model", 2)))
+        }
+        key = DurableEmbeddingWorkPublisher.keyFor(change)
+        _ <- successful(work.enqueue(key, now))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          InMemoryJobs(jobsRef),
+          provider,
+          clock
+        )
+          .use(wakeups => wakeups.offer(()) *> completion.get)
+        snapshot <- work.snapshot
+        finalJobs <- jobsRef.get
+        finalUsers <- usersRef.get
+      } yield {
+        assertEquals(snapshot.get(key.value).flatMap(_.failure), Some(EmbeddingWorkFailure.InvalidResponse))
+        assertEquals(finalJobs.get(jobId).flatMap(_.embedding), None)
+        assertEquals(finalUsers.get(candidateId).flatMap(_.embedding), None)
+      }
+    }
+  }
+
   test("repository fetch and guarded write failures retain required work") {
     RepositoryError.values.toList.traverse_ { failure =>
       List(true, false).traverse_ { failFetch =>
@@ -619,11 +658,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     }
   }
 
-  test("document metadata keeps configured model and injected completion time") {
+  test("validated document metadata keeps configured model and injected completion time") {
     val provider = new EmbeddingService {
       override def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] = {
         assertEquals(input.inputType, EmbeddingInputType.Document)
-        IO.pure(Right(EmbeddingVector(List(0.1f, 0.2f), "provider-reported-model", 2)))
+        IO.pure(Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2)))
       }
     }
     for {
@@ -1424,6 +1463,9 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     ) = delegate.relatedJobs(scope, keys)
 
     override def find(id: Identifiers.JobId): RepositoryIO[Option[Job]] = delegate.find(id)
+
+    override def findSubmissionSnapshot(id: Identifiers.JobId): RepositoryIO[Option[JobSubmissionSnapshot]] =
+      delegate.findSubmissionSnapshot(id)
 
     override def findVersioned(
         id: Identifiers.JobId

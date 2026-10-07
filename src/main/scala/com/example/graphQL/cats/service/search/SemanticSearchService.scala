@@ -341,7 +341,10 @@ final class SemanticSearchService(
   private def embedQuery(text: String): UseCaseIO[EmbeddingVector] =
     UseCase
       .liftIO(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Query)))
-      .subflatMap(_.leftMap(_ => UseCaseError.Search(SearchError.ProviderUnavailable)))
+      .subflatMap(
+        _.flatMap(EmbeddingVector.validateModel(_, embeddingModel))
+          .leftMap(_ => UseCaseError.Search(SearchError.ProviderUnavailable))
+      )
 
   private def vectorSearch[A](result: RepositoryIO[A]): UseCaseIO[A] =
     UseCase.repository(result).leftMap(_ => UseCaseError.Search(SearchError.VectorSearchUnavailable))

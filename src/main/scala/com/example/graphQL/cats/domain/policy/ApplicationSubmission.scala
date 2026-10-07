@@ -4,13 +4,13 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.domain.error.DomainError.{CandidateRequired, JobMustBeOpen}
 import com.example.graphQL.cats.domain.model.Application
 import com.example.graphQL.cats.domain.model.Identifiers.ApplicationId
-import com.example.graphQL.cats.domain.model.{Job, JobStatus, User, UserRole}
+import com.example.graphQL.cats.domain.model.{JobSubmissionSnapshot, JobStatus, User, UserRole}
 import java.time.Instant
 
 object ApplicationSubmission {
   def create(
       candidate: User,
-      job: Job,
+      job: JobSubmissionSnapshot,
       applicationId: ApplicationId,
       now: Instant
   ): Either[DomainError, Application] =

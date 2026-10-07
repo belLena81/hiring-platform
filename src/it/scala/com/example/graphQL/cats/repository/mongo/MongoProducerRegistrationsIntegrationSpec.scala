@@ -1,10 +1,10 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.IO
+import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.Diagnostics
-import com.example.graphQL.cats.service.port.RepositoryIO
+import com.example.graphQL.cats.service.port.{RepositoryIO, RepositoryError}
 import com.example.graphQL.cats.service.events.*
 import org.bson.Document
 import com.mongodb.client.model.Filters
@@ -19,6 +19,104 @@ final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSu
   private val now = Instant.parse("2026-10-07T08:00:00Z")
   private def success[A](effect: RepositoryIO[A]): IO[A] =
     effect.value.flatMap(value => IO.fromEither(value.leftMap(error => new AssertionError(error.toString))))
+
+  test("stopped generation retirement traverses 130 rows, retries broker failure and preserves unrelated generations") {
+    mongoResource.use { fixture =>
+      val selected = "hiring-interview-worker-" + UUID.randomUUID()
+      val unrelated = "hiring-publisher-" + UUID.randomUUID()
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- (1 to 130).toList.traverse_(_ =>
+          success(
+            MongoProducerRegistrations.register(
+              fixture.database,
+              None,
+              UUID.randomUUID().toString,
+              selected,
+              "Interview",
+              now
+            )
+          )
+        )
+        _ <- success(
+          MongoProducerRegistrations.register(
+            fixture.database,
+            None,
+            UUID.randomUUID().toString,
+            unrelated,
+            "Operational",
+            now
+          )
+        )
+        fenceCalls <- Ref.of[IO, Int](0)
+        failing = new MongoProducerGenerationMaintenance(
+          fixture.database,
+          _ =>
+            RepositoryIO
+              .lift(fenceCalls.update(_ + 1))
+              .flatMap(_ => RepositoryIO.fromEither[Unit](Left(RepositoryError.Unavailable))),
+          IO.pure(now)
+        )
+        inventory <- success(failing.inventory(None))
+        next <- success(failing.inventory(inventory.nextCursor))
+        failed <- failing.retire(selected).value
+        rows <- Mongo4catsCollections.documents(fixture.database, MongoProducerRegistrations.Collection)
+        stillActive <- rows.count(Filters.eq("state", "Active"), new com.mongodb.client.model.CountOptions())
+        recovering = new MongoProducerGenerationMaintenance(
+          fixture.database,
+          _ => RepositoryIO.lift(fenceCalls.update(_ + 1)),
+          IO.pure(now)
+        )
+        _ <- success(recovering.retire(selected))
+        _ <- success(recovering.retire(selected))
+        active <- rows.find(Filters.eq("state", "Active")).all
+        fenced <- rows.find(Filters.eq("state", "Fenced")).all
+        calls <- fenceCalls.get
+      } yield {
+        assert(inventory.nextCursor.nonEmpty)
+        assert(next.nextCursor.nonEmpty)
+        assertEquals(failed, Left(RepositoryError.Unavailable))
+        assertEquals(stillActive, 131L)
+        assertEquals(active.map(_.getString("transactionalId")).toList, List(unrelated))
+        assertEquals(fenced.size, 130)
+        assert(fenced.forall(_.getDate("expiresAt").toInstant == now.plusSeconds(8.days.toSeconds)))
+        assertEquals(calls, 3)
+      }
+    }
+  }
+
+  test("restart after broker fencing but before checkpoint safely repeats retirement") {
+    mongoResource.use { fixture =>
+      val id = "hiring-interview-orchestrator-" + UUID.randomUUID()
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- success(
+          MongoProducerRegistrations.register(fixture.database, None, UUID.randomUUID().toString, id, "Interview", now)
+        )
+        brokerConfirmed <- Ref.of[IO, Int](0)
+        interrupted = new MongoProducerGenerationMaintenance(
+          fixture.database,
+          _ => RepositoryIO.lift(brokerConfirmed.update(_ + 1)),
+          IO.raiseError(new IllegalStateException("process stopped after fencing"))
+        )
+        interruptedResult <- interrupted.retire(id).value.attempt
+        restarted = new MongoProducerGenerationMaintenance(
+          fixture.database,
+          _ => RepositoryIO.lift(brokerConfirmed.update(_ + 1)),
+          IO.pure(now)
+        )
+        before <- success(restarted.inventory(None))
+        _ <- success(restarted.retire(id))
+        after <- success(restarted.inventory(None))
+        calls <- brokerConfirmed.get
+      } yield {
+        assert(interruptedResult.isLeft)
+        assertEquals(before.transactionalIds, Vector(id))
+        assertEquals(after.transactionalIds, Vector.empty)
+        assertEquals(calls, 2)
+      }
+    }
+  }
 
   test("bounded registration pages persist fencing checkpoints and active generations have no expiry") {
     mongoResource.use { fixture =>
