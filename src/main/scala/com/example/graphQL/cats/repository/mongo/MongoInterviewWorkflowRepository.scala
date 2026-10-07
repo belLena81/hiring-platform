@@ -219,19 +219,24 @@ final class MongoInterviewWorkflowRepository(
       _ <- guardWrite(
         commands,
         session,
-        claimFilter(claim, now),
-        if (valid) MongoUpdate.set("publicationCheckedAt", Date.from(now))
+        if (valid)
+          MongoFilter.and(
+            claimFilter(claim, now),
+            MongoFilter.eq(MongoFields.Attempts, Int.box(claim.record.publicationAttempts))
+          )
+        else claimFilter(claim, now),
+        if (valid)
+          MongoUpdate.combine(
+            MongoUpdate.set("publicationCheckedAt", Date.from(now)),
+            MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))
+          )
         else terminalCommand(InterviewWorkflowCommandState.Superseded, "publication_obsolete", now)
       )
       _ <-
         if (valid)
           List(workflow.candidateId, workflow.recruiterId, workflow.initiatedBy).distinct.traverse_(subject =>
-            guardWrite(
-              Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences),
-              session,
-              MongoFilter.eq(MongoFields.Id, subject.value.toString),
-              MongoUpdate.addToSet("interviewTransactionalIds", generation.transactionalId)
-            )
+            MongoProducerRegistrations
+              .register(database, session, subject.value.toString, generation.transactionalId, "Interview", now)
           )
         else RepositoryIO.fromEither(Right(()))
     } yield valid
@@ -969,8 +974,7 @@ final class MongoInterviewWorkflowRepository(
         MongoUpdate.set(CommandStateField, InterviewWorkflowCommandState.Claimed.toString),
         MongoUpdate.set(OwnerField, workerId),
         MongoUpdate.set(FencingTokenField, token.toString),
-        MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil)),
-        MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))
+        MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil))
       )
       val options = new FindOneAndUpdateOptions()
         .returnDocument(ReturnDocument.AFTER)
@@ -983,6 +987,29 @@ final class MongoInterviewWorkflowRepository(
           .flatMap(_.traverse(document => RepositoryIO.fromEither(readClaim(document))))
       }(_ => Left(RepositoryError.Unavailable))
     }
+
+  override def renewPublication(
+      claim: ClaimedInterviewWorkflowCommand,
+      now: Instant,
+      leaseUntil: Instant
+  ): RepositoryIO[Boolean] =
+    if (!leaseUntil.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    else
+      MongoRepositorySupport.repositoryGuard(diagnostics, "interviewWorkflow.renewPublication") {
+        RepositoryIO
+          .lift(
+            MongoSessionOperations.updateOne(
+              commands,
+              None,
+              claimFilter(claim, now),
+              MongoUpdate.set(LeaseUntilField, Date.from(leaseUntil))
+            )
+          )
+          .subflatMap {
+            case Some(result) => Right(result.getMatchedCount == 1L)
+            case None         => Left(RepositoryError.MissingWriteResult)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
 
   override def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryIO[Unit] =
     transitionClaim(

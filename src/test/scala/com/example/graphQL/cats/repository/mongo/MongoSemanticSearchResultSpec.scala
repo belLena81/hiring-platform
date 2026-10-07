@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import com.example.graphQL.cats.domain.pagination.PageSize
-import com.example.graphQL.cats.service.search.{JobSearchFilter, RankedCandidate, VectorSearchQuery}
+import com.example.graphQL.cats.service.search.{JobSearchFilter, SearchRetrievalHit, VectorSearchQuery}
 import com.example.graphQL.cats.service.ServiceFixtures;
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.domain.model.{
@@ -32,12 +32,12 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
   test("fresh job vector hit is returned with score and metadata") {
     val job = ServiceFixtures.openJob.copy(embedding = Some(jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite")))
-    val ranked = MongoSemanticSearchResult.rankedJob(
+    val ranked = MongoSemanticSearchResult.jobHit(
       scored(MongoHiringCodecs.job(job)).append("retrievalScore", java.lang.Double.valueOf(0.88d)),
       query
     )
 
-    assertEquals(ranked.map(_.map(_.job.id)), Right(Some(job.id)))
+    assertEquals(ranked.map(_.map(_.id)), Right(Some(job.id)))
     assertEquals(ranked.map(_.map(_.score)), Right(Some(0.91d)))
     assertEquals(ranked.map(_.map(_.retrievalScore)), Right(Some(Some(0.88d))))
     assertEquals(ranked.map(_.map(_.meta.sourceHash)), Right(Some(SourceHash.sha256(SearchableText.job(job)))))
@@ -47,12 +47,12 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     val malformed = new Document("_id", "unexpected").append("unsupported", true).append("score", "invalid")
 
     assertEquals(
-      MongoSemanticSearchResult.rankedJobs(List(malformed), query),
+      MongoSemanticSearchResult.jobHits(List(malformed), query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
   }
 
-  test("stale job vector hit is omitted") {
+  test("indexed source metadata is evidence for authoritative validation, without loading job source") {
     val stale = ServiceFixtures.openJob.copy(embedding =
       Some(
         jobEmbedding(ServiceFixtures.openJob, "voyage-4-lite")
@@ -60,7 +60,10 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
       )
     )
 
-    assertEquals(MongoSemanticSearchResult.rankedJob(scored(MongoHiringCodecs.job(stale)), query), Right(None))
+    assertEquals(
+      MongoSemanticSearchResult.jobHit(scored(MongoHiringCodecs.job(stale)), query).map(_.map(_.meta.sourceHash)),
+      Right(Some("stale"))
+    )
   }
 
   test("fresh job vector hits with missing or nonnumeric scores are invalid stored data") {
@@ -68,19 +71,19 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     val document = MongoHiringCodecs.job(job)
 
     assertEquals(
-      MongoSemanticSearchResult.rankedJob(document, query),
+      MongoSemanticSearchResult.jobHit(document, query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
     assertEquals(
-      MongoSemanticSearchResult.rankedJob(document.append("score", "invalid"), query),
+      MongoSemanticSearchResult.jobHit(document.append("score", "invalid"), query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
     assertEquals(
-      MongoSemanticSearchResult.rankedJob(document.append("score", Double.NaN), query),
+      MongoSemanticSearchResult.jobHit(document.append("score", Double.NaN), query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
     assertEquals(
-      MongoSemanticSearchResult.rankedJob(
+      MongoSemanticSearchResult.jobHit(
         scored(document).append("retrievalScore", "invalid"),
         query
       ),
@@ -88,7 +91,7 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
     )
   }
 
-  test("fresh candidate vector hit is returned and stale candidate hit is omitted") {
+  test("candidate retrieval returns identity and metadata without loading personal source fields") {
     val profile = CandidateProfile(Set("Scala"), Some("Backend engineer"), Some("resume-ref"))
     val fresh = ServiceFixtures.candidate.copy(
       profile = Some(UserProfile.Candidate(profile)),
@@ -103,34 +106,39 @@ final class MongoSemanticSearchResultSpec extends FunSuite {
 
     assert(
       MongoSemanticSearchResult
-        .rankedCandidate(
+        .candidateHit(
           scored(MongoHiringCodecs.user(fresh)).append("retrievalScore", java.lang.Double.valueOf(0.87d)),
           query
         )
         .exists(_.exists {
-          case RankedCandidate(candidate, 0.91d, SearchMode.VECTOR, meta, `searchId`, _, Some(0.87d)) =>
-            candidate.id == fresh.id && candidate.skills == profile.skills &&
+          case SearchRetrievalHit(id, 0.91d, SearchMode.VECTOR, meta, `searchId`, Some(0.87d)) =>
+            id == fresh.id &&
             meta.sourceHash == SourceHash.sha256(SearchableText.candidate(profile))
           case _ => false
         })
     )
     assertEquals(
-      MongoSemanticSearchResult.rankedCandidate(
+      MongoSemanticSearchResult.candidateHit(
         MongoHiringCodecs.user(fresh).append("score", "invalid"),
         query
       ),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
     assertEquals(
-      MongoSemanticSearchResult.rankedCandidate(MongoHiringCodecs.user(fresh), query),
+      MongoSemanticSearchResult.candidateHit(MongoHiringCodecs.user(fresh), query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
-    assertEquals(MongoSemanticSearchResult.rankedCandidate(scored(MongoHiringCodecs.user(stale)), query), Right(None))
+    assertEquals(
+      MongoSemanticSearchResult
+        .candidateHit(scored(MongoHiringCodecs.user(stale)), query)
+        .map(_.map(_.meta.sourceHash)),
+      Right(Some("stale"))
+    )
   }
 
   test("malformed native-fusion candidate results are classified as invalid stored data") {
     assertEquals(
-      MongoSemanticSearchResult.rankedCandidates(List(new Document("_id", "invalid")), query),
+      MongoSemanticSearchResult.candidateHits(List(new Document("_id", "invalid")), query),
       Left(com.example.graphQL.cats.service.RepositoryError.InvalidStoredData)
     )
   }

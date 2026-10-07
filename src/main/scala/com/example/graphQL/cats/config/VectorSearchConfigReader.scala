@@ -29,7 +29,11 @@ private[config] final case class RawEmbeddingConfig(
     parallelism: Parallelism,
     timeoutMs: TimeoutMs,
     retryAttempts: EmbeddingRetryAttempts,
-    retryDelayMs: EmbeddingRetryDelayMs
+    retryDelayMs: EmbeddingRetryDelayMs,
+    durableRetryAttempts: Option[Int] = None,
+    durableRetryBaseMillis: Option[Int] = None,
+    durableRetryCapMillis: Option[Int] = None,
+    workerRestartDelayMillis: Option[Int] = None
 ) derives ConfigReader
 private[config] final case class RawVectorIndexesConfig(
     jobs: NonBlankStr,

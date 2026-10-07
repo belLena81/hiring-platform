@@ -15,8 +15,21 @@ private[config] object VectorSearchConfigValidation {
       validNumCandidates(vector.numCandidates),
       validBranchResultLimit(vector.branchResultLimit, vector.numCandidates),
       validFusionStrategy(vector.fusionStrategy),
-      validRerankModel(vector.rerank.model)
-    ).mapN { (apiKey, numCandidates, branchResultLimit, fusionStrategy, rerankModel) =>
+      validRerankModel(vector.rerank.model),
+      Either
+        .cond(
+          embedding.durableRetryAttempts.getOrElse(8) >= 1 && embedding.durableRetryAttempts.getOrElse(8) <= 100 &&
+            embedding.durableRetryBaseMillis.getOrElse(1000) >= 100 && embedding.durableRetryCapMillis.getOrElse(
+              300000
+            ) >= embedding.durableRetryBaseMillis.getOrElse(1000) &&
+            embedding.durableRetryCapMillis.getOrElse(300000) <= 3600000 && embedding.workerRestartDelayMillis
+              .getOrElse(1000) >= 100 &&
+            embedding.workerRestartDelayMillis.getOrElse(1000) <= 60000,
+          (),
+          ConfigError.InvalidEmbeddingRecovery
+        )
+        .toValidatedNel
+    ).mapN { (apiKey, numCandidates, branchResultLimit, fusionStrategy, rerankModel, _) =>
       VectorSearchConfig(
         vector.enabled,
         apiKey,
@@ -38,7 +51,11 @@ private[config] object VectorSearchConfigValidation {
         indexes.readyTimeoutMs,
         indexes.pollIntervalMs,
         numCandidates,
-        branchResultLimit
+        branchResultLimit,
+        embedding.durableRetryAttempts.getOrElse(8),
+        embedding.durableRetryBaseMillis.getOrElse(1000),
+        embedding.durableRetryCapMillis.getOrElse(300000),
+        embedding.workerRestartDelayMillis.getOrElse(1000)
       )
     }.andThen(config =>
       Either

@@ -81,6 +81,98 @@ final class MongoEmbeddingWorkIntegrationSpec extends CatsEffectSuite {
       .findOne(db, MongoCollections.EmbeddingWork, Filters.eq(MongoFields.Id, key.value))
       .flatMap(IO.fromOption(_)(new AssertionError("Expected stored work")))
 
+  test("deletion removes candidate embeddings and rejects stale and fresh deleted-account writes") {
+    database.use { case (db, transactions) =>
+      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+      val id = UserId(UUID.randomUUID())
+      val embedding = EntityEmbedding(List(0.1f), EmbeddingMeta("voyage-4-lite", "candidate-source", now))
+      val user = User(
+        id,
+        Some(email(s"$id@example.com")),
+        "Candidate",
+        UserRole.Candidate,
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), Some("Engineer"), None))),
+        now,
+        embedding = Some(embedding)
+      )
+      for {
+        _ <- successful(users.insert(user))
+        before <- successful(users.findVersioned(id)).flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
+        _ <- successful(users.deleteAccount(id, now, "Deleted candidate", MutationWriteContext.directWrite))
+        raw <- MongoRepositoryTestSupport
+          .findOne(db, MongoCollections.Users, Filters.eq(MongoFields.Id, id.value.toString))
+          .flatMap(IO.fromOption(_)(new AssertionError("Missing tombstone")))
+        after <- successful(users.findVersioned(id)).flatMap(IO.fromOption(_)(new AssertionError("Missing tombstone")))
+        stale <- users.updateEmbedding(before, embedding).value
+        fresh <- users.updateEmbedding(after, embedding).value
+      } yield {
+        assert(!raw.containsKey(MongoFields.Embedding))
+        assert(!raw.containsKey(MongoFields.EmbeddingMeta))
+        assertEquals(after.value.accountStatus, AccountStatus.Deleted)
+        assertEquals(stale, Left(RepositoryError.Conflict))
+        assertEquals(fresh, Left(RepositoryError.Conflict))
+      }
+    }
+  }
+
+  test("singleton Admin can inspect and CAS-repair failed work; other actors and stale generations cannot") {
+    database.use { case (db, transactions) =>
+      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val admin = User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
+      val candidate = User(
+        UserId(UUID.randomUUID()),
+        Some(email(s"${UUID.randomUUID()}@example.com")),
+        "Candidate",
+        UserRole.Candidate,
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+        now
+      )
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      for {
+        _ <- successful(users.insert(admin))
+        _ <- successful(users.insert(candidate))
+        _ <- successful(work.enqueue(key, now))
+        lease <- claimed(work, now)
+        _ <- successful(work.fail(lease, EmbeddingWorkFailure.InvalidResponse, now))
+        denied <- work.repairFailed(key, 1L, candidate.id, now, transactions).value
+        status <- successful(work.inspectForAdmin(key, admin.id, transactions))
+        repaired <- successful(work.repairFailed(key, 1L, admin.id, now, transactions))
+        stale <- successful(work.repairFailed(key, 1L, admin.id, now, transactions))
+        current <- successful(work.inspectForAdmin(key, admin.id, transactions))
+      } yield {
+        assertEquals(denied, Left(RepositoryError.AuthorityRevoked))
+        assertEquals(status.map(_.failure), Some(Some(EmbeddingWorkFailure.InvalidResponse)))
+        assert(repaired)
+        assert(!stale)
+        assertEquals(current.map(_.generation), Some(2L))
+        assertEquals(current.map(_.state), Some(EmbeddingWorkState.Ready))
+        assertEquals(current.map(_.failure), Some(None))
+      }
+    }
+  }
+
+  test("renewal requires a live matching generation and token") {
+    database.use { case (db, _) =>
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.Job, UUID.randomUUID().toString)
+      for {
+        _ <- successful(work.enqueue(key, now))
+        first <- claimed(work, now)
+        extended <- successful(work.renew(first, now.plusSeconds(20), now.plusSeconds(60)))
+        busy <- successful(work.claim("other", now.plusSeconds(31), now.plusSeconds(61)))
+        _ <- successful(work.enqueue(key, now.plusSeconds(32)))
+        newer <- successful(work.renew(first, now.plusSeconds(33), now.plusSeconds(90)))
+        expired <- successful(work.renew(first, now.plusSeconds(61), now.plusSeconds(90)))
+      } yield {
+        assert(extended)
+        assertEquals(busy, None)
+        assert(!newer)
+        assert(!expired)
+      }
+    }
+  }
+
   test("active embedding work can be enqueued transactionally without replacing its lease") {
     database.use { case (db, transactions) =>
       val repository = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)

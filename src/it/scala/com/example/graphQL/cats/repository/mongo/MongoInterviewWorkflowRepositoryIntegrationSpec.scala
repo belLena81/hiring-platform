@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, Ref}
+import cats.effect.{IO, Ref, Deferred}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.{ApplicationEvent, ApplicationStatus, UserRole, User}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationEventId, ApplicationId, UserId}
@@ -73,6 +73,77 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
       at,
       None
     )
+  }
+
+  test("actual publication authorization fences an in-flight candidate embedding write") {
+    MongoAccessEvaluationSupport.resource.use { fixture =>
+      val candidate = UserId(UUID.randomUUID())
+      val recruiter = UserId(UUID.randomUUID())
+      val current = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, recruiter)
+      val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+      val users = MongoUserRepository.transactional(
+        fixture.database,
+        fixture.client,
+        MongoEmbeddingWorkEnqueuer.disabled,
+        Diagnostics.noop
+      )
+      val embedding = com.example.graphQL.cats.domain.model.EntityEmbedding(
+        List(0.1f),
+        com.example.graphQL.cats.domain.model.EmbeddingMeta("voyage-4-lite", "candidate-source", now)
+      )
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- seedSubjects(fixture.database, current)
+        _ <- success(
+          repository.create(
+            current,
+            InterviewWorkflow.initialCommand(current),
+            UUID.randomUUID(),
+            MutationReceiptFingerprint.fromCanonicalInput("publication-embedding-race"),
+            now
+          )
+        )
+        observed <- success(users.findVersioned(candidate)).flatMap(value =>
+          IO.fromOption(value)(new AssertionError("candidate missing"))
+        )
+        blocked <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        provider <- (blocked.complete(()).void *> release.get *> users.updateEmbedding(observed, embedding).value).start
+        _ <- blocked.get
+        claims <- success(repository.claimDueCommands("publisher", now, now.plusSeconds(60), 1))
+        claim <- IO.fromOption(claims.headOption)(new AssertionError("publication missing"))
+        permitted <- success(
+          repository.authorizePublication(
+            claim,
+            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID()),
+            now
+          )
+        )
+        _ = assert(permitted)
+        duplicate <- repository
+          .authorizePublication(
+            claim,
+            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID()),
+            now
+          )
+          .value
+        storedCommand <- success(repository.findCommand(current.id, claim.record.stepId))
+        ids <- success(MongoProducerRegistrations.batch(fixture.database, candidate.value.toString, "Interview"))
+        _ = assertEquals(duplicate, Left(RepositoryError.Conflict))
+        _ = assertEquals(storedCommand.map(_.publicationAttempts), Some(1))
+        _ = assertEquals(ids.size, 1)
+        _ <- release.complete(())
+        stale <- provider.joinWithNever
+        fresh <- success(users.findVersioned(candidate)).flatMap(value =>
+          IO.fromOption(value)(new AssertionError("candidate missing"))
+        )
+        updated <- users.updateEmbedding(fresh, embedding).value
+      } yield {
+        assertEquals(stale, Left(RepositoryError.Conflict))
+        assert(fresh.version > observed.version)
+        assertEquals(updated, Right(()))
+      }
+    }
   }
 
   test("workflow create and advance are atomic, replayable, and guarded by revision and inbox identity") {
@@ -1199,7 +1270,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
     }
   }
 
-  test("completed attempt migration validates subsequently malformed records at startup") {
+  test("verified workflow validator rejects malformed updates and preserves valid execution accounting") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
@@ -1216,24 +1287,33 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
           )
         )
         collection <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowCommands)
-        _ <- collection.updateOne(
-          com.mongodb.client.model.Filters.eq("workflowId", value.id.value.toString),
-          com.mongodb.client.model.Updates.set("executionAttempts", -1)
-        )
-        rejected <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+        rejected <- collection
+          .updateOne(
+            com.mongodb.client.model.Filters.eq("workflowId", value.id.value.toString),
+            com.mongodb.client.model.Updates.set("executionAttempts", -1)
+          )
+          .attempt
+        startup <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
         stored <- MongoRepositoryTestSupport.findOne(
           fixture.database,
           MongoCollections.InterviewWorkflowCommands,
           com.mongodb.client.model.Filters.eq("workflowId", value.id.value.toString)
         )
       } yield {
-        assert(rejected.isLeft, "Complete ledger must not bypass current stored-contract validation")
-        assertEquals(stored.map(_.getInteger("executionAttempts").intValue()), Some(-1))
+        assert(
+          rejected.left.exists {
+            case error: com.mongodb.MongoWriteException => error.getError.getCode == 121
+            case _                                      => false
+          },
+          "strict validator must reject invalid execution accounting"
+        )
+        assert(startup.isRight, "verified startup must accept the preserved valid row")
+        assertEquals(stored.map(_.getInteger("executionAttempts").intValue()), Some(0))
       }
     }
   }
 
-  test("completed attempt migration rejects mixed BSON identities beyond a full string batch and wrong ledger type") {
+  test("cutover rejects mixed BSON identities beyond a full string batch and wrong ledger type") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
       val id = UUID.randomUUID().toString
       val rows = (0 until 501).toList.map { index =>
@@ -1250,7 +1330,6 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
       }
       val malformedId = new org.bson.types.ObjectId()
       for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         collection <- Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowCommands)
         _ <- collection.insertMany(rows :+ new org.bson.Document("_id", malformedId))
         rejected <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
@@ -1258,13 +1337,35 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
         _ <- collection.deleteOne(com.mongodb.client.model.Filters.eq("_id", malformedId))
         valid <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
         _ = assert(valid.isRight)
+        invalidWrite <- collection.insertOne(new org.bson.Document("_id", malformedId)).attempt
+        _ = assert(
+          invalidWrite.left.exists {
+            case error: com.mongodb.MongoWriteException => error.getError.getCode == 121
+            case _                                      => false
+          },
+          "verified validator must reject later mixed BSON identities"
+        )
+        preserved <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflowCommands)
+        _ = assertEquals(preserved, 501L)
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
         _ <- ledger.updateOne(
           com.mongodb.client.model.Filters.eq("_id", "010_interview_workflow_attempts"),
           com.mongodb.client.model.Updates.set("version", Int.box(1))
         )
         wrongType <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
-      } yield assert(wrongType.isLeft, "numeric equality must not accept an unsupported BSON ledger shape")
+        _ <- ledger.updateOne(
+          com.mongodb.client.model.Filters.eq("_id", "010_interview_workflow_attempts"),
+          com.mongodb.client.model.Updates.set("version", Long.box(1L))
+        )
+        _ <- ledger.updateOne(
+          com.mongodb.client.model.Filters.eq("_id", "003_event_outbox_subject_references"),
+          com.mongodb.client.model.Updates.set("version", Int.box(1))
+        )
+        wrongOutboxType <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
+      } yield {
+        assert(wrongType.isLeft, "numeric equality must not accept an unsupported command ledger shape")
+        assert(wrongOutboxType.isLeft, "trusted cutover must not accept an unsupported outbox ledger shape")
+      }
     }
   }
 

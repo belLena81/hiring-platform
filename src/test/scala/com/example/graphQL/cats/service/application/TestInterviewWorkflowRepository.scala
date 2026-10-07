@@ -25,6 +25,8 @@ private[application] class TestInterviewWorkflowRepository extends InterviewWork
       generation: InterviewPublisherGeneration,
       now: Instant
   ) = unexpected[Boolean]
+  override def renewPublication(claim: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+    unexpected[Boolean]
   override def attemptCount(workflowId: InterviewWorkflowId, command: InterviewWorkflowCommand) = unexpected[Long]
   override def quarantine(identity: String, now: Instant) = unexpected[Unit]
   override def recordResult(claim: ClaimedInterviewWorkflowCommand, result: InterviewCommandResult, now: Instant) =

@@ -10,7 +10,8 @@ private[config] final case class TransportSettings(
     requestTimeout: FiniteDuration,
     trustedProxy: TrustedProxyConfig,
     mongoUri: String,
-    mongoDatabase: String
+    mongoDatabase: String,
+    discovery: DiscoveryConfig
 )
 
 private[config] final case class AuthSettings(

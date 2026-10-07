@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.service.application
 
-import cats.effect.{IO, Ref}
+import cats.effect.{Deferred, IO, Ref}
+import cats.syntax.foldable.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
@@ -171,6 +172,190 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       advances <- advanced.get
     } yield DeliveryObservation(acknowledged, quarantines, claimCount, advances)
 
+  test("publication claims one command and renews its lease while sending") {
+    for {
+      renewed <- Deferred[IO, Unit]
+      renewCount <- Ref.of[IO, Int](0)
+      marked <- Ref.of[IO, Boolean](false)
+      requested <- Ref.of[IO, Vector[Int]](Vector.empty)
+      record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 70L), observedAt.plusSeconds(1))
+      store = new TestInterviewWorkflowRepository {
+        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+          RepositoryIO.lift(requested.modify(values => (values :+ limit, if (values.isEmpty) List(claim) else Nil)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+        override def authorizePublication(
+            value: ClaimedInterviewWorkflowCommand,
+            generation: InterviewPublisherGeneration,
+            now: Instant
+        ) =
+          RepositoryIO.fromEither(Right(true))
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+          RepositoryIO.lift(renewCount.getAndUpdate(_ + 1).flatMap { count =>
+            if (count == 0) IO.pure(true) else renewed.complete(()).as(true)
+          })
+        override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
+          RepositoryIO.lift(marked.set(true))
+      }
+      sender = new InterviewTransport {
+        def generationFor(value: InterviewMessage) =
+          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 71L))
+        def publish(value: InterviewMessage) = renewed.get
+      }
+      worker = new InterviewWorkflowWorker(
+        store,
+        calendar,
+        notifications,
+        InterviewWorkerSettings("worker", 1.second, 3.millis, 1.second, 5, 1.second, 30.seconds),
+        Diagnostics.noop,
+        IO.pure(observedAt)
+      )
+      _ <- worker.publishDue(sender)
+      limits <- requested.get
+      completed <- marked.get
+    } yield {
+      assertEquals(limits, Vector(1, 1))
+      assert(completed)
+    }
+  }
+
+  test("lost publication lease cancels the send and stops the sweep") {
+    for {
+      cancelled <- Deferred[IO, Unit]
+      retries <- Ref.of[IO, Int](0)
+      renewals <- Ref.of[IO, Int](0)
+      record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 72L), observedAt.plusSeconds(1))
+      store = new TestInterviewWorkflowRepository {
+        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+          RepositoryIO.fromEither(Right(List(claim)))
+        override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+        override def authorizePublication(
+            value: ClaimedInterviewWorkflowCommand,
+            generation: InterviewPublisherGeneration,
+            now: Instant
+        ) = RepositoryIO.fromEither(Right(true))
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+          RepositoryIO.lift(renewals.getAndUpdate(_ + 1).map(_ == 0))
+        override def retry(
+            value: ClaimedInterviewWorkflowCommand,
+            now: Instant,
+            availableAt: Instant,
+            failureCode: String
+        ) = RepositoryIO.lift(retries.update(_ + 1))
+      }
+      sender = new InterviewTransport {
+        def generationFor(value: InterviewMessage) =
+          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 73L))
+        def publish(value: InterviewMessage) = IO.never[Unit].onCancel(cancelled.complete(()).void)
+      }
+      worker = new InterviewWorkflowWorker(
+        store,
+        calendar,
+        notifications,
+        InterviewWorkerSettings("worker", 1.second, 3.millis, 1.second, 5, 1.second, 30.seconds),
+        Diagnostics.noop,
+        IO.pure(observedAt)
+      )
+      _ <- worker.publishDue(sender)
+      _ <- cancelled.get
+      retried <- retries.get
+    } yield assertEquals(retried, 0)
+  }
+
+  test("initial lease renewal failure prevents transport invocation after authorization") {
+    List[Either[RepositoryError, Boolean]](Right(false), Left(RepositoryError.Unavailable)).traverse_ { renewal =>
+      for {
+        sent <- Ref.of[IO, Int](0)
+        retried <- Ref.of[IO, Int](0)
+        failures <- Ref.of[IO, Vector[String]](Vector.empty)
+        record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
+        claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 80L), observedAt.plusSeconds(60))
+        store = new TestInterviewWorkflowRepository {
+          override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+            RepositoryIO.fromEither(Right(List(claim)))
+          override def findForAdmin(id: InterviewWorkflowId) = RepositoryIO.fromEither(Right(Some(workflow)))
+          override def authorizePublication(
+              value: ClaimedInterviewWorkflowCommand,
+              generation: InterviewPublisherGeneration,
+              now: Instant
+          ) = RepositoryIO.fromEither(Right(true))
+          override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+            RepositoryIO.fromEither(renewal)
+          override def retry(
+              value: ClaimedInterviewWorkflowCommand,
+              now: Instant,
+              availableAt: Instant,
+              failureCode: String
+          ) = RepositoryIO.lift(retried.update(_ + 1) *> failures.update(_ :+ failureCode))
+        }
+        sender = new InterviewTransport {
+          def generationFor(value: InterviewMessage) =
+            InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 81L))
+          def publish(value: InterviewMessage) = sent.update(_ + 1)
+        }
+        worker = new InterviewWorkflowWorker(
+          store,
+          calendar,
+          notifications,
+          InterviewWorkerSettings("worker", 1.second, 60.seconds, 1.second, 5, 1.second, 30.seconds),
+          Diagnostics.noop,
+          IO.pure(observedAt)
+        )
+        _ <- worker.publishDue(sender)
+        count <- sent.get
+        retries <- retried.get
+        codes <- failures.get
+      } yield {
+        assertEquals(count, 0)
+        assertEquals(retries, if (renewal.isLeft) 1 else 0)
+        assertEquals(codes, if (renewal.isLeft) Vector("publication_coordination_unavailable") else Vector.empty)
+      }
+    }
+  }
+
+  test("slow publication preparation refreshes the lease before sending") {
+    for {
+      clock <- Ref.of[IO, Instant](observedAt)
+      expiry <- Ref.of[IO, Instant](observedAt.plusMillis(60))
+      claims <- Ref.of[IO, Int](0)
+      record = command.copy(state = InterviewWorkflowCommandState.Claimed, publicationAttempts = 0)
+      claim = ClaimedInterviewWorkflowCommand(record, "worker", new UUID(0L, 82L), observedAt.plusMillis(60))
+      store = new TestInterviewWorkflowRepository {
+        override def claimDueCommands(workerId: String, now: Instant, leaseUntil: Instant, limit: Int) =
+          RepositoryIO.lift(claims.getAndUpdate(_ + 1).map(n => if (n == 0) List(claim) else Nil))
+        override def findForAdmin(id: InterviewWorkflowId) =
+          RepositoryIO.lift(clock.set(observedAt.plusMillis(59)).as(Some(workflow)))
+        override def authorizePublication(
+            value: ClaimedInterviewWorkflowCommand,
+            generation: InterviewPublisherGeneration,
+            now: Instant
+        ) = RepositoryIO.fromEither(Right(now.isBefore(claim.leaseUntil)))
+        override def renewPublication(value: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant) =
+          RepositoryIO.lift(expiry.set(leaseUntil).as(now.isBefore(claim.leaseUntil)))
+        override def markPublished(value: ClaimedInterviewWorkflowCommand, now: Instant) =
+          RepositoryIO.fromEither(Right(()))
+      }
+      sender = new InterviewTransport {
+        def generationFor(value: InterviewMessage) =
+          InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, new UUID(0L, 83L))
+        def publish(value: InterviewMessage) = clock.set(observedAt.plusMillis(70)) *> expiry.get.flatMap(until =>
+          IO(assert(until.isAfter(observedAt.plusMillis(70))))
+        )
+      }
+      worker = new InterviewWorkflowWorker(
+        store,
+        calendar,
+        notifications,
+        InterviewWorkerSettings("worker", 1.second, 60.millis, 1.second, 5, 1.second, 30.seconds),
+        Diagnostics.noop,
+        clock.get
+      )
+      _ <- worker.publishDue(sender)
+      renewedUntil <- expiry.get
+    } yield assertEquals(renewedUntil, observedAt.plusMillis(119))
+  }
+
   test("a matching timely command reaches execution claiming without quarantine") {
     observeDelivery(message).map(result =>
       assertEquals(result, DeliveryObservation(true, Vector.empty, 1, Vector.empty))
@@ -185,16 +370,35 @@ final class InterviewWorkflowWorkerSpec extends CatsEffectSuite {
       .map(result => assertEquals(result, DeliveryObservation(true, Vector.empty, 0, Vector.empty)))
   }
 
+  test("near-future commands defer without acknowledgment or quarantine") {
+    observeDelivery(message.copy(occurredAt = observedAt.plusSeconds(1))).map { result =>
+      assert(!result.acknowledged)
+      assertEquals(result.claims, 0)
+      assertEquals(result.quarantined, Vector.empty)
+    }
+  }
+
   test("future commands quarantine before the stored-result acknowledgment shortcut") {
     observeDelivery(
-      message.copy(occurredAt = observedAt.plusSeconds(1)),
+      message.copy(occurredAt = observedAt.plusSeconds(6)),
       stored = Some(command.copy(result = Some(InterviewCommandResult.Succeeded)))
     )
       .map { result =>
         assert(result.acknowledged)
         assertEquals(result.claims, 0)
         assert(result.quarantined.exists(_.endsWith(":future")))
+        assertEquals(result.advanced, Vector.empty)
       }
+  }
+
+  test("matching far-future commands require visible repair before acknowledgment") {
+    val future = command.copy(occurredAt = observedAt.plusSeconds(6))
+    observeDelivery(messageFor(future, workflow, InterviewStep.Reserve, None), stored = Some(future)).map { result =>
+      assert(result.acknowledged)
+      assertEquals(result.claims, 0)
+      assertEquals(result.advanced.map(_.phase), Vector(InterviewWorkflowPhase.RepairRequired))
+      assert(result.quarantined.exists(_.endsWith(":future")))
+    }
   }
 
   test("an expired matching command requires repair even when its stored result exists") {

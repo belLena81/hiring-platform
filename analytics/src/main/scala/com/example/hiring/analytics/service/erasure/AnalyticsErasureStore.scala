@@ -10,6 +10,7 @@ trait ErasureQueue[F[_]] {
   def claim(now: Instant, leaseUntil: Instant, limit: Int): F[Vector[ErasureClaim]]
   def publisherDrainReady(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): F[Boolean]
   def transactionalIds(requestId: AccountSubjectId): F[Vector[String]]
+  def markProducersFenced(requestId: AccountSubjectId, ids: Vector[String], now: Instant): F[Unit]
   def purgeOutbox(subjectId: AccountSubjectId, now: Instant, deliveryTimeout: FiniteDuration): F[Boolean]
   def hasNonReadyOtherRequests(requestId: AccountSubjectId): F[Boolean]
   def heartbeat(now: Instant, leaseUntil: Instant): F[Unit]

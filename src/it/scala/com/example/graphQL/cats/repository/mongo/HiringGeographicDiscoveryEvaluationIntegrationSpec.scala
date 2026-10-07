@@ -76,177 +76,203 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends CatsEffec
     values.sorted.apply(math.ceil(values.size * fraction).toInt.max(1) - 1)
 
   test("measure 128 jobs and 32 authenticated candidates over 20 fixed geographic queries at concurrency 1 and 8") {
-    support.resource.use { fixture =>
-      val repository = MongoJobRepository.transactional(
-        fixture.database,
-        fixture.client,
-        MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
-      )
-      val users = MongoUserRepository.transactional(
-        fixture.database,
-        fixture.client,
-        MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
-      )
-      val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
-      val service = JobService.live(
-        users,
-        repository,
-        new EmbeddingWorkPublisher { def wake: IO[Unit] = IO.unit },
-        Idempotent(receipts),
-        Diagnostics.noop
-      )
-      def storage = for {
-        admin <- fixture.client.getDatabase("admin")
-        _ <- support.command(admin, new Document("fsync", 1))
-        value <- support.command(fixture.database, new Document("collStats", MongoCollections.Jobs))
-      } yield Json.obj(
-        "storageBytes" -> Json.fromLong(value.get("storageSize", classOf[Number]).longValue()),
-        "indexBytes" -> Json.fromLong(value.get("totalIndexSize", classOf[Number]).longValue()),
-        "indexSizes" -> io.circe.parser.parse(value.get("indexSizes", classOf[Document]).toJson).getOrElse(Json.Null),
-        "sampleBoundary" -> Json.fromString("After fsync flush on the disposable MongoDB")
-      )
-      for {
-        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
-        mongoBuild <- support.command(fixture.database, new Document("buildInfo", 1))
-        before <- storage
-        _ <- MongoRepositoryTestSupport.insertOne(
+    support.resource
+      .evalMap(fixture => DiscoveryQueryPolicy.create(2.seconds, 4).map(policy => (fixture, policy)))
+      .use { case (fixture, policy) =>
+        val repository = MongoJobRepository.transactional(
           fixture.database,
-          MongoCollections.Users,
-          MongoHiringCodecs.user(recruiter)
+          fixture.client,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop,
+          Some(policy)
         )
-        _ <- candidates.traverse_(value =>
-          MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Users, MongoHiringCodecs.user(value))
-        )
-        _ <- jobs.traverse_(value =>
-          MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
-        )
-        after <- storage
-        explain <- support.command(
+        val users = MongoUserRepository.transactional(
           fixture.database,
-          new Document(
-            "explain",
-            new Document("aggregate", MongoCollections.Jobs)
-              .append(
-                "pipeline",
-                List(
-                  new Document(
-                    "$geoNear",
-                    new Document(
-                      "near",
-                      new Document("type", "Point").append(
-                        "coordinates",
-                        List(center.longitude, center.latitude).asJava
+          fixture.client,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop
+        )
+        val receipts = MongoMutationReceiptRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        val service = JobService.live(
+          users,
+          repository,
+          new EmbeddingWorkPublisher { def wake: IO[Unit] = IO.unit },
+          Idempotent(receipts),
+          Diagnostics.noop
+        )
+        def storage = for {
+          admin <- fixture.client.getDatabase("admin")
+          _ <- support.command(admin, new Document("fsync", 1))
+          value <- support.command(fixture.database, new Document("collStats", MongoCollections.Jobs))
+        } yield Json.obj(
+          "storageBytes" -> Json.fromLong(value.get("storageSize", classOf[Number]).longValue()),
+          "indexBytes" -> Json.fromLong(value.get("totalIndexSize", classOf[Number]).longValue()),
+          "indexSizes" -> io.circe.parser.parse(value.get("indexSizes", classOf[Document]).toJson).getOrElse(Json.Null),
+          "sampleBoundary" -> Json.fromString("After fsync flush on the disposable MongoDB")
+        )
+        for {
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          mongoBuild <- support.command(fixture.database, new Document("buildInfo", 1))
+          before <- storage
+          _ <- MongoRepositoryTestSupport.insertOne(
+            fixture.database,
+            MongoCollections.Users,
+            MongoHiringCodecs.user(recruiter)
+          )
+          _ <- candidates.traverse_(value =>
+            MongoRepositoryTestSupport
+              .insertOne(fixture.database, MongoCollections.Users, MongoHiringCodecs.user(value))
+          )
+          _ <- jobs.traverse_(value =>
+            MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
+          )
+          after <- storage
+          scope <- IO.fromEither(
+            com.example.graphQL.cats.service.read.HiringReadScope
+              .validated(
+                ActorContext(candidates.head.id, candidates.head.role),
+                candidates.head,
+                com.example.graphQL.cats.service.auth.ActorAuthorization(users)
+              )
+              .leftMap(error => new AssertionError(error.toString))
+          )
+          explain <- support.command(
+            fixture.database,
+            new Document(
+              "explain",
+              new Document("aggregate", MongoCollections.Users)
+                .append(
+                  "pipeline",
+                  MongoJobRepository
+                    .authorizedDiscoveryPipeline(
+                      scope,
+                      List(
+                        new Document(
+                          "$geoNear",
+                          new Document(
+                            "near",
+                            new Document("type", "Point").append(
+                              "coordinates",
+                              List(center.longitude, center.latitude).asJava
+                            )
+                          )
+                            .append("key", "location.point")
+                            .append("distanceField", "_distanceKm")
+                            .append("distanceMultiplier", 0.001d)
+                            .append("spherical", true)
+                            .append("maxDistance", 1000d)
+                            .append(
+                              "query",
+                              MongoJobRepository.discoveryFilter(queries.head.filter).append("location.remote", false)
+                            )
+                        ),
+                        new Document("$sort", new Document("_distanceKm", 1).append("_id", 1)),
+                        new Document("$limit", 21),
+                        new Document(
+                          "$project",
+                          MongoSearchEligibilityCodecs.projection(
+                            MongoSearchEligibilityCodecs.jobFields
+                              .filterNot(_ == MongoFields.EmbeddingMeta) :+ "_distanceKm"
+                          )
+                        )
                       )
                     )
-                      .append("key", "location.point")
-                      .append("distanceField", "_distanceKm")
-                      .append("distanceMultiplier", 0.001d)
-                      .append("spherical", true)
-                      .append("maxDistance", 1000d)
-                      .append(
-                        "query",
-                        MongoJobRepository.discoveryFilter(queries.head.filter).append("location.remote", false)
-                      )
+                    .asJava
+                )
+                .append("cursor", new Document())
+            )
+              .append("verbosity", "executionStats")
+          )
+          denied <- service.nearbyJobs(ActorContext(recruiter.id, recruiter.role), queries.head, 20).value
+          _ = assert(denied.isLeft)
+          deniedFacets <- service
+            .jobDiscoveryFacets(
+              ActorContext(recruiter.id, recruiter.role),
+              JobFacetQuery(queries.head.filter, None)
+            )
+            .value
+          _ = assert(deniedFacets.isLeft)
+          userCollection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Users)
+          _ <- userCollection.updateOne(
+            Filters.eq("_id", candidates.head.id.value.toString),
+            Updates.set("accountStatus", AccountStatus.Deleted.toString)
+          )
+          deletedDenied <- service
+            .nearbyJobs(ActorContext(candidates.head.id, candidates.head.role), queries.head, 20)
+            .value
+          _ = assert(deletedDenied.isLeft)
+          _ <- userCollection.updateOne(
+            Filters.eq("_id", candidates.head.id.value.toString),
+            Updates.set("accountStatus", AccountStatus.Active.toString)
+          )
+          rows <- List(1, 8).traverse { concurrency =>
+            for {
+              _ <- fixture.commands.clear
+              resourcesBefore <- fixture.sampleResources
+              started <- IO.monotonic
+              samples <- Stream
+                .emits(candidates.zipWithIndex.flatMap { case (candidate, index) =>
+                  queries.zipWithIndex.map { case (query, queryIndex) => (candidate, index, query, queryIndex) }
+                })
+                .covary[IO]
+                .parEvalMap(concurrency) { case (candidate, _, query, _) =>
+                  for {
+                    start <- IO.monotonic
+                    result <- service.nearbyJobs(ActorContext(candidate.id, candidate.role), query, 20).value
+                    end <- IO.monotonic
+                  } yield ((end - start).toNanos.toDouble / 1000000d, result.isLeft)
+                }
+                .compile
+                .toList
+              finished <- IO.monotonic
+              resourcesAfter <- fixture.sampleResources
+              commands <- fixture.commands.snapshot
+              _ = assertEquals(samples.count(_._2), 0)
+              elapsed = (finished - started).toNanos.toDouble / 1000000000d
+            } yield Json.obj(
+              "concurrency" -> Json.fromInt(concurrency),
+              "requests" -> Json.fromInt(samples.size),
+              "errors" -> Json.fromInt(samples.count(_._2)),
+              "requestsPerSecond" -> Json.fromDoubleOrNull(samples.size / elapsed),
+              "p50Millis" -> Json.fromDoubleOrNull(percentile(samples.map(_._1), 0.5)),
+              "p95Millis" -> Json.fromDoubleOrNull(percentile(samples.map(_._1), 0.95)),
+              "p99Millis" -> Json.fromDoubleOrNull(percentile(samples.map(_._1), 0.99)),
+              "mongoCommands" -> Json.fromInt(commands.size),
+              "resourcesBefore" -> resourcesBefore,
+              "resourcesAfter" -> resourcesAfter
+            )
+          }
+          ended <- IO.realTimeInstant
+          _ <- IO.blocking {
+            val directory = Paths.get(".local/data/discovery-evaluation")
+            val _ = Files.createDirectories(directory)
+            val path = directory.resolve(s"geographic-${ended.toEpochMilli}.json")
+            val _ = Files.writeString(
+              path,
+              Json
+                .obj(
+                  "jobs" -> Json.fromInt(128),
+                  "queryBoundary" -> Json.fromString("Current Users actor gate with geoNear first inside jobs lookup"),
+                  "candidates" -> Json.fromInt(32),
+                  "fixedQueries" -> Json.fromInt(20),
+                  "warmupRequests" -> Json.fromInt(0),
+                  "samplesPerQuery" -> Json.fromInt(32),
+                  "measurementBoundary" -> Json.fromString(
+                    "Job service authorization through real Mongo driver; excludes HTTP and GraphQL"
                   ),
-                  new Document("$sort", new Document("_distanceKm", 1).append("_id", 1)),
-                  new Document("$limit", 21)
-                ).asJava
-              )
-              .append("cursor", new Document())
-          )
-            .append("verbosity", "executionStats")
-        )
-        denied <- service.nearbyJobs(ActorContext(recruiter.id, recruiter.role), queries.head, 20).value
-        _ = assert(denied.isLeft)
-        deniedFacets <- service
-          .jobDiscoveryFacets(
-            ActorContext(recruiter.id, recruiter.role),
-            JobFacetQuery(queries.head.filter, None)
-          )
-          .value
-        _ = assert(deniedFacets.isLeft)
-        userCollection <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Users)
-        _ <- userCollection.updateOne(
-          Filters.eq("_id", candidates.head.id.value.toString),
-          Updates.set("accountStatus", AccountStatus.Deleted.toString)
-        )
-        deletedDenied <- service
-          .nearbyJobs(ActorContext(candidates.head.id, candidates.head.role), queries.head, 20)
-          .value
-        _ = assert(deletedDenied.isLeft)
-        _ <- userCollection.updateOne(
-          Filters.eq("_id", candidates.head.id.value.toString),
-          Updates.set("accountStatus", AccountStatus.Active.toString)
-        )
-        rows <- List(1, 8).traverse { concurrency =>
-          for {
-            _ <- fixture.commands.clear
-            resourcesBefore <- fixture.sampleResources
-            started <- IO.monotonic
-            samples <- Stream
-              .emits(candidates.zipWithIndex.flatMap { case (candidate, index) =>
-                queries.zipWithIndex.map { case (query, queryIndex) => (candidate, index, query, queryIndex) }
-              })
-              .covary[IO]
-              .parEvalMap(concurrency) { case (candidate, _, query, _) =>
-                for {
-                  start <- IO.monotonic
-                  result <- service.nearbyJobs(ActorContext(candidate.id, candidate.role), query, 20).value
-                  end <- IO.monotonic
-                } yield ((end - start).toNanos.toDouble / 1000000d, result.isLeft)
-              }
-              .compile
-              .toList
-            finished <- IO.monotonic
-            resourcesAfter <- fixture.sampleResources
-            commands <- fixture.commands.snapshot
-            _ = assertEquals(samples.count(_._2), 0)
-            elapsed = (finished - started).toNanos.toDouble / 1000000000d
-          } yield Json.obj(
-            "concurrency" -> Json.fromInt(concurrency),
-            "requests" -> Json.fromInt(samples.size),
-            "errors" -> Json.fromInt(samples.count(_._2)),
-            "requestsPerSecond" -> Json.fromDoubleOrNull(samples.size / elapsed),
-            "p50Millis" -> Json.fromDoubleOrNull(percentile(samples.map(_._1), 0.5)),
-            "p95Millis" -> Json.fromDoubleOrNull(percentile(samples.map(_._1), 0.95)),
-            "p99Millis" -> Json.fromDoubleOrNull(percentile(samples.map(_._1), 0.99)),
-            "mongoCommands" -> Json.fromInt(commands.size),
-            "resourcesBefore" -> resourcesBefore,
-            "resourcesAfter" -> resourcesAfter
-          )
-        }
-        ended <- IO.realTimeInstant
-        _ <- IO.blocking {
-          val directory = Paths.get(".local/data/discovery-evaluation")
-          val _ = Files.createDirectories(directory)
-          val path = directory.resolve(s"geographic-${ended.toEpochMilli}.json")
-          val _ = Files.writeString(
-            path,
-            Json
-              .obj(
-                "jobs" -> Json.fromInt(128),
-                "candidates" -> Json.fromInt(32),
-                "fixedQueries" -> Json.fromInt(20),
-                "warmupRequests" -> Json.fromInt(0),
-                "samplesPerQuery" -> Json.fromInt(32),
-                "measurementBoundary" -> Json.fromString(
-                  "Job service authorization through real Mongo driver; excludes HTTP and GraphQL"
-                ),
-                "mongoVersion" -> Json.fromString(mongoBuild.getString("version")),
-                "javaVersion" -> Json.fromString(System.getProperty("java.version")),
-                "processors" -> Json.fromInt(Runtime.getRuntime.availableProcessors()),
-                "explain" -> io.circe.parser.parse(explain.toJson).getOrElse(Json.Null),
-                "storageBefore" -> before,
-                "storageAfter" -> after,
-                "measurements" -> Json.fromValues(rows)
-              )
-              .spaces2
-          )
-          println(s"Geographic discovery evidence: $path")
-        }
-      } yield ()
-    }
+                  "mongoVersion" -> Json.fromString(mongoBuild.getString("version")),
+                  "javaVersion" -> Json.fromString(System.getProperty("java.version")),
+                  "processors" -> Json.fromInt(Runtime.getRuntime.availableProcessors()),
+                  "explain" -> io.circe.parser.parse(explain.toJson).getOrElse(Json.Null),
+                  "storageBefore" -> before,
+                  "storageAfter" -> after,
+                  "measurements" -> Json.fromValues(rows)
+                )
+                .spaces2
+            )
+            println(s"Geographic discovery evidence: $path")
+          }
+        } yield ()
+      }
   }
 }

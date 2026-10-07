@@ -137,7 +137,9 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
           strategy,
           settings.concurrency,
           30.seconds,
-          Resource.pure[IO, SearchEvaluationCapture.Retrieval](new HiringSearchEvaluationRetrieval(database)),
+          Resource
+            .eval(DiscoveryQueryPolicy.create(2.seconds, 4))
+            .map[SearchEvaluationCapture.Retrieval](policy => new HiringSearchEvaluationRetrieval(database, policy)),
           maximumResults = SearchEvaluationFixtures.K
         )
         ended <- IO.monotonic

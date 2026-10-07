@@ -55,7 +55,9 @@ private[runtime] object InterviewSchedulingRuntime {
               settings.maxAttempts,
               settings.retryBaseSeconds.seconds,
               settings.retryCapSeconds.seconds,
-              settings.replayRetentionSeconds.seconds
+              settings.replayRetentionSeconds.seconds,
+              settings.clockSkewToleranceMillis.millis,
+              settings.publicationBatchSize
             ),
             diagnostics = diagnostics
           )
@@ -64,14 +66,16 @@ private[runtime] object InterviewSchedulingRuntime {
             orchestratorUsername,
             orchestratorPassword,
             config.saslSecurityProtocol,
-            worker = false
+            worker = false,
+            partitionConcurrency = settings.partitionConcurrency
           )
           val resultConfig = InterviewKafkaConfig(
             config.bootstrapServers,
             workerUsername,
             workerPassword,
             config.saslSecurityProtocol,
-            worker = true
+            worker = true,
+            partitionConcurrency = settings.partitionConcurrency
           )
           def receive(handler: InterviewMessage => IO[Boolean])(value: Either[String, InterviewMessage]): IO[Boolean] =
             value.fold(

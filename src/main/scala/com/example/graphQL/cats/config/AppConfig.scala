@@ -20,7 +20,8 @@ final case class AppConfig(
     authRateLimit: AuthRateLimitConfig,
     vectorSearch: VectorSearchConfig,
     kafka: KafkaConfig,
-    resetOnStart: Boolean = false
+    resetOnStart: Boolean = false,
+    discovery: DiscoveryConfig = DiscoveryConfig()
 ) {
   override def toString: String = "AppConfig([REDACTED])"
 }

@@ -6,6 +6,7 @@ import java.util.UUID
 enum InterviewAdvanceCause {
   case ResultReceipt(messageId: String)
   case ReplayExpired(messageId: UUID)
+  case FutureMessage(messageId: UUID)
   case AdminRepair(requestKey: UUID, actorId: UserId)
   case PublicationExhausted(stepId: String)
   case ExecutionExhausted(stepId: String)
@@ -13,6 +14,7 @@ enum InterviewAdvanceCause {
   def receiptIdentity: String = this match {
     case ResultReceipt(id)          => id
     case ReplayExpired(id)          => s"expired:$id"
+    case FutureMessage(id)          => s"future:$id"
     case AdminRepair(key, _)        => s"repair:$key"
     case PublicationExhausted(step) => s"publication-exhausted:$step"
     case ExecutionExhausted(step)   => s"execution-exhausted:$step"

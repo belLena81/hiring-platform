@@ -42,6 +42,8 @@ private[mongo] object MongoHiringMigrations {
     MongoCollections.EmbeddingWork,
     MongoCollections.EventOutbox,
     MongoCollections.OutboxSubjectFences,
+    MongoProducerRegistrations.Collection,
+    MongoProducerRegistrations.ClaimCursorsCollection,
     MongoCollections.SearchSessions,
     MongoCollections.SearchSessionWork,
     MongoCollections.ConsumerReceipts,
@@ -81,16 +83,17 @@ private[mongo] object MongoHiringMigrations {
 
   def initialize(database: SetupDatabase, resetOnStart: Boolean, diagnostics: Diagnostics): IO[Unit] =
     Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
-      migrateAggregateVersions(database) *> verifyCandidateSearchProfiles(database) *>
-      migrateOutboxSubjectReferences(database, diagnostics) *> migrateAnalyticsReportControl(database) *>
-      migrateAnalyticsDeletionReceipts(database) *> migrateInterviewWorkflowStorage(
-        database
-      ) *> migrateInterviewSubjectCleanup(database) *> migrateInterviewInboxIdentity(database) *>
-      MongoInterviewWorkflowMigrations.initialize(database) *> MongoInterviewCleanupMigrations.initialize(
-        database
-      ) *> createAccountRegistry(
-        database
-      )
+      MongoWorkflowIntegrityMigrations.trusted(database).flatMap { trusted =>
+        migrateAggregateVersions(database) *> verifyCandidateSearchProfiles(database) *>
+          (if (trusted) IO.unit else migrateOutboxSubjectReferences(database, diagnostics)) *>
+          migrateAnalyticsReportControl(database) *> migrateAnalyticsDeletionReceipts(database) *>
+          migrateInterviewWorkflowStorage(database) *> migrateInterviewSubjectCleanup(database) *>
+          migrateInterviewInboxIdentity(database) *>
+          (if (trusted) IO.unit else MongoInterviewWorkflowMigrations.initialize(database)) *>
+          MongoInterviewCleanupMigrations.initialize(database) *>
+          MongoProducerRegistrationMigrations.initialize(database) *>
+          MongoWorkflowIntegrityMigrations.initialize(database) *> createAccountRegistry(database)
+      }
 
   /** Retire only the known unfiltered inbox index; quarantine/hiring receipts must not share a null identity. */
   private def migrateInterviewInboxIdentity(database: SetupDatabase): IO[Unit] = {

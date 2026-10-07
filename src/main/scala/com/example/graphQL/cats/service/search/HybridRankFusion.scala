@@ -4,77 +4,50 @@ package com.example.graphQL.cats.service.search
 object HybridRankFusion {
   val RankConstant: Int = 60
 
+  def retrieval[Id](branches: List[List[SearchRetrievalHit[Id]]], limit: Int)(
+      identifier: Id => String
+  ): List[SearchRetrievalHit[Id]] = {
+    final case class Entry(value: SearchRetrievalHit[Id], ranks: Vector[Option[Int]]) {
+      val score: Double = ranks.flatten.map(rank => 1d / (RankConstant + rank)).sum
+    }
+    val entries = branches.zipWithIndex.foldLeft(Map.empty[Id, Entry]) { case (all, (branch, branchIndex)) =>
+      branch.distinctBy(_.id).zipWithIndex.foldLeft(all) { case (current, (value, index)) =>
+        val entry = current.getOrElse(value.id, Entry(value, Vector.fill(branches.size)(None)))
+        current.updated(value.id, entry.copy(ranks = entry.ranks.updated(branchIndex, Some(index + 1))))
+      }
+    }
+    def before(left: Entry, right: Entry): Boolean = {
+      if (left.score != right.score) left.score > right.score
+      else
+        left.ranks
+          .zip(right.ranks)
+          .collectFirst {
+            case (a, b) if a != b => a.getOrElse(Int.MaxValue) < b.getOrElse(Int.MaxValue)
+          }
+          .getOrElse(identifier(left.value.id) < identifier(right.value.id))
+    }
+    entries.values.toList.sortWith(before).take(limit).map(entry => entry.value.copy(score = entry.score))
+  }
+
   def candidates(
       jobVector: List[RankedCandidate],
       queryVector: List[RankedCandidate],
       lexical: List[RankedCandidate],
       limit: Int
   ): List[RankedCandidate] = {
-    final case class Entry(
-        value: RankedCandidate,
-        jobVectorRank: Option[Int],
-        queryVectorRank: Option[Int],
-        lexicalRank: Option[Int]
-    ) {
-      val score: Double = List(jobVectorRank, queryVectorRank, lexicalRank).flatten
-        .map(rank => 1.0 / (RankConstant + rank))
-        .sum
-    }
-    def addBranch(entries: Map[String, Entry], branch: List[RankedCandidate])(
-        withRank: (Entry, Int) => Entry
-    ): Map[String, Entry] =
-      branch.zipWithIndex.foldLeft(entries) { case (current, (candidate, index)) =>
-        val id = candidate.candidate.id.value.toString
-        val entry = current.getOrElse(id, Entry(candidate, None, None, None))
-        current.updated(id, withRank(entry, index + 1))
-      }
-    val jobVectorEntries =
-      addBranch(Map.empty[String, Entry], jobVector)((entry, rank) => entry.copy(jobVectorRank = Some(rank)))
-    val queryVectorEntries =
-      addBranch(jobVectorEntries, queryVector)((entry, rank) => entry.copy(queryVectorRank = Some(rank)))
-    val entries = addBranch(queryVectorEntries, lexical)((entry, rank) => entry.copy(lexicalRank = Some(rank)))
-    entries.values.toList
-      .sortBy(entry =>
-        (
-          -entry.score,
-          entry.jobVectorRank.getOrElse(Int.MaxValue),
-          entry.queryVectorRank.getOrElse(Int.MaxValue),
-          entry.lexicalRank.getOrElse(Int.MaxValue),
-          entry.value.candidate.id.value.toString
-        )
-      )
-      .take(limit)
-      .map(entry => entry.value.copy(score = entry.score))
+    val values = (jobVector ++ queryVector ++ lexical)
+      .distinctBy(_.candidate.id)
+      .map(value => value.candidate.id -> value)
+      .toMap
+    retrieval(List(jobVector.map(_.retrieval), queryVector.map(_.retrieval), lexical.map(_.retrieval)), limit)(
+      _.value.toString
+    )
+      .flatMap(hit => values.get(hit.id).map(_.copy(score = hit.score)))
   }
 
   def jobs(vector: List[RankedJob], lexical: List[RankedJob], limit: Int): List[RankedJob] = {
-    final case class Entry(job: RankedJob, vectorRank: Option[Int], lexicalRank: Option[Int]) {
-      val score: Double = vectorRank.fold(0.0)(rank => 1.0 / (RankConstant + rank)) +
-        lexicalRank.fold(0.0)(rank => 1.0 / (RankConstant + rank))
-    }
-
-    val vectorEntries = vector.zipWithIndex.foldLeft(Map.empty[String, Entry]) { case (entries, (job, index)) =>
-      val key = job.job.id.value.toString
-      entries.updated(key, Entry(job, Some(index + 1), entries.get(key).flatMap(_.lexicalRank)))
-    }
-    val entries = lexical.zipWithIndex.foldLeft(vectorEntries) { case (current, (job, index)) =>
-      val key = job.job.id.value.toString
-      current.updated(
-        key,
-        current.get(key).fold(Entry(job, None, Some(index + 1)))(_.copy(lexicalRank = Some(index + 1)))
-      )
-    }
-
-    entries.valuesIterator.toList
-      .sortBy(entry =>
-        (
-          -entry.score,
-          entry.vectorRank.getOrElse(Int.MaxValue),
-          entry.lexicalRank.getOrElse(Int.MaxValue),
-          entry.job.job.id.value.toString
-        )
-      )
-      .take(limit)
-      .map(entry => entry.job.copy(score = entry.score, mode = entry.job.mode))
+    val values = (vector ++ lexical).distinctBy(_.job.id).map(value => value.job.id -> value).toMap
+    retrieval(List(vector.map(_.retrieval), lexical.map(_.retrieval)), limit)(_.value.toString)
+      .flatMap(hit => values.get(hit.id).map(_.copy(score = hit.score)))
   }
 }

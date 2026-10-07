@@ -20,7 +20,7 @@ import com.example.graphQL.cats.service.port.{
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.{MongoCommandException, MongoWriteException}
-import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
+import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions, Projections}
 import org.bson.Document
 import org.bson.types.Binary
 import java.time.Instant
@@ -148,25 +148,106 @@ final class MongoOperationalEventOutboxRepository(
       now: Instant,
       leaseUntil: Instant,
       limit: Int
-  ): RepositoryIO[List[ClaimedOperationalEvent]] = {
-    def claimUntilBlocked(
-        remaining: Int,
-        values: List[ClaimedOperationalEvent]
-    ): RepositoryIO[List[ClaimedOperationalEvent]] =
-      if (remaining <= 0) RepositoryIO.fromEither(Right(values))
-      else
-        claimOne(workerId, transactionalId, now, leaseUntil)
-          .leftFlatMap {
-            case RepositoryError.Conflict => RepositoryIO.fromEither(Right(None))
-            case error                    => RepositoryIO.fromEither(Left(error))
-          }
-          .flatMap {
-            case None        => RepositoryIO.fromEither(Right(values))
-            case Some(value) => claimUntilBlocked(remaining - 1, values :+ value)
-          }
+  ): RepositoryIO[List[ClaimedOperationalEvent]] =
+    MongoRepositorySupport.repositoryGuard(diagnostics, "outbox.claim")(
+      claimPage(workerId, transactionalId, now, leaseUntil, limit)
+    )(_ => Left(RepositoryError.Unavailable))
 
-    claimUntilBlocked(limit, Nil)
+  private def claimPage(
+      workerId: String,
+      transactionalId: String,
+      now: Instant,
+      leaseUntil: Instant,
+      limit: Int
+  ): RepositoryIO[List[ClaimedOperationalEvent]] = {
+    val cursors = Mongo4catsCollections.documents(database, MongoProducerRegistrations.ClaimCursorsCollection)
+    def cursorFilter(row: Document): Either[RepositoryError, MongoFilter] = for {
+      at <- Option(row.get("availableAt"))
+        .collect { case date: Date => date }
+        .toRight(RepositoryError.InvalidStoredData)
+      occurred <- Option(row.get("occurredAt"))
+        .collect { case date: Date => date }
+        .toRight(RepositoryError.InvalidStoredData)
+      id <- Option(row.get("eventId"))
+        .collect { case value: String => value }
+        .toRight(RepositoryError.InvalidStoredData)
+    } yield MongoFilter.or(
+      MongoFilter.gt(MongoFields.AvailableAt, at),
+      MongoFilter.and(MongoFilter.eq(MongoFields.AvailableAt, at), MongoFilter.gt(MongoFields.OccurredAt, occurred)),
+      MongoFilter.and(
+        MongoFilter.eq(MongoFields.AvailableAt, at),
+        MongoFilter.eq(MongoFields.OccurredAt, occurred),
+        MongoFilter.gt(MongoFields.Id, id)
+      )
+    )
+    def page(after: Option[MongoFilter]): RepositoryIO[List[Document]] = RepositoryIO
+      .lift(
+        outbox.flatMap(
+          _.find(after.fold(due(now))(value => MongoFilter.and(due(now), value)).bson)
+            .sort(Sorts.ascending(MongoFields.AvailableAt, MongoFields.OccurredAt, MongoFields.Id))
+            .projection(Projections.include(MongoFields.Id, MongoFields.AvailableAt, MongoFields.OccurredAt))
+            .limit(MongoProducerRegistrations.BatchSize)
+            .all
+        )
+      )
+      .subflatMap(_.toList.traverse { row =>
+        val valid = Option(row.get("_id")).exists(_.isInstanceOf[String]) &&
+          Option(row.get("availableAt")).exists(_.isInstanceOf[Date]) && Option(row.get("occurredAt"))
+            .exists(_.isInstanceOf[Date])
+        Either.cond(valid, row, RepositoryError.InvalidStoredData)
+      })
+    def checkpoint(row: Document): RepositoryIO[Unit] = RepositoryIO
+      .lift(
+        MongoSessionOperations.updateOne(
+          cursors,
+          None,
+          MongoFilter.eq("_id", workerId),
+          MongoUpdate.combine(
+            MongoUpdate.set("eventId", row.getString("_id")),
+            MongoUpdate.set("availableAt", row.getDate("availableAt")),
+            MongoUpdate.set("occurredAt", row.getDate("occurredAt"))
+          ),
+          new UpdateOptions().upsert(true)
+        )
+      )
+      .subflatMap {
+        case Some(result) if result.wasAcknowledged() => Right(())
+        case _                                        => Left(RepositoryError.MissingWriteResult)
+      }
+    def scan(
+        rows: List[Document],
+        values: List[ClaimedOperationalEvent],
+        last: Option[Document]
+    ): RepositoryIO[List[ClaimedOperationalEvent]] =
+      if (rows.isEmpty || values.size >= limit) last.traverse_(checkpoint).as(values)
+      else
+        rows match {
+          case row :: tail =>
+            claimOne(workerId, transactionalId, now, leaseUntil, row.getString("_id"))
+              .leftFlatMap {
+                case RepositoryError.Conflict => RepositoryIO.fromEither(Right(None))
+                case error                    => RepositoryIO.fromEither(Left(error))
+              }
+              .flatMap(value => scan(tail, values ++ value.toList, Some(row)))
+          case Nil => last.traverse_(checkpoint).as(values)
+        }
+    for {
+      current <- RepositoryIO.lift(MongoSessionOperations.findOne(cursors, None, MongoFilter.eq("_id", workerId)))
+      after <- RepositoryIO.fromEither(current.traverse(cursorFilter))
+      found <- page(after)
+      rows <- if (found.isEmpty && after.nonEmpty) page(None) else RepositoryIO.fromEither(Right(found))
+      result <- scan(rows, Nil, None)
+    } yield result
   }
+
+  private def due(now: Instant): MongoFilter = MongoFilter.or(
+    MongoFilter
+      .and(MongoFilter.eq(MongoFields.State, "Retryable"), MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))),
+    MongoFilter.and(
+      MongoFilter.eq(MongoFields.State, "InFlight"),
+      MongoFilter.lte(MongoFields.LeaseUntil, Date.from(now))
+    )
+  )
 
   override def markPublished(
       eventId: UUID,
@@ -279,11 +360,12 @@ final class MongoOperationalEventOutboxRepository(
       workerId: String,
       transactionalId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseUntil: Instant,
+      eventId: String
   ): RepositoryIO[Option[ClaimedOperationalEvent]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "outbox.claimOne")(transactionRunner.run { session =>
-        claimOneInSession(session, workerId, now, leaseUntil).flatMap {
+        claimOneInSession(session, workerId, now, leaseUntil, eventId).flatMap {
           case None        => RepositoryIO.fromEither(Right(None))
           case Some(claim) =>
             subjectIsDeleted(session, claim).flatMap {
@@ -297,21 +379,12 @@ final class MongoOperationalEventOutboxRepository(
       session: Option[ClientSession[IO]],
       workerId: String,
       now: Instant,
-      leaseUntil: Instant
+      leaseUntil: Instant,
+      eventId: String
   ): RepositoryIO[Option[ClaimedOperationalEvent]] = {
     RepositoryIO.lift(uuidGen.randomUUID).flatMap { id =>
       val token = id.toString
-      val filter = MongoFilter.or(
-        MongoFilter
-          .and(
-            MongoFilter.eq(MongoFields.State, "Retryable"),
-            MongoFilter.lte(MongoFields.AvailableAt, Date.from(now))
-          ),
-        MongoFilter.and(
-          MongoFilter.eq(MongoFields.State, "InFlight"),
-          MongoFilter.lte(MongoFields.LeaseUntil, Date.from(now))
-        )
-      )
+      val filter = MongoFilter.and(due(now), MongoFilter.eq(MongoFields.Id, eventId))
       val update = MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, "InFlight"),
         MongoUpdate.set(MongoFields.LeaseOwner, workerId),
@@ -361,8 +434,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoUpdate.setOnInsert(MongoFields.Id, subjectId),
         MongoUpdate.set(MongoFields.LeaseEventId, claim.event.eventId.toString),
         MongoUpdate.set(MongoFields.LeaseToken, claim.leaseToken),
-        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil)),
-        MongoUpdate.addToSet(MongoFields.TransactionalIds, transactionalId)
+        MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil))
       )
       MongoRepositorySupport
         .transactionGuard(diagnostics, "outbox.acquireSubjectLease", session)(
@@ -387,7 +459,10 @@ final class MongoOperationalEventOutboxRepository(
           case _ => Left(RepositoryError.Unavailable)
         }
     }
-    MongoOutboxSubjectLeases.acquire(claim.subjectIds)(acquireOne)
+    MongoOutboxSubjectLeases.acquire(claim.subjectIds)(subject =>
+      acquireOne(subject) *>
+        MongoProducerRegistrations.register(database, session, subject, transactionalId, "Operational", now)
+    )
   }
 
   private def subjectIsDeleted(

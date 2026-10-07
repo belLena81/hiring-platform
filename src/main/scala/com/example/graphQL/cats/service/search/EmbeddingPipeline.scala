@@ -61,7 +61,11 @@ final class EmbeddingPipeline(
     leaseDuration: FiniteDuration,
     now: IO[Instant],
     workerId: String,
-    diagnostics: Diagnostics
+    diagnostics: Diagnostics,
+    durableRetryAttempts: Int = 1,
+    durableRetryBase: FiniteDuration = 1.second,
+    durableRetryCap: FiniteDuration = 5.minutes,
+    workerHealth: Boolean => IO[Unit] = _ => IO.unit
 ) {
   def stream: Stream[IO, Unit] =
     Stream
@@ -74,15 +78,15 @@ final class EmbeddingPipeline(
 
   private def claimNext: IO[Option[ClaimedEmbeddingWork]] =
     now.flatMap(instant => work.claim(workerId, instant, instant.plusMillis(leaseDuration.toMillis)).value).flatMap {
-      case Right(claim) => IO.pure(claim)
-      case Left(_)      => reportRepositoryFailure.as(None)
+      case Right(claim) => workerHealth(true).as(claim)
+      case Left(_)      => workerHealth(false) *> reportRepositoryFailure.as(None)
     }
 
   private def reportRepositoryFailure: IO[Unit] =
     diagnostics.emit(LogEvent.EmbeddingProcessingFailed)
 
   private enum ProcessingOutcome {
-    case Completed, Retry
+    case Completed, Retry, Conflict, Abandoned
     case Terminal(failure: EmbeddingWorkFailure)
   }
 
@@ -103,13 +107,46 @@ final class EmbeddingPipeline(
           case ProcessingOutcome.Retry => HandlerDecision.Continue
           case _                       => HandlerDecision.Stop
         })
-    ).flatMap { result =>
-      result.fold(identity, identity) match {
+    ).race(leaseHeartbeat(claim)).flatMap { result =>
+      result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
+        case ProcessingOutcome.Abandoned => IO.unit
+        case ProcessingOutcome.Conflict  =>
+          entityAbsent(claim)
+            .flatMap { absent =>
+              if (absent) work.complete(claim).value
+              else
+                // Aggregate revisions also advance for unrelated writes. Reobserve the source without
+                // spending the provider failure budget; deletion and absence still complete the work.
+                now.flatMap(at =>
+                  work.retry(claim, at.plusMillis(durableRetryBase.toMillis), chargeAttempt = false).value
+                )
+            }
+            .flatMap {
+              case Right(_) => IO.unit
+              case Left(_)  => reportRepositoryFailure
+            }
         case ProcessingOutcome.Retry =>
-          now.flatMap(work.fail(claim, EmbeddingWorkFailure.RetryExhausted, _).value).flatMap {
-            case Right(_) => IO.unit
-            case Left(_)  => reportRepositoryFailure
-          }
+          now
+            .flatMap { at =>
+              if (claim.attempts + 1 < durableRetryAttempts)
+                work
+                  .retry(
+                    claim,
+                    at.plusMillis(
+                      EmbeddingRecoveryPolicy.backoffMillis(
+                        claim.attempts.toLong + 1L,
+                        durableRetryBase.toMillis,
+                        durableRetryCap.toMillis
+                      )
+                    )
+                  )
+                  .value
+              else work.fail(claim, EmbeddingWorkFailure.RetryExhausted, at).value
+            }
+            .flatMap {
+              case Right(_) => IO.unit
+              case Left(_)  => reportRepositoryFailure
+            }
         case ProcessingOutcome.Completed =>
           work.complete(claim).value.flatMap {
             case Right(_) => IO.unit
@@ -122,6 +159,43 @@ final class EmbeddingPipeline(
           }
       }
     }
+
+  private def entityAbsent(claim: ClaimedEmbeddingWork): IO[Boolean] =
+    claim.key.kind match {
+      case EmbeddingWorkKind.Job =>
+        parseIdentifier(claim.key.entityId)(JobId.apply)
+          .fold(_ => IO.pure(false), id => jobs.findVersioned(id).value.map(_.exists(_.isEmpty)))
+      case EmbeddingWorkKind.CandidateProfile =>
+        parseIdentifier(claim.key.entityId)(UserId.apply).fold(
+          _ => IO.pure(false),
+          id =>
+            users
+              .findVersioned(id)
+              .value
+              .map(
+                _.exists(
+                  _.forall(observed =>
+                    observed.value.accountStatus != com.example.graphQL.cats.domain.model.AccountStatus.Active ||
+                      observed.value.role != com.example.graphQL.cats.domain.model.UserRole.Candidate
+                  )
+                )
+              )
+        )
+    }
+
+  private def renewClaim(claim: ClaimedEmbeddingWork): IO[Boolean] =
+    now.flatMap(at => work.renew(claim, at, at.plusMillis(leaseDuration.toMillis)).value).flatMap {
+      case Right(renewed) => IO.pure(renewed)
+      case Left(_)        => reportRepositoryFailure.as(false)
+    }
+
+  private def leaseHeartbeat(claim: ClaimedEmbeddingWork): IO[Unit] =
+    Stream
+      .awakeEvery[IO]((leaseDuration / 3).max(1.millis))
+      .evalMap(_ => renewClaim(claim))
+      .takeWhile(identity)
+      .compile
+      .drain
 
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
     claim.key.kind match {
@@ -156,7 +230,9 @@ final class EmbeddingPipeline(
 
   private def processCandidate(id: UserId): IO[ProcessingOutcome] =
     users.findVersioned(id).value.flatMap {
-      case Right(Some(observed)) =>
+      case Right(Some(observed))
+          if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
+            observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
         val user = observed.value
         val prepared = EmbeddingPreparation.prepare(
           user.candidateProfile.map(SearchableText.candidate),
@@ -165,14 +241,16 @@ final class EmbeddingPipeline(
           SearchableText.DocumentMaxChars
         )
         embedPrepared(prepared)(embedding => users.updateEmbedding(observed, embedding)).value.map(attemptOutcome)
-      case Right(None) => IO.pure(ProcessingOutcome.Completed)
-      case Left(_)     => IO.pure(ProcessingOutcome.Retry)
+      case Right(Some(_)) => IO.pure(ProcessingOutcome.Completed)
+      case Right(None)    => IO.pure(ProcessingOutcome.Completed)
+      case Left(_)        => IO.pure(ProcessingOutcome.Retry)
     }
 
   private def attemptOutcome(result: Either[RepositoryError, ProcessingOutcome]): ProcessingOutcome = result match {
     case Right(outcome)                 => outcome
-    case Left(RepositoryError.Conflict) => ProcessingOutcome.Completed
-    case Left(RepositoryError.Unavailable) | Left(RepositoryError.DuplicateApplication) | Left(
+    case Left(RepositoryError.Conflict) => ProcessingOutcome.Conflict
+    case Left(RepositoryError.AuthorityRevoked) | Left(RepositoryError.Unavailable) |
+        Left(RepositoryError.DuplicateApplication) | Left(
           RepositoryError.InvalidStoredData
         ) | Left(RepositoryError.MissingWriteResult) | Left(RepositoryError.MissingStoredResult) =>
       ProcessingOutcome.Retry
@@ -186,7 +264,9 @@ final class EmbeddingPipeline(
       RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge)))
     case EmbeddingPreparation.Prepared(text, hash) =>
       RepositoryIO.lift(embeddings.embed(EmbeddingInput(text, EmbeddingInputType.Document))).flatMap {
-        case Left(_)       => RepositoryIO.fromEither(Right(ProcessingOutcome.Retry))
+        case Left(EmbeddingError.ProviderUnavailable) => RepositoryIO.fromEither(Right(ProcessingOutcome.Retry))
+        case Left(EmbeddingError.InvalidResponse)     =>
+          RepositoryIO.fromEither(Right(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidResponse)))
         case Right(vector) =>
           RepositoryIO.lift(now).flatMap { instant =>
             persist(EntityEmbedding(vector.values, EmbeddingMeta(model, hash, instant)))
@@ -209,7 +289,12 @@ object EmbeddingPipeline {
       retryDelay: FiniteDuration,
       leaseDuration: FiniteDuration,
       workerReady: IO[Boolean] = IO.pure(true),
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      durableRetryAttempts: Int = 8,
+      durableRetryBase: FiniteDuration = 1.second,
+      durableRetryCap: FiniteDuration = 5.minutes,
+      workerRestartDelay: FiniteDuration = 1.second,
+      workerHealth: Boolean => IO[Unit] = _ => IO.unit
   ): Resource[IO, DurableEmbeddingWorkPublisher] =
     Resource.eval(Queue.bounded[IO, Unit](queueSize)).flatMap { wakeups =>
       for {
@@ -228,10 +313,24 @@ object EmbeddingPipeline {
           leaseDuration,
           IO.realTimeInstant,
           workerId,
-          diagnostics
+          diagnostics,
+          durableRetryAttempts,
+          durableRetryBase,
+          durableRetryCap,
+          workerHealth
         )
         _ <- Resource.make(
-          workerReady.flatMap(ready => if (ready) pipeline.stream.compile.drain else IO.unit).start
+          workerReady.flatMap { ready =>
+            if (!ready) workerHealth(false)
+            else
+              (workerHealth(true) *> pipeline.stream.compile.drain)
+                .guarantee(workerHealth(false))
+                .handleErrorWith(error =>
+                  diagnostics.emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
+                )
+                .flatMap(_ => IO.sleep(workerRestartDelay))
+                .foreverM
+          }.start
         )(_.cancel)
       } yield publisher
     }

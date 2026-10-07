@@ -1,5 +1,14 @@
 # Current Contract and Persistence Evolution
 
+## Workflow reliability cutovers
+
+The October 7 reliability slice adds `012_attributable_producer_registrations` and `013_hiring_workflow_integrity`; applied migrations remain unchanged. Stop incompatible operational and analytics writers before cutover. Migration 012 transfers attribution before removing old arrays, verifies strict validators and preserves unresolved generations without TTL. Analytics accepts the single registry-backed shape only after the completed version-one proof.
+
+After migration 013 audits existing commands/outbox rows and installs equivalent strict validators, startup verifies the exact definitions before skipping completed 010 command and 003 outbox audits. Validator drift fails closed; startup does not silently restore a changed validator. Migration 011 cleanup verification continues.
+
+Run the explicit `MongoWorkflowIntegrityAudit` maintenance entrypoint for bounded resumable checks. Failed audit batches retain their previous checkpoint for repair and rerun; a completed run starts a fresh audit next time. Canonical UUID identities are required at cutover, so incompatible existing command rows require explicit repair before proof completion. No application rollback is a database rollback; preserve the database and stopped-writer recovery evidence.
+
+
 The API and analytics schemas have one active shape before full MVP. Implement their schema changes directly; do not add migration, backfill, dual-read/write, or legacy-compatibility code before full MVP. If incompatible local analytics data exists, reset/rebuild only the exact local lakehouse when explicitly in scope; otherwise preserve it and fail closed. After full MVP, apply the schema evolution requirements in `AGENTS.md`.
 
 GraphQL, cursor, operational-event, and embedding contracts therefore have one active shape before MVP. User and job Mongo documents also carry an internal version: Long concurrency revision. This field is not a schema revision and is not exposed through GraphQL or events.
@@ -34,6 +43,6 @@ Run sbt test for the Docker-independent contract suite and sbt 'IntegrationTest 
 
 ## Interview workflow recovery maintenance
 
-Operational migrations `010_interview_workflow_attempts` and `011_interview_publication_fencing` preserve workflow rows, permanent subject tombstones and conservative execution budgets. They gate startup, are restartable in bounded batches and reject malformed stored contracts. Both operational migrations verify their current stored contracts even when their ledgers are Complete. Notification lookup has one active participant-aware shape; no legacy dual interpreter is introduced. Cleanup rows lacking the new proof metadata, including legacy Complete rows, are reopened for broker fencing and fresh retention barriers.
+Operational migrations `010_interview_workflow_attempts` and `011_interview_publication_fencing` preserve workflow rows, permanent subject tombstones and conservative execution budgets. They gate startup, are restartable in bounded batches and reject malformed stored contracts. Migration 011 continues verifying its stored cleanup contract when Complete; migration 010 verification is skipped only after the new 013 audited baseline and exact strict validators are verified, as described above. Notification lookup has one active participant-aware shape; no legacy dual interpreter is introduced. Cleanup rows lacking the new proof metadata, including legacy Complete rows, are reopened for broker fencing and fresh retention barriers.
 
 Before activation stop old interview writers and revoke their nontransactional topic-write credentials. Configure separate command/result publishers and a prefix-scoped fencer; verify migrations, fencing and physical retention on the target environment before declaring erasure complete. Rolling back the application does not roll back migrated budgets or restore the old cleanup proof. Existing local data is preserved; a deployed maintenance migration is outside this local refactoring task. See [current acceptance criteria](specs/hiring-workflow-recovery.md).

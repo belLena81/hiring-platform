@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
@@ -33,16 +33,112 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
       now,
       now
     )
+  private val discoveryResource = MongoAccessEvaluationSupport.resource.evalMap { fixture =>
+    val actor = com.example.graphQL.cats.service.ServiceFixtures.candidate
+    val users = MongoUserRepository.transactional(
+      fixture.database,
+      fixture.client,
+      MongoEmbeddingWorkEnqueuer.disabled,
+      Diagnostics.noop
+    )
+    for {
+      _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+      _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Users, MongoHiringCodecs.user(actor))
+      policy <- DiscoveryQueryPolicy.create(2.seconds, 4)
+      scope <- IO.fromEither(
+        com.example.graphQL.cats.service.read.HiringReadScope
+          .validated(
+            com.example.graphQL.cats.service.ActorContext(actor.id, actor.role),
+            actor,
+            com.example.graphQL.cats.service.auth.ActorAuthorization(users)
+          )
+          .leftMap(error => new AssertionError(error.toString))
+      )
+    } yield (fixture, policy, scope)
+  }
   private def success[A](effect: RepositoryIO[A]): IO[A] =
     effect.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failed: $error")), IO.pure))
 
-  test("radius query excludes remote, missing, closed and deleted jobs; full precision tie pagination is complete") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+  test("real Mongo maxTimeMS exhaustion returns typed unavailable for nearby jobs and exact facets") {
+    discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop,
+        Some(policy)
+      )
+      for {
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.Jobs,
+          MongoHiringCodecs.job(job(1))
+        )
+        admin <- fixture.client.getDatabase("admin")
+        _ <- Resource
+          .make(
+            MongoAccessEvaluationSupport
+              .command(admin, new Document("configureFailPoint", "maxTimeAlwaysTimeOut").append("mode", "alwaysOn"))
+              .void
+          )(_ =>
+            MongoAccessEvaluationSupport
+              .command(admin, new Document("configureFailPoint", "maxTimeAlwaysTimeOut").append("mode", "off"))
+              .void
+          )
+          .use { _ =>
+            for {
+              nearby <- repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2).value
+              facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
+              _ = assertEquals(nearby, Left(RepositoryError.Unavailable))
+              _ = assertEquals(facets, Left(RepositoryError.Unavailable))
+            } yield ()
+          }
+        recovered <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2))
+        _ = assertEquals(recovered.map(_.job.id), List(job(1).id))
+      } yield ()
+    }
+  }
+
+  test(
+    "authoritative discovery distinguishes empty jobs from a revoked cached actor, including cursors beyond radius"
+  ) {
+    discoveryResource.use { case (fixture, policy, scope) =>
+      val repository = MongoJobRepository.transactional(
+        fixture.database,
+        fixture.client,
+        MongoEmbeddingWorkEnqueuer.disabled,
+        Diagnostics.noop,
+        Some(policy)
+      )
+      val base = NearbyJobsQuery(center, 10d, filter)
+      val beyond = base.copy(after = Some(NearbyJobCursor(11d, JobId(new UUID(0L, 1L)), base.fingerprint)))
+      for {
+        empty <- repository.nearbyJobs(scope, base, 2).value
+        beyondEmpty <- repository.nearbyJobs(scope, beyond, 2).value
+        facets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
+        _ = assertEquals(empty, Right(Nil))
+        _ = assertEquals(beyondEmpty, Right(Nil))
+        _ = assertEquals(facets, Right(JobDiscoveryFacets(Nil, Nil, Nil, Nil, truncated = false)))
+        users <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Users)
+        _ <- users.deleteOne(Filters.eq(MongoFields.Id, scope.userId.value.toString))
+        revoked <- repository.nearbyJobs(scope, base, 2).value
+        revokedBeyond <- repository.nearbyJobs(scope, beyond, 2).value
+        revokedFacets <- repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)).value
+        _ = assertEquals(revoked, Left(RepositoryError.AuthorityRevoked))
+        _ = assertEquals(revokedBeyond, Left(RepositoryError.AuthorityRevoked))
+        _ = assertEquals(revokedFacets, Left(RepositoryError.AuthorityRevoked))
+      } yield ()
+    }
+  }
+
+  test("radius query excludes remote, missing, closed and deleted jobs; full precision tie pagination is complete") {
+    discoveryResource.use { case (fixture, policy, scope) =>
+      val repository = MongoJobRepository.transactional(
+        fixture.database,
+        fixture.client,
+        MongoEmbeddingWorkEnqueuer.disabled,
+        Diagnostics.noop,
+        Some(policy)
       )
       val query = NearbyJobsQuery(center, 10d, filter)
       val values = (1 to 24).toList
@@ -56,27 +152,27 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
         _ <- values.traverse_(value =>
           MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
         )
-        first <- success(repository.nearbyJobs(query, 7))
+        first <- success(repository.nearbyJobs(scope, query, 7))
         _ = assertEquals(first.map(_.job.id), values.take(7).map(_.id))
         cursor = NearbyJobCursor(first.last.distanceKm, first.last.job.id, query.fingerprint)
-        rest <- success(repository.nearbyJobs(query.copy(after = Some(cursor)), 30))
+        rest <- success(repository.nearbyJobs(scope, query.copy(after = Some(cursor)), 30))
         _ = assertEquals((first ++ rest).map(_.job.id), values.take(24).map(_.id))
         _ = assert((first ++ rest).forall(value => value.distanceKm > 0d && value.distanceKm < 1d))
         coll <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Jobs)
         _ <- (
           coll.deleteOne(Filters.eq("_id", values.head.id.value.toString)),
-          success(repository.nearbyJobs(query, 30))
+          success(repository.nearbyJobs(scope, query, 30))
         ).parTupled
-        deleted <- success(repository.nearbyJobs(query, 30))
+        deleted <- success(repository.nearbyJobs(scope, query, 30))
         _ = assertEquals(deleted.size, 23)
         _ <- (
           coll.updateOne(
             Filters.eq("_id", values(1).id.value.toString),
             Updates.set("status", JobStatus.Closed.toString)
           ),
-          success(repository.nearbyJobs(query, 30))
+          success(repository.nearbyJobs(scope, query, 30))
         ).parTupled
-        closed <- success(repository.nearbyJobs(query, 30))
+        closed <- success(repository.nearbyJobs(scope, query, 30))
         _ = assertEquals(closed.size, 22)
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
       } yield ()
@@ -84,12 +180,13 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
   }
 
   test("facets count the complete filtered corpus and bound buckets; radius facets exclude remote and absent points") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop,
+        Some(policy)
       )
       val values = (1 to 24).toList
         .map(job(_)) ++ List(job(25, remote = true), job(26, None), job(27).copy(status = JobStatus.Closed))
@@ -103,41 +200,42 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
           Filters.eq("_id", job(1).id.value.toString),
           Updates.set("skills", List("Scala", "Scala", "Skill1").asJava)
         )
-        all <- success(repository.jobDiscoveryFacets(JobFacetQuery(filter, None)))
+        all <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, None)))
         _ = assertEquals(all.skills.head, JobFacetBucket("Scala", 26L))
         _ = assertEquals(all.skills.size, 20)
         _ = assert(all.truncated)
-        nearby <- success(repository.jobDiscoveryFacets(JobFacetQuery(filter, Some(NearbyRadius(center, 10d)))))
+        nearby <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d)))))
         _ = assertEquals(nearby.skills.head, JobFacetBucket("Scala", 24L))
         _ = assertEquals(nearby.remote, List(JobFacetBucket("false", 24L)))
         filtered <- success(
-          repository.jobDiscoveryFacets(JobFacetQuery(filter.copy(skills = Set("Scala", "Skill1")), None))
+          repository.jobDiscoveryFacets(scope, JobFacetQuery(filter.copy(skills = Set("Scala", "Skill1")), None))
         )
         _ = assertEquals(filtered.cities, List(JobFacetBucket("Nicosia", 1L)))
         dateFilter = filter.copy(city = Some("Nicosia"), skills = Set("Scala"), createdAfter = Some(now.plusSeconds(1)))
-        dated <- success(repository.nearbyJobs(NearbyJobsQuery(center, 10d, dateFilter), 30))
+        dated <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, dateFilter), 30))
         _ = assertEquals(dated, Nil)
-        datedFacets <- success(repository.jobDiscoveryFacets(JobFacetQuery(dateFilter, None)))
+        datedFacets <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(dateFilter, None)))
         _ = assertEquals(datedFacets.cities, Nil)
       } yield ()
     }
   }
   test("Mongo maximum distance includes its computed radius boundary and excludes a point two metres outside") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
         fixture.client,
         MongoEmbeddingWorkEnqueuer.disabled,
-        Diagnostics.noop
+        Diagnostics.noop,
+        Some(policy)
       )
       val value = job(1, Some(GeoPoint(center.latitude + 0.01d, center.longitude)))
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
-        measured <- success(repository.nearbyJobs(NearbyJobsQuery(center, 10d, filter), 2))
+        measured <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2))
         distance = measured.head.distanceKm
-        included <- success(repository.nearbyJobs(NearbyJobsQuery(center, distance + 0.001d, filter), 2))
-        excluded <- success(repository.nearbyJobs(NearbyJobsQuery(center, distance - 0.002d, filter), 2))
+        included <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, distance + 0.001d, filter), 2))
+        excluded <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, distance - 0.002d, filter), 2))
         _ = assertEquals(included.map(_.job.id), List(value.id))
         _ = assertEquals(excluded, Nil)
       } yield ()

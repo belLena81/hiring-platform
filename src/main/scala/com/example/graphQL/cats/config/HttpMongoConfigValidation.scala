@@ -15,8 +15,25 @@ private[config] object HttpMongoConfigValidation {
       http.admissionPermits.validNel[ConfigError],
       validTrustedProxyCidrs(http.trustedProxyCidrs),
       validMongoUri(mongo.uri),
-      validMongoDatabase(mongo.database)
-    ).mapN { (host, port, admissionPermits, trustedProxy, mongoUri, mongoDatabase) =>
+      validMongoDatabase(mongo.database),
+      Either
+        .cond(
+          mongo.discovery.flatMap(_.maxTimeMillis).getOrElse(2000) >= 100 && mongo.discovery
+            .flatMap(_.maxTimeMillis)
+            .getOrElse(2000) < http.requestTimeoutMs &&
+            mongo.discovery.flatMap(_.permits).getOrElse(4) >= 1 && mongo.discovery
+              .flatMap(_.permits)
+              .getOrElse(4) <= 64 && mongo.discovery.flatMap(_.maxRoots).getOrElse(4) >= 1 &&
+            mongo.discovery.flatMap(_.maxRoots).getOrElse(4) <= 64,
+          DiscoveryConfig(
+            mongo.discovery.flatMap(_.maxTimeMillis).getOrElse(2000),
+            mongo.discovery.flatMap(_.permits).getOrElse(4),
+            mongo.discovery.flatMap(_.maxRoots).getOrElse(4)
+          ),
+          ConfigError.InvalidDiscoveryQueryLimits
+        )
+        .toValidatedNel
+    ).mapN { (host, port, admissionPermits, trustedProxy, mongoUri, mongoDatabase, discovery) =>
       TransportSettings(
         host,
         port,
@@ -24,7 +41,8 @@ private[config] object HttpMongoConfigValidation {
         http.requestTimeoutMs.millis,
         trustedProxy,
         mongoUri,
-        mongoDatabase
+        mongoDatabase,
+        discovery
       )
     }
 

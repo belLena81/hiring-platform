@@ -27,6 +27,7 @@ private[mongo] object MongoSearchEligibilityCodecs {
   )
   val candidateFields: List[String] = List(
     MongoFields.Id,
+    MongoFields.Name,
     MongoFields.Role,
     MongoFields.AccountStatus,
     MongoFields.ProfileSkills,
@@ -39,15 +40,25 @@ private[mongo] object MongoSearchEligibilityCodecs {
 
   def projection(fields: List[String]): Document = fields.foldLeft(new Document())((doc, field) => doc.append(field, 1))
 
-  private def metadata(document: Document): Either[RepositoryError, Option[EmbeddingMeta]] =
+  def metadata(document: Document): Either[RepositoryError, Option[EmbeddingMeta]] =
     Either
-      .catchNonFatal(Option(document.get(MongoFields.EmbeddingMeta, classOf[Document])).map { value =>
-        val model = value.getString(MongoFields.Model)
-        val hash = value.getString(MongoFields.SourceHash)
-        require(model != null && hash != null)
-        EmbeddingMeta(model, hash, value.getDate(MongoFields.UpdatedAt).toInstant)
-      })
+      .catchNonFatal(Option(document.get(MongoFields.EmbeddingMeta, classOf[Document])))
       .leftMap(_ => RepositoryError.InvalidStoredData)
+      .flatMap(_.traverse { value =>
+        def text(field: String): Either[RepositoryError, String] =
+          Either
+            .catchNonFatal(Option(value.getString(field)))
+            .leftMap(_ => RepositoryError.InvalidStoredData)
+            .flatMap(_.toRight(RepositoryError.InvalidStoredData))
+        for {
+          model <- text(MongoFields.Model)
+          hash <- text(MongoFields.SourceHash)
+          timestamp <- Either
+            .catchNonFatal(Option(value.getDate(MongoFields.UpdatedAt)))
+            .leftMap(_ => RepositoryError.InvalidStoredData)
+            .flatMap(_.toRight(RepositoryError.InvalidStoredData))
+        } yield EmbeddingMeta(model, hash, timestamp.toInstant)
+      })
 
   def job(document: Document): Either[RepositoryError, JobSearchEligibility] = {
     val source = new Document(document)
@@ -83,9 +94,15 @@ private[mongo] object MongoSearchEligibilityCodecs {
                 Option(value.get(MongoFields.RecruiterSearchOptIn, classOf[java.lang.Boolean])).exists(_.booleanValue())
               CandidateProfile(skills, summary, None, residence, availability, optIn)
             }
-          CandidateSearchEligibility(id, role, status, profile, None)
+          CandidateSearchEligibility(id, role, status, profile, None, Option(document.getString(MongoFields.Name)))
         }
         .leftMap(_ => RepositoryError.InvalidStoredData)
+      _ <- Either.cond(
+        source.role != UserRole.Candidate || source.accountStatus != AccountStatus.Active ||
+          source.name.exists(_.nonEmpty),
+        (),
+        RepositoryError.InvalidStoredData
+      )
       meta <- metadata(document)
     } yield source.copy(metadata = meta)
 }

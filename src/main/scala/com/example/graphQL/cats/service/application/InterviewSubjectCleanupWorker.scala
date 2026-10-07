@@ -63,8 +63,18 @@ final class InterviewSubjectCleanupWorker(
       } yield ()
 
     InterviewSubjectCleanup.command(current) match {
-      case InterviewCleanupCommand.FenceProducers(ids) =>
-        fencer.fence(ids) *> advance(InterviewCleanupObservation.ProducersFenced)
+      case InterviewCleanupCommand.FenceProducers(_) =>
+        repository.producerBatch(current.subjectId).flatMap {
+          case ids if ids.isEmpty => advance(InterviewCleanupObservation.ProducersFenced)
+          case ids                =>
+            fencer.fence(ids) *> RepositoryIO
+              .lift(currentTime)
+              .flatMap(now => repository.markProducersFenced(current.subjectId, ids, now)) *>
+              repository.producerBatch(current.subjectId).flatMap { remaining =>
+                if (remaining.isEmpty) advance(InterviewCleanupObservation.ProducersFenced)
+                else RepositoryIO.fromEither(Right(()))
+              }
+        }
       case InterviewCleanupCommand.PurgeMongo =>
         repository.purge(current.subjectId) *> advance(InterviewCleanupObservation.MongoPurged)
       case InterviewCleanupCommand.CaptureBarriers =>

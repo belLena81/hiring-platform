@@ -15,7 +15,8 @@ final case class CandidateSearchEligibility(
     role: UserRole,
     accountStatus: AccountStatus,
     profile: Option[CandidateProfile],
-    metadata: Option[EmbeddingMeta]
+    metadata: Option[EmbeddingMeta],
+    name: Option[String] = None
 )
 object CandidateSearchEligibility {
   def fromUser(user: User): CandidateSearchEligibility =
@@ -24,7 +25,8 @@ object CandidateSearchEligibility {
       user.role,
       user.accountStatus,
       user.candidateProfile.map(_.copy(resumeRef = None)),
-      user.embedding.map(_.meta)
+      user.embedding.map(_.meta),
+      Some(user.name)
     )
 }
 

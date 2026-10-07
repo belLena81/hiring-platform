@@ -23,7 +23,8 @@ final class MongoJobRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
     embeddingWork: MongoEmbeddingWorkEnqueuer,
-    diagnostics: Diagnostics
+    diagnostics: Diagnostics,
+    discoveryPolicy: Option[DiscoveryQueryPolicy] = None
 ) extends JobRepository
     with MongoConflictWriteMapping
     with MongoOperationalEventInsertion {
@@ -96,7 +97,11 @@ final class MongoJobRepository(
   ): RepositoryIO[List[Job]] =
     findMany(baseSearchFilter(filter, page), page)
 
-  override def nearbyJobs(query: com.example.graphQL.cats.service.search.NearbyJobsQuery, limit: Int) = {
+  override def nearbyJobs(
+      scope: HiringReadScope,
+      query: com.example.graphQL.cats.service.search.NearbyJobsQuery,
+      limit: Int
+  ) = {
     import com.example.graphQL.cats.service.search.NearbyJob
     import scala.jdk.CollectionConverters.*
     val queryFilter = MongoJobRepository.discoveryFilter(query.filter).append("location.remote", false)
@@ -112,6 +117,9 @@ final class MongoJobRepository(
       .append("spherical", true)
       .append("maxDistance", query.radiusKm * 1000d)
       .append("query", queryFilter)
+    query.after.foreach(cursor =>
+      near.append("minDistance", MongoJobRepository.minimumDistanceMeters(cursor.distanceKm))
+    )
     val afterStage = query.after.toList.map { cursor =>
       val distance = cursor.distanceKm
       new Document(
@@ -131,15 +139,21 @@ final class MongoJobRepository(
         )
       )
     }
-    val pipeline = List(new Document("$geoNear", near)) ++ afterStage ++ List(
-      new Document("$sort", new Document("_distanceKm", 1).append(MongoFields.Id, 1)),
-      new Document("$limit", limit)
-    )
-    MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.nearbyJobs")(
-      RepositoryIO
-        .lift(
-          collection.flatMap(_.aggregate[Document](pipeline.asJava.asScala.toSeq).boundedStream(limit).compile.toList)
+    val pipeline =
+      (if (query.after.exists(_.distanceKm > query.radiusKm))
+         List(new Document("$match", new Document("$expr", new Document("$eq", java.util.Arrays.asList(1, 0)))))
+       else List(new Document("$geoNear", near)) ++ afterStage) ++ List(
+        new Document("$sort", new Document("_distanceKm", 1).append(MongoFields.Id, 1)),
+        new Document("$limit", limit),
+        new Document(
+          "$project",
+          MongoSearchEligibilityCodecs.projection(
+            MongoSearchEligibilityCodecs.jobFields.filterNot(_ == MongoFields.EmbeddingMeta) :+ "_distanceKm"
+          )
         )
+      )
+    MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.nearbyJobs")(
+      authorizedDiscovery(scope, pipeline)
         .subflatMap { documents =>
           MongoStoredDocumentDecoding.values(documents.map { document =>
             val distanceKm = Option(document.get("_distanceKm")).collect { case value: Number => value.doubleValue() }
@@ -154,7 +168,10 @@ final class MongoJobRepository(
     )(_ => Left(RepositoryError.Unavailable))
   }
 
-  override def jobDiscoveryFacets(query: com.example.graphQL.cats.service.search.JobFacetQuery) = {
+  override def jobDiscoveryFacets(
+      scope: HiringReadScope,
+      query: com.example.graphQL.cats.service.search.JobFacetQuery
+  ) = {
     import scala.jdk.CollectionConverters.*
     val filter = query.filter
     val bucketReadLimit = com.example.graphQL.cats.service.search.JobDiscoveryFacets.MaxBucketsPerDimension + 1
@@ -213,15 +230,53 @@ final class MongoJobRepository(
     }
     val initialMatch =
       Option.when(query.radius.isEmpty)(new Document("$match", MongoJobRepository.discoveryFilter(filter))).toList
-    val pipeline = radiusStage ++ initialMatch ++ List(new Document("$facet", facets))
+    val pipeline = radiusStage ++ initialMatch ++ List(
+      new Document(
+        "$project",
+        new Document(MongoFields.Skills, 1)
+          .append("location.country", 1)
+          .append("location.city", 1)
+          .append("location.remote", 1)
+      ),
+      new Document("$facet", facets)
+    )
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.jobDiscoveryFacets")(
-      RepositoryIO
-        .lift(collection.flatMap(_.aggregate[Document](pipeline.asJava.asScala.toSeq).boundedStream(1).compile.toList))
+      authorizedDiscovery(scope, pipeline)
         .subflatMap(results =>
           MongoStoredDocumentDecoding.repository(MongoJobDiscoveryCodecs.facets(results.headOption))
         )
     )(_ => Left(RepositoryError.Unavailable))
   }
+
+  private def authorizedDiscovery(scope: HiringReadScope, jobsPipeline: List[Document]): RepositoryIO[List[Document]] =
+    discoveryPolicy match {
+      case None         => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      case Some(policy) =>
+        import scala.jdk.CollectionConverters.*
+        val allowed = scope.role == UserRole.Candidate || scope.role == UserRole.Admin
+        if (!allowed) RepositoryIO.fromEither(Left(RepositoryError.AuthorityRevoked))
+        else {
+          val pipeline = MongoJobRepository.authorizedDiscoveryPipeline(scope, jobsPipeline)
+          RepositoryIO
+            .lift(
+              policy.run(
+                Mongo4catsCollections
+                  .documents(database, MongoCollections.Users)
+                  .flatMap(
+                    _.aggregate[Document](pipeline).maxTime(policy.maxTime).boundedStream(1).compile.toList
+                  )
+              )
+            )
+            .subflatMap {
+              case Nil          => Left(RepositoryError.AuthorityRevoked)
+              case actor :: Nil =>
+                Either
+                  .catchNonFatal(actor.getList("discoveryResults", classOf[Document]).asScala.toList)
+                  .leftMap(_ => RepositoryError.InvalidStoredData)
+              case _ => Left(RepositoryError.InvalidStoredData)
+            }
+        }
+    }
 
   override def findAll(page: JobPageRequest): RepositoryIO[List[Job]] =
     findMany(
@@ -390,29 +445,62 @@ final class MongoJobRepository(
 }
 
 object MongoJobRepository {
+  private[mongo] def authorizedDiscoveryPipeline(
+      scope: HiringReadScope,
+      jobsPipeline: List[Document]
+  ): List[Document] = {
+    import scala.jdk.CollectionConverters.*
+    val predicates = List(
+      Filters.eq(MongoFields.Id, scope.userId.value.toString),
+      Filters.eq(MongoFields.Role, scope.role.toString),
+      Filters.eq(MongoFields.AccountStatus, AccountStatus.Active.toString)
+    ) ++ Option.when(scope.role == UserRole.Admin)(Filters.eq(MongoFields.AdminSingletonKey, "singleton-admin")).toList
+    List(
+      MongoAuthorizedReadQueries.matching(Filters.and(predicates*)),
+      new Document("$limit", 1),
+      new Document(
+        "$lookup",
+        new Document("from", MongoCollections.Jobs)
+          .append("pipeline", jobsPipeline.asJava)
+          .append("as", "discoveryResults")
+      ),
+      new Document("$project", new Document("discoveryResults", 1))
+    )
+  }
+
+  /** Round down across both multiplier conversions; exact distance/ID comparison still resolves ties. */
+  private[mongo] def minimumDistanceMeters(distanceKm: Double): Double = {
+    val meters = distanceKm * 1000d
+    Math.max(0d, meters - 4d * Math.ulp(meters))
+  }
+
   private[mongo] def discoveryFilter(filter: JobSearchFilter): Document = {
     import scala.jdk.CollectionConverters.*
-    val clauses = List.newBuilder[Document]
-    clauses += new Document("status", JobStatus.Open.toString)
-    filter.city.foreach(city => clauses += new Document("location.city", city.trim))
-    if (filter.skills.nonEmpty)
-      clauses += new Document("skills", new Document("$all", filter.skills.toList.map(_.trim).distinct.sorted.asJava))
-    filter.createdAfter.foreach(value =>
-      clauses += new Document("createdAt", new Document("$gte", java.util.Date.from(value)))
-    )
-    new Document("$and", clauses.result().asJava)
+    val clauses = List(new Document("status", JobStatus.Open.toString)) ++
+      filter.city.toList.map(city => new Document("location.city", city.trim)) ++
+      Option
+        .when(filter.skills.nonEmpty)(
+          new Document("skills", new Document("$all", filter.skills.toList.map(_.trim).distinct.sorted.asJava))
+        )
+        .toList ++
+      filter.createdAfter.toList.map(value =>
+        new Document("createdAt", new Document("$gte", java.util.Date.from(value)))
+      )
+    new Document("$and", clauses.asJava)
   }
 
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
       embeddingWork: MongoEmbeddingWorkEnqueuer,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      discoveryPolicy: Option[DiscoveryQueryPolicy] = None
   ): MongoJobRepository =
     new MongoJobRepository(
       database,
       MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
       embeddingWork,
-      diagnostics
+      diagnostics,
+      discoveryPolicy
     )
 }

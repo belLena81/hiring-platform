@@ -45,7 +45,8 @@ object Main extends IOApp {
         config.jwtAuth,
         config.passwordHash,
         config.kafka,
-        config.resetOnStart
+        config.resetOnStart,
+        discovery = config.discovery
       )
     )
     contextFactory <- RequestContextFactory.resource
@@ -63,7 +64,8 @@ object Main extends IOApp {
         contextFactory,
         documentCache,
         rateLimiter,
-        ClientAddressResolver(config.trustedProxy)
+        ClientAddressResolver(config.trustedProxy),
+        config.discovery.maxRoots
       ),
       telemetry.tracer
     )

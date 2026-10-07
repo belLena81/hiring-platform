@@ -1,5 +1,12 @@
 # Hiring Management Platform
 
+## Retrieval and publication reliability checkpoint
+
+The current remediation is tracked in [hiring retrieval and publication reliability](docs/specs/hiring-retrieval-publication-reliability.md). Discovery uses a shared four-permit process budget, four costly roots per GraphQL request and a 2000 ms MongoDB query deadline. Search branches return bounded retrieval hits; current authorized documents are hydrated once. Embedding workers renew leases, reschedule revision-conflicted work without charging provider failures and expose recovery health.
+
+Operational storage cutovers require stopping incompatible application and analytics writers. New migrations preserve producer attribution in separate bounded records and establish strict workflow validators. They do not authorize a data reset. Local implementation and test evidence do not establish Atlas performance, relevance, real-provider acceptance or deployed phase completion.
+
+
 Backend-only hiring management platform built with **Scala 3, Sangria GraphQL, Cats Effect, and MongoDB**.
 
 A practical playground for functional Scala, GraphQL API design, MongoDB data modeling/query optimization, and AI-powered semantic search & candidate/job matching via MongoDB Vector Search.

@@ -57,6 +57,9 @@ enum ConfigError(val key: String) {
   case InvalidKafkaPollInterval extends ConfigError("KAFKA_POLL_INTERVAL_MS")
   case InvalidKafkaReceiptTtl extends ConfigError("KAFKA_RECEIPT_TTL_DAYS")
   case InvalidKafkaQuarantineTtl extends ConfigError("KAFKA_QUARANTINE_TTL_DAYS")
+  case InvalidKafkaPartitionConcurrency extends ConfigError("KAFKA_PARTITION_CONCURRENCY")
+  case InvalidDiscoveryQueryLimits extends ConfigError("DISCOVERY_QUERY_LIMITS")
+  case InvalidEmbeddingRecovery extends ConfigError("EMBEDDING_RECOVERY")
   case InvalidKafkaCredentials extends ConfigError("KAFKA_CREDENTIALS")
   case InvalidKafkaSaslSecurityProtocol extends ConfigError("KAFKA_SASL_SECURITY_PROTOCOL")
 }
@@ -112,6 +115,9 @@ object ConfigError {
     InvalidKafkaPollInterval,
     InvalidKafkaReceiptTtl,
     InvalidKafkaQuarantineTtl,
+    InvalidKafkaPartitionConcurrency,
+    InvalidDiscoveryQueryLimits,
+    InvalidEmbeddingRecovery,
     InvalidKafkaCredentials,
     InvalidKafkaSaslSecurityProtocol
   ).map(_.key).toSet
@@ -143,7 +149,11 @@ final case class VectorSearchConfig(
     indexReadyTimeoutMillis: Int,
     indexPollIntervalMillis: Int,
     numCandidates: Int,
-    branchResultLimit: Int
+    branchResultLimit: Int,
+    durableRetryAttempts: Int = 8,
+    durableRetryBaseMillis: Int = 1000,
+    durableRetryCapMillis: Int = 300000,
+    workerRestartDelayMillis: Int = 1000
 )
 
 final case class JwtAuthConfig(
@@ -171,7 +181,8 @@ final case class KafkaConsumerConfig(
     receiptTtlDays: Int,
     quarantineTtlDays: Int,
     saslUsername: Option[String] = None,
-    saslPassword: Option[String] = None
+    saslPassword: Option[String] = None,
+    partitionConcurrency: Int = 4
 )
 final case class KafkaConfig(
     enabled: Boolean,
@@ -230,5 +241,10 @@ final case class InterviewRuntimeConfig(
     replayRetentionSeconds: Long = 604800L,
     completedDedupRetentionSeconds: Long = 691200L,
     fencerUsername: Option[String] = None,
-    fencerPassword: Option[String] = None
+    fencerPassword: Option[String] = None,
+    publicationBatchSize: Int = 16,
+    clockSkewToleranceMillis: Int = 5000,
+    partitionConcurrency: Int = 4
 )
+
+final case class DiscoveryConfig(maxTimeMillis: Int = 2000, permits: Int = 4, maxRoots: Int = 4)

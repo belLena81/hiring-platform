@@ -10,6 +10,18 @@ import org.bson.codecs.{Codec, DecoderContext, EncoderContext}
 import java.time.Instant
 
 final class AnalyticsMongoRecordsSpec extends FunSuite {
+  test("migration proof rejects BSON int versions and preserves long versions") {
+    val codec = AnalyticsMongoRecords.migrationEntryRegistry.get(classOf[AnalyticsMongoRecords.MigrationEntry])
+    val marker = new BsonDocument("_id", new org.bson.BsonString("012_attributable_producer_registrations"))
+      .append("state", new org.bson.BsonString("Complete"))
+      .append("version", new org.bson.BsonInt32(1))
+    intercept[mongo4cats.errors.MongoJsonParsingException] {
+      codec.decode(new BsonDocumentReader(marker), DecoderContext.builder().build())
+    }
+    marker.put("version", new org.bson.BsonInt64(1L))
+    assertEquals(codec.decode(new BsonDocumentReader(marker), DecoderContext.builder().build()).version, Some(1L))
+  }
+
   private def roundTrip[A](codec: Codec[A], value: A): (A, BsonDocument) = {
     val bson = new BsonDocument()
     codec.encode(

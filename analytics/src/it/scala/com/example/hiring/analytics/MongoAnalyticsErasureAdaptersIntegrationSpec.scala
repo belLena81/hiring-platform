@@ -150,8 +150,18 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
           new Document("_id", requestId)
             .append("state", "Pending")
             .append("fencingVersion", 1)
-            .append("transactionalIds", java.util.List.of("hiring-publisher-test"))
+            .append("producerRegistry", true)
             .append("requestedAt", Date.from(requestedAt))
+        )
+      database
+        .getCollection("producer_registrations")
+        .insertOne(
+          new Document("_id", s"$requestId:hiring-publisher-test")
+            .append("subjectId", requestId)
+            .append("transactionalId", "hiring-publisher-test")
+            .append("kind", "Operational")
+            .append("state", "Active")
+            .append("registeredAt", Date.from(requestedAt))
         )
       val store =
         AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, databaseName))
@@ -338,6 +348,45 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
     }
   }
 
+  test("erasure preflight rejects an int registry proof and recovers after restoring its long version") {
+    val container = replicaSet()
+    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val client = syncClient(uri)
+    val name = s"registry_proof_${UUID.randomUUID()}"
+    try {
+      val database = client.getDatabase(name)
+      List(
+        AnalyticsCollections.ErasureRequests,
+        AnalyticsCollections.ErasureCompletions,
+        AnalyticsCollections.ErasureHeartbeats,
+        AnalyticsCollections.ReportSnapshots,
+        AnalyticsCollections.ReportControl,
+        AnalyticsCollections.ReportRuns,
+        AnalyticsCollections.EventOutbox,
+        AnalyticsCollections.OutboxSubjectFences,
+        AnalyticsCollections.Users,
+        "producer_registrations"
+      ).foreach(database.createCollection)
+      val ledger = database.getCollection("hiring_migration_ledger")
+      ledger.insertOne(new Document("_id", "003_event_outbox_subject_references").append("state", "Complete"))
+      ledger.insertOne(
+        new Document("_id", "012_attributable_producer_registrations")
+          .append("state", "Complete")
+          .append("version", Int.box(1))
+      )
+      val stores = AnalyticsErasureWorkerTestSupport.stores(mongo4catsClient(client), mongo4catsDatabase(client, name))
+      assert(stores.queue.preflight.attempt.unsafeRunSync().isLeft, "BSON int proof must fail closed")
+      ledger.updateOne(
+        new Document("_id", "012_attributable_producer_registrations"),
+        new Document("$set", new Document("version", Long.box(1L)))
+      )
+      assert(stores.queue.preflight.attempt.unsafeRunSync().isRight, "restored BSON long proof must recover")
+    } finally {
+      client.close()
+      container.stop()
+    }
+  }
+
   test("erasure processing restarts from the durable Delta checkpoint and publishes completion") {
     val container = replicaSet()
     val connectionString =
@@ -372,7 +421,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
           new Document("_id", requestId)
             .append("state", "Pending")
             .append("fencingVersion", 1)
-            .append("transactionalIds", java.util.Collections.emptyList[String]())
+            .append("producerRegistry", true)
             .append("requestedAt", Date.from(startedAt))
             .append("receiptId", receiptId)
         )
@@ -390,6 +439,14 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         .getCollection("hiring_migration_ledger")
         .insertOne(
           new Document("_id", "003_event_outbox_subject_references").append("state", "Complete")
+        )
+      database.createCollection("producer_registrations")
+      database
+        .getCollection("hiring_migration_ledger")
+        .insertOne(
+          new Document("_id", "012_attributable_producer_registrations")
+            .append("state", "Complete")
+            .append("version", Long.box(1L))
         )
       database
         .getCollection("analytics_report_control")
@@ -578,8 +635,18 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
           new Document("_id", requestId)
             .append("state", "Pending")
             .append("fencingVersion", 1)
-            .append("transactionalIds", java.util.List.of(transactionalId))
+            .append("producerRegistry", true)
             .append("requestedAt", Date.from(now))
+        )
+      database
+        .getCollection("producer_registrations")
+        .insertOne(
+          new Document("_id", s"$requestId:$transactionalId")
+            .append("subjectId", requestId)
+            .append("transactionalId", transactionalId)
+            .append("kind", "Operational")
+            .append("state", "Active")
+            .append("registeredAt", Date.from(now))
         )
       database
         .getCollection("event_outbox")
@@ -680,7 +747,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         new Document("_id", requestId)
           .append("state", "Pending")
           .append("fencingVersion", 1)
-          .append("transactionalIds", java.util.List.of())
+          .append("producerRegistry", true)
           .append("requestedAt", Date.from(now))
       )
       val store =
@@ -758,7 +825,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         new Document("_id", requestId)
           .append("state", "Pending")
           .append("fencingVersion", 1)
-          .append("transactionalIds", java.util.List.of[String]())
+          .append("producerRegistry", true)
           .append("requestedAt", Date.from(now))
       )
       val staleStore =
@@ -832,7 +899,7 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
         new Document("_id", requestId)
           .append("state", "Pending")
           .append("fencingVersion", 1)
-          .append("transactionalIds", java.util.List.of())
+          .append("producerRegistry", true)
           .append("requestedAt", Date.from(now))
           .append("phase", phase.persistedName)
           .append("progress", progress)

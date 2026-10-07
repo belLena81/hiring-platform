@@ -13,12 +13,15 @@ private[config] object KafkaConfigValidation {
         kafka.consumer.saslUsername,
         kafka.consumer.saslPassword
       ),
+      ConfigBounds.bounded(1, 64, ConfigError.InvalidKafkaPartitionConcurrency)(
+        kafka.consumer.partitionConcurrency.getOrElse(4)
+      ),
       validInterview(
         kafka.interview.getOrElse(RawInterviewRuntimeConfig()),
         kafka.enabled,
         List(kafka.publisher.saslUsername, kafka.consumer.saslUsername).flatten
       )
-    ).mapN { (saslSecurityProtocol, _, _, interview) =>
+    ).mapN { (saslSecurityProtocol, _, _, _, interview) =>
       KafkaConfig(
         kafka.enabled,
         kafka.bootstrapServers,
@@ -39,7 +42,8 @@ private[config] object KafkaConfigValidation {
           kafka.consumer.receiptTtlDays,
           kafka.consumer.quarantineTtlDays,
           kafka.consumer.saslUsername,
-          kafka.consumer.saslPassword
+          kafka.consumer.saslPassword,
+          kafka.consumer.partitionConcurrency.getOrElse(4)
         ),
         saslSecurityProtocol,
         interview
@@ -57,7 +61,14 @@ private[config] object KafkaConfigValidation {
       validKafkaCredentials(raw.enabled, raw.fencerUsername, raw.fencerPassword),
       Either
         .cond(
-          raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
+          raw.publicationBatchSize.getOrElse(16) >= 1 && raw.publicationBatchSize.getOrElse(
+            16
+          ) <= 64 && raw.clockSkewToleranceMillis.getOrElse(5000) >= 0 && raw.clockSkewToleranceMillis.getOrElse(
+            5000
+          ) <= 60000 &&
+            raw.partitionConcurrency.getOrElse(4) >= 1 && raw.partitionConcurrency.getOrElse(
+              4
+            ) <= 64 && raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
             raw.retryCapSeconds >= raw.retryBaseSeconds && raw.retryCapSeconds <= 300 &&
             raw.providerTimeoutSeconds >= 1 && raw.providerTimeoutSeconds.toLong + 30L < raw.claimSeconds.toLong &&
             raw.claimSeconds <= 3600 && raw.preCommitDeadlineSeconds >= 1 && raw.preCommitDeadlineSeconds <= 300 && raw.replayRetentionSeconds == 604800L &&
@@ -88,7 +99,10 @@ private[config] object KafkaConfigValidation {
         raw.replayRetentionSeconds,
         raw.completedDedupRetentionSeconds,
         raw.fencerUsername,
-        raw.fencerPassword
+        raw.fencerPassword,
+        raw.publicationBatchSize.getOrElse(16),
+        raw.clockSkewToleranceMillis.getOrElse(5000),
+        raw.partitionConcurrency.getOrElse(4)
       )
     }
 

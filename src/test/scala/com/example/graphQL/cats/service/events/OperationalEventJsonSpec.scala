@@ -24,6 +24,10 @@ class OperationalEventJsonSpec extends FunSuite {
     )
   )
 
+  test("Kafka tombstones return a malformed outcome") {
+    assertEquals(OperationalEventJson.decode(null: Array[Byte]), Left("MalformedEnvelope"))
+  }
+
   test("derived codec preserves the unversioned envelope wire shape and round-trips") {
     assertEquals(
       OperationalEventJson.json(envelope),

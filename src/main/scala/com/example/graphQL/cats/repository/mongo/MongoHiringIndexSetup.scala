@@ -23,6 +23,21 @@ private[mongo] object MongoHiringIndexSetup {
 
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
+      MongoProducerRegistrations.Collection,
+      Indexes.ascending("subjectId", "kind", "state", "_id"),
+      new IndexOptions().name("producer_registration_subject_state")
+    ),
+    IndexSpec(
+      MongoProducerRegistrations.Collection,
+      Indexes.ascending("transactionalId", "state", "_id"),
+      new IndexOptions().name("producer_registration_generation_state")
+    ),
+    IndexSpec(
+      MongoProducerRegistrations.Collection,
+      Indexes.ascending("expiresAt"),
+      new IndexOptions().name("producer_registration_fenced_expiry").expireAfter(0L, TimeUnit.SECONDS)
+    ),
+    IndexSpec(
       MongoCollections.InterviewSubjectCleanup,
       Indexes.ascending("state", "requestedAt"),
       new IndexOptions().name("interview_subject_cleanup_due")

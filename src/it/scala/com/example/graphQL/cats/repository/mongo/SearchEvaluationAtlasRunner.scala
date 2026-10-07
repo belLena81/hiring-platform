@@ -22,7 +22,8 @@ import scala.util.Random
 
 /** Creates a synthetic disposable Atlas collection, captures paired ANN/ENN runs, and drops it. */
 object SearchEvaluationAtlasRunner extends IOApp {
-  private val MaxNumCandidates = 1000
+  private val MaxNumCandidates = 10000
+  private val ExplainTimeoutMillis = 30000
   private final case class Settings(
       uri: String,
       database: String,
@@ -31,6 +32,9 @@ object SearchEvaluationAtlasRunner extends IOApp {
       queryCount: Int,
       dimensions: Int,
       numCandidates: Int,
+      branchLimit: Int,
+      storedSource: Boolean,
+      quantization: Option[String],
       pageSize: Int,
       concurrency: Int,
       temperature: String,
@@ -75,6 +79,14 @@ object SearchEvaluationAtlasRunner extends IOApp {
       queries <- int("queries", 20)
       dimensions <- int("dimensions", 1024)
       candidates <- int("num-candidates", 100)
+      branchLimit <- int("branch-limit", 100)
+      storedSource <- values
+        .get("stored-source")
+        .fold[Either[String, Boolean]](Right(false))(_.toBooleanOption.toRight("Invalid --stored-source"))
+      quantization <- values
+        .get("quantization")
+        .filter(_ != "none")
+        .traverse(value => Either.cond(value == "scalar", value, "--quantization must be none or scalar"))
       pageSize <- int("page-size", 7)
       concurrency <- int("concurrency", 1)
       temperature = values.getOrElse("temperature", "cold")
@@ -88,9 +100,9 @@ object SearchEvaluationAtlasRunner extends IOApp {
         s"--page-size must be between ${PageSize.Min} and ${PageSize.Max}"
       )
       _ <- Either.cond(
-        candidates >= pageSize && candidates <= MaxNumCandidates,
+        branchLimit >= pageSize && branchLimit <= PageSize.Max && candidates >= branchLimit && candidates <= MaxNumCandidates,
         (),
-        s"--num-candidates must cover page size and be at most $MaxNumCandidates"
+        s"--num-candidates must cover branch limit (page size <= branch limit <= 100) and be at most $MaxNumCandidates"
       )
       _ <- Either.cond(Set(1, 8).contains(concurrency), (), "--concurrency must be 1 or 8")
       _ <- Either.cond(Set("cold", "warm").contains(temperature), (), "--temperature must be cold or warm")
@@ -112,6 +124,9 @@ object SearchEvaluationAtlasRunner extends IOApp {
       queries,
       dimensions,
       candidates,
+      branchLimit,
+      storedSource,
+      quantization,
       pageSize,
       concurrency,
       temperature,
@@ -134,17 +149,22 @@ object SearchEvaluationAtlasRunner extends IOApp {
           database.getCollection[CatsDocument](collectionName, CodecRegistry.Default).map(_.as[Document]).flatMap {
             collection =>
               val indexName = "synthetic_vector"
+              val vectorField = new Document("type", "vector")
+                .append("path", "embedding")
+                .append("numDimensions", Int.box(settings.dimensions))
+                .append("similarity", "cosine")
+              settings.quantization.foreach(value => vectorField.append("quantization", value))
               val indexDefinition = new Document(
                 "fields",
                 List(
-                  new Document("type", "vector")
-                    .append("path", "embedding")
-                    .append("numDimensions", Int.box(settings.dimensions))
-                    .append("similarity", "cosine"),
+                  vectorField,
                   new Document("type", "filter").append("path", "category")
                 ).asJava
               )
 
+              if (settings.storedSource) {
+                val _ = indexDefinition.append("storedSource", new Document("include", List("_id", "category").asJava))
+              }
               Resource
                 .make(
                   database.createCollection(collectionName).as(collection)
@@ -182,6 +202,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
                       .map(_.getAs[Long]("totalIndexSize"))
                       .handleError(_ => None)
                     _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
+                    _ <- captureExplain(database, collectionName, settings)
                   } yield ()
                 }
           }
@@ -266,6 +287,55 @@ object SearchEvaluationAtlasRunner extends IOApp {
       ids => TimedRanking(ids, (ended - started).toNanos.toDouble / 1000000.0, None)
     )
 
+  private def captureExplain(database: MongoDatabase[IO], collectionName: String, settings: Settings): IO[Unit] = {
+    val vector = syntheticVector(settings.seed ^ 1L, settings.dimensions, 1, 1)
+    List(false, true).traverse_ { exact =>
+      val pipeline = retrievalPipeline(settings, vector, Some(1), exact)
+      val aggregate = new Document("aggregate", collectionName)
+        .append("pipeline", pipeline.asJava)
+        .append("cursor", new Document())
+        .append("maxTimeMS", Int.box(ExplainTimeoutMillis))
+      MongoAccessEvaluationSupport
+        .command(database, new Document("explain", aggregate).append("verbosity", "executionStats"))
+        .attempt
+        .flatMap { result =>
+          val json = result.fold(
+            error =>
+              io.circe.Json.obj(
+                "status" -> io.circe.Json.fromString("Unavailable"),
+                "errorType" -> io.circe.Json.fromString(error.getClass.getSimpleName)
+              ),
+            document => io.circe.parser.parse(document.toJson).getOrElse(io.circe.Json.Null)
+          )
+          IO.blocking {
+            val _ = Files.createDirectories(settings.outputDirectory)
+            val _ = Files.writeString(
+              settings.outputDirectory.resolve(s"vector-explain-${if (exact) "enn" else "ann"}.json"),
+              json.spaces2,
+              StandardCharsets.UTF_8
+            )
+          }
+        }
+    }
+  }
+
+  private def retrievalPipeline(
+      settings: Settings,
+      vector: List[Double],
+      category: Option[Int],
+      exact: Boolean
+  ): List[Document] = {
+    val vectorSearch = new Document("index", "synthetic_vector")
+      .append("path", "embedding")
+      .append("queryVector", vector.map(java.lang.Double.valueOf).asJava)
+      .append("limit", Int.box(settings.branchLimit))
+    category.foreach(value => vectorSearch.append("filter", new Document("category", Int.box(value))))
+    if (settings.storedSource) { val _ = vectorSearch.append("returnStoredSource", java.lang.Boolean.TRUE) }
+    if (exact) vectorSearch.append("exact", java.lang.Boolean.TRUE)
+    else vectorSearch.append("numCandidates", Int.box(settings.numCandidates))
+    List(new Document("$vectorSearch", vectorSearch), new Document("$project", new Document("_id", 1)))
+  }
+
   private def retrieve(
       collection: MongoCollection[IO, Document],
       settings: Settings,
@@ -273,22 +343,12 @@ object SearchEvaluationAtlasRunner extends IOApp {
       category: Option[Int],
       exact: Boolean
   ): IO[List[String]] = {
-    val vectorSearch = new Document("index", "synthetic_vector")
-      .append("path", "embedding")
-      .append("queryVector", vector.map(java.lang.Double.valueOf).asJava)
-      .append("limit", Int.box(settings.pageSize))
-    category.foreach(value => vectorSearch.append("filter", new Document("category", Int.box(value))))
-    if (exact) vectorSearch.append("exact", java.lang.Boolean.TRUE)
-    else vectorSearch.append("numCandidates", Int.box(settings.numCandidates))
-    val pipeline = List(
-      new Document("$vectorSearch", vectorSearch),
-      new Document("$project", new Document("_id", 1))
-    )
-    collection.aggregate[Document](pipeline).stream.take(settings.pageSize.toLong + 1L).compile.toList.flatMap {
+    val pipeline = retrievalPipeline(settings, vector, category, exact)
+    collection.aggregate[Document](pipeline).stream.take(settings.branchLimit.toLong + 1L).compile.toList.flatMap {
       results =>
-        if (results.size > settings.pageSize)
-          IO.raiseError(new IllegalStateException(s"Atlas search result exceeded page size ${settings.pageSize}"))
-        else IO.pure(results.map(_.getString("_id")))
+        if (results.size > settings.branchLimit)
+          IO.raiseError(new IllegalStateException(s"Atlas search result exceeded branch limit ${settings.branchLimit}"))
+        else IO.pure(results.map(_.getString("_id")).distinct.take(settings.pageSize))
     }
   }
 
@@ -353,9 +413,9 @@ object SearchEvaluationAtlasRunner extends IOApp {
           SearchEvaluationRankingOrigin.ObservedAtlas,
           "deterministic-synthetic",
           settings.dimensions,
-          s"synthetic-vector-cosine-dimensions-${settings.dimensions}-category",
+          s"synthetic-vector-cosine-dimensions-${settings.dimensions}-category-storedSource-${settings.storedSource}-quantization-${settings.quantization.getOrElse("none")}",
           settings.numCandidates,
-          settings.numCandidates,
+          settings.branchLimit,
           settings.pageSize,
           "captured Atlas branch order"
         ),

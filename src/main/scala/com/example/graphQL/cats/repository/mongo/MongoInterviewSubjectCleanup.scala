@@ -41,14 +41,7 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
   /** Called within account deletion after its permanent subject fence is marked deleted. */
   def enqueue(subject: UserId, now: Instant, session: Option[ClientSession[IO]]): RepositoryIO[Unit] =
     for {
-      fence <- RepositoryIO.lift(
-        MongoSessionOperations.findOne(
-          Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences),
-          session,
-          MongoFilter.eq(MongoFields.Id, subject.value.toString)
-        )
-      )
-      ids <- RepositoryIO.fromEither(producerIds(fence))
+      ids <- MongoProducerRegistrations.batch(database, subject.value.toString, "Interview")
       attributable <- hasAttributableData(subject, session)
       _ <-
         if (!attributable && ids.isEmpty) RepositoryIO.fromEither(Right(()))
@@ -61,9 +54,10 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
                 MongoFilter.eq(MongoFields.Id, subject.value.toString),
                 MongoUpdate.combine(
                   MongoUpdate.setOnInsert("state", "Pending"),
+                  MongoUpdate.setOnInsert("producerRegistry", true),
                   MongoUpdate.setOnInsert("revision", Long.box(0L)),
                   MongoUpdate.setOnInsert("requestedAt", Date.from(now)),
-                  MongoUpdate.setOnInsert(ProducerIdsField, ids.asJava)
+                  MongoUpdate.setOnInsert(ProducerIdsField, Vector.empty[String].asJava)
                 ),
                 new UpdateOptions().upsert(true)
               )
@@ -74,16 +68,14 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
             }
     } yield ()
 
-  private def producerIds(fence: Option[Document]): Either[RepositoryError, Vector[String]] = fence match {
-    case None                                                      => Right(Vector.empty)
-    case Some(document) if !document.containsKey(ProducerIdsField) => Right(Vector.empty)
-    case Some(document)                                            =>
-      MongoInterviewCleanupCodec
-        .stringVector(document, ProducerIdsField)
-        .flatMap(values =>
-          InterviewSubjectCleanup.validateProducerIds(values).leftMap(_ => RepositoryError.InvalidStoredData)
-        )
+  override def producerBatch(subject: UserId): RepositoryIO[Vector[String]] = guard("interviewCleanup.producerBatch") {
+    MongoProducerRegistrations.batch(database, subject.value.toString, "Interview")
   }
+
+  override def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryIO[Unit] =
+    guard("interviewCleanup.markProducersFenced") {
+      MongoProducerRegistrations.markFenced(database, subject.value.toString, "Interview", ids, now)
+    }
 
   private def hasAttributableData(subject: UserId, session: Option[ClientSession[IO]]): RepositoryIO[Boolean] =
     RepositoryIO
@@ -115,7 +107,7 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
   override def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]] = guard("interviewCleanup.find") {
     RepositoryIO
       .lift(MongoSessionOperations.findOne(queue, None, MongoFilter.eq(MongoFields.Id, subject.value.toString)))
-      .flatMap(_.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decode(row))))
+      .flatMap(_.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decodeCurrent(row))))
   }
 
   /** Malformed evidence cannot certify public deletion completion. */
@@ -167,7 +159,7 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
                   )
                   .map(_.flatten)
             RepositoryIO.fromEither(
-              next.map(token => InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decode), token))
+              next.map(token => InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent), token))
             )
           }
     }
@@ -335,6 +327,11 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
 
 private[mongo] object MongoInterviewCleanupCodec {
   private val ProducerIdsField = "interviewTransactionalIds"
+
+  def decodeCurrent(row: Document): Either[RepositoryError, InterviewSubjectCleanup] =
+    Either
+      .cond(Option(row.get("producerRegistry")).contains(java.lang.Boolean.TRUE), (), RepositoryError.InvalidStoredData)
+      .flatMap(_ => decode(row))
 
   def decode(row: Document): Either[RepositoryError, InterviewSubjectCleanup] = for {
     id <- string(row, MongoFields.Id).flatMap(value =>

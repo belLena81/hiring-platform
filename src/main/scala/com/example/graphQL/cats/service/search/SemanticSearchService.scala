@@ -206,7 +206,7 @@ final class SemanticSearchService(
   private def validateJobHits(
       actor: ActorContext,
       filter: JobSearchFilter,
-      hits: List[RankedJob],
+      hits: List[JobRetrievalHit],
       expectedActorEmbedding: Option[EntityEmbedding] = None
   ): UseCaseIO[List[RankedJob]] =
     resolveCurrentCandidate(actor).flatMap { currentActor =>
@@ -226,7 +226,7 @@ final class SemanticSearchService(
           )
         )
         .flatMap { _ =>
-          val ids = hits.map(_.job.id).distinct
+          val ids = hits.map(_.id).distinct
           UseCase.fromEither(HiringReadScope.validated(actor, currentActor, authorization)).flatMap { scope =>
             searchRead(
               search.authorizedJobEligibility(
@@ -236,11 +236,20 @@ final class SemanticSearchService(
               )
             ).map { currentJobs =>
               val byId = currentJobs.iterator.map(value => value.job.id -> value).toMap
-              hits.flatMap { hit =>
+              hits.distinctBy(_.id).flatMap { hit =>
                 byId
-                  .get(hit.job.id)
+                  .get(hit.id)
                   .filter(value => SearchEligibilityPolicy.job(value, hit.meta, embeddingModel, filter))
-                  .map(value => hit.copy(job = value.job))
+                  .map(value =>
+                    RankedJob(
+                      value.job,
+                      hit.score,
+                      hit.mode,
+                      hit.meta,
+                      hit.searchId,
+                      retrievalScore = hit.retrievalScore
+                    )
+                  )
               }
             }
           }
@@ -252,7 +261,7 @@ final class SemanticSearchService(
       jobId: JobId,
       queryMeta: com.example.graphQL.cats.domain.model.EmbeddingMeta,
       filters: ValidatedCandidateMatchFilters,
-      hits: List[RankedCandidate]
+      hits: List[CandidateRetrievalHit]
   ): UseCaseIO[List[RankedCandidate]] =
     for {
       currentActor <- currentActor(actor)
@@ -285,16 +294,28 @@ final class SemanticSearchService(
         search.authorizedCandidateEligibility(
           scope,
           JobSearchEligibility.fromJob(currentJob),
-          hits.map(_.candidate.id).distinct
+          hits.map(_.id).distinct
         )
       )
     } yield {
       val byId = currentUsers.iterator.map(user => user.id -> user).toMap
-      hits.flatMap { hit =>
+      hits.distinctBy(_.id).flatMap { hit =>
         byId
-          .get(hit.candidate.id)
+          .get(hit.id)
           .filter(value => SearchEligibilityPolicy.candidate(value, hit.meta, embeddingModel, filters))
-          .map(_ => hit)
+          .flatMap(value =>
+            for {
+              profile <- value.profile
+              name <- value.name
+            } yield RankedCandidate(
+              CandidateSearchHit(value.id, name, profile.skills, profile.experienceSummary),
+              hit.score,
+              hit.mode,
+              hit.meta,
+              hit.searchId,
+              retrievalScore = hit.retrievalScore
+            )
+          )
       }
     }
 

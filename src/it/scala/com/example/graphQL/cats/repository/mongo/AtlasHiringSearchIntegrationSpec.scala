@@ -35,7 +35,12 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       )
     }
 
-  private def repository(db: MongoDatabase[IO], strategy: SearchFusionStrategy, rerank: Boolean = false) =
+  private def repository(
+      db: MongoDatabase[IO],
+      strategy: SearchFusionStrategy,
+      policy: DiscoveryQueryPolicy,
+      rerank: Boolean = false
+  ) =
     new MongoSemanticSearchRepository(
       db,
       indexes.jobVectorIndex,
@@ -46,7 +51,8 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
       100,
       strategy,
       rerank,
-      diagnostics = Diagnostics.noop
+      diagnostics = Diagnostics.noop,
+      discoveryPolicy = Some(policy)
     )
 
   private def fixture(db: MongoDatabase[IO]): IO[(Job, Set[UserId])] = {
@@ -136,18 +142,20 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     ValidatedCandidateMatchFilters.from(filters).fold(errors => fail(errors.toString), identity)
   )
 
-  private def live(body: MongoDatabase[IO] => IO[Unit]): IO[Unit] = IO.defer {
+  private def live(body: (MongoDatabase[IO], DiscoveryQueryPolicy) => IO[Unit]): IO[Unit] = IO.defer {
     assume(sys.env.contains("ATLAS_TEST_URI"), "BLOCKED: ATLAS_TEST_URI absent; live Atlas gate not executed")
-    database(sys.env("ATLAS_TEST_URI")).use(body)
+    database(sys.env("ATLAS_TEST_URI")).use(db =>
+      DiscoveryQueryPolicy.create(2.seconds, 4).flatMap(policy => body(db, policy))
+    )
   }
 
   private def observeClosureLag(repo: MongoSemanticSearchRepository, job: Job): IO[Unit] = {
     def poll(remaining: Int, observed: Boolean): IO[(Boolean, Boolean)] =
       repo.searchJobs(query(job, false)).value.flatMap {
         case Left(_) => IO.raiseError(new AssertionError("Atlas lag observation retrieval unavailable"))
-        case Right(hits) if !hits.exists(_.job.id == job.id) => IO.pure((observed, true))
-        case Right(_) if remaining > 0                       => IO.sleep(500.millis) *> poll(remaining - 1, true)
-        case Right(_)                                        => IO.pure((true, false))
+        case Right(hits) if !hits.exists(_.id == job.id) => IO.pure((observed, true))
+        case Right(_) if remaining > 0                   => IO.sleep(500.millis) *> poll(remaining - 1, true)
+        case Right(_)                                    => IO.pure((true, false))
       }
     for {
       started <- IO.monotonic
@@ -171,12 +179,17 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     } yield ()
   }
 
-  private def awaitIngestion(db: MongoDatabase[IO], job: Job, expected: Set[UserId]): IO[Unit] = {
-    val repo = repository(db, SearchFusionStrategy.ApplicationRrf)
+  private def awaitIngestion(
+      db: MongoDatabase[IO],
+      job: Job,
+      expected: Set[UserId],
+      policy: DiscoveryQueryPolicy
+  ): IO[Unit] = {
+    val repo = repository(db, SearchFusionStrategy.ApplicationRrf, policy)
     def poll(remaining: Int): IO[Unit] =
       (repo.candidateMatches(query(job, false)).value, repo.searchJobs(query(job, false)).value).tupled.flatMap {
         case (Right(candidates), Right(jobs))
-            if candidates.map(_.candidate.id).toSet == expected && jobs.map(_.job.id) == List(job.id) =>
+            if candidates.map(_.id).toSet == expected && jobs.map(_.id) == List(job.id) =>
           IO.unit
         case _ if remaining > 0 => IO.sleep(500.millis) *> poll(remaining - 1)
         case _                  =>
@@ -186,24 +199,24 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
   }
 
   test("production vector and application RRF branches enforce the consent truth table and current eligibility") {
-    live { db =>
+    live { (db, policy) =>
       for {
         seeded <- fixture(db)
         (job, expected) = seeded
         _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
-        repo = repository(db, SearchFusionStrategy.ApplicationRrf)
+        repo = repository(db, SearchFusionStrategy.ApplicationRrf, policy)
         // Poll only initial index ingestion. Mutation checks below do not wait for Atlas indexing.
-        _ <- awaitIngestion(db, seeded._1, seeded._2)
+        _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
         _ <- List(false, true).traverse_ { lexical =>
           def await(attempts: Int): IO[Unit] = repo.candidateMatches(query(job, lexical)).value.flatMap { result =>
             result match {
-              case Right(hits) if hits.map(_.candidate.id).toSet == expected =>
-                repo.candidateEligibility(hits.map(_.candidate.id)).value.map { current =>
+              case Right(hits) if hits.map(_.id).toSet == expected =>
+                repo.candidateEligibility(hits.map(_.id)).value.map { current =>
                   assertEquals(current.map(_.map(_.id).toSet), Right(expected))
                   assert(current.toOption.toList.flatten.forall(value => value.profile.forall(_.resumeRef.isEmpty)))
                 }
               case _ if attempts > 0 => IO.sleep(500.millis) *> await(attempts - 1)
-              case _                 => IO(assertEquals(result.map(_.map(_.candidate.id).toSet), Right(expected)))
+              case _                 => IO(assertEquals(result.map(_.map(_.id).toSet), Right(expected)))
             }
           }
           await(120)
@@ -240,7 +253,7 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
           .value
         _ = assertEquals(validated.map(_.map(_.candidate.id).toSet), Right(expected))
         hits <- repo.searchJobs(query(job, false)).value
-        _ = assertEquals(hits.map(_.map(_.job.id)), Right(List(job.id)))
+        _ = assertEquals(hits.map(_.map(_.id)), Right(List(job.id)))
         _ <- MongoAccessEvaluationSupport.command(
           db,
           new org.bson.Document("update", MongoCollections.Jobs).append(
@@ -276,29 +289,29 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
 
   List(SearchFusionStrategy.MongoRankFusion, SearchFusionStrategy.MongoScoreFusion).foreach { strategy =>
     test(s"explicit production $strategy capability gate") {
-      live { db =>
+      live { (db, policy) =>
         for {
           seeded <- fixture(db)
           _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
-          _ <- awaitIngestion(db, seeded._1, seeded._2)
-          result <- repository(db, strategy).candidateMatches(query(seeded._1, true)).value
+          _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
+          result <- repository(db, strategy, policy).candidateMatches(query(seeded._1, true)).value
           _ = assert(result.isRight, s"BLOCKED: $strategy unavailable on this deployment")
-          _ = assertEquals(result.map(_.map(_.candidate.id).toSet), Right(seeded._2))
+          _ = assertEquals(result.map(_.map(_.id).toSet), Right(seeded._2))
         } yield ()
       }
     }
   }
   test("explicit production native rerank capability gate") {
-    live { db =>
+    live { (db, policy) =>
       for {
         seeded <- fixture(db)
         _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
-        _ <- awaitIngestion(db, seeded._1, seeded._2)
-        result <- repository(db, SearchFusionStrategy.MongoRankFusion, rerank = true)
+        _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
+        result <- repository(db, SearchFusionStrategy.MongoRankFusion, policy, rerank = true)
           .candidateMatches(query(seeded._1, true))
           .value
         _ = assert(result.isRight, "BLOCKED: native reranking unavailable on this deployment")
-        _ = assertEquals(result.map(_.map(_.candidate.id).toSet), Right(seeded._2))
+        _ = assertEquals(result.map(_.map(_.id).toSet), Right(seeded._2))
       } yield ()
     }
   }

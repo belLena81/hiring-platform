@@ -12,7 +12,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLTypes.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLDsl.{ioField, resultField}
 import com.example.graphQL.cats.domain.model.ApplicationStatus
-import sangria.execution.QueryReducer
+import sangria.execution.{QueryReducer, ExecutionPath}
+import sangria.ast
 import sangria.execution.deferred.DeferredResolver
 import sangria.schema.*
 
@@ -21,7 +22,37 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   private val MaxQueryComplexity = 1000d
   private val connectionComplexity: (RequestContext, Args, Double) => Double =
     (_, args, child) => 1d + args.arg(firstArgument) * child
+  private val expensivePageComplexity: (RequestContext, Args, Double) => Double =
+    (_, args, child) => 100d + args.arg(firstArgument) * (1d + child)
+  private val facetComplexity: (RequestContext, Args, Double) => Double =
+    (_, _, child) => 100d + child
+  private val expensiveRoots =
+    Set("nearbyJobs", "jobDiscoveryFacets", "semanticJobSearch", "recommendedJobs", "candidateMatches")
+  private val expensiveRootBudget = new QueryReducer[RequestContext, RequestContext] {
+    type Acc = Int
+    val initial = 0
+    def reduceAlternatives(values: Seq[Int]): Int = values.foldLeft(0)(math.max)
+    def reduceField[Val](
+        fieldAcc: Int,
+        childrenAcc: Int,
+        path: ExecutionPath,
+        context: RequestContext,
+        astFields: Vector[ast.Field],
+        parentType: ObjectType[RequestContext, Val],
+        field: Field[RequestContext, Val],
+        argumentValuesFn: QueryReducer.ArgumentValuesFn
+    ): Int =
+      fieldAcc + childrenAcc + (if (parentType.name == "Query" && expensiveRoots.contains(field.name)) 1 else 0)
+    def reduceScalar[T](path: ExecutionPath, context: RequestContext, tpe: ScalarType[T]): Int = 0
+    def reduceEnum[T](path: ExecutionPath, context: RequestContext, tpe: EnumType[T]): Int = 0
+    def reduceCtx(count: Int, context: RequestContext): ReduceAction[RequestContext, RequestContext] =
+      // Sangria reducers reject through the framework throwable boundary before any resolver starts.
+      if (count > context.discoveryMaxRoots)
+        throw context.effectAdapter.complexityRejected(context.discoveryMaxRoots.toDouble)
+      else context
+  }
   lazy val queryReducers: List[QueryReducer[RequestContext, ?]] = List(
+    expensiveRootBudget,
     QueryReducer.rejectMaxDepth[RequestContext](MaxQueryDepth),
     QueryReducer
       .rejectComplexQueries[RequestContext](
@@ -61,23 +92,32 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField(
         "nearbyJobs",
         nearbyJobsResultsType,
-        nearbyCenterArgument :: radiusKmArgument :: nearbyFilterArgument :: firstArgument :: afterArgument :: Nil
+        nearbyCenterArgument :: radiusKmArgument :: nearbyFilterArgument :: firstArgument :: afterArgument :: Nil,
+        complexity = Some(expensivePageComplexity)
       )(nearbyJobs),
       resultField(
         "jobDiscoveryFacets",
         jobDiscoveryFacetsType,
-        nearbyFilterArgument :: optionalNearbyCenterArgument :: optionalRadiusKmArgument :: Nil
+        nearbyFilterArgument :: optionalNearbyCenterArgument :: optionalRadiusKmArgument :: Nil,
+        complexity = Some(facetComplexity)
       )(jobDiscoveryFacets),
       resultField(
         "semanticJobSearch",
         rankedJobResultsType,
-        queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil
+        queryArgument :: jobFilterArgument :: firstArgument :: searchIdArgument :: Nil,
+        complexity = Some(expensivePageComplexity)
       )(semanticJobSearch),
-      resultField("recommendedJobs", rankedJobResultsType, firstArgument :: searchIdArgument :: Nil)(recommendedJobs),
+      resultField(
+        "recommendedJobs",
+        rankedJobResultsType,
+        firstArgument :: searchIdArgument :: Nil,
+        complexity = Some(expensivePageComplexity)
+      )(recommendedJobs),
       resultField(
         "candidateMatches",
         rankedCandidateResultsType,
-        jobIdArgument :: candidateSearchQueryArgument :: candidateMatchFilterArgument :: firstArgument :: searchIdArgument :: Nil
+        jobIdArgument :: candidateSearchQueryArgument :: candidateMatchFilterArgument :: firstArgument :: searchIdArgument :: Nil,
+        complexity = Some(expensivePageComplexity)
       )(candidateMatches),
       resultField("job", OptionType(jobType), idArgument :: Nil)(job(_).map(Some(_))),
       resultField(

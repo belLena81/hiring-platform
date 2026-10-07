@@ -87,7 +87,11 @@ object OperationalEventJson {
     json(value).noSpaces.getBytes(StandardCharsets.UTF_8)
 
   def decode(bytes: Array[Byte]): Either[String, OperationalEventEnvelope] =
-    parse(new String(bytes, StandardCharsets.UTF_8)).leftMap(_ => "MalformedEnvelope").flatMap(decode)
+    Option(bytes)
+      .toRight("MalformedEnvelope")
+      .flatMap(value =>
+        parse(new String(value, StandardCharsets.UTF_8)).leftMap(_ => "MalformedEnvelope").flatMap(decode)
+      )
 
   def decode(json: Json): Either[String, OperationalEventEnvelope] =
     for {

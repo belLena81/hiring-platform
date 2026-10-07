@@ -164,6 +164,8 @@ final class MongoUserRepository(
             MongoFilter.and(
               MongoFilter.eq(MongoFields.Id, observed.value.id.value.toString),
               MongoFilter.eq(MongoFields.Version, observed.version),
+              MongoFilter.eq(MongoFields.AccountStatus, AccountStatus.Active.toString),
+              MongoFilter.eq(MongoFields.Role, UserRole.Candidate.toString),
               MongoFilter.lt(MongoFields.Version, Long.MaxValue)
             ),
             MongoUpdate.combine(
@@ -442,6 +444,8 @@ final class MongoUserRepository(
       MongoUpdate.set(MongoFields.NameCanonical, AccountName.canonical(tombstone)),
       MongoUpdate.unset(MongoFields.PasswordHash),
       MongoUpdate.unset(MongoFields.Profile),
+      MongoUpdate.unset(MongoFields.Embedding),
+      MongoUpdate.unset(MongoFields.EmbeddingMeta),
       MongoUpdate.unset(MongoFields.RecruiterProfile),
       MongoUpdate.unset(MongoFields.Email),
       MongoUpdate.unset(MongoFields.EmailCanonical),

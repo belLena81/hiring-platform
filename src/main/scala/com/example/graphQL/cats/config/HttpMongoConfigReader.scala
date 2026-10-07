@@ -10,6 +10,16 @@ private[config] final case class RawHttpConfig(
     requestTimeoutMs: RequestTimeoutMs,
     trustedProxyCidrs: List[String]
 ) derives ConfigReader
-private[config] final case class RawMongoConfig(uri: String, database: String, resetOnStart: Option[Boolean])
-    derives ConfigReader
+private[config] final case class RawMongoConfig(
+    uri: String,
+    database: String,
+    resetOnStart: Option[Boolean],
+    discovery: Option[RawDiscoveryConfig] = None
+) derives ConfigReader
 private[config] final case class RawLoggingConfig(maskSensitive: Boolean) derives ConfigReader
+
+private[config] final case class RawDiscoveryConfig(
+    maxTimeMillis: Option[Int] = None,
+    permits: Option[Int] = None,
+    maxRoots: Option[Int] = None
+) derives ConfigReader

@@ -52,7 +52,8 @@ private[config] object AppConfigValidation {
           authSettings.rateLimit,
           vectorSettings,
           kafkaSettings,
-          mongo.resetOnStart.getOrElse(false)
+          mongo.resetOnStart.getOrElse(false),
+          transport.discovery
         )
       }
     }.toEither
@@ -80,11 +81,17 @@ private[config] object AppConfigValidation {
     Option(path).filter(_.nonEmpty).fold(key)(parent => s"$parent.$key")
 
   private def configErrorForPath(path: String): Option[ConfigError] = path match {
-    case "http.host"                              => Some(ConfigError.InvalidHost)
-    case "http.port"                              => Some(ConfigError.InvalidPort)
-    case "http.admission-permits"                 => Some(ConfigError.InvalidAdmissionPermits)
-    case "http.request-timeout-ms"                => Some(ConfigError.InvalidRequestTimeout)
-    case "mongo.uri"                              => Some(ConfigError.InvalidMongoUri)
+    case "http.host"               => Some(ConfigError.InvalidHost)
+    case "http.port"               => Some(ConfigError.InvalidPort)
+    case "http.admission-permits"  => Some(ConfigError.InvalidAdmissionPermits)
+    case "http.request-timeout-ms" => Some(ConfigError.InvalidRequestTimeout)
+    case "mongo.uri"               => Some(ConfigError.InvalidMongoUri)
+    case "mongo.discovery.max-time-millis" | "mongo.discovery.permits" | "mongo.discovery.max-roots" =>
+      Some(ConfigError.InvalidDiscoveryQueryLimits)
+    case "kafka.consumer.partition-concurrency" => Some(ConfigError.InvalidKafkaPartitionConcurrency)
+    case "vector-search.embedding.durable-retry-attempts" | "vector-search.embedding.durable-retry-base-millis" |
+        "vector-search.embedding.durable-retry-cap-millis" | "vector-search.embedding.worker-restart-delay-millis" =>
+      Some(ConfigError.InvalidEmbeddingRecovery)
     case "mongo.database"                         => Some(ConfigError.InvalidMongoDatabase)
     case "logging.mask-sensitive"                 => Some(ConfigError.InvalidMaskSensitive)
     case "auth.jwt.hs256-secret"                  => Some(ConfigError.InvalidJwtSecret)

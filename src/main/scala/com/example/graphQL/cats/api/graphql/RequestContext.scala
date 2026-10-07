@@ -56,7 +56,8 @@ final case class RequestContextParameters(
     diagnostics: Diagnostics,
     requestId: Option[String] = None,
     clientAddress: Option[IpAddress] = None,
-    rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(()))
+    rateLimit: AuthRateLimiter.Key => IO[Either[AuthRateLimiter.RateLimited, Unit]] = _ => IO.pure(Right(())),
+    discoveryMaxRoots: Int = 4
 )
 
 final class RequestContext private (
@@ -72,6 +73,8 @@ final class RequestContext private (
   private[graphql] def effectAdapter: HiringGraphQLSangriaAdapter = sangriaAdapter
 
   def hiring: HiringGraphQLServices = parameters.hiring
+
+  private[graphql] def discoveryMaxRoots: Int = parameters.discoveryMaxRoots
 
   def readiness: IO[ProbeResult] = readinessProbe
 

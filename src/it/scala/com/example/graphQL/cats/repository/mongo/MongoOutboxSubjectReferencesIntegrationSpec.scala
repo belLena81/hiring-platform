@@ -626,8 +626,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .insertOne(
                   new Document("_id", userId.value.toString)
                     .append("deleted", false)
-                    .append("transactionalIds", transactionalIds.asJava)
                 )
+            )
+            _ <- transactionalIds.traverse_(id =>
+              MongoProducerRegistrations
+                .register(database, None, userId.value.toString, id, "Operational", now)
+                .value
+                .flatMap(result => IO(assert(result.isRight)))
             )
             _ <- MongoRepositoryTestSupport.first(
               database
@@ -645,9 +650,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .getCollection(MongoCollections.AnalyticsErasureRequests)
                 .find(new Document("_id", userId.value.toString))
             )
-            storedIds = request.toList
-              .flatMap(document => document.getList("transactionalIds", classOf[String]).asScala.toList)
-            _ = assertEquals(storedIds, transactionalIds)
+            storedIds <- MongoProducerRegistrations.batch(database, userId.value.toString, "Operational").value
+            _ = assertEquals(storedIds.map(_.toList), Right(transactionalIds))
+            _ = assertEquals(request.map(_.getBoolean("producerRegistry").booleanValue()), Some(true))
             fencingVersion = request.flatMap(value => Option(value.getInteger("fencingVersion"))).map(_.intValue())
             _ = assertEquals(fencingVersion, Option(1))
           } yield ()
@@ -686,8 +691,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .getCollection(MongoCollections.OutboxSubjectFences)
                 .find(new Document("_id", actor.value.toString))
             )
-            storedIds = fence.toList.flatMap(_.getList("transactionalIds", classOf[String]).asScala.toList)
-            _ = assertEquals(storedIds, List(transactionalId))
+            storedIds <- MongoProducerRegistrations.batch(database, actor.value.toString, "Operational").value
+            _ = assertEquals(storedIds, Right(Vector(transactionalId)))
+            _ = assert(fence.forall(!_.containsKey("transactionalIds")))
           } yield ()
         }
       }
@@ -764,9 +770,11 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .getCollection(MongoCollections.OutboxSubjectFences)
                 .find(new Document("_id", userId.value.toString))
             )
-            generationsBeforeRace = fenceBeforeRace.toList
-              .flatMap(_.getList("transactionalIds", classOf[String]).asScala.toList)
-            _ = assertEquals(generationsBeforeRace, List(firstPublisher, secondPublisher))
+            generationsBeforeRace <- MongoProducerRegistrations
+              .batch(database, userId.value.toString, "Operational")
+              .value
+            _ = assertEquals(generationsBeforeRace.map(_.toList), Right(List(firstPublisher, secondPublisher).sorted))
+            _ = assert(fenceBeforeRace.forall(!_.containsKey("transactionalIds")))
             requestWritten <- Deferred[IO, Unit]
             allowDeletionToContinue <- Deferred[IO, Unit]
             deletionFiber <- runner
@@ -798,12 +806,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .getCollection(MongoCollections.AnalyticsErasureRequests)
                 .find(new Document("_id", userId.value.toString))
             )
-            _ = firstDeletion.foreach { _ =>
-              val captured = firstRequest.toList.flatMap(
-                _.getList("transactionalIds", classOf[String]).asScala.toList
-              )
-              assertEquals(captured, List(firstPublisher, secondPublisher, racingPublisher))
-            }
+            _ = firstDeletion
+              .foreach(_ => assertEquals(firstRequest.map(_.getBoolean("producerRegistry").booleanValue()), Some(true)))
             _ = assert(firstDeletion.isRight || firstRequest.isEmpty, clues(firstDeletion, firstRequest))
             finalDeletion <- firstDeletion match {
               case right @ Right(_) => IO.pure(right)
@@ -826,10 +830,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                 .getCollection(MongoCollections.AnalyticsErasureRequests)
                 .find(new Document("_id", userId.value.toString))
             )
-            capturedAfterDeletion = requestAfterDeletion.toList.flatMap(
-              _.getList("transactionalIds", classOf[String]).asScala.toList
+            capturedAfterDeletion <- MongoProducerRegistrations
+              .batch(database, userId.value.toString, "Operational")
+              .value
+            _ = assertEquals(
+              capturedAfterDeletion.map(_.toList),
+              Right(List(firstPublisher, secondPublisher, racingPublisher).sorted)
             )
-            _ = assertEquals(capturedAfterDeletion, List(firstPublisher, secondPublisher, racingPublisher))
             storedUser <- MongoRepositoryTestSupport.first(
               database.getCollection(MongoCollections.Users).find(new Document("_id", userId.value.toString))
             )

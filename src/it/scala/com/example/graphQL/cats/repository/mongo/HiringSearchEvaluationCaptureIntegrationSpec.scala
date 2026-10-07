@@ -48,26 +48,51 @@ class HiringSearchEvaluationCaptureIntegrationSpec extends munit.FunSuite {
     assertNotEquals(first, second)
   }
 
-  test("curated stale embeddings fail actual production job and candidate result mapping") {
+  test("curated stale retrieval metadata fails authoritative job and candidate eligibility") {
     def scored(document: Document): Document = new Document(document).append(MongoFields.Score, 1.0d)
     val jobs = HiringSearchEvaluationCorpus.jobs
     assertEquals(jobs.size, 8)
     jobs.foreach { job =>
-      val result = MongoSemanticSearchResult.rankedJob(scored(HiringSearchEvaluationCorpus.jobDocument(job)), query)
+      val result = MongoSemanticSearchResult.jobHit(scored(HiringSearchEvaluationCorpus.jobDocument(job)), query)
       if (job.id.value.toString == SearchEvaluationFixtures.jobId(8)) {
-        assertEquals(result, Right(None))
+        assertEquals(
+          result.map(
+            _.exists(hit =>
+              com.example.graphQL.cats.service.search.SearchEligibilityPolicy.job(
+                com.example.graphQL.cats.service.search.JobSearchEligibility.fromJob(job),
+                hit.meta,
+                query.model,
+                query.filter
+              )
+            )
+          ),
+          Right(false)
+        )
         assert(job.embedding.exists(_.meta.sourceHash != SourceHash.sha256(SearchableText.job(job))))
       } else assert(result.toOption.flatten.nonEmpty)
     }
     HiringSearchEvaluationCorpus.candidates.foreach { user =>
       val result =
-        MongoSemanticSearchResult.rankedCandidate(scored(HiringSearchEvaluationCorpus.candidateDocument(user)), query)
-      if (user.id.value.toString == SearchEvaluationFixtures.candidateId(8)) assertEquals(result, Right(None))
+        MongoSemanticSearchResult.candidateHit(scored(HiringSearchEvaluationCorpus.candidateDocument(user)), query)
+      if (user.id.value.toString == SearchEvaluationFixtures.candidateId(8))
+        assertEquals(
+          result.map(
+            _.exists(hit =>
+              com.example.graphQL.cats.service.search.SearchEligibilityPolicy.candidate(
+                com.example.graphQL.cats.service.search.CandidateSearchEligibility.fromUser(user),
+                hit.meta,
+                query.model,
+                com.example.graphQL.cats.service.search.ValidatedCandidateMatchFilters.empty
+              )
+            )
+          ),
+          Right(false)
+        )
       else assert(result.toOption.flatten.nonEmpty)
     }
     val wrongModel = query.copy(model = "unrelated-model")
     assertEquals(
-      MongoSemanticSearchResult.rankedJob(scored(HiringSearchEvaluationCorpus.jobDocument(jobs.head)), wrongModel),
+      MongoSemanticSearchResult.jobHit(scored(HiringSearchEvaluationCorpus.jobDocument(jobs.head)), wrongModel),
       Right(None)
     )
   }

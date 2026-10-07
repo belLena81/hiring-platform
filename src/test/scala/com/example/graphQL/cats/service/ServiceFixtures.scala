@@ -223,7 +223,8 @@ private[cats] object ServiceFixtures {
   final class InMemoryJobs(
       protected val ref: Ref[IO, Map[JobId, Job]],
       operationalEvents: Option[Ref[IO, Vector[OperationalEventEnvelope]]] = None,
-      relationLookup: Option[(HiringReadScope, List[JobRelationKey]) => IO[List[RelatedJob]]] = None
+      relationLookup: Option[(HiringReadScope, List[JobRelationKey]) => IO[List[RelatedJob]]] = None,
+      discoveryActors: Option[Ref[IO, Map[UserId, User]]] = None
   ) extends JobRepository
       with RefBackedLookup[JobId, Job] {
     override def relatedJobs(scope: HiringReadScope, keys: List[JobRelationKey]): RepositoryIO[List[RelatedJob]] =
@@ -263,45 +264,70 @@ private[cats] object ServiceFixtures {
           .map(Right(_))
       )
 
-    override def nearbyJobs(query: com.example.graphQL.cats.service.search.NearbyJobsQuery, limit: Int) =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map { all =>
-        def distance(point: com.example.graphQL.cats.domain.model.GeoPoint): Double = {
-          val lat1 = Math.toRadians(query.center.latitude)
-          val lat2 = Math.toRadians(point.latitude)
-          val dLat = lat2 - lat1
-          val dLon = Math.toRadians(point.longitude - query.center.longitude)
-          val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) *
-            Math.sin(dLon / 2) * Math.sin(dLon / 2)
-          6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-        }
-        val selected = all.values.toList
-          .flatMap { job =>
-            job.location.coordinates
-              .filter(point => distance(point) <= query.radiusKm)
-              .map(point => com.example.graphQL.cats.service.search.NearbyJob(job, distance(point)))
+    override def nearbyJobs(
+        scope: HiringReadScope,
+        query: com.example.graphQL.cats.service.search.NearbyJobsQuery,
+        limit: Int
+    ) =
+      requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map {
+        all =>
+          def distance(point: com.example.graphQL.cats.domain.model.GeoPoint): Double = {
+            val lat1 = Math.toRadians(query.center.latitude)
+            val lat2 = Math.toRadians(point.latitude)
+            val dLat = lat2 - lat1
+            val dLon = Math.toRadians(point.longitude - query.center.longitude)
+            val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1) * Math.cos(lat2) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2)
+            6371d * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
           }
-          .filter(value =>
-            value.job.status == JobStatus.Open && !value.job.location.remote &&
-              query.filter.city.forall(_ == value.job.location.city) && query.filter.skills
-                .subsetOf(value.job.skills) &&
-              query.filter.createdAfter.forall(!value.job.createdAt.isBefore(_))
-          )
-        Right(selected.sortBy(value => (value.distanceKm, value.job.id.value.toString)).take(limit))
+          val selected = all.values.toList
+            .flatMap { job =>
+              job.location.coordinates
+                .filter(point => distance(point) <= query.radiusKm)
+                .map(point => com.example.graphQL.cats.service.search.NearbyJob(job, distance(point)))
+            }
+            .filter(value =>
+              value.job.status == JobStatus.Open && !value.job.location.remote &&
+                query.filter.city.forall(_ == value.job.location.city) && query.filter.skills
+                  .subsetOf(value.job.skills) &&
+                query.filter.createdAfter.forall(!value.job.createdAt.isBefore(_))
+            )
+          Right(selected.sortBy(value => (value.distanceKm, value.job.id.value.toString)).take(limit))
       })
 
-    override def jobDiscoveryFacets(query: com.example.graphQL.cats.service.search.JobFacetQuery) =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map { all =>
-        val filter = query.filter
-        val eligible = all.values.toList.filter(job =>
-          job.status == JobStatus.Open && filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
-            job.skills
-          ) &&
-            filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>
-              job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
-            )
-        )
-        Right(com.example.graphQL.cats.service.search.JobDiscoveryFacets.fromJobs(eligible))
+    override def jobDiscoveryFacets(
+        scope: HiringReadScope,
+        query: com.example.graphQL.cats.service.search.JobFacetQuery
+    ) =
+      requireDiscoveryActor(scope) *> com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.get.map {
+        all =>
+          val filter = query.filter
+          val eligible = all.values.toList.filter(job =>
+            job.status == JobStatus.Open && filter.city.forall(_ == job.location.city) && filter.skills.subsetOf(
+              job.skills
+            ) &&
+              filter.createdAfter.forall(!job.createdAt.isBefore(_)) && query.radius.forall(radius =>
+                job.location.coordinates.exists(point => haversine(radius.center, point) <= radius.radiusKm)
+              )
+          )
+          Right(com.example.graphQL.cats.service.search.JobDiscoveryFacets.fromJobs(eligible))
       })
+
+    private def requireDiscoveryActor(scope: HiringReadScope): RepositoryIO[Unit] =
+      discoveryActors.fold(RepositoryIO.fromEither[Unit](Left(RepositoryError.AuthorityRevoked))) { users =>
+        RepositoryIO.fromIOEither(users.get.map { values =>
+          Either.cond(
+            values
+              .get(scope.userId)
+              .exists(user =>
+                user.role == scope.role && user.accountStatus == AccountStatus.Active &&
+                  (user.role == UserRole.Candidate || (user.role == UserRole.Admin && user.adminSingleton))
+              ),
+            (),
+            RepositoryError.AuthorityRevoked
+          )
+        })
+      }
 
     private def haversine(
         center: com.example.graphQL.cats.domain.model.GeoPoint,
@@ -400,7 +426,8 @@ private[cats] object ServiceFixtures {
     ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(ref.modify { jobs =>
       jobs.get(observed.value.id) match {
         case Some(current)
-            if observed.version == 0L && SearchableText.job(current) == SearchableText.job(observed.value) =>
+            if observed.version == 0L && current.updatedAt == observed.value.updatedAt &&
+              SearchableText.job(current) == SearchableText.job(observed.value) =>
           (jobs.updated(observed.value.id, current.copy(embedding = Some(embedding))), Right(()))
         case _ => (jobs, Left(RepositoryError.Conflict))
       }

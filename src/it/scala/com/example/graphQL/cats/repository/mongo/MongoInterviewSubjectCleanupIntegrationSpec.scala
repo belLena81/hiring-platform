@@ -74,6 +74,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
       .append("revision", Long.box(0L))
       .append("requestedAt", Date.from(at))
       .append("interviewTransactionalIds", java.util.List.of[String]())
+      .append("producerRegistry", true)
 
   test("cleanup visits a later subject while thirty-two older subjects await retention") {
     MongoAccessEvaluationSupport.resource.use { fixture =>
@@ -608,10 +609,16 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
           MongoCollections.OutboxSubjectFences,
           new Document("_id", subject.value.toString)
             .append("deleted", true)
-            .append("interviewTransactionalIds", java.util.List.of(generation))
-            .append("transactionalIds", java.util.List.of(unrelated))
         )
+        _ <- MongoProducerRegistrations
+          .register(fixture.database, None, subject.value.toString, generation, "Interview", Instant.now())
+          .value
+        _ <- MongoProducerRegistrations
+          .register(fixture.database, None, subject.value.toString, unrelated, "Operational", Instant.now())
+          .value
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
+        ids <- cleanup.producerBatch(subject).value
+        operational <- MongoProducerRegistrations.batch(fixture.database, subject.value.toString, "Operational").value
         current <- cleanup.find(subject).value
         complete <- cleanup.complete(subject)
         fence <- MongoRepositoryTestSupport.findOne(
@@ -620,10 +627,12 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
           Filters.eq("_id", subject.value.toString)
         )
       } yield {
-        assertEquals(current.toOption.flatten.map(_.transactionalIds), Some(Vector(generation)))
+        assertEquals(ids, Right(Vector(generation)))
+        assertEquals(current.toOption.flatten.map(_.transactionalIds), Some(Vector.empty))
         assertEquals(current.toOption.flatten.map(_.state), Some(InterviewCleanupState.Pending))
         assert(!complete)
-        assertEquals(fence.map(_.getList("transactionalIds", classOf[String])), Some(java.util.List.of(unrelated)))
+        assertEquals(operational, Right(Vector(unrelated)))
+        assert(fence.forall(!_.containsKey("transactionalIds")))
       }
     }
   }
@@ -708,7 +717,16 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewWorkflowCommands,
-          new Document("_id", s"$workflowId:command").append("workflowId", workflowId)
+          new Document("_id", s"$workflowId:command")
+            .append("workflowId", workflowId)
+            .append("stepId", "command")
+            .append("revision", Long.box(0L))
+            .append("attempts", Int.box(0))
+            .append("executionAttempts", Int.box(0))
+            .append("commandState", "Pending")
+            .append("availableAt", java.util.Date.from(Instant.now()))
+            .append("occurredAt", java.util.Date.from(Instant.now()))
+            .append("command", new Document("kind", "requireRepair").append("reason", "Orphan command cleanup"))
         )
         _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
         absentBefore <- cleanup.absent(subject).value
@@ -734,7 +752,20 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)
-        _ <- ledger.deleteMany(Filters.eq("_id", MongoInterviewCleanupMigrations.MigrationId))
+        _ <- ledger.deleteMany(
+          Filters.in(
+            "_id",
+            MongoInterviewCleanupMigrations.MigrationId,
+            MongoProducerRegistrationMigrations.MigrationId
+          )
+        )
+        _ <- fixture.database
+          .runCommand(
+            new Document("collMod", MongoCollections.OutboxSubjectFences)
+              .append("validationLevel", "off"),
+            com.mongodb.ReadPreference.primary()
+          )
+          .void
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.OutboxSubjectFences,
@@ -752,14 +783,16 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
         )
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         reopened <- cleanup.find(subject).value
+        ids <- cleanup.producerBatch(subject).value
         _ <- step(cleanup)
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         resumed <- cleanup.find(subject).value
       } yield {
         assertEquals(reopened.toOption.flatten.map(_.state), Some(InterviewCleanupState.Pending))
-        assertEquals(reopened.toOption.flatten.map(_.transactionalIds), Some(Vector(generation)))
+        assertEquals(ids, Right(Vector(generation)))
+        assertEquals(reopened.toOption.flatten.map(_.transactionalIds), Some(Vector.empty))
         assertEquals(resumed.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
-        assertEquals(resumed.toOption.flatten.map(_.revision), Some(1L))
+        assertEquals(resumed.toOption.flatten.map(_.revision), Some(2L))
       }
     }
   }
@@ -795,6 +828,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
               new Document("_id", UUID.randomUUID().toString)
                 .append("requestedAt", at)
                 .append("interviewTransactionalIds", java.util.List.of[String]())
+                .append("producerRegistry", true)
                 .append("state", "Pending")
                 .append("revision", Long.box(0L))
             )
@@ -805,6 +839,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
           val row = new Document("_id", subject)
             .append("requestedAt", at)
             .append("interviewTransactionalIds", java.util.List.of[String]())
+            .append("producerRegistry", true)
           row.putAll(malformed)
           for {
             _ <- queue.insertOne(row)

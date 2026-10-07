@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
-import cats.effect.{IO, Ref, Resource}
+import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
 import com.example.graphQL.cats.service.Diagnostics
@@ -58,7 +58,8 @@ final case class InterviewKafkaConfig(
     username: String,
     password: String,
     protocol: KafkaSaslSecurityProtocol,
-    worker: Boolean
+    worker: Boolean,
+    partitionConcurrency: Int = 4
 )
 
 object InterviewKafkaRuntime {
@@ -118,35 +119,11 @@ object InterviewKafkaRuntime {
     }
   }
 
-  /** fs2-kafka installs its close finalizer after initTransactions; retain ownership until that succeeds. */
   private[kafka] def initializedProducer(
       settings: TransactionalProducerSettings[IO, String, Array[Byte]],
       factory: MkProducer[IO]
   ): Resource[IO, TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]]] =
-    Resource
-      .make(Ref.of[IO, Option[KafkaByteProducer]](None)) { pending =>
-        pending
-          .getAndSet(None)
-          .flatMap(
-            _.traverse_(producer =>
-              IO.blocking(
-                producer.close(java.time.Duration.ofMillis(settings.producerSettings.closeTimeout.toMillis))
-              )
-            )
-          )
-      }
-      .flatMap { pending =>
-        given MkProducer[IO] = new MkProducer[IO] {
-          def apply[G[_]](value: ProducerSettings[G, ?, ?]): IO[KafkaByteProducer] =
-            factory(value).flatTap(producer => pending.set(Some(producer)))
-        }
-        // Mask the finalizer handoff so cancellation cannot leave both owners responsible for closing.
-        Resource
-          .make(
-            TransactionalKafkaProducer.resource(settings).allocated.flatTap(_ => pending.set(None))
-          )(_._2)
-          .map(_._1)
-      }
+    GuardedTransactionalProducer.resource(settings, factory)
 
   /** Consumers have independent lifetimes so replacing a fenced producer does not reset their offset frontier. */
   def consumerResource(config: InterviewKafkaConfig, diagnostics: Diagnostics)(
@@ -163,7 +140,10 @@ object InterviewKafkaRuntime {
         .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
     ) { case (current, (key, value)) => current.withProperty(key, value) }
     val input = if (config.worker) InterviewMessageCodec.CommandsTopic else InterviewMessageCodec.ResultsTopic
-    val consumer = KafkaConsumer.stream(consumerSettings).subscribeTo(input).records.evalMap { message =>
+    val consumer = KafkaPartitionProcessing(
+      KafkaConsumer.stream(consumerSettings).subscribeTo(input).partitionedRecords,
+      config.partitionConcurrency
+    ) { message =>
       val parsed = InterviewMessageCodec
         .parse(message.record.value)
         .flatMap(value => Either.cond(value.workflowId.toString == message.record.key, value, "workflow key mismatch"))

@@ -16,7 +16,9 @@ final case class InterviewWorkerSettings(
     maxAttempts: Int,
     initialBackoff: FiniteDuration,
     maxBackoff: FiniteDuration,
-    replayWindow: FiniteDuration = 7.days
+    replayWindow: FiniteDuration = 7.days,
+    clockSkewTolerance: FiniteDuration = 5.seconds,
+    publicationBatchSize: Int = 16
 )
 
 /** Resource ownership makes shutdown cancel the publisher before transport and database release. */
@@ -28,6 +30,10 @@ final class InterviewWorkflowWorker(
     diagnostics: Diagnostics,
     currentTime: IO[java.time.Instant] = Clock[IO].realTimeInstant
 ) {
+  private enum PublicationOutcome {
+    case Published, LeaseLost, CoordinationUnavailable
+  }
+
   private def report(operation: String): IO[Unit] =
     diagnostics.emit(LogEvent.MongoRepositoryFailed, fields = Map(LogField.SpanName -> operation))
 
@@ -45,14 +51,21 @@ final class InterviewWorkflowWorker(
       } *> IO.sleep(settings.pollInterval)).foreverM.start)(_.cancel)
       .void
 
-  def publishDue(transport: InterviewTransport): IO[Unit] =
+  def publishDue(transport: InterviewTransport): IO[Unit] = {
+    def drain(remaining: Int): IO[Unit] =
+      if (remaining <= 0) IO.unit
+      else publishNext(transport).flatMap(more => if (more) drain(remaining - 1) else IO.unit)
+    drain(settings.publicationBatchSize)
+  }
+
+  private def publishNext(transport: InterviewTransport): IO[Boolean] =
     for {
       now <- currentTime
       claimed <- observe(
-        repository.claimDueCommands(settings.workerId, now, now.plusMillis(settings.claimLease.toMillis), 16),
+        repository.claimDueCommands(settings.workerId, now, now.plusMillis(settings.claimLease.toMillis), 1),
         "interviewWorkflow.claimPublication"
       )
-      _ <- claimed.toList.flatten.traverse_ { claim =>
+      results <- claimed.toList.flatten.traverse { claim =>
         observe(repository.findForAdmin(claim.record.workflowId), "interviewWorkflow.loadPublication").flatMap {
           case Some(Some(workflow)) =>
             val commandId = stableId(claim.record.stepId)
@@ -68,13 +81,13 @@ final class InterviewWorkflowWorker(
               claim.record.result.map(InterviewResult.fromCommandResult),
               claim.record.occurredAt
             )
-            def finish: IO[Unit] = currentTime.flatMap(at =>
+            def finish: IO[Boolean] = currentTime.flatMap(at =>
               observe(
                 repository.requireRepair(claim, at, "publication_exhausted"),
                 "interviewWorkflow.finishPublication"
-              ).void
+              ).as(false)
             )
-            if (claim.record.publicationAttempts > settings.maxAttempts) finish
+            if (claim.record.publicationAttempts >= settings.maxAttempts) finish
             else
               currentTime
                 .flatMap(checkedAt =>
@@ -91,36 +104,81 @@ final class InterviewWorkflowWorker(
                           "publication_coordination_unavailable"
                         ),
                         "interviewWorkflow.deferPublication"
-                      ).void
+                      ).as(false)
                     )
-                  case Left(_)      => report("interviewWorkflow.authorizePublication")
-                  case Right(false) => IO.unit
+                  case Left(_)      => report("interviewWorkflow.authorizePublication").as(false)
+                  case Right(false) => IO.pure(false)
                   case Right(true)  =>
-                    transport.publish(message).attempt.flatMap {
-                      case Right(_) =>
+                    publishWithLease(transport, message, claim).attempt.flatMap {
+                      case Right(PublicationOutcome.Published) =>
                         currentTime.flatMap(at =>
-                          observe(repository.markPublished(claim, at), "interviewWorkflow.markPublished").void
+                          observe(repository.markPublished(claim, at), "interviewWorkflow.markPublished")
+                            .map(_.isDefined)
                         )
-                      case Left(fenced: InterviewProducerGenerationFenced)                     => IO.raiseError(fenced)
-                      case Left(_) if claim.record.publicationAttempts >= settings.maxAttempts => finish
-                      case Left(_)                                                             =>
+                      case Right(PublicationOutcome.LeaseLost)               => IO.pure(false)
+                      case Right(PublicationOutcome.CoordinationUnavailable) =>
+                        currentTime.flatMap(at =>
+                          observe(
+                            repository.retry(
+                              claim,
+                              at,
+                              at.plusMillis(settings.initialBackoff.toMillis),
+                              "publication_coordination_unavailable"
+                            ),
+                            "interviewWorkflow.deferPublication"
+                          ).as(false)
+                        )
+                      case Left(fenced: InterviewProducerGenerationFenced) => IO.raiseError(fenced)
+                      case Left(_) if claim.record.publicationAttempts + 1 >= settings.maxAttempts => finish
+                      case Left(_)                                                                 =>
                         currentTime.flatMap { at =>
                           val delay = InterviewWorkflowPolicy.backoffMillis(
-                            claim.record.publicationAttempts,
+                            claim.record.publicationAttempts + 1,
                             settings.initialBackoff.toMillis,
                             settings.maxBackoff.toMillis
                           )
                           observe(
                             repository.retry(claim, at, at.plusMillis(delay), "publication_unavailable"),
                             "interviewWorkflow.retryPublication"
-                          ).void
+                          ).as(false)
                         }
                     }
                 }
-          case _ => IO.unit
+          case _ => IO.pure(false)
         }
       }
-    } yield ()
+    } yield results.contains(true)
+
+  private def publishWithLease(
+      transport: InterviewTransport,
+      message: InterviewMessage,
+      claim: ClaimedInterviewWorkflowCommand
+  ): IO[PublicationOutcome] = {
+    def renew: IO[Option[PublicationOutcome]] = currentTime.flatMap { now =>
+      repository.renewPublication(claim, now, now.plusMillis(settings.claimLease.toMillis)).value.map {
+        case Right(true)  => None
+        case Right(false) => Some(PublicationOutcome.LeaseLost)
+        case Left(_)      => Some(PublicationOutcome.CoordinationUnavailable)
+      }
+    }
+    val heartbeat = fs2.Stream
+      .awakeEvery[IO]((settings.claimLease / 3).max(1.millis))
+      .evalMap(_ => renew)
+      .unNone
+      .take(1)
+      .compile
+      .last
+      .map(_.getOrElse(PublicationOutcome.CoordinationUnavailable))
+    // Loading and authorization can consume most of the original claim lease.
+    renew.flatMap {
+      case Some(outcome) => IO.pure(outcome)
+      case None          =>
+        IO.defer(IO.race(transport.publish(message), heartbeat)).map {
+          case Left(_)        => PublicationOutcome.Published
+          case Right(outcome) => outcome
+        }
+    }
+  }
 
   private def quarantineMessage(message: InterviewMessage, reason: InterviewMessageRejection): IO[Boolean] =
     currentTime.flatMap(now =>
@@ -132,10 +190,11 @@ final class InterviewWorkflowWorker(
 
   private def withinReplayWindow(message: InterviewMessage)(process: IO[Boolean]): IO[Boolean] =
     currentTime.flatMap { now =>
-      InterviewMessagePolicy.replayDisposition(message, now, settings.replayWindow) match {
-        case InterviewReplayDisposition.Future  => quarantineMessage(message, InterviewMessageRejection.Future)
-        case InterviewReplayDisposition.Timely  => process
-        case InterviewReplayDisposition.Expired =>
+      InterviewMessagePolicy.replayDisposition(message, now, settings.replayWindow, settings.clockSkewTolerance) match {
+        case InterviewReplayDisposition.Deferred => IO.pure(false)
+        case InterviewReplayDisposition.Future   => repairFutureMessage(message, now)
+        case InterviewReplayDisposition.Timely   => process
+        case InterviewReplayDisposition.Expired  =>
           (for {
             workflow <- repository.findForAdmin(InterviewWorkflowId(message.workflowId))
             command <- repository.findCommand(InterviewWorkflowId(message.workflowId), message.stepId)
@@ -162,6 +221,26 @@ final class InterviewWorkflowWorker(
             case Left(_) => report("interviewWorkflow.receive").as(false)
           }
       }
+    }
+
+  private def repairFutureMessage(message: InterviewMessage, now: java.time.Instant): IO[Boolean] =
+    (for {
+      workflow <- repository.findForAdmin(InterviewWorkflowId(message.workflowId))
+      command <- repository.findCommand(InterviewWorkflowId(message.workflowId), message.stepId)
+    } yield (workflow, command)).value.flatMap {
+      case Left(_)                    => report("interviewWorkflow.futureReceipt").as(false)
+      case Right((workflow, command)) =>
+        InterviewMessagePolicy.futureDecision(workflow, command, message) match {
+          case Left(_) => quarantineMessage(message, InterviewMessageRejection.Future)
+          case Right(InterviewWorkflowDecision(next, commands)) =>
+            repository
+              .advance(next, next.revision - 1L, InterviewAdvanceCause.FutureMessage(message.messageId), commands, now)
+              .value
+              .flatMap {
+                case Right(InterviewWorkflowAdvanceResult.StaleRevision) | Left(_) => IO.pure(false)
+                case Right(_) => quarantineMessage(message, InterviewMessageRejection.Future)
+              }
+        }
     }
 
   def receiveCommand(message: InterviewMessage): IO[Boolean] = withinReplayWindow(message)(processCommand(message))

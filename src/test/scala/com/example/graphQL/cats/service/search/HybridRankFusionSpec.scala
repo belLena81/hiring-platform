@@ -115,4 +115,14 @@ final class HybridRankFusionSpec extends FunSuite {
       hits.take(2).map(_.candidate.id)
     )
   }
+  test("typed retrieval fusion deduplicates indexed identities before assigning each branch rank") {
+    val first = candidate(1).retrieval
+    val second = candidate(2).retrieval
+    val duplicated = HybridRankFusion.retrieval(List(List(first, first, second), List(second)), 2)(_.value.toString)
+    val distinct = HybridRankFusion.retrieval(List(List(first, second), List(second)), 2)(_.value.toString)
+    assertEquals(duplicated, distinct)
+    assertEquals(duplicated.map(_.id), List(second.id, first.id))
+    assertEquals(duplicated.last.score, 1d / 61d)
+  }
+
 }

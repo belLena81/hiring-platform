@@ -1,8 +1,11 @@
 package com.example.graphQL.cats.infrastructure.kafka
 
-import com.example.graphQL.cats.service.port.{InterviewMessage, InterviewStep}
-
-import cats.effect.{IO, Ref}
+import cats.effect.{IO, Ref, Deferred}
+import com.example.graphQL.cats.service.port.*
+import com.example.graphQL.cats.service.events.*
+import com.example.graphQL.cats.domain.model.Identifiers.UserId
+import com.example.graphQL.cats.config.{KafkaConfig, KafkaPublisherConfig, KafkaConsumerConfig}
+import io.circe.Json
 import com.example.graphQL.cats.config.KafkaSaslSecurityProtocol
 import com.example.graphQL.cats.service.Diagnostics
 import munit.CatsEffectSuite
@@ -120,4 +123,77 @@ class InterviewKafkaRestartIntegrationSpec extends CatsEffectSuite {
         }
     } yield ()
   }
+  test("operational tombstones retry failed quarantine before later valid records progress") {
+    assume(enabled, "BLOCKED: isolated Kafka restart proof credentials absent")
+    val kafka = KafkaConfig(
+      true,
+      config(false).bootstrapServers,
+      OperationalEventEnvelope.Topic,
+      "hiring-operational-events-integration",
+      KafkaPublisherConfig("test", 1, 60, 1, 5, 1000),
+      KafkaConsumerConfig(true, 8, 7, Some("analytics_reader"), sys.env.get("KAFKA_READER_PASSWORD")),
+      KafkaSaslSecurityProtocol.Plaintext
+    )
+    val value = OperationalEventEnvelope(
+      UUID.randomUUID(),
+      OperationalEventType.JOB_CREATED,
+      Instant.now(),
+      OperationalAggregateType.Job,
+      UUID.randomUUID().toString,
+      UserId(UUID.randomUUID()),
+      Json.obj()
+    )
+    val settings = OperationalEventKafkaRuntime
+      .saslProperties(
+        Some("hiring_publisher_v2"),
+        sys.env.get("KAFKA_PUBLISHER_V2_PASSWORD"),
+        KafkaSaslSecurityProtocol.Plaintext
+      )
+      .foldLeft(
+        ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
+          .withBootstrapServers(kafka.bootstrapServers)
+      ) { case (current, (key, property)) => current.withProperty(key, property) }
+    for {
+      attempts <- Ref.of[IO, Int](0)
+      observed <- Ref.of[IO, Vector[String]](Vector.empty)
+      done <- Deferred[IO, Unit]
+      offsets <- KafkaProducer.resource(settings).use { producer =>
+        for {
+          first <- producer
+            .produce(ProducerRecords.one(ProducerRecord(kafka.topic, value.partitionKey, null: Array[Byte])))
+            .flatten
+          _ <- producer
+            .produce(
+              ProducerRecords.one(ProducerRecord(kafka.topic, value.partitionKey, OperationalEventJson.bytes(value)))
+            )
+            .flatten
+        } yield first.toList.map(_._2.offset())
+      }
+      receipts = new ConsumerReceiptRepository {
+        def exists(group: String, id: UUID) = RepositoryIO.fromEither(Right(false))
+        def record(group: String, event: OperationalEventEnvelope, at: Instant, expiresAt: Instant) =
+          if (event.eventId == value.eventId)
+            RepositoryIO.lift(observed.update(_ :+ "valid") *> done.complete(()).as(true))
+          else RepositoryIO.fromEither(Right(true))
+      }
+      quarantine = new EventQuarantineRepository {
+        def save(record: EventQuarantineRecord) =
+          if (!offsets.contains(record.offset)) RepositoryIO.fromEither(Right(()))
+          else
+            RepositoryIO.lift(attempts.updateAndGet(_ + 1)).flatMap {
+              case 1 => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+              case _ => RepositoryIO.lift(observed.update(_ :+ "quarantined"))
+            }
+      }
+      _ <- OperationalEventKafkaRuntime
+        .consumerResource(kafka, receipts, quarantine, Diagnostics.noop)
+        .use(_ => done.get.timeout(30.seconds))
+      count <- attempts.get
+      result <- observed.get
+    } yield {
+      assert(count >= 2)
+      assertEquals(result.take(2), Vector("quarantined", "valid"))
+    }
+  }
+
 }

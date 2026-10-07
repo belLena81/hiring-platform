@@ -64,6 +64,18 @@ final class InterviewMessagePolicySpec extends FunSuite {
     )
   }
 
+  test("bounded clock skew defers through the inclusive tolerance") {
+    assertEquals(
+      InterviewMessagePolicy.replayDisposition(message.copy(occurredAt = now.plusSeconds(5)), now, 7.days, 5.seconds),
+      InterviewReplayDisposition.Deferred
+    )
+    assertEquals(
+      InterviewMessagePolicy
+        .replayDisposition(message.copy(occurredAt = now.plusSeconds(5).plusNanos(1)), now, 7.days, 5.seconds),
+      InterviewReplayDisposition.Future
+    )
+  }
+
   test("expired receipt reconciliation deliberately differs from timely result admission") {
     val stored = command.copy(result = Some(InterviewCommandResult.Succeeded))
     val mismatched = message.copy(

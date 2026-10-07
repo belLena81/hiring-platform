@@ -1,7 +1,7 @@
 package com.example.graphQL.cats.service.search
 
 import com.example.graphQL.cats.domain.model.{EmbeddingMeta, GeoPoint, Job, SearchMode}
-import com.example.graphQL.cats.domain.model.Identifiers.JobId
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.pagination.PageSize
 import java.time.Instant
 import java.util.UUID
@@ -98,6 +98,18 @@ object CandidateMatchFilters {
   val empty: CandidateMatchFilters = CandidateMatchFilters(Nil, None, None, None)
 }
 
+/** Retrieval supplies indexed evidence; public entities are hydrated once from authorized operational truth. */
+final case class SearchRetrievalHit[Id](
+    id: Id,
+    score: Double,
+    mode: SearchMode,
+    meta: EmbeddingMeta,
+    searchId: UUID,
+    retrievalScore: Option[Double] = None
+)
+type JobRetrievalHit = SearchRetrievalHit[JobId]
+type CandidateRetrievalHit = SearchRetrievalHit[UserId]
+
 final case class RankedJob(
     job: Job,
     score: Double,
@@ -106,7 +118,9 @@ final case class RankedJob(
     searchId: UUID,
     matchedSkills: List[String] = Nil,
     retrievalScore: Option[Double] = None
-)
+) {
+  def retrieval: JobRetrievalHit = SearchRetrievalHit(job.id, score, mode, meta, searchId, retrievalScore)
+}
 final case class CandidateSearchHit(
     id: com.example.graphQL.cats.domain.model.Identifiers.UserId,
     name: String,
@@ -122,7 +136,9 @@ final case class RankedCandidate(
     searchId: UUID,
     matchedSkills: List[String] = Nil,
     retrievalScore: Option[Double] = None
-)
+) {
+  def retrieval: CandidateRetrievalHit = SearchRetrievalHit(candidate.id, score, mode, meta, searchId, retrievalScore)
+}
 
 object SkillMatching {
   def matched(candidateSkills: Set[String], targetSkills: Set[String]): List[String] = {

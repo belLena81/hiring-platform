@@ -50,7 +50,6 @@ object OperationalEventKafkaRuntime {
       outbox: OperationalEventOutboxRepository,
       diagnostics: Diagnostics
   ): Resource[IO, Unit] = {
-    given MkProducer[IO] = MkProducer.mkProducerForSync[IO]
     val baseSettings =
       ProducerSettings(
         keySerializer = Serializer[IO, String],
@@ -72,7 +71,10 @@ object OperationalEventKafkaRuntime {
       Stream.eval(UUIDGen[IO].randomUUID).flatMap { id =>
         val transactionalId = "hiring-publisher-" + id.toString
         Stream
-          .resource(TransactionalKafkaProducer.resource(TransactionalProducerSettings(transactionalId, settings)))
+          .resource(
+            GuardedTransactionalProducer
+              .resource(TransactionalProducerSettings(transactionalId, settings), MkProducer.mkProducerForSync[IO])
+          )
           .flatMap { producer =>
             resilientStream(
               diagnostics,
@@ -186,7 +188,7 @@ object OperationalEventKafkaRuntime {
   )(publish: ClaimedOperationalEvent => IO[Unit]): IO[Unit] =
     claims.groupBy(_.partitionKey).values.toList.parTraverse_(_.traverse_(publish))
 
-  private def consumerResource(
+  private[kafka] def consumerResource(
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository,
       quarantine: EventQuarantineRepository,
@@ -212,16 +214,15 @@ object OperationalEventKafkaRuntime {
     background(
       resilientStream(
         diagnostics,
-        KafkaConsumer
-          .stream(settings)
-          .subscribeTo(config.topic)
-          .records
-          .evalMap { message =>
-            val record = message.record
-            processRecordBeforeCommit(record.topic, record.partition, record.offset)(
-              handleRecord(config, receipts, quarantine, record.topic, record.partition, record.offset, record.value)
-            )(message.offset.commit)
-          },
+        KafkaPartitionProcessing(
+          KafkaConsumer.stream(settings).subscribeTo(config.topic).partitionedRecords,
+          config.consumer.partitionConcurrency
+        ) { message =>
+          val record = message.record
+          processRecordBeforeCommit(record.topic, record.partition, record.offset)(
+            handleRecord(config, receipts, quarantine, record.topic, record.partition, record.offset, record.value)
+          )(message.offset.commit)
+        },
         1.second
       )
     )
@@ -320,7 +321,7 @@ object OperationalEventKafkaRuntime {
         offset,
         category,
         reason,
-        bytes,
+        Option(bytes).getOrElse(Array.emptyByteArray),
         now,
         now.plusSeconds(config.consumer.quarantineTtlDays.days.toSeconds)
       )

@@ -28,7 +28,7 @@ private[analytics] object AnalyticsMongoRecords {
       repairRequired: Option[Boolean] = None,
       requestedAt: Option[Instant] = None,
       receiptId: Option[String] = None,
-      transactionalIds: Option[Vector[String]] = None,
+      producerRegistry: Option[Boolean] = None,
       subjectIds: Option[Vector[String]] = None,
       subjectRefsVersion: Option[Int] = None,
       progress: Option[Int] = None,
@@ -42,6 +42,13 @@ private[analytics] object AnalyticsMongoRecords {
       deleted: Option[Boolean] = None
   )
 
+  final case class ProducerRegistration(
+      _id: String,
+      subjectId: String,
+      transactionalId: String,
+      kind: String,
+      state: String
+  )
   final case class RetentionBarrier(topic: String, partitions: Vector[RetentionPartition])
   final case class RetentionPartition(number: Int, endOffsetExclusive: Long)
   final case class PublisherFence(
@@ -56,7 +63,7 @@ private[analytics] object AnalyticsMongoRecords {
       leaseUntil: Option[Instant],
       updatedAt: Option[Instant]
   )
-  final case class MigrationEntry(_id: String, state: Option[String])
+  final case class MigrationEntry(_id: String, state: Option[String], version: Option[Long] = None)
   final case class EventOutboxReferences(subjectRefsVersion: Option[Int], subjectIds: Option[Vector[String]])
   final case class DeltaFileEvidence(_id: String, requestId: String, filePath: String)
   final case class ErasureCompletion(_id: String, completedAt: Option[Instant], receiptId: Option[String])
@@ -208,9 +215,10 @@ private[analytics] object AnalyticsMongoRecords {
     Set("progressKey", "deltaGeneration", "deltaAffectedRows", "deltaEvidenceRevision", "endOffsetExclusive"),
     Set("fencingVersion", "attemptCount", "subjectRefsVersion", "progress", "number")
   )
+  val producerRegistrationRegistry: CodecRegistry = registry[ProducerRegistration]()
   val publisherFenceRegistry: CodecRegistry = registry[PublisherFence]()
   val workerHeartbeatRegistry: CodecRegistry = registry[WorkerHeartbeat]()
-  val migrationEntryRegistry: CodecRegistry = registry[MigrationEntry]()
+  val migrationEntryRegistry: CodecRegistry = registry[MigrationEntry](longFields = Set("version"))
   val eventOutboxReferencesRegistry: CodecRegistry =
     registry[EventOutboxReferences](intFields = Set("subjectRefsVersion"))
   val deltaFileEvidenceRegistry: CodecRegistry = registry[DeltaFileEvidence]()

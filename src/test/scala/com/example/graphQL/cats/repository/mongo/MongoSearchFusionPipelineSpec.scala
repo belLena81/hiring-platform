@@ -80,13 +80,16 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assertEquals(
       lexical.head
         .get("$search", classOf[Document])
+        .get("compound", classOf[Document])
+        .getList("must", classOf[Document])
+        .get(0)
         .get("text", classOf[Document])
         .getList("path", classOf[String])
         .asScala
         .toList,
       List("title", "description", "requirements", "skills")
     )
-    assertEquals(lexical(2).getInteger("$limit").intValue(), 60)
+    assertEquals(lexical(1).getInteger("$limit").intValue(), 60)
     assertEquals(stages(3).getInteger("$limit").intValue(), 60)
     assert(stages.exists(_.containsKey("$rerank")))
   }
@@ -103,7 +106,7 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
       .get("input", classOf[Document])
       .get("pipelines", classOf[Document])
     val vector = pipelines.getList("vector", classOf[Document]).get(0).get("$vectorSearch", classOf[Document])
-    val lexical = pipelines.getList("lexical", classOf[Document]).get(2)
+    val lexical = pipelines.getList("lexical", classOf[Document]).get(1)
 
     assertEquals(vector.getInteger("numCandidates").intValue(), 60)
     assertEquals(vector.getInteger("limit").intValue(), 30)
@@ -143,18 +146,28 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
     assert(filterJson.contains("AVAILABLE_NOW"))
     assertEquals(bsonJson(jobVector.get("filter", classOf[org.bson.conversions.Bson])), filterJson)
     assertEquals(bsonJson(queryVector.get("filter", classOf[org.bson.conversions.Bson])), filterJson)
-    assertEquals(bsonJson(lexical(1).get("$match", classOf[org.bson.conversions.Bson])), filterJson)
+    assertEquals(
+      lexical.head
+        .get("$search", classOf[Document])
+        .get("compound", classOf[Document])
+        .getList("filter", classOf[Document])
+        .get(0),
+      repo.candidateLexicalFilter(searchQuery)
+    )
     assertEquals(lexical.head.get("$search", classOf[Document]).getString("index"), "candidates_lexical")
     assertEquals(
       lexical.head
         .get("$search", classOf[Document])
+        .get("compound", classOf[Document])
+        .getList("must", classOf[Document])
+        .get(0)
         .get("text", classOf[Document])
         .getList("path", classOf[String])
         .asScala
         .toList,
       List("profile.skills", "profile.experienceSummary")
     )
-    assertEquals(lexical(2).getInteger("$limit").intValue(), 30)
+    assertEquals(lexical(1).getInteger("$limit").intValue(), 30)
     assertEquals(stages(3).getInteger("$limit").intValue(), 30)
     assertEquals(stages(5).get("$rerank", classOf[Document]).getInteger("numDocsToRerank").intValue(), 30)
     assertEquals(stages.lastOption.map(_.keySet().iterator().next()), Some("$project"))
@@ -248,20 +261,88 @@ class MongoSearchFusionPipelineSpec extends FunSuite {
   }
   test("lexical capture adapter fixes public job fields and applies eligibility before its bounded limit") {
     val repo = repository()
-    val stages = repo.lexicalJobStages("Scala engineer", repo.jobFilter(searchQuery, searchQuery.filter)).asScala.toList
+    val stages =
+      repo.lexicalJobStages("Scala engineer", repo.jobLexicalFilter(searchQuery, searchQuery.filter)).asScala.toList
     assertEquals(
       stages.head
         .get("$search", classOf[Document])
+        .get("compound", classOf[Document])
+        .getList("must", classOf[Document])
+        .get(0)
         .get("text", classOf[Document])
         .getList("path", classOf[String])
         .asScala
         .toList,
       List("title", "description", "requirements", "skills")
     )
-    assert(stages(1).containsKey("$match"))
-    assert(stages(2).containsKey("$limit"))
+    assert(stages.head.get("$search", classOf[Document]).get("compound", classOf[Document]).containsKey("filter"))
+    assert(stages(1).containsKey("$limit"))
     assert(!stages.head.toJson.contains("residence"))
     assert(!stages.head.toJson.contains("availability"))
+  }
+
+  test("indexed eligibility keeps exact job skills conjunctive and explicit consent bypass alternatives") {
+    val repo = repository()
+    val query = searchQuery.copy(filter = searchQuery.filter.copy(skills = Set("Scala", "Kafka")))
+    val job = repo.jobLexicalFilter(query, query.filter)
+    val clauses = job.get("compound", classOf[Document]).getList("filter", classOf[Document]).asScala.toList
+    val skills = clauses
+      .flatMap(clause => Option(clause.get("equals", classOf[Document])))
+      .filter(_.getString("path") == "skills")
+      .map(_.getString("value"))
+    assertEquals(skills, List("Kafka", "Scala"))
+    val candidate = repo.candidateLexicalFilter(searchQuery)
+    val top = candidate.get("compound", classOf[Document]).getList("filter", classOf[Document]).asScala.toList
+    val consent = top.last.get("compound", classOf[Document])
+    assertEquals(consent.getInteger("minimumShouldMatch").intValue(), 1)
+    val alternatives = consent.getList("should", classOf[Document]).asScala.toList
+    assertEquals(alternatives.size, 3)
+    assertEquals(alternatives.head.get("equals", classOf[Document]).getBoolean("value"), java.lang.Boolean.FALSE)
+    assert(alternatives(1).get("compound", classOf[Document]).containsKey("mustNot"))
+    assert(alternatives(2).get("compound", classOf[Document]).containsKey("filter"))
+  }
+
+  test("static lexical mappings validate equality fields and reject previous text-only definitions") {
+    val jobs = MongoAtlasSearchSetup.jobLexicalDefinition
+    val candidates = MongoAtlasSearchSetup.candidateLexicalDefinition
+    assert(MongoAtlasSearchSetup.validLexical(new Document("latestDefinition", jobs), jobs))
+    assert(MongoAtlasSearchSetup.validLexical(new Document("latestDefinition", candidates), candidates))
+    val old = new Document(
+      "mappings",
+      new Document("dynamic", false).append(
+        "fields",
+        new Document()
+          .append("title", new Document("type", "string"))
+          .append("description", new Document("type", "string"))
+          .append("requirements", new Document("type", "string"))
+          .append("skills", new Document("type", "string"))
+      )
+    )
+    assert(!MongoAtlasSearchSetup.validLexical(new Document("latestDefinition", old), jobs))
+    val fields = jobs.get("mappings", classOf[Document]).get("fields", classOf[Document])
+    assertEquals(fields.get("skills", classOf[java.util.List[Document]]).get(1).getString("normalizer"), "none")
+  }
+
+  test("retrieval branches return only typed identity, score and embedding metadata") {
+    val repo = repository()
+    val fields = repo.retrievalProjection.get("$project", classOf[Document]).keySet().asScala.toSet
+    assertEquals(fields, Set("_id", "embeddingMeta", "score", "retrievalScore"))
+    val job = repo.jobVectorPipeline(searchQuery.vector, repo.jobFilter(searchQuery, searchQuery.filter), 30)
+    val candidate = repo.candidateVectorPipeline(searchQuery.vector, repo.candidateFilter(searchQuery, true), 30)
+    assertEquals(job.asScala.toList.last, repo.retrievalProjection)
+    assertEquals(candidate.asScala.toList.last, repo.retrievalProjection)
+    assert(!fields.contains("embedding"))
+    assert(!fields.contains("profile"))
+    assert(!fields.contains("name"))
+  }
+
+  test("geo cursor lower bound never rounds beyond the original meter distance") {
+    List(0d, 0.01d, 1d, 9999.9999999d, 500000d).foreach { meters =>
+      val kilometers = meters * 0.001d
+      val lower = MongoJobRepository.minimumDistanceMeters(kilometers)
+      assert(lower >= 0d)
+      assert(lower <= meters)
+    }
   }
 
 }

@@ -18,7 +18,10 @@ private[cats] object JobDiscoveryTestSupport {
       jobsRef <- Ref.of[IO, Map[JobId, Job]](values.map(job => job.id -> job).toMap)
       calls <- Ref.of[IO, Calls](Calls())
       userRepository = new ServiceFixtures.InMemoryUsers(usersRef)
-      jobRepository = new RecordingJobs(new ServiceFixtures.InMemoryJobs(jobsRef), calls)
+      jobRepository = new RecordingJobs(
+        new ServiceFixtures.InMemoryJobs(jobsRef, discoveryActors = Some(usersRef)),
+        calls
+      )
     } yield Fixture(TestHiringServices.job(userRepository, jobRepository), userRepository, jobRepository, calls)
 
   private final class RecordingJobs(delegate: JobRepository, calls: Ref[IO, Calls]) extends JobRepository {
@@ -35,12 +38,19 @@ private[cats] object JobDiscoveryTestSupport {
       updateEmbedding
     }
 
-    override def nearbyJobs(query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]] =
+    override def nearbyJobs(
+        scope: com.example.graphQL.cats.service.read.HiringReadScope,
+        query: NearbyJobsQuery,
+        limit: Int
+    ): RepositoryIO[List[NearbyJob]] =
       RepositoryIO.lift(calls.update(state => state.copy(nearby = state.nearby :+ query))) *>
-        delegate.nearbyJobs(query, limit)
+        delegate.nearbyJobs(scope, query, limit)
 
-    override def jobDiscoveryFacets(query: JobFacetQuery): RepositoryIO[JobDiscoveryFacets] =
+    override def jobDiscoveryFacets(
+        scope: com.example.graphQL.cats.service.read.HiringReadScope,
+        query: JobFacetQuery
+    ): RepositoryIO[JobDiscoveryFacets] =
       RepositoryIO.lift(calls.update(state => state.copy(facets = state.facets :+ query))) *>
-        delegate.jobDiscoveryFacets(query)
+        delegate.jobDiscoveryFacets(scope, query)
   }
 }

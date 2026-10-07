@@ -1,5 +1,12 @@
 # MVP Use Cases
 
+## Retrieval and recovery implementation checkpoint
+
+The [reliability specification](specs/hiring-retrieval-publication-reliability.md) records the current changes and pending gates. Nearby jobs and exact facets validate the active trusted actor in their database query, preserve authorized empty results and bound costly request roots, process concurrency and query duration. Search hydrates current public data after deduplicating bounded hits. These limits do not change visibility, consent, required-skills semantics or exact facet counts.
+
+Transient embedding failures retain durable work within the configured retry budget; revision-only conflicts reschedule without charging that budget; invalid provider responses become terminal. Active singleton Admin maintenance can inspect and repair failed work with generation compare-and-set. Candidate deletion removes embedding data and rejects later embedding writes. Local recovery evidence does not certify real embedding providers or search relevance.
+
+
 These use cases and SLOs describe product intent; see [current implementation](../README.md) and the [current roadmap](development-milestones.md). Query/event sketches below are design examples and may omit active fields or use conceptual names. Use the [API reference](api.md) and [checked schema](../src/test/resources/graphql/hiring.graphql) for executable contracts; the sketches do not authorize new operations or lifecycle transitions.
 
 ## Current capability mapping

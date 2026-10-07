@@ -21,7 +21,11 @@ object UseCaseIO {
   def liftIO[A](value: IO[A]): UseCaseIO[A] = EitherT.liftF(value)
 
   def repository[A](value: RepositoryIO[A]): UseCaseIO[A] =
-    value.leftMap(UseCaseError.Repository.apply)
+    value.leftMap {
+      case RepositoryError.AuthorityRevoked =>
+        UseCaseError.Domain(com.example.graphQL.cats.domain.error.DomainError.Forbidden)
+      case error => UseCaseError.Repository(error)
+    }
 
   def repository[A](value: IO[Either[RepositoryError, A]]): UseCaseIO[A] =
     repository(RepositoryIO.fromIOEither(value))

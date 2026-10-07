@@ -190,16 +190,13 @@ final class MongoAnalyticsErasureRequestRepository(
                         MongoAnalyticsRepositoryOperations
                           .findOne(subjectFences, Some(active), MongoFilter.eq(MongoFields.Id, requestId))
                       )
-                      fence.flatMap { currentFence =>
-                        val transactionalIds = currentFence
-                          .flatMap(value => Option(value.getList(MongoFields.TransactionalIds, classOf[String])))
-                          .fold(List.empty[String])(_.asScala.toList.distinct.sorted)
+                      fence.flatMap { _ =>
                         val request = new Document(MongoFields.Id, requestId)
                           .append(MongoFields.RequestedAt, Date.from(now))
                           .append(MongoFields.ReceiptId, freshReceiptId)
                           .append(MongoFields.State, "Pending")
                           .append(MongoFields.FencingVersion, 1)
-                          .append(MongoFields.TransactionalIds, transactionalIds.asJava)
+                          .append("producerRegistry", true)
                         val insert = session.fold(
                           MongoAnalyticsRepositoryOperations.insertOne(collection, None, request)
                         )(active => MongoAnalyticsRepositoryOperations.insertOne(collection, Some(active), request))

@@ -1,5 +1,10 @@
 # Development Milestones
 
+## Retrieval and publication remediation checkpoint
+
+October 7: implementation of the approved MongoDB-informed remediation is tracked by [HRP-01–HRP-18](specs/hiring-retrieval-publication-reliability.md). It covers deletion/embedding convergence, Kafka resource and lease safety, actor-scoped discovery, bounded retrieval/concurrency, producer registry cutover and explicit integrity maintenance. Verification and independent review statuses belong to that specification. This checkpoint does not close Phases 8–11: Atlas, human relevance, real-provider and deployed acceptance retain their existing gates.
+
+
 ## Hiring Analytics Lakehouse (Phase 6)
 
 The current analytics milestone is documented in [Hiring Analytics Lakehouse](specs/hiring-analytics-lakehouse.md). It introduces a local bounded Bronze/Silver/Gold batch pipeline, guarded Admin reporting, and a retention-aware erasure worker. Local implementation is complete: all HAL-01–HAL-14 pass independent final QA on October 3. Production activation prerequisites remain tracked in the spec. The roadmap retains Phases 1–7 and prioritizes operational MongoDB and AI/search completion in Phases 8–11 before further Spark/Delta development in Phase 13. Production hardening and deployed analytics optimization follow in Phases 14–15. Existing correctness and activation gates continue to apply.

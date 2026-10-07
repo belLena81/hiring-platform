@@ -140,6 +140,8 @@ trait InterviewWorkflowRepository {
       limit: Int
   ): RepositoryIO[List[ClaimedInterviewWorkflowCommand]]
 
+  def renewPublication(claim: ClaimedInterviewWorkflowCommand, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean]
+
   def markPublished(claim: ClaimedInterviewWorkflowCommand, publishedAt: Instant): RepositoryIO[Unit]
 
   def retry(

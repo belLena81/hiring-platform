@@ -25,8 +25,8 @@ import com.example.graphQL.cats.service.search.{
   JobSearchFilter,
   NearbyJob,
   NearbyJobsQuery,
-  RankedCandidate,
-  RankedJob,
+  CandidateRetrievalHit,
+  JobRetrievalHit,
   VectorSearchQuery
 }
 import java.time.Instant
@@ -272,8 +272,8 @@ trait JobRepository {
   def findVersioned(id: JobId): RepositoryIO[Option[Versioned[Job]]]
   def findMany(ids: List[JobId]): RepositoryIO[List[Job]]
   def findOpen(filter: JobSearchFilter, page: JobPageRequest): RepositoryIO[List[Job]]
-  def nearbyJobs(query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]]
-  def jobDiscoveryFacets(query: JobFacetQuery): RepositoryIO[JobDiscoveryFacets]
+  def nearbyJobs(scope: HiringReadScope, query: NearbyJobsQuery, limit: Int): RepositoryIO[List[NearbyJob]]
+  def jobDiscoveryFacets(scope: HiringReadScope, query: JobFacetQuery): RepositoryIO[JobDiscoveryFacets]
   def findAll(page: JobPageRequest): RepositoryIO[List[Job]]
   def findByRecruiter(recruiterId: UserId, page: JobPageRequest): RepositoryIO[List[Job]]
   def createWithEvents(
@@ -313,7 +313,7 @@ final case class ClaimedEmbeddingWork(
 )
 
 enum EmbeddingWorkFailure {
-  case RetryExhausted, DocumentTooLarge, InvalidWorkKey
+  case RetryExhausted, DocumentTooLarge, InvalidWorkKey, InvalidResponse
 }
 
 trait EmbeddingWorkRepository {
@@ -323,8 +323,11 @@ trait EmbeddingWorkRepository {
       now: Instant,
       leaseUntil: Instant
   ): RepositoryIO[Option[ClaimedEmbeddingWork]]
+  def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean]
   def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit]
-  def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit]
+
+  /** Revision conflicts reschedule with chargeAttempt=false; actual failed processing consumes the durable budget. */
+  def retry(claim: ClaimedEmbeddingWork, availableAt: Instant, chargeAttempt: Boolean = true): RepositoryIO[Unit]
   def fail(claim: ClaimedEmbeddingWork, failure: EmbeddingWorkFailure, now: Instant): RepositoryIO[Unit]
 }
 
@@ -359,9 +362,9 @@ trait SemanticSearchRepository {
   def candidateEligibility(
       ids: List[UserId]
   ): RepositoryIO[List[com.example.graphQL.cats.service.search.CandidateSearchEligibility]]
-  def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
-  def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]]
-  def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]]
+  def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]]
+  def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]]
+  def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]]
 }
 
 trait SearchSessionRepository {

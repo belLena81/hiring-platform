@@ -9,7 +9,7 @@ import scala.jdk.CollectionConverters.*
 
 /** Collection validators are maintained beside their collection setup behavior. */
 private[mongo] object MongoHiringValidators {
-  def createOutboxValidator(database: MongoDatabase[IO]): IO[Unit] = {
+  def outboxValidator: Document = {
     val subjectIds = new Document("bsonType", "array")
       .append("minItems", 1)
       .append("uniqueItems", true)
@@ -21,12 +21,18 @@ private[mongo] object MongoHiringValidators {
         "properties",
         new Document(MongoFields.SubjectIds, subjectIds).append(MongoFields.SubjectRefsVersion, version)
       )
-    val command = new Document("collMod", MongoCollections.EventOutbox)
-      .append("validator", new Document("$jsonSchema", schema))
-      .append("validationLevel", "strict")
-      .append("validationAction", "error")
-    database.runCommand(command).void
+    new Document("$jsonSchema", schema)
   }
+
+  def createOutboxValidator(database: MongoDatabase[IO]): IO[Unit] =
+    database
+      .runCommand(
+        new Document("collMod", MongoCollections.EventOutbox)
+          .append("validator", outboxValidator)
+          .append("validationLevel", "strict")
+          .append("validationAction", "error")
+      )
+      .void
 
   def createUserValidator(database: MongoDatabase[IO]): IO[Unit] = {
     def active(role: String, required: String) = new Document("required", List(required).asJava).append(

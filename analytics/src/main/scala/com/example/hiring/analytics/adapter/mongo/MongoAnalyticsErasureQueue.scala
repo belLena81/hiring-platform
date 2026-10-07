@@ -15,6 +15,7 @@ import org.bson.Document
 import org.bson.conversions.Bson
 
 import java.time.Instant
+import scala.concurrent.duration.*
 import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
@@ -27,7 +28,8 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
     fences: MongoCollection[F, AnalyticsMongoRecords.PublisherFence],
     outbox: MongoCollection[F, AnalyticsMongoRecords.EventOutboxReferences],
     ledger: MongoCollection[F, AnalyticsMongoRecords.MigrationEntry],
-    streams: MongoPublisherStream
+    streams: MongoPublisherStream,
+    registrations: MongoCollection[F, AnalyticsMongoRecords.ProducerRegistration]
 ) extends MongoAnalyticsErasureStoreSupport[F](streams)
     with ErasureQueue[F] {
   import MongoAnalyticsErasureStoreSupport.*
@@ -223,31 +225,48 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       }
   }
 
-  /** IDs are copied into the durable request in the account deletion transaction. */
-
+  /** Each returned batch is durably retired only after broker-confirmed fencing. */
   def transactionalIds(requestId: AccountSubjectId): F[Vector[String]] = mongo {
-    requests
-      .find(Filters.eq(AnalyticsCollections.Fields.Id, requestId.value))
-      .projection(
-        Projections.include(
-          AnalyticsCollections.Fields.Id,
-          AnalyticsCollections.Fields.FencingVersion,
-          AnalyticsCollections.Fields.TransactionalIds
-        )
-      )
-      .first
-      .map(_.toRight(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing")))
-      .map(_.flatMap { request =>
-        if (request.fencingVersion.isEmpty || !request.fencingVersion.contains(1))
-          Left(AnalyticsError.InvalidConfiguration("erasure request predates transactional publisher fencing"))
-        else
-          request.transactionalIds
-            .toRight(AnalyticsError.MalformedMarker)
-            .flatMap(values => Either.cond(values.forall(_.trim.nonEmpty), values, AnalyticsError.MalformedMarker))
-            .map(_.distinct.sorted)
-      })
-      .flatMap(Async[F].fromEither)
+    requests.find(Filters.eq("_id", requestId.value)).first.flatMap {
+      case Some(request) if request.fencingVersion.contains(1) && request.producerRegistry.contains(true) =>
+        registrations
+          .find(
+            Filters.and(
+              Filters.eq("subjectId", requestId.value),
+              Filters.eq("kind", "Operational"),
+              Filters.eq("state", "Active")
+            )
+          )
+          .sort(Sorts.ascending("_id"))
+          .limit(64)
+          .all
+          .map(_.toVector.map(_.transactionalId))
+      case _ => Async[F].raiseError(AnalyticsError.MalformedMarker)
+    }
   }
+
+  def markProducersFenced(requestId: AccountSubjectId, ids: Vector[String], now: Instant): F[Unit] =
+    if (ids.isEmpty || ids.size > 64) Async[F].raiseError(AnalyticsError.MalformedMarker)
+    else
+      mongo {
+        registrations
+          .updateMany(
+            Filters.and(
+              Filters.eq("subjectId", requestId.value),
+              Filters.eq("kind", "Operational"),
+              Filters.in("transactionalId", ids.asJava)
+            ),
+            Updates.combine(
+              Updates.set("state", "Fenced"),
+              Updates.set("fencedAt", Date.from(now)),
+              Updates.set("expiresAt", Date.from(now.plusSeconds(8.days.toSeconds)))
+            )
+          )
+          .flatMap(result =>
+            if (result.wasAcknowledged()) Async[F].unit
+            else Async[F].raiseError(AnalyticsError.MalformedMarker)
+          )
+      }
 
   /** Purging is safe only after the matching publisher fence is deleted and its send lease is drained. */
 
@@ -353,7 +372,8 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
       AnalyticsCollections.ReportRuns,
       AnalyticsCollections.EventOutbox,
       AnalyticsCollections.OutboxSubjectFences,
-      AnalyticsCollections.Users
+      AnalyticsCollections.Users,
+      "producer_registrations"
     )
     database.listCollectionNames.map(_.toVector).flatMap { collectedNames =>
       val missing = required.diff(collectedNames.toSet)
@@ -364,9 +384,22 @@ final class MongoAnalyticsErasureQueue[F[_]: Async] private (
           "analytics erasure worker collections are missing: " + missing.toVector.sorted.mkString(",")
         )
       )
-      Async[F].fromEither(collectionValidation) *> migrationValidation(ledger) *> outboxValidation(outbox)
+      Async[F].fromEither(collectionValidation) *> migrationValidation(
+        ledger
+      ) *> registryMigrationValidation *> outboxValidation(outbox)
     }
   }
+
+  private def registryMigrationValidation: F[Unit] =
+    ledger.find(Filters.eq("_id", "012_attributable_producer_registrations")).first.flatMap { marker =>
+      Either
+        .cond(
+          marker.exists(value => value.state.contains("Complete") && value.version.contains(1L)),
+          (),
+          AnalyticsError.InvalidConfiguration("producer registration migration is incomplete")
+        )
+        .liftTo[F]
+    }
 
   private def migrationValidation(ledger: MongoCollection[F, AnalyticsMongoRecords.MigrationEntry]): F[Unit] = {
     ledger
@@ -486,5 +519,20 @@ object MongoAnalyticsErasureQueue {
           AnalyticsMongoRecords.migrationEntryRegistry
         )
       )
-    } yield new MongoAnalyticsErasureQueue(database, requests, heartbeats, fences, outbox, ledger, streams)
+      registrations <- Resource.eval(
+        database.getCollection[AnalyticsMongoRecords.ProducerRegistration](
+          "producer_registrations",
+          AnalyticsMongoRecords.producerRegistrationRegistry
+        )
+      )
+    } yield new MongoAnalyticsErasureQueue(
+      database,
+      requests,
+      heartbeats,
+      fences,
+      outbox,
+      ledger,
+      streams,
+      registrations
+    )
 }

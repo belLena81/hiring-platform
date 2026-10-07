@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.runtime
 
-import cats.effect.{Deferred, IO, Resource}
+import cats.effect.{Deferred, IO, Resource, Ref}
 import cats.effect.std.Semaphore
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{CursorCodec, HiringGraphQLServices}
@@ -26,7 +26,13 @@ import com.example.graphQL.cats.service.events.{
   SearchSessionHandoffConfig
 }
 import com.example.graphQL.cats.service.search.{EmbeddingPipeline, EmbeddingWorkPublisher, SemanticSearchService}
-import com.example.graphQL.cats.config.{JwtAuthConfig, KafkaConfig, PasswordHashConfig, VectorSearchConfig}
+import com.example.graphQL.cats.config.{
+  JwtAuthConfig,
+  KafkaConfig,
+  PasswordHashConfig,
+  VectorSearchConfig,
+  DiscoveryConfig
+}
 import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import scala.concurrent.duration.*
@@ -40,6 +46,7 @@ import com.example.graphQL.cats.repository.mongo.{
   MongoEventQuarantineRepository,
   MongoHiringSetup,
   MongoJobRepository,
+  DiscoveryQueryPolicy,
   MongoAnalyticsErasureRequestRepository,
   MongoAnalyticsReportRepository,
   MongoMutationReceiptRepository,
@@ -107,19 +114,24 @@ object MongoHiringRuntime {
       kafka: KafkaConfig,
       resetOnStart: Boolean,
       embeddingService: (VectorSearchConfig, String, Diagnostics) => Resource[IO, EmbeddingService] =
-        voyageEmbeddingService
+        voyageEmbeddingService,
+      discovery: DiscoveryConfig = DiscoveryConfig()
   )
 
   def resource(config: RuntimeConfig): Resource[IO, MongoHiringRuntime] =
     for {
       passwordHashPermits <- Resource.eval(Semaphore[IO](Runtime.getRuntime.availableProcessors.toLong))
+      embeddingHealth <- Resource.eval(Ref.of[IO, Boolean](!config.vectorSearch.enabled))
+      discoveryPolicy <- Resource.eval(
+        DiscoveryQueryPolicy.create(config.discovery.maxTimeMillis.millis, config.discovery.permits)
+      )
       client <- MongoDatabaseProbe.clientResource(config.uri)
       database <- Resource.eval(client.getDatabase(config.databaseName))
       setup <- SetupLifecycle.resource(
         setupEffect(database, config.vectorSearch, config.resetOnStart, config.diagnostics),
         config.diagnostics
       )
-      capability <- embeddingCapability(database, client, config, setup.await)
+      capability <- embeddingCapability(database, client, config, setup.await, embeddingHealth.set, discoveryPolicy)
       users = capability.users
       applications = MongoApplicationRepository.transactional(database, client, config.diagnostics)
       searchSessions = MongoSearchSessionRepository.transactional(database, client, config.diagnostics)
@@ -161,10 +173,12 @@ object MongoHiringRuntime {
       )
       metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
     } yield MongoHiringRuntime(
-      probe(database, metadata, config.diagnostics, setup.ready),
+      probe(database, metadata, config.diagnostics, (setup.ready, embeddingHealth.get).mapN(_ && _)),
       services,
       UserAuthenticationService(users),
-      setup.ready.map(if (_) ProbeResult.Ready else ProbeResult.Unavailable)
+      (setup.ready, embeddingHealth.get).mapN((setupReady, healthy) =>
+        if (setupReady && healthy) ProbeResult.Ready else ProbeResult.Unavailable
+      )
     )
 
   private type RuntimeEmbeddingCapability = EmbeddingCapability[
@@ -178,7 +192,9 @@ object MongoHiringRuntime {
       database: MongoDatabase[IO],
       client: MongoClient[IO],
       config: RuntimeConfig,
-      embeddingWorkerReady: IO[Boolean]
+      embeddingWorkerReady: IO[Boolean],
+      embeddingHealth: Boolean => IO[Unit],
+      discoveryPolicy: DiscoveryQueryPolicy
   ): Resource[IO, RuntimeEmbeddingCapability] =
     EmbeddingCapability.resource(
       config.vectorSearch,
@@ -198,7 +214,8 @@ object MongoHiringRuntime {
             database,
             client,
             embeddingWork.fold(MongoEmbeddingWorkEnqueuer.disabled)(identity),
-            config.diagnostics
+            config.diagnostics,
+            Some(discoveryPolicy)
           )
         ),
       IO(
@@ -213,7 +230,8 @@ object MongoHiringRuntime {
           config.vectorSearch.fusionStrategy,
           config.vectorSearch.rerankEnabled,
           config.vectorSearch.rerankModel,
-          config.diagnostics
+          config.diagnostics,
+          Some(discoveryPolicy)
         )
       ),
       (vectorSearch, apiKey) => config.embeddingService(vectorSearch, apiKey, config.diagnostics),
@@ -234,7 +252,12 @@ object MongoHiringRuntime {
             config.vectorSearch.retryDelayMillis.millis,
             embeddingLease,
             embeddingWorkerReady,
-            config.diagnostics
+            config.diagnostics,
+            config.vectorSearch.durableRetryAttempts,
+            config.vectorSearch.durableRetryBaseMillis.millis,
+            config.vectorSearch.durableRetryCapMillis.millis,
+            config.vectorSearch.workerRestartDelayMillis.millis,
+            embeddingHealth
           )
           .map(publisher => publisher: EmbeddingWorkPublisher)
       }

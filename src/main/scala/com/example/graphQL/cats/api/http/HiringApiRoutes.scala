@@ -80,7 +80,8 @@ object HiringApiRoutes {
       contextFactory: RequestContextFactory,
       documentCache: GraphQLDocumentCache,
       rateLimiter: AuthRateLimiter,
-      clientAddressResolver: ClientAddressResolver
+      clientAddressResolver: ClientAddressResolver,
+      discoveryMaxRoots: Int = 4
   )
 
   final case class HttpConfig(admissionPermits: Long, requestTimeout: FiniteDuration)

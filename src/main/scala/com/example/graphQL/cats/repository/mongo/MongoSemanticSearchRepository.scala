@@ -7,12 +7,12 @@ import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.Identifiers.parse as parseIdentifier
 import com.example.graphQL.cats.domain.search.SearchFusionStrategy
 import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO, SemanticSearchRepository}
-import com.example.graphQL.cats.shared.crypto.SourceHash
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.Filters
 import mongo4cats.database.MongoDatabase
+import mongo4cats.collection.MongoCollection
 import org.bson.Document
 import org.bson.conversions.Bson
 
@@ -30,10 +30,21 @@ final class MongoSemanticSearchRepository(
     fusionStrategy: SearchFusionStrategy = SearchFusionStrategy.ApplicationRrf,
     rerankEnabled: Boolean = false,
     rerankModel: String = "rerank-2.5-lite",
-    diagnostics: Diagnostics
+    diagnostics: Diagnostics,
+    discoveryPolicy: Option[DiscoveryQueryPolicy] = None
 ) extends SemanticSearchRepository {
 
+  private def admitted[A](query: RepositoryIO[A]): RepositoryIO[A] =
+    discoveryPolicy.fold(RepositoryIO.fromEither[A](Left(RepositoryError.Unavailable)))(policy =>
+      RepositoryIO.fromIOEither(policy.run(query.value))
+    )
+
   private val branchLimit = if (branchResultLimit > 0) branchResultLimit else numCandidates
+
+  private def aggregate(source: MongoCollection[IO, Document], pipeline: Seq[Document]): Stream[IO, Document] = {
+    val query = source.aggregate[Document](pipeline)
+    discoveryPolicy.fold(query)(policy => query.maxTime(policy.maxTime)).boundedStream(32)
+  }
 
   private def collectWithin[A](stream: Stream[IO, A], maximum: Int): IO[List[A]] =
     stream.take(maximum.toLong + 1L).compile.toList.flatMap { values =>
@@ -140,7 +151,7 @@ final class MongoSemanticSearchRepository(
         )
         RepositoryIO
           .lift(Mongo4catsCollections.documents(database, parentCollection).flatMap { collection =>
-            collectWithin(collection.aggregate[Document](pipeline).boundedStream(32), selected.size)
+            collectWithin(aggregate(collection, pipeline), selected.size)
           })
           .subflatMap(_.traverse(decode))
       }(_ => Left(RepositoryError.Unavailable))
@@ -171,19 +182,19 @@ final class MongoSemanticSearchRepository(
               new Document("$limit", selected.size),
               new Document("$project", MongoSearchEligibilityCodecs.projection(fields))
             )
-            collectWithin(source.aggregate[Document](pipeline).boundedStream(32), selected.size)
+            collectWithin(aggregate(source, pipeline), selected.size)
           })
           .subflatMap(_.traverse(decode))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
-  override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
-    rankedJobs(query, query.filter)
+  override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+    admitted(rankedJobs(query, query.filter))
 
-  override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
-    rankedJobs(query, JobSearchFilter(None, Set.empty, None))
+  override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+    admitted(rankedJobs(query, JobSearchFilter(None, Set.empty, None)))
 
-  override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = {
+  override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] = {
     val filter = candidateFilter(query, includeEmbeddingModel = true)
     val vectorLimit = branchLimit
     val jobVector = candidateVectorSearch(query, query.vector, filter, vectorLimit)
@@ -193,10 +204,10 @@ final class MongoSemanticSearchRepository(
         nativeCandidateFusion(query, queryVector, filter)
       case Some(queryVector) =>
         val queryVectorResults = candidateVectorSearch(query, queryVector, filter, branchLimit)
-        val lexicalResults = candidateLexicalSearch(query, filter)
+        val lexicalResults = candidateLexicalSearch(query)
         MongoSemanticSearchResult.fuseCandidates(jobVector, queryVectorResults, lexicalResults, branchLimit)
     }
-    result
+    admitted(result)
   }
 
   private def candidateVectorSearch(
@@ -204,75 +215,42 @@ final class MongoSemanticSearchRepository(
       vector: List[Float],
       filter: Bson,
       limit: Int
-  ): RepositoryIO[List[RankedCandidate]] = {
+  ): RepositoryIO[List[CandidateRetrievalHit]] = {
     val pipeline = candidateVectorPipeline(vector, filter, limit)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.candidateVector") {
         RepositoryIO
           .lift(
             Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-              collectWithin(users.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), limit)
+              collectWithin(aggregate(users, pipeline.asScala.toSeq), limit)
             }
           )
-          .subflatMap(documents => MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten))
+          .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
   private def candidateLexicalSearch(
-      query: VectorSearchQuery,
-      filter: Bson
-  ): RepositoryIO[List[RankedCandidate]] = {
-    val pipeline = candidateLexicalPipeline(query, filter)
+      query: VectorSearchQuery
+  ): RepositoryIO[List[CandidateRetrievalHit]] = {
+    val pipeline = candidateLexicalPipeline(query, candidateLexicalFilter(query))
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.candidateLexical") {
         RepositoryIO
           .lift(
             Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
-              collectWithin(users.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), branchLimit)
+              collectWithin(aggregate(users, pipeline.asScala.toSeq), branchLimit)
             }
           )
-          .subflatMap(documents => MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten))
+          .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
-  private[mongo] def candidateFilter(query: VectorSearchQuery, includeEmbeddingModel: Boolean): Bson = {
-    val filters = List(
-      Some(Filters.eq(MongoFields.Role, UserRole.Candidate.toString)),
-      Some(Filters.eq(MongoFields.AccountStatus, AccountStatus.Active.toString)),
-      Option.when(includeEmbeddingModel)(Filters.eq(MongoFields.EmbeddingMetaModel, query.model)),
-      Option.when(query.candidateFilters.requiredSkills.nonEmpty)(
-        Filters.and(
-          query.candidateFilters.requiredSkills
-            .map(Filters.eq(MongoFields.ProfileSkillsCanonical, _))*
-        )
-      )
-    ).flatten ++ privateCandidateFilters(query.candidateFilters)
-    Filters.and(filters*)
-  }
+  private[mongo] def candidateFilter(query: VectorSearchQuery, includeEmbeddingModel: Boolean): Bson =
+    MongoSearchEligibilityRendering.operational(SearchEligibilityCriteria.candidates(query, includeEmbeddingModel))
 
-  private def privateCandidateFilters(filters: ValidatedCandidateMatchFilters): List[Bson] = {
-    val requested = List(
-      filters.countryCanonical.map(value => Filters.eq(MongoFields.ProfileCurrentResidenceCountryCanonical, value)),
-      filters.cityCanonical.map(value => Filters.eq(MongoFields.ProfileCurrentResidenceCityCanonical, value)),
-      filters.availabilityStatus.map(value => Filters.eq(MongoFields.ProfileAvailabilityStatus, value.toString))
-    ).flatten
-    Option
-      .when(requested.nonEmpty)(
-        Filters.or(
-          Filters.eq(MongoFields.ProfileRecruiterSearchOptIn, false),
-          Filters.exists(MongoFields.ProfileRecruiterSearchOptIn, false),
-          Filters.and((Filters.eq(MongoFields.ProfileRecruiterSearchOptIn, true) :: requested)*)
-        )
-      )
-      .toList
-  }
-
-  private val candidateProjection = new Document(
+  private[mongo] def retrievalProjection: Document = new Document(
     "$project",
     new Document(MongoFields.Id, 1)
-      .append(MongoFields.Name, 1)
-      .append(MongoFields.ProfileSkills, 1)
-      .append(MongoFields.ProfileExperienceSummary, 1)
       .append(MongoFields.EmbeddingMeta, 1)
       .append(MongoFields.Score, 1)
       .append(MongoFields.RetrievalScore, 1)
@@ -281,14 +259,14 @@ final class MongoSemanticSearchRepository(
   private def rankedJobs(
       query: VectorSearchQuery,
       filter: JobSearchFilter
-  ): RepositoryIO[List[RankedJob]] = {
+  ): RepositoryIO[List[JobRetrievalHit]] = {
     val mongoFilter = jobFilter(query, filter)
     query.lexicalQuery.filter(_ => query.mode == SearchMode.HYBRID) match {
       case Some(text) if fusionStrategy != SearchFusionStrategy.ApplicationRrf =>
         nativeJobFusion(query, text, mongoFilter)
       case Some(text) =>
         val vector = vectorJobs(query, mongoFilter, branchLimit)
-        val lexical = lexicalJobs(query, text, mongoFilter)
+        val lexical = lexicalJobs(query, text)
         MongoSemanticSearchResult.fuseJobs(vector, lexical, branchLimit)
       case None => vectorJobs(query, mongoFilter, branchLimit)
     }
@@ -298,17 +276,17 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       text: String,
       filter: Bson
-  ): RepositoryIO[List[RankedJob]] = {
+  ): RepositoryIO[List[JobRetrievalHit]] = {
     val stages = nativeJobFusionStages(query, text, filter)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.nativeJobs") {
         RepositoryIO
           .lift(
             Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-              collectWithin(jobs.aggregate[Document](stages.asJava.asScala.toSeq).boundedStream(32), branchLimit)
+              collectWithin(aggregate(jobs, stages), branchLimit)
             }
           )
-          .subflatMap(documents => MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten))
+          .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
@@ -319,7 +297,7 @@ final class MongoSemanticSearchRepository(
   ): List[Document] = {
     val pipelines = new Document()
       .append("vector", List(vectorSearchStage(jobVectorIndex, query.vector, filter, branchLimit)).asJava)
-      .append("lexical", lexicalJobStages(text, filter))
+      .append("lexical", lexicalJobStages(text, jobLexicalFilter(query, query.filter)))
     val rerank = Option.when(rerankEnabled)(
       MongoSearchFusionPipeline
         .rerankStage(
@@ -337,23 +315,38 @@ final class MongoSemanticSearchRepository(
       rerank,
       Nil,
       scoreFieldStage
-    )
+    ) ++ List(retrievalProjection)
   }
 
-  private[mongo] def lexicalJobStages(text: String, filter: Bson): java.util.List[Document] = {
-    val search = new Document("index", jobLexicalIndex).append(
-      "text",
-      new Document("query", text).append(
-        "path",
-        List(MongoFields.Title, MongoFields.Description, MongoFields.Requirements, MongoFields.Skills).asJava
-      )
-    )
+  private[mongo] def lexicalJobStages(text: String, filter: Document): java.util.List[Document] =
     List(
-      new Document("$search", search),
-      new Document("$match", filter),
+      lexicalSearchStage(
+        jobLexicalIndex,
+        text,
+        List(MongoFields.Title, MongoFields.Description, MongoFields.Requirements, MongoFields.Skills),
+        filter
+      ),
       new Document("$limit", Int.box(branchLimit))
     ).asJava
-  }
+
+  private def lexicalSearchStage(index: String, text: String, paths: List[String], filter: Document): Document =
+    new Document(
+      "$search",
+      new Document("index", index).append(
+        "compound",
+        new Document(
+          "must",
+          List(new Document("text", new Document("query", text).append("path", paths.asJava))).asJava
+        )
+          .append("filter", List(filter).asJava)
+      )
+    )
+
+  private[mongo] def jobLexicalFilter(query: VectorSearchQuery, filter: JobSearchFilter): Document =
+    MongoSearchEligibilityRendering.indexed(SearchEligibilityCriteria.jobs(query.model, filter))
+
+  private[mongo] def candidateLexicalFilter(query: VectorSearchQuery): Document =
+    MongoSearchEligibilityRendering.indexed(SearchEligibilityCriteria.candidates(query, includeEmbeddingModel = true))
 
   private val scoreFieldStage = new Document("$set", new Document(MongoFields.Score, new Document("$meta", "score")))
 
@@ -361,7 +354,7 @@ final class MongoSemanticSearchRepository(
       query: VectorSearchQuery,
       queryVector: List[Float],
       filter: Bson
-  ): RepositoryIO[List[RankedCandidate]] = {
+  ): RepositoryIO[List[CandidateRetrievalHit]] = {
     val pipeline = nativeCandidateFusionStages(query, queryVector, filter)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.nativeCandidates") {
@@ -369,12 +362,12 @@ final class MongoSemanticSearchRepository(
           .lift(
             Mongo4catsCollections.documents(database, MongoCollections.Users).flatMap { users =>
               collectWithin(
-                users.aggregate[Document](pipeline.asJava.asScala.toSeq).boundedStream(32),
+                aggregate(users, pipeline),
                 branchLimit
               )
             }
           )
-          .subflatMap(documents => MongoSemanticSearchResult.rankedCandidates(documents, query).map(_.flatten))
+          .subflatMap(documents => MongoSemanticSearchResult.candidateHits(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
@@ -386,7 +379,7 @@ final class MongoSemanticSearchRepository(
     val pipelines = new Document()
       .append("jobVector", List(vectorSearchStage(candidateVectorIndex, query.vector, filter, branchLimit)).asJava)
       .append("queryVector", List(vectorSearchStage(candidateVectorIndex, queryVector, filter, branchLimit)).asJava)
-      .append("lexical", candidateLexicalStages(query, filter))
+      .append("lexical", candidateLexicalStages(query, candidateLexicalFilter(query)))
     val rerank = Option.when(rerankEnabled)(
       MongoSearchFusionPipeline.rerankStage(
         rerankModel,
@@ -415,112 +408,76 @@ final class MongoSemanticSearchRepository(
       rerank,
       rerankPreparation,
       scoreFieldStage
-    ) ++ List(candidateProjection)
+    ) ++ List(retrievalProjection)
   }
 
-  private[mongo] def candidateLexicalStages(query: VectorSearchQuery, filter: Bson): java.util.List[Document] = {
-    val search = new Document("index", candidateLexicalIndex)
-      .append(
-        "text",
-        new Document("query", query.lexicalQuery.getOrElse(""))
-          .append("path", List(MongoFields.ProfileSkills, MongoFields.ProfileExperienceSummary).asJava)
-      )
+  private[mongo] def candidateLexicalStages(query: VectorSearchQuery, filter: Document): java.util.List[Document] =
     List(
-      new Document("$search", search),
-      new Document("$match", filter),
+      lexicalSearchStage(
+        candidateLexicalIndex,
+        query.lexicalQuery.getOrElse(""),
+        List(MongoFields.ProfileSkills, MongoFields.ProfileExperienceSummary),
+        filter
+      ),
       new Document("$limit", Int.box(branchLimit))
     ).asJava
-  }
 
   private def vectorJobs(
       query: VectorSearchQuery,
       filter: Bson,
       limit: Int
-  ): RepositoryIO[List[RankedJob]] = {
+  ): RepositoryIO[List[JobRetrievalHit]] = {
     val pipeline = jobVectorPipeline(query.vector, filter, limit)
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.vectorJobs") {
         RepositoryIO
           .lift(
             Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-              collectWithin(jobs.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), limit)
+              collectWithin(aggregate(jobs, pipeline.asScala.toSeq), limit)
             }
           )
-          .subflatMap(documents => MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten))
+          .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
   private[mongo] def jobVectorPipeline(vector: List[Float], filter: Bson, limit: Int): java.util.List[Document] =
-    List(vectorSearchStage(jobVectorIndex, vector, filter, limit), scoreStage).asJava
+    List(vectorSearchStage(jobVectorIndex, vector, filter, limit), scoreStage, retrievalProjection).asJava
 
   private[mongo] def candidateVectorPipeline(vector: List[Float], filter: Bson, limit: Int): java.util.List[Document] =
     List(
       vectorSearchStage(candidateVectorIndex, vector, filter, limit),
       scoreStage,
-      candidateProjection
+      retrievalProjection
     ).asJava
 
-  private[mongo] def candidateLexicalPipeline(query: VectorSearchQuery, filter: Bson): java.util.List[Document] = {
-    val search = new Document("index", candidateLexicalIndex)
-      .append(
-        "text",
-        new Document("query", query.lexicalQuery.getOrElse(""))
-          .append("path", List(MongoFields.ProfileSkills, MongoFields.ProfileExperienceSummary).asJava)
-      )
-    List(
-      new Document("$search", search),
-      new Document("$match", filter),
-      new Document("$limit", java.lang.Integer.valueOf(branchLimit)),
+  private[mongo] def candidateLexicalPipeline(query: VectorSearchQuery, filter: Document): java.util.List[Document] =
+    (candidateLexicalStages(query, filter).asScala.toList ++ List(
       new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))),
-      candidateProjection
-    ).asJava
-  }
+      retrievalProjection
+    )).asJava
 
   private def lexicalJobs(
       query: VectorSearchQuery,
-      text: String,
-      filter: Bson
-  ): RepositoryIO[List[RankedJob]] = {
-    val search = new Document("index", jobLexicalIndex)
-      .append(
-        "text",
-        new Document("query", text)
-          .append(
-            "path",
-            List(MongoFields.Title, MongoFields.Description, MongoFields.Requirements, MongoFields.Skills).asJava
-          )
-      )
-    val pipeline = List(
-      new Document("$search", search),
-      new Document("$match", filter),
-      new Document("$limit", java.lang.Integer.valueOf(branchLimit)),
-      new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore")))
-    ).asJava
+      text: String
+  ): RepositoryIO[List[JobRetrievalHit]] = {
+    val pipeline = (lexicalJobStages(text, jobLexicalFilter(query, query.filter)).asScala.toList ++ List(
+      new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))),
+      retrievalProjection
+    )).asJava
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "semanticSearch.lexicalJobs") {
         RepositoryIO
           .lift(
             Mongo4catsCollections.documents(database, MongoCollections.Jobs).flatMap { jobs =>
-              collectWithin(jobs.aggregate[Document](pipeline.asScala.toSeq).boundedStream(32), branchLimit)
+              collectWithin(aggregate(jobs, pipeline.asScala.toSeq), branchLimit)
             }
           )
-          .subflatMap(documents => MongoSemanticSearchResult.rankedJobs(documents, query).map(_.flatten))
+          .subflatMap(documents => MongoSemanticSearchResult.jobHits(documents, query).map(_.flatten))
       }(_ => Left(RepositoryError.Unavailable))
   }
 
   private[mongo] def jobFilter(query: VectorSearchQuery, filter: JobSearchFilter): Bson =
-    MongoKeysetPaging.filter(
-      List(
-        Some(Filters.eq(MongoFields.Status, JobStatus.Open.toString)),
-        Some(Filters.eq(MongoFields.EmbeddingMetaModel, query.model)),
-        filter.city.map(city => Filters.eq(s"${MongoFields.Location}.${MongoFields.City}", city)),
-        skillsFilter(filter.skills),
-        filter.createdAfter.map(createdAfter => Filters.gte(MongoFields.CreatedAt, java.util.Date.from(createdAfter)))
-      )
-    )
-
-  private def skillsFilter(skills: Set[String]): Option[Bson] =
-    Option.when(skills.nonEmpty)(Filters.and(skills.toList.sorted.map(skill => Filters.eq(MongoFields.Skills, skill))*))
+    MongoSearchEligibilityRendering.operational(SearchEligibilityCriteria.jobs(query.model, filter))
 
   private def vectorSearchStage(index: String, vector: List[Float], filter: Bson, limit: Int): Document =
     new Document(
@@ -535,6 +492,49 @@ final class MongoSemanticSearchRepository(
 
   private val scoreStage: Document =
     new Document("$set", new Document(MongoFields.Score, new Document("$meta", "vectorSearchScore")))
+}
+
+private[mongo] object MongoSearchEligibilityRendering {
+  private def path(field: SearchEligibilityField): String = field match {
+    case SearchEligibilityField.JobStatus              => MongoFields.Status
+    case SearchEligibilityField.EmbeddingModel         => MongoFields.EmbeddingMetaModel
+    case SearchEligibilityField.JobCity                => MongoFields.LocationCity
+    case SearchEligibilityField.JobSkill               => MongoFields.Skills
+    case SearchEligibilityField.JobCreatedAt           => MongoFields.CreatedAt
+    case SearchEligibilityField.CandidateRole          => MongoFields.Role
+    case SearchEligibilityField.CandidateAccountStatus => MongoFields.AccountStatus
+    case SearchEligibilityField.CandidateSkill         => MongoFields.ProfileSkillsCanonical
+    case SearchEligibilityField.SearchConsent          => MongoFields.ProfileRecruiterSearchOptIn
+    case SearchEligibilityField.ResidenceCountry       => MongoFields.ProfileCurrentResidenceCountryCanonical
+    case SearchEligibilityField.ResidenceCity          => MongoFields.ProfileCurrentResidenceCityCanonical
+    case SearchEligibilityField.Availability           => MongoFields.ProfileAvailabilityStatus
+  }
+  private def literal(value: SearchEligibilityValue): Object = value match {
+    case SearchEligibilityValue.Text(value) => value
+    case SearchEligibilityValue.Flag(value) => java.lang.Boolean.valueOf(value)
+  }
+  def operational(criteria: SearchEligibilityCriteria): Bson = criteria match {
+    case SearchEligibilityCriteria.Equal(field, value)   => Filters.eq(path(field), literal(value))
+    case SearchEligibilityCriteria.AtLeast(field, value) => Filters.gte(path(field), java.util.Date.from(value))
+    case SearchEligibilityCriteria.Missing(field)        => Filters.exists(path(field), false)
+    case SearchEligibilityCriteria.All(values)           => Filters.and(values.map(operational)*)
+    case SearchEligibilityCriteria.AnyOf(values)         => Filters.or(values.map(operational)*)
+  }
+  def indexed(criteria: SearchEligibilityCriteria): Document = criteria match {
+    case SearchEligibilityCriteria.Equal(field, value) =>
+      new Document("equals", new Document("path", path(field)).append("value", literal(value)))
+    case SearchEligibilityCriteria.AtLeast(field, value) =>
+      new Document("range", new Document("path", path(field)).append("gte", java.util.Date.from(value)))
+    case SearchEligibilityCriteria.Missing(field) =>
+      new Document(
+        "compound",
+        new Document("mustNot", List(new Document("exists", new Document("path", path(field)))).asJava)
+      )
+    case SearchEligibilityCriteria.All(values) =>
+      new Document("compound", new Document("filter", values.map(indexed).asJava))
+    case SearchEligibilityCriteria.AnyOf(values) =>
+      new Document("compound", new Document("should", values.map(indexed).asJava).append("minimumShouldMatch", 1))
+  }
 }
 
 private[mongo] object MongoSearchFusionPipeline {
@@ -599,107 +599,61 @@ private[mongo] object MongoSearchFusionPipeline {
 
 private[mongo] object MongoSemanticSearchResult {
   def fuseJobs(
-      vector: RepositoryIO[List[RankedJob]],
-      lexical: RepositoryIO[List[RankedJob]],
+      vector: RepositoryIO[List[JobRetrievalHit]],
+      lexical: RepositoryIO[List[JobRetrievalHit]],
       limit: Int
-  ): RepositoryIO[List[RankedJob]] =
+  ): RepositoryIO[List[JobRetrievalHit]] =
     (vector, lexical)
-      .parMapN((vectorHits, lexicalHits) => HybridRankFusion.jobs(vectorHits, lexicalHits, limit))
+      .parMapN((vectorHits, lexicalHits) =>
+        HybridRankFusion.retrieval(List(vectorHits, lexicalHits), limit)(_.value.toString)
+      )
       .leftMap(_ => RepositoryError.Unavailable)
 
   def fuseCandidates(
-      jobVector: RepositoryIO[List[RankedCandidate]],
-      queryVector: RepositoryIO[List[RankedCandidate]],
-      lexical: RepositoryIO[List[RankedCandidate]],
+      jobVector: RepositoryIO[List[CandidateRetrievalHit]],
+      queryVector: RepositoryIO[List[CandidateRetrievalHit]],
+      lexical: RepositoryIO[List[CandidateRetrievalHit]],
       limit: Int
-  ): RepositoryIO[List[RankedCandidate]] =
+  ): RepositoryIO[List[CandidateRetrievalHit]] =
     (jobVector, queryVector, lexical)
-      .parMapN((jobs, text, lexicalHits) => HybridRankFusion.candidates(jobs, text, lexicalHits, limit))
+      .parMapN((jobs, text, lexicalHits) =>
+        HybridRankFusion.retrieval(List(jobs, text, lexicalHits), limit)(_.value.toString)
+      )
       .leftMap(_ => RepositoryError.Unavailable)
 
-  def rankedJobs(
+  def jobHits(
       documents: List[Document],
       query: VectorSearchQuery
-  ): Either[RepositoryError, List[Option[RankedJob]]] =
-    documents.traverse(rankedJob(_, query)).leftMap(_ => RepositoryError.InvalidStoredData)
+  ): Either[RepositoryError, List[Option[JobRetrievalHit]]] =
+    documents.traverse(jobHit(_, query))
 
-  def rankedCandidates(
+  def candidateHits(
       documents: List[Document],
       query: VectorSearchQuery
-  ): Either[RepositoryError, List[Option[RankedCandidate]]] =
-    documents.traverse(rankedCandidate(_, query))
+  ): Either[RepositoryError, List[Option[CandidateRetrievalHit]]] =
+    documents.traverse(candidateHit(_, query))
 
-  def rankedJob(
+  def jobHit(document: Document, query: VectorSearchQuery): Either[RepositoryError, Option[JobRetrievalHit]] =
+    hit(document, query)(JobId.apply)
+
+  def candidateHit(
       document: Document,
       query: VectorSearchQuery
-  ): Either[RepositoryError, Option[RankedJob]] =
-    val stored = new Document(document)
-    stored.remove(MongoFields.Score)
-    stored.remove(MongoFields.RetrievalScore)
-    MongoHiringCodecs
-      .readJob(stored)
-      .toEither
-      .leftMap(_ => RepositoryError.InvalidStoredData)
-      .flatMap { job =>
-        readScore(document, MongoFields.Score, required = true)
-          .map(_.getOrElse(0.0d))
-          .flatMap { score =>
-            readScore(document, MongoFields.RetrievalScore, required = false).map { retrievalScore =>
-              for {
-                embedding <- job.embedding
-                if embedding.meta.model == query.model
-                if embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(job))
-              } yield RankedJob(
-                job,
-                score,
-                query.mode,
-                embedding.meta,
-                query.searchId,
-                retrievalScore = retrievalScore
-              )
-            }
-          }
-      }
+  ): Either[RepositoryError, Option[CandidateRetrievalHit]] =
+    hit(document, query)(UserId.apply)
 
-  def rankedCandidate(
-      document: Document,
-      query: VectorSearchQuery
-  ): Either[RepositoryError, Option[RankedCandidate]] =
-    parseIdentifier(document.getString(MongoFields.Id))(UserId.apply)
-      .leftMap(_ => RepositoryError.InvalidStoredData)
-      .flatMap { id =>
-        readScore(document, MongoFields.Score, required = true)
-          .map(_.getOrElse(0.0d))
-          .flatMap { score =>
-            readScore(document, MongoFields.RetrievalScore, required = false).flatMap { retrievalScore =>
-              val decoded = Either.catchNonFatal {
-                val name = document.getString(MongoFields.Name)
-                val profile = document.get(MongoFields.Profile, classOf[Document])
-                val skills = profile.get(MongoFields.Skills, classOf[java.util.List[String]]).asScala.toSet
-                val summary = Option(profile.get(MongoFields.ExperienceSummary)).collect { case value: String => value }
-                val storedMeta = document.get(MongoFields.EmbeddingMeta, classOf[Document])
-                val model = storedMeta.getString(MongoFields.Model)
-                val sourceHash = storedMeta.getString(MongoFields.SourceHash)
-                val updatedAt = storedMeta.getDate(MongoFields.UpdatedAt).toInstant
-                val profileValue = CandidateProfile(skills, summary, None)
-                val meta = EmbeddingMeta(model, sourceHash, updatedAt)
-                Option.when(
-                  model == query.model && sourceHash == SourceHash.sha256(SearchableText.candidate(profileValue))
-                ) {
-                  RankedCandidate(
-                    CandidateSearchHit(id, name, skills, summary.filter(_.nonEmpty)),
-                    score,
-                    query.mode,
-                    meta,
-                    query.searchId,
-                    retrievalScore = retrievalScore
-                  )
-                }
-              }
-              decoded.leftMap(_ => RepositoryError.InvalidStoredData)
-            }
-          }
-      }
+  private def hit[Id](document: Document, query: VectorSearchQuery)(
+      identify: java.util.UUID => Id
+  ): Either[RepositoryError, Option[SearchRetrievalHit[Id]]] =
+    for {
+      raw <- Either.catchNonFatal(document.getString(MongoFields.Id)).leftMap(_ => RepositoryError.InvalidStoredData)
+      id <- parseIdentifier(raw)(identify).leftMap(_ => RepositoryError.InvalidStoredData)
+      score <- readScore(document, MongoFields.Score, required = true)
+      retrievalScore <- readScore(document, MongoFields.RetrievalScore, required = false)
+      metadata <- MongoSearchEligibilityCodecs.metadata(document)
+    } yield metadata
+      .filter(_.model == query.model)
+      .map(meta => SearchRetrievalHit(id, score.getOrElse(0d), query.mode, meta, query.searchId, retrievalScore))
 
   private def readScore(
       document: Document,

@@ -48,6 +48,77 @@ final class HiringGraphQLDiscoveryContractSpec extends CatsEffectSuite {
   private def errorCode(result: Json): Either[io.circe.DecodingFailure, String] =
     result.hcursor.downField("errors").downArray.downField("extensions").get[String]("code")
 
+  test("five expensive aliases through fragments reject before any discovery resolver runs") {
+    val query = """query {
+      ...DiscoveryRoots
+      fifth: jobDiscoveryFacets { truncated }
+    }
+    fragment DiscoveryRoots on Query {
+      first: jobDiscoveryFacets { truncated }
+      second: jobDiscoveryFacets { truncated }
+      third: jobDiscoveryFacets { truncated }
+      fourth: jobDiscoveryFacets { truncated }
+    }"""
+    JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
+      TestGraphQLSupport
+        .context(
+          IO.pure(ProbeResult.Ready),
+          Some(actor),
+          TestGraphQLSupport.emptyServices.copy(jobService = fixture.service)
+        )
+        .use { context =>
+          TestGraphQLSupport.parseAndExecute(GraphQLRequest(query, Json.obj(), None), context).flatMap { result =>
+            assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+            fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
+          }
+        }
+    }
+  }
+
+  test("request context can lower the expensive root budget without running resolvers") {
+    val query = """query {
+      first: jobDiscoveryFacets { truncated }
+      second: jobDiscoveryFacets { truncated }
+      third: jobDiscoveryFacets { truncated }
+    }"""
+    JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
+      RequestContextFactory.resource
+        .flatMap(
+          _.resource(
+            RequestContextParameters(
+              IO.pure(ProbeResult.Ready),
+              Some(actor),
+              TestGraphQLSupport.emptyServices.copy(jobService = fixture.service),
+              IO.pure(ProbeResult.Ready),
+              diagnostics = com.example.graphQL.cats.service.Diagnostics.noop,
+              discoveryMaxRoots = 2
+            )
+          )
+        )
+        .use { context =>
+          TestGraphQLSupport.parseAndExecute(GraphQLRequest(query, Json.obj(), None), context).flatMap { result =>
+            assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+            fixture.calls.get.map(calls => assertEquals(calls, JobDiscoveryTestSupport.Calls()))
+          }
+        }
+    }
+  }
+
+  test("four expensive aliases remain allowed within depth and complexity limits") {
+    val query = """query {
+      first: jobDiscoveryFacets { truncated }
+      second: jobDiscoveryFacets { truncated }
+      third: jobDiscoveryFacets { truncated }
+      fourth: jobDiscoveryFacets { truncated }
+    }"""
+    JobDiscoveryTestSupport.fixture(List(candidate)).flatMap { fixture =>
+      execute(query, Json.obj(), fixture).flatMap { result =>
+        assert(!result.hcursor.downField("errors").succeeded)
+        fixture.calls.get.map(calls => assertEquals(calls.facets.size, 4))
+      }
+    }
+  }
+
   test("geographic hits and exact structured facet operations validate against the active schema") {
     val query = """query {
       nearbyJobs(center: {latitude: 35.1856, longitude: 33.3823}, radiusKm: 20,

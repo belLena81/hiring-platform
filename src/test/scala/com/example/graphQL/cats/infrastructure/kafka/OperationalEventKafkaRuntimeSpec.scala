@@ -112,6 +112,41 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       Fakes(receipts, quarantines, quarantineState)
     }
 
+  test("tombstones quarantine safely before committing and failures retain the offset") {
+    fakes.flatMap { values =>
+      val failing = new EventQuarantineRepository {
+        def save(record: EventQuarantineRecord): RepositoryIO[Unit] =
+          RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+      }
+      for {
+        success <- OperationalEventKafkaRuntime.handleRecord(
+          config,
+          values.receipts,
+          values.quarantines,
+          config.topic,
+          0,
+          1L,
+          null
+        )
+        failure <- OperationalEventKafkaRuntime.handleRecord(
+          config,
+          values.receipts,
+          failing,
+          config.topic,
+          0,
+          2L,
+          null
+        )
+        records <- values.quarantined.get
+      } yield {
+        assert(success)
+        assert(!failure)
+        assertEquals(records.size, 1)
+        assertEquals(records.head.rawBytes.toList, List.empty[Byte])
+      }
+    }
+  }
+
   test("malformed records commit after durable quarantine") {
     fakes.flatMap { values =>
       for {

@@ -220,8 +220,9 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
       now <- IO.realTimeInstant
       _ <- success(users.deleteAccount(subject, now, "deleted-account", MutationWriteContext.directWrite))
       request <- success(cleanup.find(subject))
-      value <- IO.fromOption(request)(new AssertionError("account deletion did not enqueue cleanup"))
-    } yield value.transactionalIds
+      _ <- IO.fromOption(request)(new AssertionError("account deletion did not enqueue cleanup"))
+      ids <- success(cleanup.producerBatch(subject))
+    } yield ids
   }
 
   test("account deletion fences an authorized paused sender; a fresh generation works only for an unaffected subject") {
@@ -237,22 +238,40 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
             for {
               _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
               item <- scheduled(fixture.database, repository, result = worker)
-              authorized <- Deferred[IO, Unit]
+              authorized <- Deferred[IO, ClaimedInterviewWorkflowCommand]
               release <- Deferred[IO, Unit]
               result <- Resource
                 .make((for {
                   at <- IO.realTimeInstant
-                  permissions <- Vector(transport, peer).traverse(value =>
-                    success(repository.authorizePublication(item.claim, value.generationFor(item.message), at))
+                  firstPermission <- success(
+                    repository.authorizePublication(item.claim, transport.generationFor(item.message), at)
                   )
-                  _ = assert(permissions.forall(identity))
-                  _ <- authorized.complete(())
+                  _ = assert(firstPermission)
+                  _ <- success(repository.retry(item.claim, at, at, "publication_unavailable"))
+                  nextClaims <- success(repository.claimDueCommands("fencing-proof-retry", at, at.plusSeconds(600), 1))
+                  nextClaim <- IO.fromOption(nextClaims.headOption)(new AssertionError("missing retry claim"))
+                  _ = assert(
+                    nextClaim.fencingToken != item.claim.fencingToken,
+                    "a later attempt must own a fresh claim token"
+                  )
+                  _ = assertEquals(nextClaim.record.publicationAttempts, 1)
+                  secondPermission <- success(
+                    repository.authorizePublication(nextClaim, peer.generationFor(item.message), at)
+                  )
+                  _ = assert(secondPermission)
+                  stored <- success(repository.findCommand(item.workflow.id, nextClaim.record.stepId))
+                  currentRecord <- IO.fromOption(stored)(new AssertionError("missing authorized command"))
+                  currentClaim = nextClaim.copy(record = currentRecord)
+                  _ = assertEquals(currentClaim.record.publicationAttempts, 2)
+                  renewed <- success(repository.renewPublication(currentClaim, at, at.plusSeconds(600)))
+                  _ = assert(renewed, "replacement denial must use a currently owned publication claim")
+                  _ <- authorized.complete(currentClaim)
                   _ <- release.get
                   sent <- Vector(transport, peer).traverse(_.publish(item.message).attempt)
                 } yield sent).start)(_.cancel)
                 .use { fiber =>
                   for {
-                    _ <- authorized.get.timeout(30.seconds)
+                    currentClaim <- authorized.get.timeout(30.seconds)
                     ids <- delete(fixture.database, fixture.client, item.workflow.candidateId)
                     _ = assert(
                       Vector(transport, peer)
@@ -261,14 +280,14 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
                     _ <- success(fencer.fence(ids))
                     _ <- release.complete(())
                     outcome <- fiber.joinWithNever.timeout(30.seconds)
-                  } yield outcome
+                  } yield (outcome, currentClaim)
                 }
-              _ = assert(result.forall(_.left.exists(_.isInstanceOf[InterviewProducerGenerationFenced])))
+              _ = assert(result._1.forall(_.left.exists(_.isInstanceOf[InterviewProducerGenerationFenced])))
               _ <- InterviewKafkaRuntime.publisherResource(kafka.config(worker)).use { replacement =>
                 for {
                   at <- IO.realTimeInstant
                   refused <- repository
-                    .authorizePublication(item.claim, replacement.generationFor(item.message), at)
+                    .authorizePublication(result._2, replacement.generationFor(item.message), at)
                     .value
                   _ = assert(
                     refused.fold(_ => true, allowed => !allowed),

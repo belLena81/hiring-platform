@@ -36,7 +36,7 @@ import com.example.graphQL.cats.service.protocol.{
 import com.example.graphQL.cats.service.search.SemanticSearchService
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId, UserId}
 import com.example.graphQL.cats.domain.model.*
-import com.example.graphQL.cats.service.search.{RankedCandidate, RankedJob, VectorSearchQuery}
+import com.example.graphQL.cats.service.search.{RankedJob, VectorSearchQuery, JobRetrievalHit, CandidateRetrievalHit}
 import com.example.graphQL.cats.shared.crypto.SourceHash
 import io.circe.Json
 import munit.CatsEffectSuite
@@ -1195,13 +1195,13 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       com.example.graphQL.cats.service.port.RepositoryIO
         .fromEither(Right(List.empty[com.example.graphQL.cats.service.search.CandidateSearchEligibility]))
 
-    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
+    override def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs.map(_.retrieval))))
 
-    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] =
-      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs)))
+    override def recommendedJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] =
+      com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(jobs.map(_.retrieval))))
 
-    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] =
+    override def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] =
       com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(IO.pure(Right(Nil)))
   }
 

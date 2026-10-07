@@ -36,6 +36,8 @@ enum InterviewCleanupUpdate {
 }
 
 trait InterviewSubjectCleanupRepository {
+  def producerBatch(subject: UserId): RepositoryIO[Vector[String]]
+  def markProducersFenced(subject: UserId, ids: Vector[String], now: Instant): RepositoryIO[Unit]
   def pendingPage(cursor: Option[InterviewCleanupCursor], observedAt: Instant): RepositoryIO[InterviewCleanupPage]
   def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]]
   def transition(expected: InterviewSubjectCleanup, next: InterviewSubjectCleanup): RepositoryIO[InterviewCleanupUpdate]

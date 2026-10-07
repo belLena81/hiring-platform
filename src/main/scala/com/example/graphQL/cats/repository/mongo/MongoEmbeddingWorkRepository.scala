@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import cats.syntax.all.*
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.Diagnostics
@@ -41,6 +42,107 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
     extends EmbeddingWorkRepository
     with MongoEmbeddingWorkEnqueuer {
   override val requiresTransaction: Boolean = true
+
+  def inspectForAdmin(
+      key: EmbeddingWorkKey,
+      adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+      transactions: MongoTransactionRunner
+  ): RepositoryIO[Option[EmbeddingWorkInspection]] = transactions.run { session =>
+    for {
+      _ <- authorizeAdmin(adminId, session)
+      row <- RepositoryIO.lift(
+        MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, key.value))
+      )
+      result <- row.traverse(document =>
+        RepositoryIO.fromEither(for {
+          generation <- requiredNumber(document, MongoFields.Generation).left.map(_ =>
+            RepositoryError.InvalidStoredData
+          )
+          attempts <- requiredNumber(document, MongoFields.Attempts).left.map(_ => RepositoryError.InvalidStoredData)
+          state <- requiredString(document, MongoFields.State).left
+            .map(_ => RepositoryError.InvalidStoredData)
+            .flatMap(value =>
+              EmbeddingWorkState.values.find(_.toString == value).toRight(RepositoryError.InvalidStoredData)
+            )
+          failure <- Option(document.get(MongoFields.Failure)).traverse {
+            case value: String =>
+              EmbeddingWorkFailure.values.find(_.toString == value).toRight(RepositoryError.InvalidStoredData)
+            case _ => Left(RepositoryError.InvalidStoredData)
+          }
+        } yield EmbeddingWorkInspection(generation.longValue, attempts.intValue, state, failure))
+      )
+    } yield result
+  }
+
+  private def authorizeAdmin(
+      adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+      session: Option[ClientSession[IO]]
+  ): RepositoryIO[Unit] = RepositoryIO
+    .lift(
+      MongoSessionOperations.updateOne(
+        Mongo4catsCollections.documents(database, MongoCollections.Users),
+        session,
+        MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, adminId.value.toString),
+          MongoFilter.eq(MongoFields.Role, "Admin"),
+          MongoFilter.eq(MongoFields.AccountStatus, "Active"),
+          MongoFilter.eq(MongoFields.AdminSingletonKey, "singleton-admin"),
+          MongoFilter.lt(MongoFields.Version, Long.MaxValue)
+        ),
+        MongoUpdate.inc(MongoFields.Version, 1L)
+      )
+    )
+    .subflatMap {
+      case Some(result) if result.getMatchedCount == 1L => Right(())
+      case Some(_)                                      => Left(RepositoryError.AuthorityRevoked)
+      case None                                         => Left(RepositoryError.MissingWriteResult)
+    }
+
+  /** Maintenance capability: the trusted Admin and failed generation are checked in the same transaction. A
+    * changed/repaired generation is never overwritten. No provider calls occur here.
+    */
+  def repairFailed(
+      key: EmbeddingWorkKey,
+      expectedGeneration: Long,
+      adminId: com.example.graphQL.cats.domain.model.Identifiers.UserId,
+      now: Instant,
+      transactions: MongoTransactionRunner
+  ): RepositoryIO[Boolean] =
+    if (expectedGeneration < 1L || expectedGeneration == Long.MaxValue)
+      RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    else
+      transactions.run { session =>
+        for {
+          _ <- authorizeAdmin(adminId, session)
+          repaired <- RepositoryIO.lift(
+            MongoSessionOperations.updateOne(
+              collection,
+              session,
+              MongoFilter.and(
+                MongoFilter.eq(MongoFields.Id, key.value),
+                MongoFilter.eq(MongoFields.State, "Failed"),
+                MongoFilter.eq(MongoFields.Generation, expectedGeneration)
+              ),
+              MongoUpdate.combine(
+                MongoUpdate.set(MongoFields.State, "Ready"),
+                MongoUpdate.set(MongoFields.AvailableAt, Date.from(now)),
+                MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+                MongoUpdate.set(MongoFields.Attempts, 0),
+                MongoUpdate.inc(MongoFields.Generation, 1L),
+                MongoUpdate.unset(MongoFields.Failure),
+                MongoUpdate.unset(MongoFields.FinishedAt),
+                MongoUpdate.unset(MongoFields.LeaseOwner),
+                MongoUpdate.unset(MongoFields.LeaseToken),
+                MongoUpdate.unset(MongoFields.LeaseUntil)
+              )
+            )
+          )
+          result <- RepositoryIO.fromEither(repaired match {
+            case Some(result) => Right(result.getMatchedCount == 1L)
+            case None         => Left(RepositoryError.MissingWriteResult)
+          })
+        } yield result
+      }
   private enum StoredWorkError {
     case InvalidDocument
   }
@@ -167,6 +269,25 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
     }
   }
 
+  override def renew(claim: ClaimedEmbeddingWork, now: Instant, leaseUntil: Instant): RepositoryIO[Boolean] =
+    if (!leaseUntil.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+    else
+      MongoRepositorySupport.repositoryGuard(diagnostics, "embeddingWork.renew") {
+        RepositoryIO
+          .lift(
+            MongoSessionOperations.updateOne(
+              collection,
+              None,
+              MongoFilter.and(leaseFilter(claim), MongoFilter.gt(MongoFields.LeaseUntil, Date.from(now))),
+              MongoUpdate.set(MongoFields.LeaseUntil, Date.from(leaseUntil))
+            )
+          )
+          .subflatMap {
+            case Some(result) => Right(result.getMatchedCount == 1L)
+            case None         => Left(RepositoryError.MissingWriteResult)
+          }
+      }(_ => Left(RepositoryError.Unavailable))
+
   override def complete(claim: ClaimedEmbeddingWork): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "embeddingWork.complete") {
@@ -178,18 +299,20 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
           .subflatMap(result => if (result.getDeletedCount == 1L) Right(()) else Left(RepositoryError.Conflict))
       }(_ => Left(RepositoryError.Unavailable))
 
-  override def retry(claim: ClaimedEmbeddingWork, availableAt: Instant): RepositoryIO[Unit] =
-    transition(
-      claim,
-      MongoUpdate.combine(
-        MongoUpdate.set(MongoFields.State, "Retry"),
-        MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
-        MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1)),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil)
-      )
-    )
+  override def retry(
+      claim: ClaimedEmbeddingWork,
+      availableAt: Instant,
+      chargeAttempt: Boolean = true
+  ): RepositoryIO[Unit] = {
+    val updates = List(
+      MongoUpdate.set(MongoFields.State, "Retry"),
+      MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
+      MongoUpdate.unset(MongoFields.LeaseOwner),
+      MongoUpdate.unset(MongoFields.LeaseToken),
+      MongoUpdate.unset(MongoFields.LeaseUntil)
+    ) ++ Option.when(chargeAttempt)(MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))).toList
+    transition(claim, MongoUpdate.combine(updates*))
+  }
 
   override def fail(
       claim: ClaimedEmbeddingWork,
@@ -251,3 +374,11 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
   private def requiredNumber(document: Document, field: String): Either[StoredWorkError, Number] =
     Option(document.get(field)).collect { case value: Number => value }.toRight(StoredWorkError.InvalidDocument)
 }
+
+enum EmbeddingWorkState { case Ready, Retry, Processing, Failed }
+final case class EmbeddingWorkInspection(
+    generation: Long,
+    attempts: Int,
+    state: EmbeddingWorkState,
+    failure: Option[EmbeddingWorkFailure]
+)

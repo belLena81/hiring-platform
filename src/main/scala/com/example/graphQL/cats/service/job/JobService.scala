@@ -172,7 +172,10 @@ final class JobService(
           UseCaseError.Domain(DomainError.Forbidden)
         )
       )
-      results <- UseCase.repository(jobs.nearbyJobs(normalized, limit + 1))
+      scope <- UseCase.fromEither(
+        com.example.graphQL.cats.service.read.HiringReadScope.validated(actor, user, authorization)
+      )
+      results <- UseCase.repository(jobs.nearbyJobs(scope, normalized, limit + 1))
     } yield results
 
   def jobDiscoveryFacets(actor: ActorContext, query: JobFacetQuery): UseCaseIO[JobDiscoveryFacets] =
@@ -188,7 +191,10 @@ final class JobService(
           UseCaseError.Domain(DomainError.Forbidden)
         )
       )
-      results <- UseCase.repository(jobs.jobDiscoveryFacets(normalized))
+      scope <- UseCase.fromEither(
+        com.example.graphQL.cats.service.read.HiringReadScope.validated(actor, user, authorization)
+      )
+      results <- UseCase.repository(jobs.jobDiscoveryFacets(scope, normalized))
     } yield results
 
   def myJobs(actor: ActorContext, page: JobPageRequest): UseCaseIO[List[Job]] =

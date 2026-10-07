@@ -778,6 +778,33 @@ class AppConfigSpec extends FunSuite {
     assertContainsError(AppConfig.fromConfig(invalidReranker, Map.empty), ConfigError.InvalidRerankModel)
   }
 
+  test("discovery query budgets are typed and stay below the HTTP deadline") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.discovery), Right(DiscoveryConfig()))
+    List("mongo.discovery.permits = 0", "mongo.discovery.max-roots = 65", "mongo.discovery.max-time-millis = 5000")
+      .foreach(setting =>
+        assertContainsError(
+          AppConfig.fromConfig(defaultConfig + setting + "\n", Map.empty),
+          ConfigError.InvalidDiscoveryQueryLimits
+        )
+      )
+  }
+
+  test("durable embedding and Kafka partition settings reject unsafe bounds") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.vectorSearch.durableRetryAttempts), Right(8))
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "vector-search.embedding.durable-retry-attempts = 0\n", Map.empty),
+      ConfigError.InvalidEmbeddingRecovery
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "vector-search.embedding.durable-retry-cap-millis = 999\n", Map.empty),
+      ConfigError.InvalidEmbeddingRecovery
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "kafka.consumer.partition-concurrency = 0\n", Map.empty),
+      ConfigError.InvalidKafkaPartitionConcurrency
+    )
+  }
+
   test("request timeout is bounded") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.requestTimeout), Right(5.seconds))
     assertContainsError(

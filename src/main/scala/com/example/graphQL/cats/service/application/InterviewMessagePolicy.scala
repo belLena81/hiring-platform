@@ -16,7 +16,7 @@ enum InterviewMessageRejection(val code: String) {
 }
 
 enum InterviewReplayDisposition {
-  case Timely, Expired, Future
+  case Timely, Expired, Deferred, Future
 }
 
 enum InterviewCommandAdmission {
@@ -32,9 +32,11 @@ object InterviewMessagePolicy {
   def replayDisposition(
       message: InterviewMessage,
       now: Instant,
-      replayWindow: FiniteDuration
+      replayWindow: FiniteDuration,
+      clockSkewTolerance: FiniteDuration = scala.concurrent.duration.Duration.Zero
   ): InterviewReplayDisposition =
-    if (message.occurredAt.isAfter(now)) InterviewReplayDisposition.Future
+    if (message.occurredAt.isAfter(now.plusMillis(clockSkewTolerance.toMillis))) InterviewReplayDisposition.Future
+    else if (message.occurredAt.isAfter(now)) InterviewReplayDisposition.Deferred
     else if (message.occurredAt.isBefore(now.minusMillis(replayWindow.toMillis))) InterviewReplayDisposition.Expired
     else InterviewReplayDisposition.Timely
 
@@ -96,6 +98,20 @@ object InterviewMessagePolicy {
           .left
           .map(_ => InterviewMessageRejection.Expired)
       case _ => Left(InterviewMessageRejection.Expired)
+    }
+
+  def futureDecision(
+      workflow: Option[InterviewWorkflow],
+      command: Option[InterviewWorkflowCommandRecord],
+      message: InterviewMessage
+  ): Either[InterviewMessageRejection, InterviewWorkflowDecision] =
+    (workflow, command) match {
+      case (Some(current), Some(stored)) if applicable(current, stored) && identityMatches(current, stored, message) =>
+        InterviewWorkflow
+          .decide(current, current.revision, InterviewWorkflowEvent.RetryExhausted("future_message"))
+          .left
+          .map(_ => InterviewMessageRejection.Future)
+      case _ => Left(InterviewMessageRejection.Future)
     }
 
   def resultEvent(message: InterviewMessage, attempts: Long, maxAttempts: Int): Option[InterviewWorkflowEvent] =

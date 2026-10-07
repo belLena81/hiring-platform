@@ -15,7 +15,7 @@ import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
 /** Captures IDs through real service authorization and current Mongo eligibility, never fixture prefiltering. */
-private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDatabase[IO])
+private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDatabase[IO], policy: DiscoveryQueryPolicy)
     extends SearchEvaluationCapture.Retrieval {
   private val indexes = HiringSearchEvaluationAtlasRunner.indexes
   private val repository = new MongoSemanticSearchRepository(
@@ -26,7 +26,8 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
     indexes.candidateLexicalIndex,
     8,
     8,
-    diagnostics = Diagnostics.noop
+    diagnostics = Diagnostics.noop,
+    discoveryPolicy = Some(policy)
   )
   private val users = new MongoUserRepository(
     database,
@@ -46,11 +47,15 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
 
   private def documents(collection: String, pipeline: List[Document]): RepositoryIO[List[Document]] =
     RepositoryIO.fromIOEither(
-      Mongo4catsCollections
-        .documents(database, collection)
-        .flatMap { source =>
-          MongoRepositoryTestSupport.collectWithin(source.aggregate[Document](pipeline).stream, 8)
-        }
+      policy
+        .run(
+          Mongo4catsCollections
+            .documents(database, collection)
+            .flatMap { source =>
+              MongoRepositoryTestSupport
+                .collectWithin(source.aggregate[Document](pipeline).maxTime(policy.maxTime).stream, 8)
+            }
+        )
         .attempt
         .map(_.leftMap(_ => RepositoryError.Unavailable))
     )
@@ -67,30 +72,31 @@ private[mongo] final class HiringSearchEvaluationRetrieval(database: MongoDataba
     def jobEligibility(ids: List[JobId]) = repository.jobEligibility(ids)
     def candidateEligibility(ids: List[UserId]) = repository.candidateEligibility(ids)
     def recommendedJobs(query: VectorSearchQuery) = repository.recommendedJobs(query)
-    def searchJobs(query: VectorSearchQuery): RepositoryIO[List[RankedJob]] = strategy match {
+    def searchJobs(query: VectorSearchQuery): RepositoryIO[List[JobRetrievalHit]] = strategy match {
       case SearchEvaluationStrategy.ApplicationRrf => repository.searchJobs(query)
       case SearchEvaluationStrategy.Vector         =>
         repository.searchJobs(query.copy(lexicalQuery = None, mode = SearchMode.VECTOR))
       case SearchEvaluationStrategy.Lexical =>
         val pipeline = repository
-          .lexicalJobStages(query.lexicalQuery.getOrElse(""), repository.jobFilter(query, query.filter))
+          .lexicalJobStages(query.lexicalQuery.getOrElse(""), repository.jobLexicalFilter(query, query.filter))
           .asScala
           .toList :+
-          new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore")))
+          new Document("$set", new Document(MongoFields.Score, new Document("$meta", "searchScore"))) :+
+          repository.retrievalProjection
         documents(MongoCollections.Jobs, pipeline).subflatMap(
-          MongoSemanticSearchResult.rankedJobs(_, query).map(_.flatten)
+          MongoSemanticSearchResult.jobHits(_, query).map(_.flatten)
         )
       case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
     }
-    def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[RankedCandidate]] = strategy match {
+    def candidateMatches(query: VectorSearchQuery): RepositoryIO[List[CandidateRetrievalHit]] = strategy match {
       case SearchEvaluationStrategy.ApplicationRrf => repository.candidateMatches(query)
       case SearchEvaluationStrategy.Vector         =>
         repository.candidateMatches(query.copy(lexicalQuery = None, candidateQueryVector = None))
       case SearchEvaluationStrategy.Lexical =>
         val pipeline =
-          repository.candidateLexicalPipeline(query, repository.candidateFilter(query, true)).asScala.toList
+          repository.candidateLexicalPipeline(query, repository.candidateLexicalFilter(query)).asScala.toList
         documents(MongoCollections.Users, pipeline).subflatMap(
-          MongoSemanticSearchResult.rankedCandidates(_, query).map(_.flatten)
+          MongoSemanticSearchResult.candidateHits(_, query).map(_.flatten)
         )
       case SearchEvaluationStrategy.AtlasAnn => RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
     }

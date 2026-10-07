@@ -8,6 +8,65 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 private[mongo] object MongoAtlasSearchSetup {
+  private def token: Document = new Document("type", "token").append("normalizer", "none")
+  private def string: Document = new Document("type", "string")
+  private def document(fields: Document): Document = new Document("type", "document").append("fields", fields)
+  private def lexical(fields: Document): Document =
+    new Document("mappings", new Document("dynamic", false).append("fields", fields))
+
+  private[mongo] def jobLexicalDefinition: Document = lexical(
+    new Document()
+      .append(MongoFields.Title, string)
+      .append(MongoFields.Description, string)
+      .append(MongoFields.Requirements, string)
+      .append(MongoFields.Skills, List(string, token).asJava)
+      .append(MongoFields.Status, token)
+      .append(MongoFields.CreatedAt, new Document("type", "date"))
+      .append(MongoFields.Location, document(new Document(MongoFields.City, token)))
+      .append(MongoFields.EmbeddingMeta, document(new Document(MongoFields.Model, token)))
+  )
+
+  private[mongo] def candidateLexicalDefinition: Document = lexical(
+    new Document()
+      .append(MongoFields.Role, token)
+      .append(MongoFields.AccountStatus, token)
+      .append(MongoFields.EmbeddingMeta, document(new Document(MongoFields.Model, token)))
+      .append(
+        MongoFields.Profile,
+        document(
+          new Document()
+            .append(MongoFields.Skills, string)
+            .append(MongoFields.ExperienceSummary, string)
+            .append(MongoFields.SkillsCanonical, token)
+            .append(MongoFields.RecruiterSearchOptIn, new Document("type", "boolean"))
+            .append(MongoFields.AvailabilityStatus, token)
+            .append(
+              MongoFields.CurrentResidence,
+              document(
+                new Document()
+                  .append(MongoFields.CountryCanonical, token)
+                  .append(MongoFields.CityCanonical, token)
+              )
+            )
+        )
+      )
+  )
+
+  private[mongo] def validLexical(index: Document, expected: Document): Boolean = {
+    val definition = Option(index.get("latestDefinition", classOf[Document]))
+      .orElse(Option(index.get("definition", classOf[Document])))
+    def includes(actual: Object, required: Object): Boolean = (actual, required) match {
+      case (a: Document, r: Document) =>
+        r.entrySet()
+          .asScala
+          .forall(entry => Option(a.get(entry.getKey)).exists(value => includes(value, entry.getValue)))
+      case (a: java.util.List[?], r: java.util.List[?]) =>
+        r.asScala.forall(requiredEntry => a.asScala.exists(includes(_, requiredEntry)))
+      case (a, r) => a == r
+    }
+    definition.exists(value => includes(value, expected))
+  }
+
   def provision(database: MongoHiringSetup.SetupDatabase, config: AtlasSearchIndexConfig): IO[Unit] = {
 
     def vectorDefinition(filters: List[String]): Document = new Document(
@@ -17,17 +76,6 @@ private[mongo] object MongoAtlasSearchSetup {
         .append("numDimensions", Int.box(config.dimension))
         .append("similarity", "cosine") ::
         filters.map(path => new Document("type", MongoFields.Filter).append("path", path))).asJava
-    )
-    val lexicalDefinition = new Document(
-      "mappings",
-      new Document("dynamic", false).append(
-        "fields",
-        new Document()
-          .append(MongoFields.Title, new Document("type", "string"))
-          .append(MongoFields.Description, new Document("type", "string"))
-          .append(MongoFields.Requirements, new Document("type", "string"))
-          .append(MongoFields.Skills, new Document("type", "string"))
-      )
     )
     def create(collectionName: String, model: SearchIndexModel): IO[Unit] =
       MongoAtlasSearchAdmin.createIndex(database.underlying, collectionName, model)
@@ -72,27 +120,13 @@ private[mongo] object MongoAtlasSearchSetup {
         MongoCollections.Users,
         new SearchIndexModel(
           config.candidateLexicalIndex,
-          new Document(
-            "mappings",
-            new Document("dynamic", false).append(
-              "fields",
-              new Document(
-                MongoFields.Profile,
-                new Document("type", "document").append(
-                  "fields",
-                  new Document()
-                    .append(MongoFields.Skills, new Document("type", "string"))
-                    .append(MongoFields.ExperienceSummary, new Document("type", "string"))
-                )
-              )
-            )
-          ),
+          candidateLexicalDefinition,
           SearchIndexType.search()
         )
       ),
       create(
         MongoCollections.Jobs,
-        new SearchIndexModel(config.jobLexicalIndex, lexicalDefinition, SearchIndexType.search())
+        new SearchIndexModel(config.jobLexicalIndex, jobLexicalDefinition, SearchIndexType.search())
       )
     ).sequence_.void *> awaitSearchIndexes(database, config)
   }
@@ -130,24 +164,6 @@ private[mongo] object MongoAtlasSearchSetup {
           field.getString("similarity") == "cosine"
       )
     }
-    def validLexical(index: Document): Boolean = {
-      val definition = Option(index.get("latestDefinition", classOf[Document]))
-        .orElse(Option(index.get("definition", classOf[Document])))
-      val mappings = definition.flatMap(value => Option(value.get("mappings", classOf[Document])))
-      val profile = mappings.flatMap(value =>
-        Option(value.get("fields", classOf[Document])).flatMap(fields =>
-          Option(fields.get(MongoFields.Profile, classOf[Document]))
-        )
-      )
-      val profileFields = profile.flatMap(value => Option(value.get("fields", classOf[Document])))
-      def stringField(fields: Document, name: String): Boolean =
-        Option(fields.get(name, classOf[Document])).exists(_.getString("type") == "string")
-      mappings.exists(_.getBoolean("dynamic", true) == false) &&
-      profile.exists(_.getString("type") == "document") &&
-      profileFields.exists(fields =>
-        stringField(fields, MongoFields.Skills) && stringField(fields, MongoFields.ExperienceSummary)
-      )
-    }
     def await(name: String, collectionName: String, validate: Document => Boolean): IO[Unit] =
       deadline.flatMap { until =>
         def poll: IO[Unit] = indexDocuments(collectionName).flatMap { indexes =>
@@ -173,19 +189,13 @@ private[mongo] object MongoAtlasSearchSetup {
       MongoFields.RecruiterId,
       MongoFields.EmbeddingMetaModel
     )
-    def validJobLexical(index: Document): Boolean = {
-      val definition = Option(index.get("latestDefinition", classOf[Document]))
-        .orElse(Option(index.get("definition", classOf[Document])))
-      val mappings = definition.flatMap(value => Option(value.get("mappings", classOf[Document])))
-      val fields = mappings.flatMap(value => Option(value.get("fields", classOf[Document])))
-      mappings.exists(_.getBoolean("dynamic", true) == false) && fields.exists(value =>
-        List(MongoFields.Title, MongoFields.Description, MongoFields.Requirements, MongoFields.Skills)
-          .forall(name => Option(value.get(name, classOf[Document])).exists(_.getString("type") == "string"))
-      )
-    }
     await(config.jobVectorIndex, MongoCollections.Jobs, index => validVector(index, jobFilters)) *>
-      await(config.jobLexicalIndex, MongoCollections.Jobs, validJobLexical) *>
+      await(config.jobLexicalIndex, MongoCollections.Jobs, index => validLexical(index, jobLexicalDefinition)) *>
       await(config.candidateVectorIndex, MongoCollections.Users, index => validVector(index, candidateVectorFilters)) *>
-      await(config.candidateLexicalIndex, MongoCollections.Users, validLexical)
+      await(
+        config.candidateLexicalIndex,
+        MongoCollections.Users,
+        index => validLexical(index, candidateLexicalDefinition)
+      )
   }
 }

@@ -1,5 +1,22 @@
 # MongoDB design
 
+## Retrieval and workflow integrity cutover
+
+See [the reliability specification](specs/hiring-retrieval-publication-reliability.md) for current acceptance evidence. Migration `012_attributable_producer_registrations` transfers existing producer attribution before removing growing fence/cleanup arrays. Active registrations never expire; only broker-confirmed fenced rows receive retention expiry. Cleanup traverses 64 records per batch. Stop incompatible writers before startup; preserve the database and verify the completed migration and strict validators before restarting analytics.
+
+Migration `013_hiring_workflow_integrity` audits stored commands and outbox records once, then verifies exact strict validator definitions on startup before skipping the former command/outbox full audits. Validator drift fails closed. Cleanup integrity verification remains active. Explicit maintenance auditing uses `sbt 'runMain com.example.graphQL.cats.repository.mongo.MongoWorkflowIntegrityAudit'`; it records bounded progress for repair and rerun. Canonical UUID command identities are required by the new validator.
+
+For embedding work, inspect with `sbt 'runMain com.example.graphQL.cats.repository.mongo.EmbeddingWorkRepair <admin-id> <Job|CandidateProfile> <entity-id>'`; append the inspected generation to repair failed work. The transaction requires an active singleton Admin and uses generation compare-and-set. Deletion removes candidate embedding values and metadata atomically; all writes retain active Candidate and observed-revision predicates.
+
+Normal retirement uses `sbt 'runMain com.example.graphQL.cats.repository.mongo.ProducerGenerationRetirementMain <transactional-id>'`. Stop the selected producer generation first and configure the matching publisher/fencer principal. The command validates its canonical prefix and UUID, obtains broker fencing, then checkpoints registrations in batches of 64. Running it against a live generation fences that process; it must restart with a new identity. A failed broker operation leaves attribution active; producer close alone does not authorize TTL.
+
+The shared permit bounds four costly retrieval operations, rather than four driver commands. RRF can execute two job or three candidate branches per admitted operation, allowing up to twelve branch aggregates at the default bound; authoritative hydration has separate bounded batch size and deadlines. Measure this fan-out before increasing admission.
+
+Lexical Search definitions now use explicit static text/token/date/boolean mappings. Existing same-name definitions are verified and incompatible definitions fail startup; the application never silently drops them. An Atlas cutover needs an explicitly prepared compatible index (or separately configured new index name), queryability verification and the live retrieval acceptance gate before activation.
+
+Production retains existing ANN settings. Disposable Atlas comparisons separate branch limit from candidate budget: branch 100 with candidates 100/500/2000 against ENN. Stored source and scalar quantization remain opt-in benchmark variants until capability, recall, latency and storage/write gates pass. Generated artifacts belong under ignored `.local/data/`.
+
+
 ## Current operational persistence
 
 The core `users`, `jobs`, `applications` and append-only `application_events` collections are implemented. Supporting collections provide account identity, mutation receipts, durable embedding/search work, outbox/fences, consumer receipts/quarantine, and analytics erasure/report controls. [MongoNames](../src/main/scala/com/example/graphQL/cats/repository/mongo/MongoNames.scala) is the complete application-owned name catalog; analytics also owns its runtime control collections.

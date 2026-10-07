@@ -31,7 +31,8 @@ private[config] final case class RawKafkaConsumerConfig(
     receiptTtlDays: KafkaRetentionDays,
     quarantineTtlDays: KafkaRetentionDays,
     saslUsername: Option[String],
-    saslPassword: Option[String]
+    saslPassword: Option[String],
+    partitionConcurrency: Option[Int] = None
 ) derives ConfigReader
 
 private[config] final case class RawInterviewRuntimeConfig(
@@ -49,5 +50,8 @@ private[config] final case class RawInterviewRuntimeConfig(
     replayRetentionSeconds: Long = 604800L,
     completedDedupRetentionSeconds: Long = 691200L,
     fencerUsername: Option[String] = None,
-    fencerPassword: Option[String] = None
+    fencerPassword: Option[String] = None,
+    publicationBatchSize: Option[Int] = None,
+    clockSkewToleranceMillis: Option[Int] = None,
+    partitionConcurrency: Option[Int] = None
 ) derives ConfigReader

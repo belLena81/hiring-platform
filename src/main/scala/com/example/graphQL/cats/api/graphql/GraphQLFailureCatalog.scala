@@ -142,7 +142,8 @@ private[graphql] object GraphQLFailureCatalog {
     error match {
       case RepositoryError.DuplicateApplication =>
         failure(FailureMetadata.DuplicateApplication, "Application already exists")
-      case RepositoryError.Conflict => failure(FailureMetadata.Conflict, "Conflict")
+      case RepositoryError.AuthorityRevoked => failure(FailureMetadata.Forbidden, "Forbidden")
+      case RepositoryError.Conflict         => failure(FailureMetadata.Conflict, "Conflict")
       case RepositoryError.InvalidStoredData | RepositoryError.MissingWriteResult |
           RepositoryError.MissingStoredResult =>
         failure(FailureMetadata.RepositoryUnavailable, "Repository unavailable")
