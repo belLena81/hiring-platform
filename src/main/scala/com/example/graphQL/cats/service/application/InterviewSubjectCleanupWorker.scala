@@ -5,7 +5,8 @@ import cats.syntax.all.*
 import com.example.graphQL.cats.domain.workflow.{
   InterviewSubjectCleanup,
   InterviewCleanupCommand,
-  InterviewCleanupObservation
+  InterviewCleanupObservation,
+  InterviewTopicPair
 }
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
@@ -20,7 +21,8 @@ final class InterviewSubjectCleanupWorker(
     capture: IO[Vector[InterviewRetentionBarrier]],
     passed: Vector[InterviewRetentionBarrier] => IO[Boolean],
     diagnostics: Diagnostics,
-    currentTime: IO[Instant] = IO.realTimeInstant
+    currentTime: IO[Instant] = IO.realTimeInstant,
+    topics: InterviewTopicPair = InterviewTopicPair.Default
 ) {
   private def boundary[A](effect: IO[A]): RepositoryIO[A] =
     RepositoryIO.fromIOEither(effect.attempt.map(_.leftMap(_ => RepositoryError.Unavailable)))
@@ -57,7 +59,9 @@ final class InterviewSubjectCleanupWorker(
       for {
         now <- RepositoryIO.lift(currentTime)
         next <- RepositoryIO.fromEither(
-          InterviewSubjectCleanup.decide(current, observation, now).leftMap(_ => RepositoryError.InvalidStoredData)
+          InterviewSubjectCleanup
+            .decide(current, observation, now, topics)
+            .leftMap(_ => RepositoryError.InvalidStoredData)
         )
         _ <- repository.transition(current, next)
       } yield ()

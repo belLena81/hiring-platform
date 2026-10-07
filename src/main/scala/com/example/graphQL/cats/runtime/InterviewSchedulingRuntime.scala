@@ -67,7 +67,10 @@ private[runtime] object InterviewSchedulingRuntime {
             orchestratorPassword,
             config.saslSecurityProtocol,
             worker = false,
-            partitionConcurrency = settings.partitionConcurrency
+            partitionConcurrency = settings.partitionConcurrency,
+            topics = settings.topics,
+            workerGroup = settings.workerGroup,
+            orchestratorGroup = settings.orchestratorGroup
           )
           val resultConfig = InterviewKafkaConfig(
             config.bootstrapServers,
@@ -75,7 +78,10 @@ private[runtime] object InterviewSchedulingRuntime {
             workerPassword,
             config.saslSecurityProtocol,
             worker = true,
-            partitionConcurrency = settings.partitionConcurrency
+            partitionConcurrency = settings.partitionConcurrency,
+            topics = settings.topics,
+            workerGroup = settings.workerGroup,
+            orchestratorGroup = settings.orchestratorGroup
           )
           def receive(handler: InterviewMessage => IO[Boolean])(value: Either[String, InterviewMessage]): IO[Boolean] =
             value.fold(
@@ -110,7 +116,8 @@ private[runtime] object InterviewSchedulingRuntime {
               config.bootstrapServers,
               orchestratorUsername,
               orchestratorPassword,
-              config.saslSecurityProtocol
+              config.saslSecurityProtocol,
+              settings.topics
             )
             fencer <- InterviewProducerFencer.resource(
               config.bootstrapServers,
@@ -125,7 +132,8 @@ private[runtime] object InterviewSchedulingRuntime {
               fencer,
               retention.capture,
               retention.passed,
-              diagnostics
+              diagnostics,
+              topics = settings.topics
             ).resource
           } yield ()
         case _ => Resource.eval(IO.raiseError(new IllegalStateException("interview credentials were not validated")))

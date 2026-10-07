@@ -6,7 +6,6 @@ import com.example.graphQL.cats.service.port.{
   PendingSearchSessionWork,
   SearchSessionWorkState
 }
-import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import org.bson.Document
 
 import java.time.Instant
@@ -24,7 +23,7 @@ private[mongo] object MongoSearchSessionWorkCodecs {
         MongoFields.Id -> value.session.id.toString,
         MongoFields.ActorId -> value.session.actorId.value.toString,
         MongoFields.Session -> session,
-        MongoFields.Event -> MongoHiringCodecs.operationalEvent(sanitize(value.event)),
+        MongoFields.Event -> MongoHiringCodecs.operationalEvent(value.event),
         MongoFields.State -> SearchSessionWorkState.Ready.toString,
         MongoFields.Attempts -> java.lang.Integer.valueOf(0),
         MongoFields.AvailableAt -> Date.from(now),
@@ -41,7 +40,7 @@ private[mongo] object MongoSearchSessionWorkCodecs {
       eventDocument <- requiredDocument(document, MongoFields.Event)
       event <- MongoHiringCodecs.readOperationalEvent(eventDocument).toEither.leftMap(_.head)
       _ <- Either.cond(
-        session.query.isEmpty && event.aggregateId == session.id.toString,
+        session.query.isEmpty && PendingSearchSessionWork(session, event).addressesSession,
         (),
         StoredDocumentError.InconsistentDocument
       )
@@ -60,9 +59,6 @@ private[mongo] object MongoSearchSessionWorkCodecs {
         .find(_.toString == value)
         .toRight(StoredDocumentError.InvalidField(MongoFields.State))
     )
-
-  private def sanitize(event: OperationalEventEnvelope): OperationalEventEnvelope =
-    event.copy(payload = event.payload.mapObject(_.remove(MongoFields.Query)))
 
   private def requiredDocument(document: Document, field: String): Either[StoredDocumentError, Document] =
     Option(document.get(field)) match {

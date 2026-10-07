@@ -8,34 +8,23 @@ import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.mongodb.client.MongoClients
-import munit.FunSuite
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
 
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
 
-final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 5.minutes
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-  private final class Mongo extends GenericContainer[Mongo](DockerImageName.parse(image))
+final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends AnalyticsMongoIntegrationSuite {
+  override val munitIOTimeout: FiniteDuration = 5.minutes
 
   test(
     "durable journal pins attempts, rejects conflicts, survives restart, and compacts only completed coordinate details"
   ) {
-    val container = new Mongo()
-      .withExposedPorts(27017)
-      .withCommand("mongod", "--bind_ip_all")
-      .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-    container.start()
-    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}"
+    val uri = endpointUri
     val client = AnalyticsMongo4catsTestSupport.client(uri)
     val sync = MongoClients.create(uri)
     try {
-      val name = s"late_replay_${UUID.randomUUID().toString.replace('-', '_')}"
+      val name = testDatabaseName
       val database = AnalyticsMongo4catsTestSupport.database(client, name)
       val root = s"file:///tmp/$name/lakehouse"
       def journal = new MongoAnalyticsLateFactReplayJournal[IO](database, AnalyticsTestOperationalConfig.streams, root)
@@ -125,7 +114,6 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends FunSuite 
     } finally {
       sync.close()
       AnalyticsMongo4catsTestSupport.close(client)
-      container.stop()
     }
   }
 }

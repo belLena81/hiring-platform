@@ -8,14 +8,15 @@ import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.search.*
 import com.mongodb.client.model.{Filters, Updates}
-import munit.CatsEffectSuite
 import java.time.Instant
 import java.util.UUID
 import org.bson.Document
 import scala.jdk.CollectionConverters.*
 import scala.concurrent.duration.*
 
-final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
+final class MongoJobDiscoveryIntegrationSpec extends MongoIntegrationSuite {
+  // Server-wide timeout failpoints require an isolated instance with test commands enabled.
+  override protected def dedicatedMongo: Boolean = true
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val now = Instant.parse("2026-10-06T12:00:00Z")
   private val center = GeoPoint(35.1856d, 33.3823d)
@@ -33,7 +34,7 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
       now,
       now
     )
-  private val discoveryResource = MongoAccessEvaluationSupport.resource.evalMap { fixture =>
+  private def discoveryResource = mongoResource.evalMap { fixture =>
     val actor = com.example.graphQL.cats.service.ServiceFixtures.candidate
     val users = MongoUserRepository.transactional(
       fixture.database,
@@ -245,7 +246,7 @@ final class MongoJobDiscoveryIntegrationSpec extends CatsEffectSuite {
   test(
     "geo cutover fails on incompatible legacy coordinates, rejects concurrent invalid writes and resumes after repair"
   ) {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val existing = MongoHiringCodecs.job(job(1))
       val invalid = new Document("type", "Point").append("coordinates", List(181d, 0d).asJava)
       val _ = existing.get("location", classOf[Document]).put("point", invalid)

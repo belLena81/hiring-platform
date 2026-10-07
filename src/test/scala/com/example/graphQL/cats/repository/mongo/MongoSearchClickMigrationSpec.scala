@@ -15,15 +15,17 @@ final class MongoSearchClickMigrationSpec extends CatsEffectSuite {
     val actor = UserId(UUID.fromString("00000000-0000-0000-0000-000000000001"))
     val searchId = UUID.fromString("00000000-0000-0000-0000-000000000002")
     val resultId = UUID.fromString("00000000-0000-0000-0000-000000000003").toString
-    val click = OperationalEvents.searchResultClicked(
-      UUID.fromString("00000000-0000-0000-0000-000000000004"),
-      searchId,
-      resultId,
-      "candidateMatches",
-      actor,
-      1,
-      Instant.parse("2026-09-22T12:00:00Z")
-    )
+    val click = OperationalEvents
+      .searchResultClicked(
+        UUID.fromString("00000000-0000-0000-0000-000000000004"),
+        searchId,
+        resultId,
+        "candidateMatches",
+        actor,
+        1,
+        Instant.parse("2026-09-22T12:00:00Z")
+      )
+      .fold(error => fail(error.toString), identity)
 
     for {
       lookedUp <- Ref.of[IO, Option[UUID]](None)

@@ -9,11 +9,10 @@ import com.example.graphQL.cats.service.auth.ActorAuthorization
 import com.example.graphQL.cats.service.read.HiringReadScope
 import com.example.graphQL.cats.service.search.*
 import com.example.graphQL.cats.shared.crypto.SourceHash
-import munit.CatsEffectSuite
 import org.bson.Document
 import scala.concurrent.duration.*
 
-final class MongoSearchAuthorizationIntegrationSpec extends CatsEffectSuite {
+final class MongoSearchAuthorizationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val model = "synthetic-search"
   private val profile = CandidateProfile(Set("Scala"), Some("Engineer"), None)
@@ -40,7 +39,7 @@ final class MongoSearchAuthorizationIntegrationSpec extends CatsEffectSuite {
       .flatMap(result => IO(assertEquals(result.get("n", classOf[Number]).intValue(), 1)))
 
   test("Mongo final eligibility joins gate current actor, open ownership and query source after prechecks") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val db = fixture.database
       val users = new MongoUserRepository(
         db,

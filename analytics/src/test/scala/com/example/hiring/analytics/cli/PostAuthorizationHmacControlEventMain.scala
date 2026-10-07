@@ -159,7 +159,13 @@ object PostAuthorizationHmacControlEventMain extends IOApp {
                       "aggregateType" -> Json.fromString("Job"),
                       "aggregateId" -> Json.fromString(jobId),
                       "actorId" -> Json.fromString(NewControlSubjectId),
-                      "payload" -> Json.obj("job" -> Json.obj("skills" -> Json.arr(Json.fromString("Scala"))))
+                      "payload" -> Json.obj(
+                        "job" -> Json.obj(
+                          "jobId" -> Json.fromString(jobId),
+                          "status" -> Json.fromString("Open"),
+                          "skills" -> Json.arr(Json.fromString("Scala"))
+                        )
+                      )
                     )
                     .noSpaces
                   val producer = new KafkaProducer[String, String](properties)

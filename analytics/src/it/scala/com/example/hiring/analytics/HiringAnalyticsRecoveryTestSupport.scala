@@ -1,6 +1,6 @@
 package com.example.hiring.analytics
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import com.example.hiring.analytics.adapter.mongo.*
 import com.example.hiring.analytics.adapter.spark.*
@@ -17,36 +17,32 @@ import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, encode, lit}
 import org.apache.spark.sql.types.*
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
+import com.example.hiring.testing.LocalTestServices
 
 import java.nio.file.{Files, Path}
 import java.sql.Timestamp
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
 /** Real disposable Delta/Mongo sink composition. Source frames and injected failures are test inputs. */
 private[analytics] object HiringAnalyticsRecoveryTestSupport {
   val InjectedFailure: Throwable = new IllegalStateException("injected hiring analytics sink boundary failure")
-  private final class ReplicaSet
-      extends GenericContainer[ReplicaSet](
-        DockerImageName.parse(
-          "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-        )
-      )
-
   final case class Runtime(
       root: Path,
       uri: String,
       spark: SparkSession,
       client: MongoClient[IO],
       execution: SparkExecution[IO],
-      driver: SparkBlockingExecution[IO]
+      driver: SparkBlockingExecution[IO],
+      databaseReleases: Ref[IO, List[IO[Unit]]]
   ) {
     def harness(name: String): IO[Harness] = for {
-      database <- client.getDatabase("hiring_recovery_" + UUID.randomUUID().toString.replace('-', '_'))
+      database <- IO.uncancelable { _ =>
+        LocalTestServices.database(client).allocated.flatMap { case (db, release) =>
+          databaseReleases.update(release :: _).as(db)
+        }
+      }
       _ <- IO.blocking {
         val sync = MongoClients.create(uri)
         try {
@@ -66,7 +62,9 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
     } yield new Harness(this, database, IntegrationAnalyticsLakehousePaths.unsafe(root.resolve(name).toUri.toString))
   }
 
-  def resource: Resource[IO, Runtime] = for {
+  def resource: Resource[IO, Runtime] = LocalTestServices.mongoEndpoint().flatMap(resource)
+
+  def resource(endpoint: LocalTestServices.MongoEndpoint): Resource[IO, Runtime] = for {
     root <- Resource.make(IO.blocking(Files.createTempDirectory("hiring-analytics-recovery-")))(path =>
       IO.blocking {
         val entries = Files.walk(path)
@@ -74,32 +72,7 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
         finally entries.close()
       }
     )
-    container <- Resource.make(IO.blocking {
-      new ReplicaSet()
-        .withExposedPorts(27017)
-        .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
-        .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-    })(mongo => IO.blocking(mongo.stop()))
-    _ <- Resource.eval(IO.blocking {
-      container.start()
-      val initiated = container.execInContainer(
-        "mongosh",
-        "--quiet",
-        "--eval",
-        "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-      )
-      require(initiated.getExitCode == 0, "disposable replica set must initialize")
-      var primary = false
-      var tries = 60
-      while (!primary && tries > 0) {
-        val observed = container.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")
-        primary = observed.getExitCode == 0 && observed.getStdout.trim == "true"
-        if (!primary) Thread.sleep(250L)
-        tries -= 1
-      }
-      require(primary, "disposable replica set must elect a primary")
-    })
-    uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    uri = endpoint.uri
     managed <- AppModule.sparkMongo[IO](
       uri,
       "local[2]",
@@ -108,11 +81,12 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
       root.resolve("spark-temp").toString
     )
     (spark, client, blocking) = managed
+    databaseReleases <- Resource.make(Ref.of[IO, List[IO[Unit]]](Nil))(_.get.flatMap(_.sequence_))
     _ <- Resource.eval(blocking {
       spark.conf.set("spark.sql.shuffle.partitions", "2")
       spark.conf.set("spark.sql.session.timeZone", "UTC")
     })
-  } yield Runtime(root, uri, spark, client, new LakehouseOperation[IO](blocking), blocking)
+  } yield Runtime(root, uri, spark, client, new LakehouseOperation[IO](blocking), blocking, databaseReleases)
 
   final class Harness(val runtime: Runtime, val database: MongoDatabase[IO], val paths: AnalyticsLakehousePaths) {
     val execution = runtime.execution
@@ -168,12 +142,14 @@ private[analytics] object HiringAnalyticsRecoveryTestSupport {
       require(eventTimes.isEmpty || eventTimes.size == 12, "fixture event times must cover its twelve records")
       val rows = (0 until 12).map { n =>
         val occurredAt = eventTimes.lift(n).getOrElse(at)
+        val eventId = AnalyticsOperationalEventFixtures.id(s"job-event-$n")
+        val jobId = AnalyticsOperationalEventFixtures.id(s"job-$n")
         val raw =
           if (malformed && n == 0) "{invalid"
           else
-            s"""{"eventId":"job-event-$n","eventType":"JOB_CREATED","occurredAt":"$occurredAt","aggregateType":"Job","aggregateId":"job-$n","actorId":"${subjects(
+            s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$occurredAt","aggregateType":"Job","aggregateId":"$jobId","actorId":"${subjects(
                 n
-              )}","payload":{"jobId":"job-$n","job":{"skills":["Scala"]}}}"""
+              )}","payload":{"job":{"jobId":"$jobId","status":"Open","skills":["Scala"]}}}"""
         Row(topic, n % 3, (n / 3).toLong, raw)
       }
       val schema = StructType(

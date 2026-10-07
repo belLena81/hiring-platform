@@ -4,13 +4,14 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.mongodb.client.model.{Filters, IndexOptions, Indexes}
 import mongo4cats.database.MongoDatabase
-import munit.CatsEffectSuite
 import org.bson.Document
 import java.util.concurrent.TimeUnit
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-final class MongoHiringIndexRecoveryIntegrationSpec extends CatsEffectSuite {
+final class MongoHiringIndexRecoveryIntegrationSpec extends MongoIntegrationSuite {
+  override protected def dedicatedMongo: Boolean = true
+
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val support = MongoAccessEvaluationSupport
 
@@ -64,7 +65,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends CatsEffectSuite {
   )
 
   test("repeated ordinary index setup preserves every definition and integrity constraint") {
-    support.resource.use { fixture =>
+    mongoResource.use { fixture =>
       for {
         _ <- MongoHiringIndexSetup.create(fixture.database)
         before <- indexes(fixture.database)
@@ -77,7 +78,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends CatsEffectSuite {
 
   mismatches.zipWithIndex.foreach { case (spec, position) =>
     test(s"ordinary index mismatch fails closed and preserves existing definitions: variant $position") {
-      support.resource.use { fixture =>
+      mongoResource.use { fixture =>
         for {
           _ <- MongoHiringIndexSetup.create(fixture.database)
           coll <- MongoRepositoryTestSupport.collection(fixture.database, spec.collection)
@@ -97,7 +98,7 @@ final class MongoHiringIndexRecoveryIntegrationSpec extends CatsEffectSuite {
   }
 
   test("interrupted ordinary index creation resumes from preserved integrity indexes") {
-    support.resource.use { fixture =>
+    mongoResource.use { fixture =>
       for {
         coll <- MongoRepositoryTestSupport.collection(fixture.database, MongoCollections.Applications)
         _ <- coll.createIndex(

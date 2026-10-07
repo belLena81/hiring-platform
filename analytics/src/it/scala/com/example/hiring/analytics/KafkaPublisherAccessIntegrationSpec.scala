@@ -658,6 +658,13 @@ class KafkaPublisherAccessIntegrationSpec extends FunSuite {
           s"user_hiring_publisher_v2=\"$publisherPassword\" user_analytics_reader=\"$readerPassword\" " +
           s"user_analytics_fencer=\"$fencerPassword\";"
       val broker = new KafkaContainer(image)
+        .withTmpFs(
+          Map(
+            "/etc/kafka/secrets" -> "rw,uid=1000,gid=1000",
+            "/mnt/shared/config" -> "rw,uid=1000,gid=1000",
+            "/var/lib/kafka/data" -> "rw,uid=1000,gid=1000"
+          ).asJava
+        )
         .withEnv(
           "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
           "BROKER:SASL_PLAINTEXT,PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT"

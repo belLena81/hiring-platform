@@ -81,31 +81,37 @@ class HiringAnalyticsWorkloadSpec extends FunSuite {
       }.void
     }
 
-  private def candidate(index: Int): String = s"candidate-${Math.floorMod(index * 31 + Seed, 10000)}"
+  private def candidate(index: Int): String = com.example.hiring.analytics.AnalyticsOperationalEventFixtures
+    .id(s"candidate-${Math.floorMod(index * 31 + Seed, 10000)}")
 
   private def occurredAt(index: Int): String =
     LocalDate.of(2026, 9, 23).minusDays(index % 30).toString + "T12:00:00Z"
 
   private def created(index: Int): String =
-    s"""{"eventId":"application-created-$index","eventType":"APPLICATION_CREATED","occurredAt":"${occurredAt(
-        index
-      )}","aggregateType":"Application","aggregateId":"application-$index","actorId":"${candidate(
-        index
-      )}","payload":{"applicationId":"application-$index","candidateId":"${candidate(
-        index
-      )}","jobId":"job-${index % 8000}"}}"""
+    com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+      s"""{"eventId":"application-created-$index","eventType":"APPLICATION_CREATED","occurredAt":"${occurredAt(
+          index
+        )}","aggregateType":"Application","aggregateId":"application-$index","actorId":"${candidate(
+          index
+        )}","payload":{"applicationId":"application-$index","candidateId":"${candidate(
+          index
+        )}","jobId":"job-${index % 8000}"}}"""
+    )
 
   private def status(index: Int, eventId: String, newStatus: String): String =
-    s"""{"eventId":"$eventId","eventType":"APPLICATION_STATUS_CHANGED","occurredAt":"${occurredAt(
-        index
-      )}","aggregateType":"Application","aggregateId":"application-$index","actorId":"recruiter-${index % 1000}","payload":{"applicationId":"application-$index","candidateId":"${candidate(
-        index
-      )}","jobId":"job-${index % 8000}","newStatus":"$newStatus"}}"""
+    com.example.hiring.analytics.AnalyticsOperationalEventFixtures
+      .complete(s"""{"eventId":"$eventId","eventType":"APPLICATION_STATUS_CHANGED","occurredAt":"${occurredAt(
+          index
+        )}","aggregateType":"Application","aggregateId":"application-$index","actorId":"recruiter-${index % 1000}","payload":{"applicationId":"application-$index","candidateId":"${candidate(
+          index
+        )}","jobId":"job-${index % 8000}","newStatus":"$newStatus"}}""")
 
   private def job(index: Int): String =
-    s"""{"eventId":"job-created-$index","eventType":"JOB_CREATED","occurredAt":"${occurredAt(
-        index
-      )}","aggregateType":"Job","aggregateId":"job-$index","actorId":"recruiter-${index % 1000}","payload":{"jobId":"job-$index","job":{"skills":["Scala","MongoDB"]}}}"""
+    com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+      s"""{"eventId":"job-created-$index","eventType":"JOB_CREATED","occurredAt":"${occurredAt(
+          index
+        )}","aggregateType":"Job","aggregateId":"job-$index","actorId":"recruiter-${index % 1000}","payload":{"jobId":"job-$index","job":{"skills":["Scala","MongoDB"]}}}"""
+    )
 
   private def valueAt(offset: Int): String =
     if (offset < 80000) created(offset)

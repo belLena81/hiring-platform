@@ -239,14 +239,16 @@ private[mongo] object MongoOperationalEventInsertion {
   def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
       write: org.bson.Document => RepositoryIO[Unit]
   ): RepositoryIO[Unit] =
-    events.traverse_ { event =>
-      for {
-        document <- RepositoryIO.fromEither(
-          MongoHiringCodecs.outboxRecord(event, now).leftMap(_ => RepositoryError.InvalidStoredData)
-        )
-        _ <- write(document)
-      } yield ()
-    }
+    RepositoryIO
+      .fromEither(
+        events.traverse { event =>
+          com.example.graphQL.cats.service.events.OperationalEventJson
+            .validate(event)
+            .leftMap(_ => RepositoryError.InvalidEvent)
+            .flatMap(valid => MongoHiringCodecs.outboxRecord(valid, now).leftMap(_ => RepositoryError.InvalidEvent))
+        }
+      )
+      .flatMap(_.traverse_(write))
 }
 
 private[mongo] object MongoStoredDocumentDecoding {

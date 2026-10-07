@@ -6,14 +6,25 @@ import java.util.UUID
 
 final case class InterviewRetentionBarrier(topic: String, partition: Int, endOffset: Long)
 
+/** Physical log identities are immutable inputs to retention proof, including isolated test logs. */
+final case class InterviewTopicPair(commands: String, results: String) {
+  def names: Set[String] = Set(commands, results)
+  def valid: Boolean = commands.nonEmpty && results.nonEmpty && commands != results
+}
+
+object InterviewTopicPair {
+  val Default: InterviewTopicPair = InterviewTopicPair("hiring.interview-commands", "hiring.interview-results")
+}
+
 object InterviewRetentionBarrier {
-  val Topics: Set[String] = Set("hiring.interview-commands", "hiring.interview-results")
+  val Topics: Set[String] = InterviewTopicPair.Default.names
 
   def validate(
-      values: Vector[InterviewRetentionBarrier]
+      values: Vector[InterviewRetentionBarrier],
+      topics: InterviewTopicPair = InterviewTopicPair.Default
   ): Either[InterviewCleanupError, Vector[InterviewRetentionBarrier]] =
     Either.cond(
-      values.nonEmpty && values.map(_.topic).toSet == Topics &&
+      topics.valid && values.nonEmpty && values.map(_.topic).toSet == topics.names &&
         values.forall(value => value.partition >= 0 && value.endOffset >= 0L) &&
         values.map(value => (value.topic, value.partition)).distinct.size == values.size,
       values,
@@ -66,8 +77,12 @@ object InterviewSubjectCleanup {
     Either.cond(ids.forall(valid), ids.distinct.sorted, InterviewCleanupError.InvalidProducerIds)
   }
 
-  def validate(value: InterviewSubjectCleanup): Either[InterviewCleanupError, InterviewSubjectCleanup] =
+  def validate(
+      value: InterviewSubjectCleanup,
+      topics: InterviewTopicPair = InterviewTopicPair.Default
+  ): Either[InterviewCleanupError, InterviewSubjectCleanup] =
     for {
+      _ <- Either.cond(topics.valid, (), InterviewCleanupError.InvalidBarriers)
       _ <- Either.cond(
         value.revision >= 0L && value.revision < Long.MaxValue,
         (),
@@ -76,7 +91,7 @@ object InterviewSubjectCleanup {
       ids <- validateProducerIds(value.transactionalIds)
       _ <- value.state match {
         case InterviewCleanupState.AwaitingRetention(barriers) =>
-          InterviewRetentionBarrier.validate(barriers).map(_ => ())
+          InterviewRetentionBarrier.validate(barriers, topics).map(_ => ())
         case _ => Right(())
       }
     } yield value.copy(transactionalIds = ids)
@@ -92,20 +107,21 @@ object InterviewSubjectCleanup {
   def decide(
       value: InterviewSubjectCleanup,
       observation: InterviewCleanupObservation,
-      now: Instant
+      now: Instant,
+      topics: InterviewTopicPair = InterviewTopicPair.Default
   ): Either[InterviewCleanupError, InterviewSubjectCleanup] =
-    validate(value).flatMap { current =>
+    validate(value, topics).flatMap { current =>
       val next = (current.state, observation) match {
         case (InterviewCleanupState.Pending, InterviewCleanupObservation.ProducersFenced) =>
           Right(InterviewCleanupState.ProducersFenced)
         case (InterviewCleanupState.ProducersFenced, InterviewCleanupObservation.MongoPurged) =>
           Right(InterviewCleanupState.MongoPurged)
         case (InterviewCleanupState.MongoPurged, InterviewCleanupObservation.BarriersCaptured(barriers)) =>
-          InterviewRetentionBarrier.validate(barriers).map(InterviewCleanupState.AwaitingRetention.apply)
+          InterviewRetentionBarrier.validate(barriers, topics).map(InterviewCleanupState.AwaitingRetention.apply)
         case (InterviewCleanupState.AwaitingRetention(_), InterviewCleanupObservation.RetentionPassedAndMongoAbsent) =>
           Right(InterviewCleanupState.Complete(now))
         case _ => Left(InterviewCleanupError.InvalidTransition)
       }
-      next.map(state => current.copy(revision = current.revision + 1L, state = state))
+      next.flatMap(state => validate(current.copy(revision = current.revision + 1L, state = state), topics))
     }
 }

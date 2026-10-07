@@ -525,7 +525,7 @@ final class MongoUserRepository(
                 _ <- RepositoryIO.fromEither(MongoUserRepository.classifyJobClose(result))
               } yield ()
             }
-            val closeEvents = closedJobs.map { closed =>
+            val closeEvents = closedJobs.traverse { closed =>
               OperationalEvents.jobEvent(
                 OperationalEventType.JOB_CLOSED,
                 java.util.UUID.nameUUIDFromBytes(
@@ -538,8 +538,9 @@ final class MongoUserRepository(
               )
             }
             for {
+              validEvents <- RepositoryIO.fromEither(closeEvents.leftMap(_ => RepositoryError.InvalidEvent))
               _ <- closeWrites
-              _ <- insertOperationalEvents(outbox, session, closeEvents, now, diagnostics)
+              _ <- insertOperationalEvents(outbox, session, validEvents, now, diagnostics)
               _ <- closeJobs(Some(openJobs.last.id.value.toString))
             } yield ()
         }

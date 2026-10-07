@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
+import com.example.hiring.testing.LocalTestServices
 import cats.syntax.all.*
 import com.example.graphQL.cats.api.graphql.{GraphQLRequest, TestGraphQLSupport}
 import com.example.graphQL.cats.domain.model.Identifiers.{ApplicationId, JobId}
@@ -28,10 +29,6 @@ final class OperationalEventAnalyticsReportComposeIntegrationSpec extends CatsEf
 
   private val enabled = sys.props.get("analytics.compose.readback").contains("true") ||
     sys.env.get("ANALYTICS_COMPOSE_READBACK").contains("true")
-  private val mongoUri = sys.props.getOrElse(
-    "phase5.compose.mongo-uri",
-    "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
-  )
   private val databaseName = sys.env
     .get("ANALYTICS_COMPOSE_DATABASE")
     .orElse(sys.props.get("analytics.compose.database"))
@@ -39,115 +36,122 @@ final class OperationalEventAnalyticsReportComposeIntegrationSpec extends CatsEf
   private val expectedRunId = sys.env.getOrElse("ANALYTICS_COMPOSE_EXPECTED_RUN_ID", "")
 
   test("Admin GraphQL reads the published report built from operational outbox events") {
-    if (!enabled) IO.unit
-    else if (databaseName.trim.isEmpty)
+    assume(enabled, "BLOCKED: isolated analytics report readback not enabled")
+    if (!enabled) IO.raiseError(new IllegalStateException("Readback not enabled"))
+    else if (!databaseName.matches("hiring_test_[a-f0-9]{32}"))
       IO.raiseError(new IllegalArgumentException("analytics.compose.database is required for report readback"))
     else if (expectedRunId.trim.isEmpty)
       IO.raiseError(new IllegalArgumentException("ANALYTICS_COMPOSE_EXPECTED_RUN_ID is required for report readback"))
     else
-      MongoDatabaseProbe.clientResource(mongoUri).use { client =>
-        client.getDatabase(databaseName).flatMap { database =>
-          val storedUsers = MongoUserRepository.transactional(
-            database,
-            client,
-            new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
-            com.example.graphQL.cats.service.Diagnostics.noop
-          )
-          val reports = MongoAnalyticsReportRepository.transactional(
-            database,
-            client,
-            com.example.graphQL.cats.service.Diagnostics.noop
-          )
-          val adminId = com.example.graphQL.cats.domain.model.Identifiers.UserId(
-            UUID.fromString("00000000-0000-0000-0000-00000000a611")
-          )
-          val admin = User(adminId, None, "Analytics Admin", UserRole.Admin, None, Instant.now(), adminSingleton = true)
-          val actor = ActorContext(adminId, UserRole.Admin)
+      LocalTestServices.manifest.flatMap { optional =>
+        val manifest = optional.getOrElse(throw new IllegalArgumentException("Isolated test manifest is required"))
+        LocalTestServices.verifiedMongo(manifest) *> MongoDatabaseProbe.clientResource(manifest.mongoUri).use {
+          client =>
+            client.getDatabase(databaseName).flatMap { database =>
+              val storedUsers = MongoUserRepository.transactional(
+                database,
+                client,
+                new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop),
+                com.example.graphQL.cats.service.Diagnostics.noop
+              )
+              val reports = MongoAnalyticsReportRepository.transactional(
+                database,
+                client,
+                com.example.graphQL.cats.service.Diagnostics.noop
+              )
+              val adminId = com.example.graphQL.cats.domain.model.Identifiers.UserId(
+                UUID.fromString("00000000-0000-0000-0000-00000000a611")
+              )
+              val admin =
+                User(adminId, None, "Analytics Admin", UserRole.Admin, None, Instant.now(), adminSingleton = true)
+              val actor = ActorContext(adminId, UserRole.Admin)
 
-          for {
-            _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
-            existingAdmin <- storedUsers.find(adminId).value
-            _ <- existingAdmin match {
-              case Right(Some(existing))
-                  if existing.role == UserRole.Admin && existing.accountStatus == AccountStatus.Active =>
-                IO.unit
-              case Right(Some(_)) =>
-                IO.raiseError(new AssertionError("Compose analytics test identity is not an active Admin"))
-              case Right(None) =>
-                storedUsers.insert(admin).value.flatMap {
-                  case Right(())   => IO.unit
+              for {
+                _ <- MongoHiringSetup.initialize(database, com.example.graphQL.cats.service.Diagnostics.noop)
+                existingAdmin <- storedUsers.find(adminId).value
+                _ <- existingAdmin match {
+                  case Right(Some(existing))
+                      if existing.role == UserRole.Admin && existing.accountStatus == AccountStatus.Active =>
+                    IO.unit
+                  case Right(Some(_)) =>
+                    IO.raiseError(new AssertionError("Compose analytics test identity is not an active Admin"))
+                  case Right(None) =>
+                    storedUsers.insert(admin).value.flatMap {
+                      case Right(())   => IO.unit
+                      case Left(error) =>
+                        IO.raiseError(new AssertionError(s"Could not initialize Compose Admin identity: $error"))
+                    }
                   case Left(error) =>
-                    IO.raiseError(new AssertionError(s"Could not initialize Compose Admin identity: $error"))
+                    IO.raiseError(new AssertionError(s"Could not read Compose Admin identity: $error"))
                 }
-              case Left(error) => IO.raiseError(new AssertionError(s"Could not read Compose Admin identity: $error"))
+                current <- MongoRepositoryTestSupport.findOne(
+                  database,
+                  MongoCollections.AnalyticsReportSnapshots,
+                  new org.bson.Document("_id", "current")
+                )
+                currentDocument <- IO.fromOption(current)(
+                  new AssertionError("expected a current analytics report document")
+                )
+                _ = assertEquals(currentDocument.getString("runId"), expectedRunId)
+                published <- reports.latest.value
+                snapshot <- published.fold(
+                  error =>
+                    IO.raiseError[com.example.graphQL.cats.service.AnalyticsReportSnapshot](
+                      new AssertionError(s"Analytics report read failed: $error")
+                    ),
+                  _.fold[IO[com.example.graphQL.cats.service.AnalyticsReportSnapshot]](
+                    IO.raiseError(new AssertionError("No published Compose analytics report is visible"))
+                  )(IO.pure)
+                )
+                inMemoryUsers <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](
+                  Map(adminId -> admin)
+                )
+                jobs <- Ref.of[IO, Map[JobId, com.example.graphQL.cats.domain.model.Job]](Map.empty)
+                applications <- Ref.of[IO, Map[ApplicationId, Application]](Map.empty)
+                applicationEvents <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
+                nextApplicationError <- Ref.of[IO, Option[RepositoryError]](None)
+                users = new ServiceFixtures.InMemoryUsers(inMemoryUsers)
+                readModel = new HiringReadService(
+                  users,
+                  new ServiceFixtures.InMemoryJobs(jobs),
+                  new ServiceFixtures.InMemoryApplications(applications, applicationEvents, nextApplicationError)
+                )
+                reporting = new AnalyticsReportingService(storedUsers, reports)
+                services = TestGraphQLSupport.emptyServices.copy(readModel = readModel, analyticsReporting = reporting)
+                from = Instant.now().minusSeconds(29L * 24L * 60L * 60L)
+                to = Instant.now()
+                request = GraphQLRequest(
+                  """query($from: Instant!, $to: Instant!) { analyticsReport(from: $from, to: $to) { asOf skillPostingActivity { skill postings } } }""",
+                  Json.obj("from" -> Json.fromString(from.toString), "to" -> Json.fromString(to.toString)),
+                  None
+                )
+                result <- TestGraphQLSupport
+                  .context(IO.pure(ProbeResult.Ready), Some(actor), services)
+                  .use(TestGraphQLSupport.parseAndExecute(request, _))
+                json <- result.fold(
+                  failure => IO.raiseError[Json](new AssertionError(s"Admin analytics query failed: $failure")),
+                  IO.pure
+                )
+                asOf <- IO.fromEither(
+                  json.hcursor.downField("data").downField("analyticsReport").get[String]("asOf")
+                )
+                skills <- IO.fromEither(
+                  json.hcursor
+                    .downField("data")
+                    .downField("analyticsReport")
+                    .get[List[Json]]("skillPostingActivity")
+                )
+                _ = assertEquals(asOf, snapshot.asOf.toString)
+                _ = assert(
+                  skills.nonEmpty,
+                  "expected K=10 eligible job-created skill activity from ten synthetic recruiters"
+                )
+                postings <- IO.fromEither(
+                  skills.traverse(_.hcursor.get[Long]("postings")).map(_.sum)
+                )
+                _ = assert(postings >= 100L, clues(postings))
+              } yield ()
             }
-            current <- MongoRepositoryTestSupport.findOne(
-              database,
-              MongoCollections.AnalyticsReportSnapshots,
-              new org.bson.Document("_id", "current")
-            )
-            currentDocument <- IO.fromOption(current)(
-              new AssertionError("expected a current analytics report document")
-            )
-            _ = assertEquals(currentDocument.getString("runId"), expectedRunId)
-            published <- reports.latest.value
-            snapshot <- published.fold(
-              error =>
-                IO.raiseError[com.example.graphQL.cats.service.AnalyticsReportSnapshot](
-                  new AssertionError(s"Analytics report read failed: $error")
-                ),
-              _.fold[IO[com.example.graphQL.cats.service.AnalyticsReportSnapshot]](
-                IO.raiseError(new AssertionError("No published Compose analytics report is visible"))
-              )(IO.pure)
-            )
-            inMemoryUsers <- Ref.of[IO, Map[com.example.graphQL.cats.domain.model.Identifiers.UserId, User]](
-              Map(adminId -> admin)
-            )
-            jobs <- Ref.of[IO, Map[JobId, com.example.graphQL.cats.domain.model.Job]](Map.empty)
-            applications <- Ref.of[IO, Map[ApplicationId, Application]](Map.empty)
-            applicationEvents <- Ref.of[IO, Vector[ApplicationEvent]](Vector.empty)
-            nextApplicationError <- Ref.of[IO, Option[RepositoryError]](None)
-            users = new ServiceFixtures.InMemoryUsers(inMemoryUsers)
-            readModel = new HiringReadService(
-              users,
-              new ServiceFixtures.InMemoryJobs(jobs),
-              new ServiceFixtures.InMemoryApplications(applications, applicationEvents, nextApplicationError)
-            )
-            reporting = new AnalyticsReportingService(storedUsers, reports)
-            services = TestGraphQLSupport.emptyServices.copy(readModel = readModel, analyticsReporting = reporting)
-            from = Instant.now().minusSeconds(29L * 24L * 60L * 60L)
-            to = Instant.now()
-            request = GraphQLRequest(
-              """query($from: Instant!, $to: Instant!) { analyticsReport(from: $from, to: $to) { asOf skillPostingActivity { skill postings } } }""",
-              Json.obj("from" -> Json.fromString(from.toString), "to" -> Json.fromString(to.toString)),
-              None
-            )
-            result <- TestGraphQLSupport
-              .context(IO.pure(ProbeResult.Ready), Some(actor), services)
-              .use(TestGraphQLSupport.parseAndExecute(request, _))
-            json <- result.fold(
-              failure => IO.raiseError[Json](new AssertionError(s"Admin analytics query failed: $failure")),
-              IO.pure
-            )
-            asOf <- IO.fromEither(
-              json.hcursor.downField("data").downField("analyticsReport").get[String]("asOf")
-            )
-            skills <- IO.fromEither(
-              json.hcursor
-                .downField("data")
-                .downField("analyticsReport")
-                .get[List[Json]]("skillPostingActivity")
-            )
-            _ = assertEquals(asOf, snapshot.asOf.toString)
-            _ = assert(
-              skills.nonEmpty,
-              "expected K=10 eligible job-created skill activity from ten synthetic recruiters"
-            )
-            postings <- IO.fromEither(
-              skills.traverse(_.hcursor.get[Long]("postings")).map(_.sum)
-            )
-            _ = assert(postings >= 100L, clues(postings))
-          } yield ()
         }
       }
   }

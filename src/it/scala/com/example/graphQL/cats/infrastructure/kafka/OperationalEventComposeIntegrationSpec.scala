@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.{IO, Ref}
+import com.example.hiring.testing.LocalTestServices
 import cats.syntax.all.*
 import com.example.graphQL.cats.repository.mongo.MongoRepositoryTestSupport.*
 import com.example.graphQL.cats.config.{
@@ -14,7 +15,6 @@ import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField}
 import com.example.graphQL.cats.service.events.{OperationalEventType, OperationalEvents}
-import munit.CatsEffectSuite
 import com.mongodb.client.model.Filters
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
@@ -25,28 +25,18 @@ import java.util.{Collections, Properties, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-/** Runs against the local `compose.yaml` Mongo replica set and Kafka broker. It is opt-in because the normal
-  * integration suite owns disposable Mongo containers.
-  */
-class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
+/** Exercises the verified isolated test Mongo/Kafka services with fresh per-case namespaces. */
+class OperationalEventComposeIntegrationSpec extends KafkaIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 2.minutes
 
-  private val enabled = sys.props.get("phase5.compose.evidence").contains("true") ||
-    sys.env.get("PHASE5_COMPOSE_EVIDENCE").contains("true")
-  private val mongoUri = sys.props.getOrElse(
-    "phase5.compose.mongo-uri",
-    "mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true"
-  )
-  private val databaseName = sys.env
-    .get("ANALYTICS_COMPOSE_DATABASE")
-    .orElse(sys.props.get("analytics.compose.database"))
-    .getOrElse(s"analytics_compose_${UUID.randomUUID().toString.replace('-', '_')}")
+  private def enabled = kafkaEvidenceEnabled
+  private def mongoUri = mongoEndpoint.uri
   private val actors = Vector.tabulate(10)(index => UserId(new UUID(0L, 0x301L + index)))
-  private val kafka = KafkaConfig(
+  private def kafka = KafkaConfig(
     enabled = true,
-    bootstrapServers = sys.props.getOrElse("phase5.compose.kafka", "127.0.0.1:9092"),
-    topic = "hiring.operational-events",
-    consumerGroup = "hiring-operational-events-integration",
+    bootstrapServers = kafkaNamespace.manifest.kafkaBootstrap,
+    topic = kafkaNamespace.events,
+    consumerGroup = kafkaNamespace.eventGroup,
     publisher = KafkaPublisherConfig(
       "compose-evidence-writer",
       50,
@@ -55,14 +45,14 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
       10,
       100,
       Some("hiring_publisher_v2"),
-      sys.env.get("KAFKA_PUBLISHER_V2_PASSWORD")
+      Some(kafkaNamespace.manifest.publisherPassword)
     ),
     consumer = KafkaConsumerConfig(
       enabled = true,
       receiptTtlDays = 8,
       quarantineTtlDays = 7,
       saslUsername = Some("analytics_reader"),
-      saslPassword = sys.env.get("KAFKA_READER_PASSWORD")
+      saslPassword = Some(kafkaNamespace.manifest.readerPassword)
     ),
     saslSecurityProtocol = KafkaSaslSecurityProtocol.Plaintext
   )
@@ -131,15 +121,68 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
     IO.realTimeInstant.flatMap(now => loop(now.plusSeconds(60)))
   }
 
+  test("operational topic accepts a valid escaped skill fact larger than the interview message limit") {
+    assume(enabled, "BLOCKED: isolated test service manifest absent")
+    val manifest = kafkaNamespace.manifest
+    val skills = (0 until 100).map(index => "\u0001" * 197 + index.toString).toSet
+    val value = job(JobId(UUID.randomUUID()), Instant.now(), actors.head).copy(skills = skills)
+    val event = OperationalEvents
+      .jobEvent(OperationalEventType.JOB_CREATED, UUID.randomUUID(), value, actors.head, value.createdAt)
+      .fold(error => fail(error.toString), identity)
+    val bytes = com.example.graphQL.cats.service.events.OperationalEventJson.bytes(event)
+    assert(bytes.length > 65536)
+    assert(bytes.length <= com.example.graphQL.cats.service.events.OperationalEventJson.MaxEnvelopeBytes)
+    val properties = LocalTestServices.adminProperties(manifest, "hiring_publisher_v2", manifest.publisherPassword)
+    val _ = properties.put("key.serializer", classOf[org.apache.kafka.common.serialization.StringSerializer].getName)
+    val _ =
+      properties.put("value.serializer", classOf[org.apache.kafka.common.serialization.ByteArraySerializer].getName)
+    val _ = properties.put("acks", "all")
+    val producer = cats.effect.Resource.make(
+      IO.blocking(new org.apache.kafka.clients.producer.KafkaProducer[String, Array[Byte]](properties))
+    )(value => IO.blocking(value.close()))
+    val admin = cats.effect.Resource.make(
+      IO.blocking(
+        org.apache.kafka.clients.admin.Admin
+          .create(LocalTestServices.adminProperties(manifest, "broker", manifest.brokerPassword))
+      )
+    )(value => IO.blocking(value.close()))
+    admin.use { value =>
+      IO.blocking {
+        val resources = List(kafkaNamespace.events, kafkaNamespace.commands, kafkaNamespace.results).map(name =>
+          new org.apache.kafka.common.config.ConfigResource(
+            org.apache.kafka.common.config.ConfigResource.Type.TOPIC,
+            name
+          )
+        )
+        val configs = value.describeConfigs(resources.asJava).all().get(10L, java.util.concurrent.TimeUnit.SECONDS)
+        assertEquals(configs.get(resources.head).get("max.message.bytes").value(), "1048576")
+        resources.tail.foreach(resource =>
+          assertEquals(configs.get(resource).get("max.message.bytes").value(), "65536")
+        )
+      } *> producer.use { client =>
+        IO.blocking {
+          val metadata = client
+            .send(
+              new org.apache.kafka.clients.producer.ProducerRecord(kafkaNamespace.events, event.partitionKey, bytes)
+            )
+            .get(10L, java.util.concurrent.TimeUnit.SECONDS)
+          assertEquals(metadata.topic(), kafkaNamespace.events)
+          assert(metadata.offset() >= 0L)
+        }
+      }
+    }
+  }
+
   test("local Compose publishes 100 facts and records receipt p95") {
-    if (!enabled) IO.unit
+    assume(enabled, "BLOCKED: isolated test service manifest absent")
+    if (!enabled) IO.raiseError(new IllegalStateException("Isolated service manifest absent"))
     else if (kafka.publisher.saslPassword.isEmpty || kafka.consumer.saslPassword.isEmpty)
       IO.raiseError(
         new IllegalStateException("compose evidence requires KAFKA_PUBLISHER_V2_PASSWORD and KAFKA_READER_PASSWORD")
       )
     else {
       MongoDatabaseProbe.clientResource(mongoUri).use { client =>
-        client.getDatabase(databaseName).flatMap { database =>
+        LocalTestServices.database(client).use { database =>
           val jobs = MongoJobRepository.transactional(
             database,
             client,
@@ -170,13 +213,15 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
               IO.realTimeInstant.flatMap { createdAt =>
                 val owner = actors(index % actors.size)
                 val jobValue = job(JobId(UUID.randomUUID()), createdAt, owner)
-                val event = OperationalEvents.jobEvent(
-                  OperationalEventType.JOB_CREATED,
-                  UUID.randomUUID(),
-                  jobValue,
-                  owner,
-                  jobValue.createdAt
-                )
+                val event = OperationalEvents
+                  .jobEvent(
+                    OperationalEventType.JOB_CREATED,
+                    UUID.randomUUID(),
+                    jobValue,
+                    owner,
+                    jobValue.createdAt
+                  )
+                  .fold(error => fail(error.toString), identity)
                 jobs
                   .createWithEvents(
                     jobValue,
@@ -214,10 +259,39 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
                       .getCollection(MongoCollections.OutboxSubjectFences)
                       .find(Filters.eq("_id", actors.head.value.toString))
                   )
-                  transactionalIds = subjectFence.toList.flatMap(
-                    _.getList("transactionalIds", classOf[String]).asScala.toList
+                  _ = assert(subjectFence.isDefined)
+                  _ = assert(subjectFence.forall(!_.containsKey("transactionalIds")))
+                  registrations <- MongoRepositoryTestSupport.collectWithin(
+                    database
+                      .getCollection(MongoProducerRegistrations.Collection)
+                      .find(
+                        Filters.and(
+                          Filters.in("subjectId", actors.map(_.value.toString).asJava),
+                          Filters.eq("kind", "Operational"),
+                          Filters.eq("state", "Active")
+                        )
+                      )
+                      .limit(100),
+                    101
                   )
-                  _ = assert(transactionalIds.nonEmpty && transactionalIds.forall(_.startsWith("hiring-publisher-")))
+                  _ = assertEquals(
+                    registrations.map(_.getString("subjectId")).toSet,
+                    actors.map(_.value.toString).toSet
+                  )
+                  _ = registrations.foreach { registration =>
+                    val transactionalId = registration.getString("transactionalId")
+                    assert(transactionalId != null && transactionalId.startsWith("hiring-publisher-"))
+                    assertEquals(
+                      registration.getString("_id"),
+                      s"${registration.getString("subjectId")}:$transactionalId"
+                    )
+                    assertEquals(
+                      UUID.fromString(transactionalId.stripPrefix("hiring-publisher-")).toString,
+                      transactionalId.stripPrefix("hiring-publisher-")
+                    )
+                    assert(registration.getDate("registeredAt") != null)
+                    assert(!registration.containsKey("expiresAt"))
+                  }
                   outboxRows <- MongoRepositoryTestSupport.collectWithin(
                     database
                       .getCollection(MongoCollections.EventOutbox)
@@ -258,7 +332,7 @@ class OperationalEventComposeIntegrationSpec extends CatsEffectSuite {
                 } yield {
                   assert(p95 < 30000L, clues(p95))
                   println(
-                    s"analyticsRange database=$databaseName topic=${kafka.topic} partition=0 start=$startOffset end=$endOffset fixtureEvents=100"
+                    s"analyticsRange database=${database.underlying.getName} topic=${kafka.topic} partition=0 start=$startOffset end=$endOffset fixtureEvents=100"
                   )
                   println(
                     s"Operational event evidence: consumerGroup=${kafka.consumerGroup}, p95CommitToReceiptMs=$p95"

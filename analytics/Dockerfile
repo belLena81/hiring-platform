@@ -7,5 +7,6 @@ COPY analytics/project ./project
 RUN sbt update
 
 COPY analytics/src ./src
+COPY test-support /workspace/test-support
 
 ENTRYPOINT ["sbt", "runMain com.example.hiring.analytics.cli.HiringAnalyticsBatchMain"]

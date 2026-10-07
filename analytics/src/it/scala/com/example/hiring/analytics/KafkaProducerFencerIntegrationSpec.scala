@@ -57,6 +57,13 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
 
   private def kafkaContainer: KafkaContainer =
     new KafkaContainer(image)
+      .withTmpFs(
+        Map(
+          "/etc/kafka/secrets" -> "rw,uid=1000,gid=1000",
+          "/mnt/shared/config" -> "rw,uid=1000,gid=1000",
+          "/var/lib/kafka/data" -> "rw,uid=1000,gid=1000"
+        ).asJava
+      )
       .withEnv(
         "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
         "BROKER:SASL_PLAINTEXT,PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT"
@@ -98,8 +105,13 @@ class KafkaProducerFencerIntegrationSpec extends FunSuite {
       case _                                => false
     }
 
-  private def applicationCreated(eventId: String): String =
-    s"""{"eventId":"$eventId","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-24T12:00:00Z","aggregateType":"Application","aggregateId":"application-$eventId","actorId":"candidate-$eventId","payload":{"applicationId":"application-$eventId","candidateId":"candidate-$eventId","jobId":"job-$eventId","newStatus":"Accepted"}}"""
+  private def applicationCreated(label: String): String = {
+    val eventId = AnalyticsOperationalEventFixtures.id(label)
+    val applicationId = AnalyticsOperationalEventFixtures.id(s"application-$label")
+    val candidateId = AnalyticsOperationalEventFixtures.id(s"candidate-$label")
+    val jobId = AnalyticsOperationalEventFixtures.id(s"job-$label")
+    s"""{"eventId":"$eventId","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-24T12:00:00Z","aggregateType":"Application","aggregateId":"$applicationId","actorId":"$candidateId","payload":{"applicationId":"$applicationId","candidateId":"$candidateId","jobId":"$jobId","status":"Created"}}"""
+  }
 
   private def localKafkaConnection(bootstrapServers: String, username: String, password: String): KafkaConnection =
     KafkaConnection(

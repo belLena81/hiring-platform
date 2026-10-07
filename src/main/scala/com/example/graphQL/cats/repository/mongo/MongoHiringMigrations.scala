@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import io.circe.Json
 import com.example.graphQL.cats.domain.model.*
+import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.shared.*
@@ -81,18 +82,28 @@ private[mongo] object MongoHiringMigrations {
   private def index(collection: SetupCollection, keys: Bson, options: IndexOptions): IO[Unit] =
     collection.createIndex(keys, options).void
 
-  def initialize(database: SetupDatabase, resetOnStart: Boolean, diagnostics: Diagnostics): IO[Unit] =
+  def initialize(
+      database: SetupDatabase,
+      resetOnStart: Boolean,
+      diagnostics: Diagnostics,
+      topics: InterviewTopicPair = InterviewTopicPair.Default
+  ): IO[Unit] =
     Option.when(resetOnStart)(resetOwnedCollections(database)).getOrElse(IO.unit) *>
-      MongoWorkflowIntegrityMigrations.trusted(database).flatMap { trusted =>
+      (
+        MongoWorkflowIntegrityMigrations.trusted(database),
+        MongoInterviewCleanupIntegrityMigrations.trusted(database, topics)
+      ).tupled.flatMap { (trusted, cleanupTrusted) =>
         migrateAggregateVersions(database) *> verifyCandidateSearchProfiles(database) *>
           (if (trusted) IO.unit else migrateOutboxSubjectReferences(database, diagnostics)) *>
           migrateAnalyticsReportControl(database) *> migrateAnalyticsDeletionReceipts(database) *>
           migrateInterviewWorkflowStorage(database) *> migrateInterviewSubjectCleanup(database) *>
           migrateInterviewInboxIdentity(database) *>
           (if (trusted) IO.unit else MongoInterviewWorkflowMigrations.initialize(database)) *>
-          MongoInterviewCleanupMigrations.initialize(database) *>
+          (if (cleanupTrusted) IO.unit else MongoInterviewCleanupMigrations.initialize(database)) *>
           MongoProducerRegistrationMigrations.initialize(database) *>
-          MongoWorkflowIntegrityMigrations.initialize(database) *> createAccountRegistry(database)
+          MongoWorkflowIntegrityMigrations.initialize(database) *>
+          MongoDeletedAccountEmbeddingMigrations.initialize(database) *>
+          MongoInterviewCleanupIntegrityMigrations.initialize(database, topics) *> createAccountRegistry(database)
       }
 
   /** Retire only the known unfiltered inbox index; quarantine/hiring receipts must not share a null identity. */

@@ -23,6 +23,13 @@ private[mongo] object MongoHiringIndexSetup {
 
   private val indexSpecs: List[IndexSpec] = List(
     IndexSpec(
+      MongoCollections.InterviewSubjectCleanup,
+      Indexes.ascending("_id", "requestedAt"),
+      new IndexOptions()
+        .name(MongoInterviewCleanupSweepCodec.ActiveIndex)
+        .partialFilterExpression(MongoInterviewCleanupSweepCodec.activeFilter)
+    ),
+    IndexSpec(
       MongoProducerRegistrations.Collection,
       Indexes.ascending("subjectId", "kind", "state", "_id"),
       new IndexOptions().name("producer_registration_subject_state")

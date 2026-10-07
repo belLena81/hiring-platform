@@ -244,7 +244,11 @@ final case class InterviewRuntimeConfig(
     fencerPassword: Option[String] = None,
     publicationBatchSize: Int = 16,
     clockSkewToleranceMillis: Int = 5000,
-    partitionConcurrency: Int = 4
+    partitionConcurrency: Int = 4,
+    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
+      com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default,
+    workerGroup: String = "hiring-interview-workers",
+    orchestratorGroup: String = "hiring-interview-orchestrator"
 )
 
 final case class DiscoveryConfig(maxTimeMillis: Int = 2000, permits: Int = 4, maxRoots: Int = 4)

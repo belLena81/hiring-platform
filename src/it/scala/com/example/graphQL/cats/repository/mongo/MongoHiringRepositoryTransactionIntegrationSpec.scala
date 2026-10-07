@@ -20,66 +20,23 @@ import com.example.graphQL.cats.domain.model.{
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, UseCaseIO}
-import com.example.graphQL.cats.service.events.{
-  OperationalAggregateType,
-  OperationalEventEnvelope,
-  OperationalEventType
-}
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEventType}
 import com.mongodb.client.model.{Filters, InsertOneOptions}
 import io.circe.Json
-import munit.CatsEffectSuite
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
+import com.example.hiring.testing.LocalTestServices
 
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 
-class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
+class MongoHiringRepositoryTransactionIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
   private val now = Instant.parse("2026-09-22T12:00:00Z")
 
-  private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
-
-  private def replicaSet: Resource[IO, ReplicaSet] =
-    Resource.make(IO.blocking {
-      val instance = new ReplicaSet
-      val _ = instance
-        .withExposedPorts(27017)
-        .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
-        .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-      try {
-        instance.start()
-        val initiated = instance.execInContainer(
-          "mongosh",
-          "--quiet",
-          "--eval",
-          "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-        )
-        if (initiated.getExitCode != 0)
-          throw new AssertionError(s"Replica-set initiation failed: ${initiated.getStderr}")
-        instance
-      } catch {
-        case error: Throwable =>
-          instance.stop()
-          throw error
-      }
-    })(instance => IO.blocking(instance.stop()))
-
-  private def awaitPrimary(instance: ReplicaSet, remaining: Int = 60): IO[Unit] =
-    IO.blocking(instance.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")).flatMap {
-      result =>
-        if (result.getExitCode == 0 && result.getStdout.trim == "true") IO.unit
-        else if (remaining > 0) IO.sleep(250.millis) *> awaitPrimary(instance, remaining - 1)
-        else IO.raiseError(new AssertionError(s"Mongo replica set did not elect a primary: ${result.getStderr}"))
-    }
-
-  private def uri(instance: ReplicaSet): String =
-    s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+  private def replicaSet: Resource[IO, LocalTestServices.MongoEndpoint] = Resource.pure(mongoEndpoint)
+  private def uri(instance: LocalTestServices.MongoEndpoint): String = instance.uri
 
   private def requireResult[A](result: Either[RepositoryError, A]): IO[A] =
     result.fold(error => IO.raiseError(new AssertionError(s"Mongo repository failure: $error")), IO.pure)
@@ -99,20 +56,14 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
     )
 
   private def event(value: Job, actorId: UserId): OperationalEventEnvelope =
-    OperationalEventEnvelope(
-      UUID.randomUUID(),
-      OperationalEventType.JOB_CREATED,
-      now,
-      OperationalAggregateType.Job,
-      value.id.value.toString,
-      actorId,
-      Json.obj("jobId" -> Json.fromString(value.id.value.toString))
-    )
+    com.example.graphQL.cats.service.events.OperationalEvents
+      .jobEvent(OperationalEventType.JOB_CREATED, UUID.randomUUID(), value, actorId, now)
+      .fold(error => fail(error.toString), identity)
 
   test("native transaction cleanup observes committed rejected failed and cancelled sessions") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"transaction_cleanup_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           for {
             failures <- Ref.of[IO, Vector[Map[LogField, String]]](Vector.empty)
             diagnostics = new Diagnostics {
@@ -173,8 +124,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("startup backfills revisions and skips scans after the migration is complete") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"revision_migration_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val legacyJob = MongoHiringCodecs.job(job(JobId(UUID.randomUUID()), UserId(UUID.randomUUID())))
           val legacyUser = MongoHiringCodecs.user(
             User(UserId(UUID.randomUUID()), None, "Admin", UserRole.Admin, None, now, adminSingleton = true)
@@ -283,8 +234,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("a stale backfill batch cannot reset a revision advanced by a repository write") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"revision_race_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val jobs = MongoJobRepository.transactional(
             database,
             client,
@@ -342,8 +293,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("repository-owned and receipt-owned job writes atomically persist all follow-ups") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"write_paths_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val embeddingWork =
             new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
           val jobs = MongoJobRepository.transactional(
@@ -470,8 +421,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("cancelling a receipt-owned job write aborts the job and every transactional follow-up") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"cancelled_job_write_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val diagnostics = com.example.graphQL.cats.service.Diagnostics.noop
           val embeddingWork = new MongoEmbeddingWorkRepository(database, diagnostics)
           val jobs = MongoJobRepository.transactional(database, client, embeddingWork, diagnostics)
@@ -525,8 +476,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("disabled embedding is explicit and job events still persist without embedding work") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"disabled_embedding_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val jobs = MongoJobRepository.transactional(
             database,
             client,
@@ -562,8 +513,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("recruiter deletion tombstones the account and closes only newly open jobs") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"delete_success_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val embeddingWork =
             new MongoEmbeddingWorkRepository(database, com.example.graphQL.cats.service.Diagnostics.noop)
           val jobs = MongoJobRepository.transactional(
@@ -640,8 +591,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("recruiter deletion rolls back on malformed owned job") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"delete_rollback_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val users = MongoUserRepository.transactional(
             database,
             client,
@@ -689,8 +640,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
 
   test("canonical mutation fingerprints conflict with receipts from the prior input format") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"mutation_fingerprint_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val receipts = MongoMutationReceiptRepository.transactional(
             database,
             client,
@@ -746,8 +697,8 @@ class MongoHiringRepositoryTransactionIntegrationSpec extends CatsEffectSuite {
     import com.example.graphQL.cats.service.read.*
     val pageSize = PageSize.fromInt(2).fold(errors => fail(errors.toString), identity)
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"authorized_hiring_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val recruiter = User(
             UserId(UUID.randomUUID()),
             None,

@@ -376,12 +376,18 @@ class MongoHiringCodecsSpec extends FunSuite {
       OperationalEventType.SEARCH_PERFORMED,
       now,
       OperationalAggregateType.Search,
-      "search-205",
+      "00000000-0000-0000-0000-000000000208",
       candidateId,
       Json.obj(
+        "searchId" -> Json.fromString("00000000-0000-0000-0000-000000000208"),
         "searchKind" -> Json.fromString("semanticJobSearch"),
-        "query" -> Json.fromString("Scala"),
-        "results" -> Json.arr(Json.obj("resultId" -> Json.fromString("job-203")))
+        "results" -> Json.arr(
+          Json.obj(
+            "resultId" -> Json.fromString(jobId.value.toString),
+            "rank" -> Json.fromInt(1),
+            "score" -> Json.fromDoubleOrNull(0.95)
+          )
+        )
       )
     )
     val search = SearchSession(
@@ -415,5 +421,7 @@ class MongoHiringCodecsSpec extends FunSuite {
       Right((Right(operational), List(candidateId.value.toString)))
     )
     assertEquals(MongoHiringCodecs.readSearchSession(MongoHiringCodecs.searchSession(search)).toEither, Right(search))
+    assert(MongoHiringCodecs.outboxRecord(operational.copy(occurredAt = Instant.MAX), now).isLeft)
+    assert(MongoHiringCodecs.outboxRecord(operational, Instant.MAX).isLeft)
   }
 }

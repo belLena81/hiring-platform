@@ -3,8 +3,9 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{ExitCode, IO, IOApp}
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.AppConfig
+import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 import com.mongodb.client.model.{Filters, Sorts, Updates, UpdateOptions}
-import org.bson.Document
+import org.bson.{BsonValue, Document}
 import scala.jdk.CollectionConverters.*
 
 /** Explicit bounded, resumable semantic audit. Invalid rows retain the previous checkpoint for repair and rerun. */
@@ -12,14 +13,21 @@ object MongoWorkflowIntegrityAudit extends IOApp {
   private val BatchSize = 500
   private val AuditId = "audit_hiring_workflow_integrity"
 
-  private[mongo] def audit(database: mongo4cats.database.MongoDatabase[IO]): IO[Unit] = {
+  private[mongo] def audit(
+      database: mongo4cats.database.MongoDatabase[IO],
+      topics: InterviewTopicPair = InterviewTopicPair.Default
+  ): IO[Unit] = {
     val ledger = Mongo4catsCollections.documents(database, MongoCollections.HiringMigrationLedger)
-    val collections = List(MongoCollections.InterviewWorkflowCommands, MongoCollections.EventOutbox)
-    def scan(collectionName: String, after: Option[String]): IO[Unit] = {
+    val collections = List(
+      MongoCollections.InterviewWorkflowCommands,
+      MongoCollections.EventOutbox,
+      MongoCollections.InterviewSubjectCleanup
+    )
+    def scan(collectionName: String, after: Option[BsonValue]): IO[Unit] = {
       val collection = Mongo4catsCollections.documents(database, collectionName)
       collection
         .flatMap(
-          _.find(after.fold(Filters.empty())(id => Filters.gt("_id", id)))
+          _.find(MongoInterviewCleanupSweepCodec.afterFilter(after))
             .sort(Sorts.ascending("_id"))
             .limit(BatchSize)
             .boundedStream(32)
@@ -37,10 +45,18 @@ object MongoWorkflowIntegrityAudit extends IOApp {
                     .map(_ => new IllegalStateException("Integrity audit rejected a command"))
                 ).void
               )
+            else if (collectionName == MongoCollections.InterviewSubjectCleanup)
+              rows.traverse_(row =>
+                IO.fromEither(
+                  MongoInterviewCleanupCodec
+                    .decodeCurrent(row, topics)
+                    .leftMap(_ => new IllegalStateException("Integrity audit rejected cleanup evidence"))
+                ).void
+              )
             else {
               val invalid = new Document("$nor", List(MongoHiringValidators.outboxValidator).asJava)
               collection
-                .flatMap(_.find(Filters.and(Filters.in("_id", rows.map(_.getString("_id"))*), invalid)).limit(1).first)
+                .flatMap(_.find(Filters.and(Filters.in("_id", rows.map(_.get("_id"))*), invalid)).limit(1).first)
                 .flatMap {
                   case None    => IO.unit
                   case Some(_) => IO.raiseError(new IllegalStateException("Integrity audit rejected an outbox row"))
@@ -52,13 +68,19 @@ object MongoWorkflowIntegrityAudit extends IOApp {
                 _.updateOne(
                   Filters.eq("_id", AuditId),
                   Updates
-                    .combine(Updates.set("collection", collectionName), Updates.set("lastId", row.getString("_id"))),
+                    .combine(Updates.set("collection", collectionName), Updates.set("lastId", row.get("_id"))),
                   new UpdateOptions().upsert(true)
                 )
               )
               .void
           ) *>
-            (if (rows.size == BatchSize) scan(collectionName, rows.lastOption.map(_.getString("_id"))) else IO.unit)
+            (if (rows.size == BatchSize)
+               IO.fromEither(
+                 rows.lastOption
+                   .traverse(MongoInterviewCleanupSweepCodec.identity)
+                   .leftMap(_ => new IllegalStateException("Invalid integrity audit identity"))
+               ).flatMap(scan(collectionName, _))
+             else IO.unit)
         }
     }
     for {
@@ -78,8 +100,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
         )
         .void
       _ <- collections.dropWhile(name => selected.exists(_ != name)).traverse_ { name =>
-        val checkpoint =
-          Option.when(selected.contains(name))(resume.flatMap(row => Option(row.getString("lastId")))).flatten
+        val checkpoint = Option.when(selected.contains(name))(resume.flatMap(row => Option(row.get("lastId")))).flatten
         // Persist collection switches before reading; a restart must not reuse the previous collection's cursor.
         val setCollection =
           if (selected.contains(name)) IO.unit
@@ -92,7 +113,13 @@ object MongoWorkflowIntegrityAudit extends IOApp {
                 )
               )
               .void
-        setCollection *> scan(name, checkpoint)
+        setCollection *> IO
+          .fromEither(
+            checkpoint
+              .traverse(value => MongoInterviewCleanupSweepCodec.identity(new Document("_id", value)))
+              .leftMap(_ => new IllegalStateException("Invalid integrity audit checkpoint"))
+          )
+          .flatMap(scan(name, _))
       }
       _ <- ledger
         .flatMap(
@@ -114,7 +141,7 @@ object MongoWorkflowIntegrityAudit extends IOApp {
           MongoDatabaseProbe
             .clientResource(config.mongoUri)
             .use { client =>
-              client.getDatabase(config.mongoDatabase).flatMap(audit)
+              client.getDatabase(config.mongoDatabase).flatMap(audit(_, config.kafka.interview.topics))
             }
             .attempt
             .flatMap {

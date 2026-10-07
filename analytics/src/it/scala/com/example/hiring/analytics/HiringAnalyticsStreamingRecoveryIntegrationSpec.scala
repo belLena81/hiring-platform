@@ -9,7 +9,6 @@ import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.streaming.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
 import io.delta.tables.DeltaTable
-import munit.FunSuite
 import org.apache.spark.sql.{DataFrame, Row}
 import org.apache.spark.sql.functions.{col, encode, lit}
 import org.apache.spark.sql.types.*
@@ -24,8 +23,10 @@ import scala.jdk.CollectionConverters.*
 
 /** Actual Delta/Mongo recovery; broker admission, Spark checkpoint ownership and process restart have separate proofs.
   */
-final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 15.minutes
+final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends AnalyticsMongoIntegrationSuite {
+  private def resource = HiringAnalyticsRecoveryTestSupport.resource(mongoEndpoint)
+
+  override val munitIOTimeout: FiniteDuration = 15.minutes
 
   test("reconstructed coordinator converges after Bronze, Silver, Gold and committed Mongo boundary failures") {
     resource
@@ -283,7 +284,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends FunSuite {
           _ = assertEquals(closedResult.outcome, StreamingTerminalOutcome.Published)
           _ = assertEquals(closedResult.candidateWatermark, None)
           afterClosed <- snapshot(harness)
-          _ = assertEquals(afterClosed.get("skillPostingActivity"), before.get("skillPostingActivity"))
+          _ = assertEquals(skillPostingRows(afterClosed), skillPostingRows(before))
           _ = assertEquals(afterClosed.get("funnel"), before.get("funnel"))
           late <- harness.execution(
             harness.spark.read
@@ -340,7 +341,7 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends FunSuite {
           finalWatermark <- harness.journal.latestWatermark(harness.preparation().identity.lineage)
           _ = assertEquals(finalWatermark, cappedWatermark)
           afterIdle <- snapshot(harness)
-          _ = assertEquals(afterIdle.get("skillPostingActivity"), afterSuppressed.get("skillPostingActivity"))
+          _ = assertEquals(skillPostingRows(afterIdle), skillPostingRows(afterSuppressed))
         } yield ()
       }
       .unsafeRunSync()
@@ -385,6 +386,20 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends FunSuite {
 
   private def snapshot(harness: Harness): IO[Document] =
     harness.sync(_.getCollection("analytics_report_snapshots").find(new Document("_id", "current")).first())
+
+  private def skillPostingRows(snapshot: Document): Vector[AnalyticsSkillPostingDayOutput] =
+    snapshot
+      .getList("skillPostingActivity", classOf[Document])
+      .asScala
+      .toVector
+      .map(row =>
+        AnalyticsSkillPostingDayOutput(
+          row.getDate("day").toInstant,
+          row.getString("skill"),
+          row.getLong("postings").longValue()
+        )
+      )
+      .sortBy(row => (row.day.toEpochMilli, row.skill, row.postings))
 
   private def processAt(
       harness: Harness,
@@ -437,15 +452,44 @@ final class HiringAnalyticsStreamingRecoveryIntegrationSpec extends FunSuite {
       distinctSubjects: Int = 12
   ): IO[DataFrame] = harness.execution {
     val rows = (0 until 12).map { n =>
-      val application = s"calendar-application-$n"
-      val aggregate = if (eventType == "JOB_CREATED") s"calendar-job-$batch-$n" else application
+      val application = AnalyticsOperationalEventFixtures.id(s"calendar-application-$n")
+      val aggregate =
+        if (eventType == "JOB_CREATED") AnalyticsOperationalEventFixtures.id(s"calendar-job-$batch-$n")
+        else application
       val aggregateType = if (eventType == "JOB_CREATED") "Job" else "Application"
-      val status = if (eventType == "APPLICATION_STATUS_CHANGED") "Hired" else "Created"
+      val actor = harness.subjects(n % distinctSubjects)
+      val job = AnalyticsOperationalEventFixtures.id("calendar-job")
+      val eventId = AnalyticsOperationalEventFixtures.id(s"calendar-event-$batch-$n")
+      val payload = eventType match {
+        case "JOB_CREATED" =>
+          io.circe.Json.obj(
+            "job" -> io.circe.Json.obj(
+              "jobId" -> io.circe.Json.fromString(aggregate),
+              "status" -> io.circe.Json.fromString("Open"),
+              "skills" -> io.circe.Json.arr(io.circe.Json.fromString(skill))
+            )
+          )
+        case "APPLICATION_CREATED" | "APPLICATION_STATUS_CHANGED" =>
+          val identity = io.circe.Json.obj(
+            "applicationId" -> io.circe.Json.fromString(application),
+            "candidateId" -> io.circe.Json.fromString(actor),
+            "jobId" -> io.circe.Json.fromString(job)
+          )
+          if (eventType == "APPLICATION_CREATED")
+            identity.deepMerge(
+              io.circe.Json.obj("status" -> io.circe.Json.fromString("Created"))
+            )
+          else
+            identity.deepMerge(
+              io.circe.Json.obj(
+                "previousStatus" -> io.circe.Json.fromString("Interview"),
+                "newStatus" -> io.circe.Json.fromString("Hired")
+              )
+            )
+        case unsupported => fail(s"Unsupported timed fixture event: $unsupported")
+      }
       val raw =
-        s"""{"eventId":"calendar-event-$batch-$n","eventType":"$eventType","occurredAt":"$occurred","aggregateType":"$aggregateType","aggregateId":"$aggregate","actorId":"${harness
-            .subjects(
-              n % distinctSubjects
-            )}","payload":{"applicationId":"$application","jobId":"calendar-job","newStatus":"$status","job":{"skills":["$skill"]}}}"""
+        s"""{"eventId":"$eventId","eventType":"$eventType","occurredAt":"$occurred","aggregateType":"$aggregateType","aggregateId":"$aggregate","actorId":"$actor","payload":${payload.noSpaces}}"""
       Row(harness.topic, n % 3, batch * 4L + n / 3L, raw)
     }
     val schema = StructType(

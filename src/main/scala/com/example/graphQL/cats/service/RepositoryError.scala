@@ -5,6 +5,7 @@ enum RepositoryError {
   case DuplicateApplication
   case AuthorityRevoked
   case Conflict
+  case InvalidEvent
   case InvalidStoredData
   case MissingWriteResult
   case MissingStoredResult

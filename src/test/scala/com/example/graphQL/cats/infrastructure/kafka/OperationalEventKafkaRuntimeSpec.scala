@@ -59,7 +59,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
 
   private def event(
       eventType: OperationalEventType,
-      aggregateId: String = "job-1",
+      aggregateId: String = "00000000-0000-0000-0000-000000000901",
       occurredAt: Instant = now
   ): OperationalEventEnvelope =
     OperationalEventEnvelope(
@@ -69,11 +69,17 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       OperationalAggregateType.Job,
       aggregateId,
       actor,
-      Json.obj("value" -> Json.fromString("fixture"))
+      Json.obj(
+        "job" -> Json.obj(
+          "jobId" -> Json.fromString(aggregateId),
+          "skills" -> Json.arr(Json.fromString("Scala")),
+          "status" -> Json.fromString("Open")
+        )
+      )
     )
 
   private def claim(partitionKey: String, eventId: UUID): ClaimedOperationalEvent = {
-    val value = event(OperationalEventType.JOB_UPDATED, aggregateId = partitionKey).copy(eventId = eventId)
+    val value = event(OperationalEventType.JOB_UPDATED).copy(eventId = eventId)
     ClaimedOperationalEvent(value, OperationalEventJson.bytes(value), partitionKey, s"lease-$partitionKey-$eventId", 1)
   }
 
@@ -91,7 +97,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       val receipts = new ConsumerReceiptRepository {
         override def exists(group: String, id: UUID): RepositoryIO[Boolean] =
           com.example.graphQL.cats.service.port.RepositoryIO
-            .fromIOEither(receiptState.get.map(values => Right(values.contains(group -> id))))
+            .lift(IO.raiseError(new AssertionError("receipt deduplication must use the atomic insert")))
         override def record(
             group: String,
             value: OperationalEventEnvelope,
@@ -126,7 +132,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           1L,
-          null
+          None
         )
         failure <- OperationalEventKafkaRuntime.handleRecord(
           config,
@@ -135,7 +141,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           2L,
-          null
+          None
         )
         records <- values.quarantined.get
       } yield {
@@ -143,6 +149,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
         assert(!failure)
         assertEquals(records.size, 1)
         assertEquals(records.head.rawBytes.toList, List.empty[Byte])
+        assertEquals(records.head.reason, "null event envelope")
       }
     }
   }
@@ -157,12 +164,33 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           1L,
-          "not-json".getBytes
+          Some("not-json".getBytes)
         )
         records <- values.quarantined.get
       } yield {
         assert(malformedCommit)
         assertEquals(records.map(_.category), Vector(OperationalEventFailureCategory.MalformedEnvelope))
+      }
+    }
+  }
+
+  test("empty non-null records retain a distinct malformed quarantine reason") {
+    fakes.flatMap { values =>
+      for {
+        accepted <- OperationalEventKafkaRuntime.handleRecord(
+          config,
+          values.receipts,
+          values.quarantines,
+          config.topic,
+          0,
+          3L,
+          Some(Array.emptyByteArray)
+        )
+        records <- values.quarantined.get
+      } yield {
+        assert(accepted)
+        assertEquals(records.map(_.reason), Vector("malformed event envelope"))
+        assertEquals(records.head.rawBytes.toList, List.empty[Byte])
       }
     }
   }
@@ -181,7 +209,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           2L,
-          "not-json".getBytes
+          Some("not-json".getBytes)
         )
         .map(commit => assert(!commit))
     }
@@ -217,7 +245,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           4L,
-          OperationalEventJson.bytes(first)
+          Some(OperationalEventJson.bytes(first))
         )
         duplicateCommit <- OperationalEventKafkaRuntime.handleRecord(
           config,
@@ -226,7 +254,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           5L,
-          OperationalEventJson.bytes(first)
+          Some(OperationalEventJson.bytes(first))
         )
         independentCommit <- OperationalEventKafkaRuntime.handleRecord(
           config,
@@ -235,7 +263,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           config.topic,
           0,
           6L,
-          OperationalEventJson.bytes(independent)
+          Some(OperationalEventJson.bytes(independent))
         )
         records <- values.quarantined.get
       } yield {
@@ -247,16 +275,88 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     }
   }
 
-  test("publisher preserves ordering within each partition key") {
-    for {
-      first = UUID.fromString("00000000-0000-0000-0000-000000000101")
-      second = UUID.fromString("00000000-0000-0000-0000-000000000102")
-      seen <- Ref.of[IO, Vector[UUID]](Vector.empty)
-      _ <- OperationalEventKafkaRuntime.publishClaims(List(claim("job-1", first), claim("job-1", second))) { value =>
-        seen.update(_ :+ value.event.eventId)
+  test("receipt failures prevent acknowledgment including unacknowledged conflicts") {
+    fakes.flatMap { values =>
+      List(RepositoryError.Unavailable, RepositoryError.Conflict).traverse_ { error =>
+        val receipts = new ConsumerReceiptRepository {
+          def exists(group: String, id: UUID): RepositoryIO[Boolean] =
+            RepositoryIO.lift(IO.raiseError(new AssertionError("Unexpected preflight read")))
+          def record(
+              group: String,
+              value: OperationalEventEnvelope,
+              at: Instant,
+              until: Instant
+          ): RepositoryIO[Boolean] =
+            RepositoryIO.fromEither(Left(error))
+        }
+        OperationalEventKafkaRuntime
+          .handleRecord(
+            config,
+            receipts,
+            values.quarantines,
+            config.topic,
+            0,
+            7L,
+            Some(OperationalEventJson.bytes(event(OperationalEventType.JOB_CREATED)))
+          )
+          .map(commit => assert(!commit))
       }
-      result <- seen.get
-    } yield assertEquals(result, Vector(first, second))
+    }
+  }
+
+  test("publisher bounds active work to four even when many facts share one key") {
+    for {
+      active <- Ref.of[IO, Int](0)
+      maximum <- Ref.of[IO, Int](0)
+      entered <- Deferred[IO, Unit]
+      release <- Deferred[IO, Unit]
+      fiber <- OperationalEventKafkaRuntime
+        .publishClaims(List.fill(20)(claim("one-key", UUID.randomUUID()))) { _ =>
+          active
+            .updateAndGet(_ + 1)
+            .flatMap { count =>
+              maximum.update(_.max(count)) *> (if (count == 4) entered.complete(()).void else IO.unit) *> release.get
+            }
+            .guarantee(active.update(_ - 1))
+        }
+        .start
+      _ <- entered.get
+      before <- active.get
+      _ <- release.complete(())
+      _ <- fiber.joinWithNever
+      peak <- maximum.get
+      remaining <- active.get
+    } yield {
+      assertEquals(before, 4)
+      assertEquals(peak, 4)
+      assertEquals(remaining, 0)
+    }
+  }
+
+  test("publication waves respect the per-poll budget and stop on an empty result") {
+    for {
+      limits <- Ref.of[IO, Vector[Int]](Vector.empty)
+      published <- Ref.of[IO, Int](0)
+      _ <- OperationalEventKafkaRuntime.publishWaves(10) { limit =>
+        limits.update(_ :+ limit).as(List.fill(limit)(claim("one-key", UUID.randomUUID())))
+      }(_ => published.update(_ + 1))
+      requests <- limits.get
+      count <- published.get
+      emptyRequests <- Ref.of[IO, Int](0)
+      _ <- OperationalEventKafkaRuntime.publishWaves(10)(_ => emptyRequests.update(_ + 1).as(Nil))(_ => IO.unit)
+      emptyCount <- emptyRequests.get
+    } yield {
+      assertEquals(requests, Vector(4, 4, 2))
+      assertEquals(count, 10)
+      assertEquals(emptyCount, 1)
+    }
+  }
+
+  test("publication waves reject a repository result exceeding the requested bound") {
+    OperationalEventKafkaRuntime
+      .publishWaves(1)(_ => IO.pure(List.fill(2)(claim("key", UUID.randomUUID()))))(_ => IO.unit)
+      .attempt
+      .map(result => assert(result.isLeft))
   }
 
   test("publisher overlaps independent partition keys") {
@@ -268,10 +368,129 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
       ) { value =>
         arrivals.modify(count => (count + 1, count + 1)).flatMap { count =>
           if (count == 2) barrier.complete(()).void else barrier.get
-        } *> IO(assert(value.event.aggregateId == "job-1" || value.event.aggregateId == "job-2"))
+        } *> IO(assert(value.partitionKey == "job-1" || value.partitionKey == "job-2"))
       }
       count <- arrivals.get
     } yield assertEquals(count, 2)
+  }
+
+  private def publicationOutbox(
+      renewal: IO[Either[RepositoryError, Unit]],
+      published: IO[Either[RepositoryError, Unit]],
+      retried: IO[Either[RepositoryError, Unit]] = IO.pure(Right(()))
+  ): OperationalEventOutboxRepository = new OperationalEventOutboxRepository {
+    def claim(
+        workerId: String,
+        transactionalId: String,
+        at: Instant,
+        until: Instant,
+        limit: Int
+    ): RepositoryIO[List[ClaimedOperationalEvent]] = RepositoryIO.fromEither(Left(RepositoryError.Unavailable))
+    def renewLease(id: UUID, token: String, subjects: List[String], until: Instant): RepositoryIO[Unit] =
+      RepositoryIO.fromIOEither(renewal)
+    def markPublished(id: UUID, token: String, at: Instant, expires: Instant): RepositoryIO[Unit] =
+      RepositoryIO.fromIOEither(published)
+    def releaseForRetry(id: UUID, token: String, at: Instant, available: Instant): RepositoryIO[Unit] =
+      RepositoryIO.fromIOEither(retried)
+    def markFailed(id: UUID, token: String, at: Instant, reason: String): RepositoryIO[Unit] =
+      RepositoryIO.fromIOEither(retried)
+  }
+
+  test("publication renews its guarded lease before sending and then records durable success") {
+    for {
+      observed <- Ref.of[IO, Vector[String]](Vector.empty)
+      outbox = publicationOutbox(
+        observed.update(_ :+ "renew").as(Right(())),
+        observed.update(_ :+ "published").as(Right(()))
+      )
+      _ <- OperationalEventKafkaRuntime.publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(
+        observed.update(_ :+ "send")
+      )
+      events <- observed.get
+    } yield assertEquals(events, Vector("renew", "send", "published"))
+  }
+
+  test("a rejected lease prevents any Kafka send") {
+    for {
+      sent <- Ref.of[IO, Boolean](false)
+      outbox = publicationOutbox(IO.pure(Left(RepositoryError.Conflict)), IO.pure(Right(())))
+      result <- OperationalEventKafkaRuntime
+        .publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(sent.set(true))
+        .attempt
+      didSend <- sent.get
+    } yield {
+      assert(result.isLeft)
+      assert(!didSend)
+    }
+  }
+
+  test("queued publication keeps renewing and a lost lease cancels the uncertain send") {
+    for {
+      renewals <- Ref.of[IO, Int](0)
+      cancelled <- Ref.of[IO, Boolean](false)
+      completed <- Ref.of[IO, Int](0)
+      outbox = publicationOutbox(
+        renewals.updateAndGet(_ + 1).map(count => if (count == 1) Right(()) else Left(RepositoryError.Conflict)),
+        completed.update(_ + 1).as(Right(()))
+      )
+      shortLease = config.copy(publisher = config.publisher.copy(leaseSeconds = 3))
+      result <- OperationalEventKafkaRuntime
+        .publishClaim(shortLease, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(
+          IO.never[Unit].onCancel(cancelled.set(true))
+        )
+        .attempt
+        .timeout(5.seconds)
+      count <- renewals.get
+      wasCancelled <- cancelled.get
+      completions <- completed.get
+    } yield {
+      assert(result.isLeft)
+      assertEquals(count, 2)
+      assert(wasCancelled)
+      assertEquals(completions, 0)
+    }
+  }
+
+  test("cancelling uncertain publication stops the send without completing or retrying its claim") {
+    for {
+      entered <- Deferred[IO, Unit]
+      cancelled <- Ref.of[IO, Boolean](false)
+      completions <- Ref.of[IO, Int](0)
+      retries <- Ref.of[IO, Int](0)
+      outbox = publicationOutbox(
+        IO.pure(Right(())),
+        completions.update(_ + 1).as(Right(())),
+        retries.update(_ + 1).as(Right(()))
+      )
+      fiber <- OperationalEventKafkaRuntime
+        .publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(
+          (entered.complete(()) *> IO.never[Unit]).onCancel(cancelled.set(true))
+        )
+        .start
+      _ <- entered.get
+      _ <- fiber.cancel
+      wasCancelled <- cancelled.get
+      completed <- completions.get
+      retried <- retries.get
+    } yield {
+      assert(wasCancelled)
+      assertEquals(completed, 0)
+      assertEquals(retried, 0)
+    }
+  }
+
+  test("failure recording publication after Kafka success never resends in the same attempt") {
+    for {
+      sends <- Ref.of[IO, Int](0)
+      outbox = publicationOutbox(IO.pure(Right(())), IO.pure(Left(RepositoryError.Unavailable)))
+      result <- OperationalEventKafkaRuntime
+        .publishClaim(config, outbox, Diagnostics.noop, claim("key", UUID.randomUUID()))(sends.update(_ + 1))
+        .attempt
+      count <- sends.get
+    } yield {
+      assert(result.isLeft)
+      assertEquals(count, 1)
+    }
   }
 
   test("resilient stream retries failed effects until they recover") {

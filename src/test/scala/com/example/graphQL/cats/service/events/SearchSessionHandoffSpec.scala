@@ -50,13 +50,15 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       Some("scala"),
       Json.obj("city" -> Json.fromString("Nicosia")),
       Some("test-model"),
-      List(SearchSessionResult("job-1", 1, 0.9d)),
+      List(SearchSessionResult("00000000-0000-0000-0000-000000000904", 1, 0.9d)),
       now,
       now.plusSeconds(3600)
     )
     val work = PendingSearchSessionWork(
       session,
-      OperationalEvents.searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000903"), session)
+      OperationalEvents
+        .searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000903"), session)
+        .fold(error => fail(error.toString), identity)
     )
 
     new SearchSessionWorkRepository {

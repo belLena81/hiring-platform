@@ -111,12 +111,12 @@ final class EmbeddingPipeline(
       result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
         case ProcessingOutcome.Abandoned => IO.unit
         case ProcessingOutcome.Conflict  =>
-          entityAbsent(claim)
-            .flatMap { absent =>
-              if (absent) work.complete(claim).value
-              else
-                // Aggregate revisions also advance for unrelated writes. Reobserve the source without
-                // spending the provider failure budget; deletion and absence still complete the work.
+          conflictOutcome(claim)
+            .flatMap {
+              case ProcessingOutcome.Completed         => work.complete(claim).value
+              case ProcessingOutcome.Terminal(failure) => now.flatMap(work.fail(claim, failure, _).value)
+              case _                                   =>
+                // Revision fencing does not consume the provider failure budget.
                 now.flatMap(at =>
                   work.retry(claim, at.plusMillis(durableRetryBase.toMillis), chargeAttempt = false).value
                 )
@@ -160,28 +160,49 @@ final class EmbeddingPipeline(
       }
     }
 
-  private def entityAbsent(claim: ClaimedEmbeddingWork): IO[Boolean] =
-    claim.key.kind match {
+  private def conflictOutcome(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] = {
+    def preparedOutcome(source: Option[String], metadata: Option[EmbeddingMeta]): ProcessingOutcome =
+      EmbeddingPreparation.prepare(source, metadata, model, SearchableText.DocumentMaxChars) match {
+        case EmbeddingPreparation.NoWork           => ProcessingOutcome.Completed
+        case EmbeddingPreparation.DocumentTooLarge => ProcessingOutcome.Terminal(EmbeddingWorkFailure.DocumentTooLarge)
+        case EmbeddingPreparation.Prepared(_, _)   => ProcessingOutcome.Retry
+      }
+
+    val reread = claim.key.kind match {
       case EmbeddingWorkKind.Job =>
-        parseIdentifier(claim.key.entityId)(JobId.apply)
-          .fold(_ => IO.pure(false), id => jobs.findVersioned(id).value.map(_.exists(_.isEmpty)))
+        parseIdentifier(claim.key.entityId)(JobId.apply).fold(
+          _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
+          id =>
+            jobs.findVersioned(id).value.map {
+              case Right(Some(observed)) =>
+                preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta))
+              case Right(None) => ProcessingOutcome.Completed
+              case Left(_)     => ProcessingOutcome.Retry
+            }
+        )
       case EmbeddingWorkKind.CandidateProfile =>
         parseIdentifier(claim.key.entityId)(UserId.apply).fold(
-          _ => IO.pure(false),
+          _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
           id =>
-            users
-              .findVersioned(id)
-              .value
-              .map(
-                _.exists(
-                  _.forall(observed =>
-                    observed.value.accountStatus != com.example.graphQL.cats.domain.model.AccountStatus.Active ||
-                      observed.value.role != com.example.graphQL.cats.domain.model.UserRole.Candidate
-                  )
+            users.findVersioned(id).value.map {
+              case Right(Some(observed))
+                  if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
+                    observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
+                preparedOutcome(
+                  observed.value.candidateProfile.map(SearchableText.candidate),
+                  observed.value.embedding.map(_.meta)
                 )
-              )
+              case Right(_) => ProcessingOutcome.Completed
+              case Left(_)  => ProcessingOutcome.Retry
+            }
         )
     }
+    reread.handleErrorWith(error =>
+      diagnostics
+        .emit(LogEvent.EmbeddingProcessingFailed, fields = LogFields.failure(error))
+        .as(ProcessingOutcome.Retry)
+    )
+  }
 
   private def renewClaim(claim: ClaimedEmbeddingWork): IO[Boolean] =
     now.flatMap(at => work.renew(claim, at, at.plusMillis(leaseDuration.toMillis)).value).flatMap {
@@ -252,7 +273,8 @@ final class EmbeddingPipeline(
     case Left(RepositoryError.AuthorityRevoked) | Left(RepositoryError.Unavailable) |
         Left(RepositoryError.DuplicateApplication) | Left(
           RepositoryError.InvalidStoredData
-        ) | Left(RepositoryError.MissingWriteResult) | Left(RepositoryError.MissingStoredResult) =>
+        ) | Left(RepositoryError.InvalidEvent) | Left(RepositoryError.MissingWriteResult) |
+        Left(RepositoryError.MissingStoredResult) =>
       ProcessingOutcome.Retry
   }
 

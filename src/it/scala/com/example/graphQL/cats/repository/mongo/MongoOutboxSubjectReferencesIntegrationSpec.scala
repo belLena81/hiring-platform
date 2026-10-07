@@ -41,59 +41,20 @@ import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.IdempotencyRequest
 import com.example.graphQL.cats.domain.model.AccountToken
 import io.circe.Json
-import munit.CatsEffectSuite
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
+import com.example.hiring.testing.LocalTestServices
 
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
+class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
   private val now = Instant.parse("2026-09-22T12:00:00Z")
-  private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
-
-  private def replicaSet: Resource[IO, ReplicaSet] =
-    Resource.make(IO.blocking {
-      val instance = new ReplicaSet
-      val _ = instance
-        .withExposedPorts(27017)
-        .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
-        .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-      try {
-        instance.start()
-        val initiated = instance.execInContainer(
-          "mongosh",
-          "--quiet",
-          "--eval",
-          "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-        )
-        if (initiated.getExitCode != 0)
-          throw new AssertionError(s"Replica-set initiation failed: ${initiated.getStderr}")
-        instance
-      } catch {
-        case error: Throwable =>
-          instance.stop()
-          throw error
-      }
-    })(instance => IO.blocking(instance.stop()))
-
-  private def awaitPrimary(instance: ReplicaSet, remaining: Int = 60): IO[Unit] =
-    IO.blocking(instance.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")).flatMap {
-      result =>
-        if (result.getExitCode == 0 && result.getStdout.trim == "true") IO.unit
-        else if (remaining > 0) IO.sleep(250.millis) *> awaitPrimary(instance, remaining - 1)
-        else IO.raiseError(new AssertionError(s"Mongo replica set did not elect a primary: ${result.getStderr}"))
-    }
-
-  private def uri(instance: ReplicaSet): String =
-    s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+  private def replicaSet: Resource[IO, LocalTestServices.MongoEndpoint] = Resource.pure(mongoEndpoint)
+  private def uri(instance: LocalTestServices.MongoEndpoint): String = instance.uri
 
   private def uuid(value: Long): UUID = new UUID(0L, value)
   private def runId(value: String): AnalyticsRunId = AnalyticsRunId.from(value).getOrElse(fail("invalid test run ID"))
@@ -126,8 +87,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
 
   test("outbox subject migration resumes after unresolved search results and indexes candidate subjects") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"outbox_subjects_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val actor = UserId(uuid(100L))
           val candidate = UserId(uuid(101L))
           val searchId = uuid(200L)
@@ -151,16 +112,22 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             1,
             now
           )
-          val legacyClick = outboxRecord(click)
+          val legacyClick = outboxRecord(click.fold(error => fail(error.toString), identity))
           legacyClick.remove("subjectRefsVersion")
-          val performed = OperationalEvents.searchPerformed(uuid(3L), session)
+          val performed =
+            OperationalEvents.searchPerformed(uuid(3L), session).fold(error => fail(error.toString), identity)
           val application = event(
             4L,
             OperationalEventType.APPLICATION_CREATED,
             OperationalAggregateType.Application,
             uuid(400L),
             actor,
-            Json.obj("candidateId" -> Json.fromString(candidate.value.toString))
+            Json.obj(
+              "applicationId" -> Json.fromString(uuid(400L).toString),
+              "candidateId" -> Json.fromString(candidate.value.toString),
+              "jobId" -> Json.fromString(uuid(401L).toString),
+              "status" -> Json.fromString("Created")
+            )
           )
           val incompleteLegacyRecord = outboxRecord(application)
             .append("subjectIds", List(actor.value.toString).asJava)
@@ -178,7 +145,13 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
                       OperationalAggregateType.Job,
                       uuid(300L),
                       actor,
-                      Json.obj("job" -> Json.obj("jobId" -> Json.fromString(uuid(300L).toString)))
+                      Json.obj(
+                        "job" -> Json.obj(
+                          "jobId" -> Json.fromString(uuid(300L).toString),
+                          "skills" -> Json.arr(Json.fromString("Scala")),
+                          "status" -> Json.fromString("Open")
+                        )
+                      )
                     )
                   )
                 )
@@ -260,8 +233,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
 
   test("report generations hide snapshots and reject stale or conflicting batch publications") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"analytics_publication_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val reports = MongoAnalyticsReportRepository.transactional(database, client, Diagnostics.noop)
           val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
           val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
@@ -508,8 +481,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
 
   test("account deletion returns and replays a durable pending receipt with status independent of the account") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"account_deletion_receipts_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val users = MongoUserRepository.transactional(
             database,
             client,
@@ -612,12 +585,15 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
 
   test("deletion request captures every publisher transactional ID from its subject fence") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"analytics_fencing_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
           val runner = MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
           val userId = UserId(UUID.randomUUID())
-          val transactionalIds = List("hiring-publisher-generation-a", "hiring-publisher-generation-b")
+          val transactionalIds = List(
+            "hiring-publisher-00000000-0000-0000-0000-000000000385",
+            "hiring-publisher-00000000-0000-0000-0000-000000000386"
+          )
           for {
             _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
             _ <- MongoRepositoryTestSupport.first(
@@ -663,8 +639,8 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
 
   test("outbox claim records its transactional publisher ID on every subject fence") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"analytics_claim_fencing_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
           val actor = UserId(UUID.randomUUID())
           val value = event(
@@ -673,10 +649,16 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             OperationalAggregateType.Job,
             uuid(701L),
             actor,
-            Json.obj("job" -> Json.obj("jobId" -> Json.fromString(uuid(701L).toString)))
+            Json.obj(
+              "job" -> Json.obj(
+                "jobId" -> Json.fromString(uuid(701L).toString),
+                "skills" -> Json.arr(Json.fromString("Scala")),
+                "status" -> Json.fromString("Open")
+              )
+            )
           )
           val secondValue = value.copy(eventId = uuid(702L))
-          val transactionalId = "hiring-publisher-test-generation"
+          val transactionalId = "hiring-publisher-00000000-0000-0000-0000-000000000389"
           for {
             _ <- MongoHiringSetup.initialize(database, Diagnostics.noop)
             _ <- MongoRepositoryTestSupport.first(
@@ -702,19 +684,25 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
 
   test("expired-lease reclaim and account deletion serialize the publisher subject fence") {
     replicaSet.use { instance =>
-      awaitPrimary(instance) *> MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
-        client.getDatabase(s"analytics_fence_race_${UUID.randomUUID()}").flatMap { database =>
+      MongoDatabaseProbe.clientResource(uri(instance)).use { client =>
+        LocalTestServices.database(client).use { database =>
           val userId = UserId(UUID.randomUUID())
-          val firstPublisher = "hiring-publisher-generation-a"
-          val secondPublisher = "hiring-publisher-generation-b"
-          val racingPublisher = "hiring-publisher-generation-c"
+          val firstPublisher = "hiring-publisher-00000000-0000-0000-0000-000000000385"
+          val secondPublisher = "hiring-publisher-00000000-0000-0000-0000-000000000386"
+          val racingPublisher = "hiring-publisher-00000000-0000-0000-0000-000000000387"
           val eventValue = event(
             800L,
             OperationalEventType.JOB_CREATED,
             OperationalAggregateType.Job,
             uuid(801L),
             userId,
-            Json.obj("job" -> Json.obj("jobId" -> Json.fromString(uuid(801L).toString)))
+            Json.obj(
+              "job" -> Json.obj(
+                "jobId" -> Json.fromString(uuid(801L).toString),
+                "skills" -> Json.arr(Json.fromString("Scala")),
+                "status" -> Json.fromString("Open")
+              )
+            )
           )
           val erasures = MongoAnalyticsErasureRequestRepository.transactional(database, client, Diagnostics.noop)
           val outbox = MongoOperationalEventOutboxRepository.transactional(database, client, Diagnostics.noop)
@@ -845,7 +833,7 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends CatsEffectSuite {
             lateClaim <- outbox
               .claim(
                 "publisher-d",
-                "hiring-publisher-generation-d",
+                "hiring-publisher-00000000-0000-0000-0000-000000000388",
                 deletionAt.plusSeconds(200L),
                 deletionAt.plusSeconds(260L),
                 1

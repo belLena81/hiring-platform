@@ -140,8 +140,9 @@ configure_names() {
   fi
   volume_name="${project}_hmac-rotation-analytics"
   base_image="${project}-base"
-  old_image="${project}-old"
-  new_image="${project}-new"
+  # Existing proof state already pins immutable IDs; avoid retagging its images.
+  old_image="${old_image_id:-${project}-old}"
+  new_image="${new_image_id:-${project}-new}"
   export HIRING_HMAC_ROTATION_MONGO_PORT="$mongo_port"
   export HIRING_HMAC_ROTATION_KAFKA_PORT="$kafka_port"
   export HIRING_HMAC_ROTATION_DATABASE="$database"
@@ -176,13 +177,36 @@ free_port() {
 }
 
 build_images() {
-  docker build -f analytics/Dockerfile -t "$base_image" .
-  docker build -f analytics/Dockerfile.hmac-key-rotation-proof \
-    --build-arg "ANALYTICS_BASE_IMAGE=$base_image" --build-arg "ANALYTICS_WRITER_UID=$old_uid" \
-    -t "$old_image" .
-  docker build -f analytics/Dockerfile.hmac-key-rotation-proof \
-    --build-arg "ANALYTICS_BASE_IMAGE=$base_image" --build-arg "ANALYTICS_WRITER_UID=$new_uid" \
-    -t "$new_image" .
+  local fingerprint
+  fingerprint="$(python3 - "$repo_root" "$old_uid" "$new_uid" <<'PY_IMAGE'
+from pathlib import Path
+import hashlib,sys
+root=Path(sys.argv[1]);digest=hashlib.sha256()
+paths=[root/'.dockerignore',root/'analytics/build.sbt',root/'analytics/Dockerfile',root/'analytics/Dockerfile.hmac-key-rotation-proof']
+for directory in ['analytics/src','analytics/project','test-support']:
+    paths += [path for path in (root/directory).rglob('*') if path.is_file() and not any(part in ('target','__pycache__') for part in path.parts)]
+for path in sorted(set(paths)):
+    digest.update(str(path.relative_to(root)).encode());digest.update(b'\0');digest.update(path.read_bytes());digest.update(b'\0')
+digest.update(('writer-uids:'+sys.argv[2]+','+sys.argv[3]).encode())
+print(digest.hexdigest())
+PY_IMAGE
+)"
+  base_image="hiring-analytics-proof-cache:base-$fingerprint"
+  old_image="hiring-analytics-proof-cache:writer-$old_uid-$fingerprint"
+  new_image="hiring-analytics-proof-cache:writer-$new_uid-$fingerprint"
+  if ! docker image inspect "$base_image" >/dev/null 2>&1; then
+    docker build -f analytics/Dockerfile -t "$base_image" .
+  fi
+  if ! docker image inspect "$old_image" >/dev/null 2>&1; then
+    docker build -f analytics/Dockerfile.hmac-key-rotation-proof \
+      --build-arg "ANALYTICS_BASE_IMAGE=$base_image" --build-arg "ANALYTICS_WRITER_UID=$old_uid" \
+      -t "$old_image" .
+  fi
+  if ! docker image inspect "$new_image" >/dev/null 2>&1; then
+    docker build -f analytics/Dockerfile.hmac-key-rotation-proof \
+      --build-arg "ANALYTICS_BASE_IMAGE=$base_image" --build-arg "ANALYTICS_WRITER_UID=$new_uid" \
+      -t "$new_image" .
+  fi
   old_image_id="$(docker image inspect --format '{{.Id}}' "$old_image")"
   new_image_id="$(docker image inspect --format '{{.Id}}' "$new_image")"
   [[ "$old_image_id" =~ ^sha256:[a-f0-9]{64}$ && "$new_image_id" =~ ^sha256:[a-f0-9]{64}$ ]] || die 'Writer image identity is unavailable.'

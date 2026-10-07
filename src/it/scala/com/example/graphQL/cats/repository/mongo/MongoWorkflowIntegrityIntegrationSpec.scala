@@ -3,13 +3,12 @@ package com.example.graphQL.cats.repository.mongo
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.Filters
-import munit.CatsEffectSuite
 import org.bson.Document
 import java.time.Instant
 import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 
-final class MongoWorkflowIntegrityIntegrationSpec extends CatsEffectSuite {
+final class MongoWorkflowIntegrityIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout = 5.minutes
 
   private def command(workflow: String): Document = {
@@ -27,7 +26,7 @@ final class MongoWorkflowIntegrityIntegrationSpec extends CatsEffectSuite {
   }
 
   test("strict command validation rejects malformed claims and completed cutover fails closed on validator drift") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val valid = command(UUID.randomUUID().toString)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
@@ -48,7 +47,7 @@ final class MongoWorkflowIntegrityIntegrationSpec extends CatsEffectSuite {
   }
 
   test("explicit audit can be rerun and records completion without changing valid commands") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val valid = command(UUID.randomUUID().toString)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
@@ -73,7 +72,7 @@ final class MongoWorkflowIntegrityIntegrationSpec extends CatsEffectSuite {
   }
 
   test("failed audit retains a bounded checkpoint and resumes after explicit repair") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val rows = (1L to 501L).toList.map(n => command(new UUID(0L, n).toString))
       val invalid = command(new UUID(0L, 501L).toString).append("commandState", "Unknown")
       for {
@@ -107,7 +106,7 @@ final class MongoWorkflowIntegrityIntegrationSpec extends CatsEffectSuite {
   }
 
   test("interrupted integrity cutover preserves command data and completes on restart") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val valid = command(UUID.randomUUID().toString)
       for {
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.InterviewWorkflowCommands, valid)
@@ -138,7 +137,7 @@ final class MongoWorkflowIntegrityIntegrationSpec extends CatsEffectSuite {
   }
 
   test("migration proofs reject BSON Int versions instead of numeric equality with Long") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         ledger <- Mongo4catsCollections.documents(fixture.database, MongoCollections.HiringMigrationLedger)

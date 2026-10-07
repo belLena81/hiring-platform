@@ -8,13 +8,12 @@ import com.example.graphQL.cats.domain.workflow.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.application.{InterviewWorkflowWorker, InterviewWorkerSettings}
 import com.example.graphQL.cats.service.port.*
-import munit.CatsEffectSuite
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
 
 /** Actual Mongo transactions and durable provider receipts; broker restarts are covered by the worker workload. */
-final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
+final class InterviewWorkflowRecoveryIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 4.minutes
   private val settings =
     InterviewWorkerSettings("recovery-worker", 10.millis, 60.seconds, 10.seconds, 5, 1.second, 30.seconds)
@@ -76,7 +75,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
     } yield result
 
   test("a reserved slot surviving a provider crash is released after the precommit deadline") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val notification = FakeInterviewNotificationProvider.durable(repository)
@@ -129,7 +128,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
   }
 
   test("Admin repair reconciles a released reservation without reopening it or extending its deadline") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       for {
@@ -203,7 +202,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
   }
 
   test("compensation exhausts five durable attempts and retains uncertain reservation for visible repair") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val failedRelease = new InterviewCalendarProvider {
@@ -276,7 +275,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
   }
 
   test("notification exhaustion retains committed hiring and Admin repair resets the bounded attempt generation") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val notification = FakeInterviewNotificationProvider.durable(repository)
@@ -364,7 +363,7 @@ final class InterviewWorkflowRecoveryIntegrationSpec extends CatsEffectSuite {
   }
 
   test("actual account deletion fences original command and result replay before and after workflow purge") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val worker = new InterviewWorkflowWorker(

@@ -11,6 +11,23 @@ import cats.effect.Async
 import cats.syntax.all.*
 import org.apache.spark.sql.{Column, DataFrame}
 import org.apache.spark.sql.functions.{
+  array,
+  array_distinct,
+  array_sort,
+  coalesce,
+  encode,
+  forall,
+  get_json_object,
+  isnan,
+  is_valid_utf8,
+  json_object_keys,
+  regexp_replace,
+  schema_of_variant,
+  sequence,
+  size,
+  transform,
+  try_parse_json,
+  try_variant_get,
   col,
   count,
   countDistinct,
@@ -23,12 +40,12 @@ import org.apache.spark.sql.functions.{
   min,
   percentile_approx,
   sha2,
-  to_timestamp,
+  try_to_timestamp,
   trim,
   unix_timestamp,
   when
 }
-import org.apache.spark.sql.types.{ArrayType, StringType, StructField, StructType}
+import org.apache.spark.sql.types.{ArrayType, DoubleType, IntegerType, StringType, StructField, StructType}
 
 object OperationalEventTransforms {
   private[analytics] val payloadSchema: StructType = StructType(
@@ -37,16 +54,34 @@ object OperationalEventTransforms {
       StructField(Columns.CandidateId, StringType, nullable = true),
       StructField(Columns.JobId, StringType, nullable = true),
       StructField(Columns.NewStatus, StringType, nullable = true),
+      StructField("status", StringType, nullable = true),
+      StructField("previousStatus", StringType, nullable = true),
+      StructField("searchId", StringType, nullable = true),
+      StructField("rank", IntegerType, nullable = true),
       StructField(Columns.SearchKind, StringType, nullable = true),
       StructField(
         Columns.Results,
-        ArrayType(StructType(Seq(StructField(Columns.ResultId, StringType, nullable = true)))),
+        ArrayType(
+          StructType(
+            Seq(
+              StructField(Columns.ResultId, StringType, nullable = true),
+              StructField("rank", IntegerType, nullable = true),
+              StructField("score", DoubleType, nullable = true)
+            )
+          )
+        ),
         nullable = true
       ),
       StructField(Columns.ResultId, StringType, nullable = true),
       StructField(
         Columns.Job,
-        StructType(Seq(StructField(Columns.Skills, ArrayType(StringType), nullable = true))),
+        StructType(
+          Seq(
+            StructField("jobId", StringType, nullable = true),
+            StructField("status", StringType, nullable = true),
+            StructField(Columns.Skills, ArrayType(StringType), nullable = true)
+          )
+        ),
         nullable = true
       )
     )
@@ -80,12 +115,12 @@ object OperationalEventTransforms {
       col(Columns.Offset),
       col(Columns.Timestamp).as(Columns.KafkaTimestamp),
       col(Columns.RawValue),
-      col(Columns.EnvelopeEventId),
+      lower(col(Columns.EnvelopeEventId)).as(Columns.EventId),
       col(Columns.EnvelopeEventType),
-      to_timestamp(col(Columns.EnvelopeOccurredAt)).as(Columns.OccurredAt),
+      try_to_timestamp(col(Columns.EnvelopeOccurredAt)).as(Columns.OccurredAt),
       col(Columns.EnvelopeAggregateType),
       col(Columns.EnvelopeAggregateId),
-      col(Columns.EnvelopeActorId),
+      lower(col(Columns.EnvelopeActorId)).as(Columns.ActorId),
       col(Columns.EnvelopePayload).as(Columns.Payload)
     )
   }
@@ -100,9 +135,127 @@ object OperationalEventTransforms {
     parsed.filter(!isValidEvent)
 
   private[analytics] def isValidEvent: Column =
-    requiredEnvelopeFields &&
-      col(Columns.EventType).isin(EventTypes*) &&
-      col(Columns.AggregateType).isin(AggregateTypes*)
+    coalesce(
+      requiredEnvelopeFields &&
+        col(Columns.EventType).isin(EventTypes*) &&
+        col(Columns.AggregateType).isin(AggregateTypes*) && validPayloadContract,
+      lit(false)
+    )
+
+  private val InstantPattern =
+    "^[+-]?[0-9]{4,10}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2}(:[0-9]{2})?)$"
+  private val UuidPattern = "(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+  private val Statuses = Seq("Created", "Accepted", "Declined", "Interview", "Hired", "Rejected")
+  private val SearchKinds = Seq("jobs", "recommendedJobs", "semanticJobSearch", "candidateMatches")
+  private val MaxEnvelopeBytes = 256 * 1024
+
+  private def payload(name: String): Column = col(s"payload.$name")
+  private def uuid(value: Column): Column = value.rlike(UuidPattern)
+  private def keys(json: Column, names: String*): Column =
+    array_sort(json_object_keys(json)) === array_sort(array(names.map(lit)*))
+  private def payloadKeys(names: String*): Column = keys(get_json_object(col(Columns.RawValue), "$.payload"), names*)
+  private def aggregate(kind: String, id: Column): Column =
+    col(Columns.AggregateType) === lit(kind) && uuid(id) && col(Columns.AggregateId) === lower(id)
+  private def rank(value: Column): Column = value.between(1, 100)
+  private def numericVariant(value: Column): Column =
+    schema_of_variant(value).rlike("^(BIGINT|DOUBLE|DECIMAL).*")
+  private def numericPayloadField(path: String): Column =
+    numericVariant(try_variant_get(try_parse_json(col(Columns.RawValue)), path, "variant"))
+  private def applicationIds: Column =
+    uuid(payload("applicationId")) && uuid(payload("candidateId")) && uuid(payload("jobId"))
+
+  /** Spark expressions validate the same active wire contract before Bronze admission and privacy attribution. */
+  private def validPayloadContract: Column = {
+    val kind = col(Columns.EventType)
+    val job = payload("job")
+    val skills = job.getField("skills")
+    val jobFact = kind.isin("JOB_CREATED", "JOB_UPDATED", "JOB_CLOSED") &&
+      payloadKeys("job") && keys(
+        get_json_object(col(Columns.RawValue), "$.payload.job"),
+        "jobId",
+        "skills",
+        "status"
+      ) &&
+      aggregate("Job", job.getField("jobId")) && job.getField("status").isin("Open", "Closed") &&
+      (kind =!= lit("JOB_CLOSED") || job.getField("status") === lit("Closed")) &&
+      skills.isNotNull && size(skills) <= lit(100) && size(array_distinct(skills)) === size(skills) &&
+      forall(
+        skills,
+        skill =>
+          skill.isNotNull && length(regexp_replace(skill, "^[\\x00-\\x20]+|[\\x00-\\x20]+$", "")) > lit(0) && length(
+            encode(skill, "UTF-16BE")
+          ) <= lit(512)
+      ) &&
+      forall(
+        try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.job.skills", "array<variant>"),
+        skill => schema_of_variant(skill) === lit("STRING")
+      )
+    val created = kind === lit("APPLICATION_CREATED") &&
+      payloadKeys("applicationId", "candidateId", "jobId", "status") && applicationIds &&
+      aggregate("Application", payload("applicationId")) && payload("status") === lit("Created")
+    val changed = kind === lit("APPLICATION_STATUS_CHANGED") &&
+      payloadKeys("applicationId", "candidateId", "jobId", "previousStatus", "newStatus") && applicationIds &&
+      aggregate("Application", payload("applicationId")) && payload("newStatus").isin(Statuses*) &&
+      ((payload("previousStatus").isNull && get_json_object(
+        col(Columns.RawValue),
+        "$.payload.previousStatus"
+      ).isNull) || payload("previousStatus").isin(Statuses*))
+    val hired = kind === lit("CANDIDATE_HIRED") &&
+      payloadKeys("applicationId", "candidateId", "jobId", "status") && applicationIds &&
+      aggregate("Application", payload("applicationId")) && payload("status") === lit("Hired")
+    val results = payload("results")
+    val resultIds = transform(results, result => result.getField("resultId"))
+    val resultRanks = transform(results, result => result.getField("rank"))
+    val rawResults = from_json(get_json_object(col(Columns.RawValue), "$.payload.results"), ArrayType(StringType))
+    val searched = kind === lit("SEARCH_PERFORMED") && payloadKeys("searchId", "searchKind", "results") &&
+      aggregate("Search", payload("searchId")) && payload("searchKind").isin(SearchKinds*) &&
+      results.isNotNull && size(results) <= lit(100) && size(array_distinct(resultIds)) === size(results) &&
+      (size(results) === lit(0) || resultRanks === sequence(lit(1), size(results))) &&
+      forall(
+        results,
+        result =>
+          uuid(result.getField("resultId")) && rank(result.getField("rank")) &&
+            result.getField("score").isNotNull && !isnan(result.getField("score")) &&
+            result.getField("score") =!= lit(Double.PositiveInfinity) && result.getField("score") =!= lit(
+              Double.NegativeInfinity
+            )
+      ) &&
+      forall(rawResults, result => keys(result, "resultId", "rank", "score")) &&
+      forall(
+        try_variant_get(try_parse_json(col(Columns.RawValue)), "$.payload.results", "array<variant>"),
+        result =>
+          numericVariant(try_variant_get(result, "$.rank", "variant")) && numericVariant(
+            try_variant_get(result, "$.score", "variant")
+          )
+      )
+    val viewed = kind === lit("JOB_VIEWED") && payloadKeys("searchId", "resultId", "searchKind", "rank") &&
+      aggregate("Search", payload("resultId")) && payload("searchKind").isNull &&
+      get_json_object(col(Columns.RawValue), "$.payload.searchKind").isNull &&
+      (!payload("searchId").isNull || get_json_object(col(Columns.RawValue), "$.payload.searchId").isNull) &&
+      (!payload("rank").isNull || get_json_object(col(Columns.RawValue), "$.payload.rank").isNull) &&
+      payload("searchId").isNull === payload("rank").isNull &&
+      (payload("searchId").isNull || uuid(payload("searchId"))) && (payload("rank").isNull || (rank(
+        payload("rank")
+      ) && numericPayloadField("$.payload.rank")))
+    val clicked = kind === lit("SEARCH_RESULT_CLICKED") && payloadKeys("searchId", "resultId", "searchKind", "rank") &&
+      aggregate("Search", payload("searchId")) && uuid(payload("resultId")) && payload("searchKind").isin(
+        SearchKinds*
+      ) && rank(payload("rank")) && numericPayloadField("$.payload.rank")
+    get_json_object(col(Columns.RawValue), "$.occurredAt").rlike(InstantPattern) &&
+    is_valid_utf8(col(Columns.RawValue)) && uuid(col(Columns.EventId)) && uuid(col(Columns.ActorId)) &&
+    length(encode(col(Columns.RawValue), "UTF-8")) <= lit(MaxEnvelopeBytes) &&
+    keys(
+      col(Columns.RawValue),
+      "eventId",
+      "eventType",
+      "occurredAt",
+      "aggregateType",
+      "aggregateId",
+      "actorId",
+      "payload"
+    ) &&
+    (jobFact || created || changed || hired || searched || viewed || clicked)
+  }
 
   /** Event IDs are idempotency keys. Same bytes are duplicates; different bytes are conflicts. */
   def conflictingEventIds(valid: DataFrame): DataFrame =
@@ -129,8 +282,8 @@ object OperationalEventTransforms {
     privacySafe.flatMap { safe =>
       val selected = safe
         .dropDuplicates(Columns.EventId)
-        .withColumn(Columns.ApplicationId, col(Columns.PayloadApplicationId))
-        .withColumn(Columns.JobId, col(Columns.PayloadJobId))
+        .withColumn(Columns.ApplicationId, lower(col(Columns.PayloadApplicationId)))
+        .withColumn(Columns.JobId, lower(col(Columns.PayloadJobId)))
         .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
         .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
         .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))

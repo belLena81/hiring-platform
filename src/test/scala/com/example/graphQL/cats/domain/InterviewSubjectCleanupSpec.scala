@@ -70,11 +70,36 @@ final class InterviewSubjectCleanupSpec extends FunSuite {
         .decide(initial.copy(revision = Long.MaxValue), InterviewCleanupObservation.ProducersFenced, now),
       Left(InterviewCleanupError.InvalidRevision)
     )
+    assertEquals(
+      InterviewSubjectCleanup
+        .decide(initial.copy(revision = Long.MaxValue - 1L), InterviewCleanupObservation.ProducersFenced, now),
+      Left(InterviewCleanupError.InvalidRevision)
+    )
     val completed = initial.copy(state = InterviewCleanupState.Complete(now))
     assertEquals(InterviewSubjectCleanup.command(completed), InterviewCleanupCommand.Finished)
     assertEquals(
       InterviewSubjectCleanup.decide(completed, InterviewCleanupObservation.ProducersFenced, now),
       Left(InterviewCleanupError.InvalidTransition)
+    )
+  }
+
+  test("retention proof records exactly the immutable physical topic pair") {
+    val topics = InterviewTopicPair("hiring-test-one.commands", "hiring-test-one.results")
+    val actual = Vector(
+      InterviewRetentionBarrier(topics.commands, 0, 4L),
+      InterviewRetentionBarrier(topics.results, 0, 5L)
+    )
+    val purged = initial.copy(state = InterviewCleanupState.MongoPurged)
+    val waiting =
+      InterviewSubjectCleanup.decide(purged, InterviewCleanupObservation.BarriersCaptured(actual), now, topics)
+    assertEquals(waiting.map(_.state), Right(InterviewCleanupState.AwaitingRetention(actual)))
+    assertEquals(
+      waiting.flatMap(InterviewSubjectCleanup.validate(_, InterviewTopicPair.Default)),
+      Left(InterviewCleanupError.InvalidBarriers)
+    )
+    assertEquals(
+      InterviewRetentionBarrier.validate(actual, topics.copy(results = topics.commands)),
+      Left(InterviewCleanupError.InvalidBarriers)
     )
   }
 }

@@ -33,6 +33,7 @@ final class StreamingActivationPermissionsIntegrationSpec extends munit.FunSuite
       .withEnv("MONGO_INITDB_ROOT_USERNAME", "proof_operator")
       .withEnv("MONGO_INITDB_ROOT_PASSWORD", adminPassword)
       .withExposedPorts(27017)
+      .withTmpFs(Map("/data/db" -> "rw", "/data/configdb" -> "rw").asJava)
       .waitingFor(Wait.forLogMessage(".*Waiting for connections.*", 2).withStartupTimeout(Duration.ofSeconds(90)))
     container.start()
     val host = container.getHost + ":" + container.getMappedPort(27017)

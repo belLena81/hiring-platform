@@ -85,18 +85,18 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
         (
           "APPLICATION_STATUS_CHANGED",
           "Application",
-          "application-1",
-          "application-1",
-          "job-1",
+          "a053804b-8231-3cb4-8074-834a69aaccab",
+          "a053804b-8231-3cb4-8074-834a69aaccab",
+          "ac15a52e-59f3-33d6-9344-2a598ffab484",
           "Hired",
           Vector("Scala")
         ),
         (
           "APPLICATION_STATUS_CHANGED",
           "Application",
-          "application-2",
-          "application-2",
-          "job-1",
+          "9697649e-95d7-3013-a337-6dcd1260d099",
+          "9697649e-95d7-3013-a337-6dcd1260d099",
+          "ac15a52e-59f3-33d6-9344-2a598ffab484",
           "Hired",
           Vector("Scala")
         )
@@ -117,7 +117,7 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
       Some("0")
     )
 
-    val marker = token("candidate-token-2")
+    val marker = token("e02a9d4d-852b-3dda-8055-c4b825532c8a")
     val erasure = new AnalyticsBatchErasureStage[IO](paths, execution, _ => IO.unit, 100)
     assertEquals(erasure.countMarkedRows(spark, markers(Vector(marker))).unsafeRunSync(), 1L)
     erasure.purgeMarkedSubjectRows(spark, paths.lateFacts, markers(Vector(marker))).unsafeRunSync()
@@ -134,7 +134,7 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
     val paths = TestAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("hiring-late-facts-schema").toUri.toString)
     val stage = new AnalyticsLateFactStage[IO](paths, execution, new DeltaBatchWriter[IO](paths, execution))
     val invalid = spark.createDataFrame(
-      spark.sparkContext.parallelize(Seq(Row("event-id"))),
+      spark.sparkContext.parallelize(Seq(Row("b818e72a-69af-34e7-8ed0-a74b74e6863a"))),
       StructType(Seq(StructField("eventId", IntegerType, nullable = true)))
     )
     val result = stage.persistClosedDayFacts(invalid, markers(Vector.empty), Instant.EPOCH).attempt.unsafeRunSync()
@@ -156,7 +156,7 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
     val stage = new AnalyticsLateFactStage[IO](paths, execution, new DeltaBatchWriter[IO](paths, execution))
     val result = stage
       .persistClosedDayFacts(
-        closedDayEvents().filter(col("eventId") === "event-1"),
+        closedDayEvents().filter(col("eventId") === "fdc3f116-9f99-3ce6-b429-3eac7ddbba73"),
         markers(Vector.empty),
         Instant.EPOCH
       )
@@ -176,10 +176,10 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
     val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(Array.fill[Byte](32)(2))
     val lateFacts = new AnalyticsLateFactStage[IO](paths, execution, writer)
     val observedAt = Instant.parse("2026-09-30T12:00:00Z")
-    val initial = closedDayEvents().filter(col("eventId") === "event-1")
+    val initial = closedDayEvents().filter(col("eventId") === "fdc3f116-9f99-3ce6-b429-3eac7ddbba73")
     lateFacts.persistClosedDayFacts(initial, markers(Vector.empty), observedAt).unsafeRunSync()
 
-    val raw = eventEnvelope("event-1", "APPLICATION_CREATED", "new event payload")
+    val raw = eventEnvelope("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_CREATED", "new event payload")
     val parsed = OperationalEventTransforms.parseKafkaRecords(kafkaRecords(Vector(raw)))
     val silver = new AnalyticsBatchSilverStage[IO](
       paths,
@@ -248,15 +248,15 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
   }
 
   private def silverRow(index: Int, eventType: String, status: String, eventTime: Timestamp): Row = {
-    val subject = s"candidate-$index"
+    val subject = com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"candidate-$index")
     Row(
-      s"event-$index",
+      com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"event-$index"),
       eventType,
       eventTime,
       "Application",
-      s"application-$index",
-      s"application-$index",
-      "job-id",
+      com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"application-$index"),
+      com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"application-$index"),
+      "04ae1877-1840-3406-9368-7f2287eedc4a",
       status,
       Seq.empty[String],
       subject,
@@ -287,7 +287,7 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
       spark.sparkContext.parallelize(
         Seq(
           Row(
-            "event-1",
+            "fdc3f116-9f99-3ce6-b429-3eac7ddbba73",
             "raw envelope with candidate-1",
             "APPLICATION_STATUS_CHANGED",
             "hiring.events",
@@ -295,13 +295,26 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
             Long.box(10L),
             eventTime,
             "Application",
-            "application-1",
-            Row("application-1", "candidate-1", "job-1", "Hired", null, null, null, Row(Seq("Scala"))),
-            token("candidate-token-1").value,
-            Seq(token("candidate-token-1").value)
+            "a053804b-8231-3cb4-8074-834a69aaccab",
+            Row(
+              "a053804b-8231-3cb4-8074-834a69aaccab",
+              "19b46da1-bee5-3018-b5f7-abe9a9fdfb29",
+              "ac15a52e-59f3-33d6-9344-2a598ffab484",
+              "Hired",
+              null,
+              "Interview",
+              null,
+              null,
+              null,
+              null,
+              null,
+              Row(null, null, Seq("Scala"))
+            ),
+            token("6ad39602-d31e-38d8-a400-185aaf6521bb").value,
+            Seq(token("6ad39602-d31e-38d8-a400-185aaf6521bb").value)
           ),
           Row(
-            "event-2",
+            "981f76e8-8247-32ae-a9db-598865bf6ba5",
             "raw envelope with candidate-2",
             "APPLICATION_STATUS_CHANGED",
             "hiring.events",
@@ -309,10 +322,23 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
             Long.box(20L),
             eventTime,
             "Application",
-            "application-2",
-            Row("application-2", "candidate-2", "job-1", "Hired", null, null, null, Row(Seq("Scala"))),
-            token("candidate-token-2").value,
-            Seq(token("candidate-token-2").value)
+            "9697649e-95d7-3013-a337-6dcd1260d099",
+            Row(
+              "9697649e-95d7-3013-a337-6dcd1260d099",
+              "d625db79-80ee-34f9-8fc1-0fb01896355f",
+              "ac15a52e-59f3-33d6-9344-2a598ffab484",
+              "Hired",
+              null,
+              "Interview",
+              null,
+              null,
+              null,
+              null,
+              null,
+              Row(null, null, Seq("Scala"))
+            ),
+            token("e02a9d4d-852b-3dda-8055-c4b825532c8a").value,
+            Seq(token("e02a9d4d-852b-3dda-8055-c4b825532c8a").value)
           )
         )
       ),
@@ -351,5 +377,7 @@ final class HiringAnalyticsLateFactsSpec extends FunSuite {
   }
 
   private def eventEnvelope(id: String, eventType: String, rawPayload: String): String =
-    s"""{"eventId":"$id","eventType":"$eventType","occurredAt":"2026-09-20T10:00:00Z","aggregateType":"Application","aggregateId":"application-1","actorId":"actor-1","payload":{"applicationId":"application-1","candidateId":"candidate-1","jobId":"job-1","newStatus":"Hired","eventNote":"$rawPayload"}}"""
+    com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+      s"""{"eventId":"$id","eventType":"$eventType","occurredAt":"2026-09-20T10:00:00Z","aggregateType":"Application","aggregateId":"a053804b-8231-3cb4-8074-834a69aaccab","actorId":"d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686","payload":{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"19b46da1-bee5-3018-b5f7-abe9a9fdfb29","jobId":"ac15a52e-59f3-33d6-9344-2a598ffab484","newStatus":"Hired","eventNote":"$rawPayload"}}"""
+    )
 }

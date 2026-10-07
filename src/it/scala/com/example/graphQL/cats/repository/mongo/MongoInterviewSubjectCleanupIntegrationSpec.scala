@@ -23,12 +23,11 @@ import org.bson.{Document, BsonBinary, BsonDocument, BsonDouble, BsonInt32, Bson
 import com.mongodb.client.model.Filters
 import java.time.Instant
 import java.util.{Date, UUID}
-import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 import io.circe.parser.parse
 
-final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite {
+final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val barriers = Vector(
     InterviewRetentionBarrier("hiring.interview-commands", 0, 4L),
@@ -77,7 +76,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
       .append("producerRegistry", true)
 
   test("cleanup visits a later subject while thirty-two older subjects await retention") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val later = UserId(new UUID(0L, 33L))
@@ -117,13 +116,24 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
     }
   }
 
+  /** Deliberate privileged corruption exercises defensive row handling; normal writes are strictly validated. */
+  private def allowCorruptFixtures(database: mongo4cats.database.MongoDatabase[IO]): IO[Unit] =
+    database
+      .runCommand(
+        new Document("collMod", MongoCollections.InterviewSubjectCleanup)
+          .append("validationLevel", "off"),
+        com.mongodb.ReadPreference.primary()
+      )
+      .void
+
   test("malformed selected cleanup records do not prevent a healthy subject from advancing") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val healthy = UserId(new UUID(0L, 2L))
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- allowCorruptFixtures(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewSubjectCleanup,
@@ -174,12 +184,13 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("bounded cleanup pages cross malformed identity types and timestamps without losing healthy work") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val healthy = UserId(new UUID(0L, 2L))
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- allowCorruptFixtures(fixture.database)
         _ <- (1 to 31).toList.traverse_(ordinal =>
           MongoRepositoryTestSupport.insertOne(
             fixture.database,
@@ -226,7 +237,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("a finite cleanup sweep defers later arrivals and future dates until the next sweep") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val behind = UserId(new UUID(0L, 0L))
@@ -272,7 +283,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("a later arrival inside the current identity range waits for the next sweep") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val inserted = UserId(new UUID(0L, 33L))
@@ -304,8 +315,8 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
     }
   }
 
-  test("cleanup selection explains use the existing identity index without a blocking sort") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+  test("cleanup selection explains use the active identity index without a blocking sort") {
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
@@ -339,7 +350,9 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
         assertEquals(reads.size, 3)
         plans.foreach { result =>
           val json = parse(result.toJson).toOption.getOrElse(fail("Invalid explain JSON"))
-          assert(json.findAllByKey("indexName").flatMap(_.asString).contains("_id_"))
+          assert(
+            json.findAllByKey("indexName").flatMap(_.asString).contains(MongoInterviewCleanupSweepCodec.ActiveIndex)
+          )
           assert(!json.findAllByKey("stage").flatMap(_.asString).contains("SORT"))
           val stats = json.hcursor.downField("executionStats")
           val returned = stats.get[Long]("nReturned").toOption.getOrElse(fail("Missing nReturned"))
@@ -354,7 +367,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("an exactly full cleanup page and a removed sweep ceiling both wrap safely") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
@@ -386,7 +399,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("two cleaners racing the same snapshot advance once and a restarted cleaner completes the durable steps") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val at = Instant.now().minusSeconds(60)
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val subject = UserId(new UUID(0L, 1L))
@@ -435,7 +448,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
     }
   }
   test("workflow deletion requires confirmed fencing and physical retention, purges both participants' effects") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val other = UUID.randomUUID().toString
       val workflowId = UUID.randomUUID().toString
@@ -515,7 +528,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("a future reservation surviving completed workflow expiry still requires deletion cleanup") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val id = UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
@@ -548,7 +561,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("concurrent migration replaces the known unfiltered inbox index and permits distinct quarantine identities") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val inbox = Mongo4catsCollections.documents(fixture.database, MongoCollections.InterviewWorkflowInbox)
       for {
         _ <- inbox.flatMap(
@@ -585,7 +598,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("accounts with no attributable workflows do not acquire an unnecessary cleanup barrier") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
@@ -597,7 +610,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("publisher generations alone create cleanup and preserve an immutable deletion snapshot") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val generation = "hiring-interview-worker-" + UUID.randomUUID().toString
       val unrelated = "hiring-publisher-" + UUID.randomUUID().toString
@@ -638,7 +651,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("competing cleaners cannot overwrite a newer durable phase with a stale observation") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       val at = Instant.now()
@@ -685,11 +698,12 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("malformed completion evidence fails closed instead of accepting a raw Complete string") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- allowCorruptFixtures(fixture.database)
         _ <- MongoRepositoryTestSupport.insertOne(
           fixture.database,
           MongoCollections.InterviewSubjectCleanup,
@@ -701,7 +715,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("request receipts remain attributable after workflow TTL and purge their linked orphan commands") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val workflowId = UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
@@ -745,7 +759,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("legacy cleanup completion is reopened with a fresh snapshot and migration is restartable") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val generation = "hiring-interview-orchestrator-" + UUID.randomUUID().toString
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
@@ -756,9 +770,11 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
           Filters.in(
             "_id",
             MongoInterviewCleanupMigrations.MigrationId,
-            MongoProducerRegistrationMigrations.MigrationId
+            MongoProducerRegistrationMigrations.MigrationId,
+            MongoInterviewCleanupIntegrityMigrations.MigrationId
           )
         )
+        _ <- allowCorruptFixtures(fixture.database)
         _ <- fixture.database
           .runCommand(
             new Document("collMod", MongoCollections.OutboxSubjectFences)
@@ -797,8 +813,8 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
     }
   }
 
-  test("startup validates every current cleanup row even after migration completion") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+  test("strict cleanup proof rejects malformed normal writes after migration completion") {
+    mongoResource.use { fixture =>
       val at = Date.from(Instant.now())
       val invalidRows = Vector(
         new Document("state", "Unknown").append("revision", Long.box(0L)),
@@ -842,14 +858,8 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
             .append("producerRegistry", true)
           row.putAll(malformed)
           for {
-            _ <- queue.insertOne(row)
-            first <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
-            repeated <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop).attempt
-            _ <- IO {
-              assert(first.isLeft)
-              assert(repeated.isLeft)
-            }
-            _ <- queue.deleteMany(Filters.eq("_id", row.get("_id")))
+            rejected <- queue.insertOne(row).attempt
+            _ <- IO(assert(rejected.isLeft))
           } yield ()
         }
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
@@ -858,7 +868,7 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends CatsEffectSuite 
   }
 
   test("startup rejects malformed cleanup migration ledger without rewriting it") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val malformedRows = Vector(
         new Document("version", Long.box(2L)).append("state", "Complete"),
         new Document("version", Int.box(1)).append("state", "Complete"),

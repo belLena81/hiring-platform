@@ -27,7 +27,13 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
       OperationalAggregateType.Job,
       new UUID(1L, number).toString,
       actor,
-      Json.obj("jobId" -> Json.fromString(new UUID(1L, number).toString))
+      Json.obj(
+        "job" -> Json.obj(
+          "jobId" -> Json.fromString(new UUID(1L, number).toString),
+          "skills" -> Json.arr(Json.fromString("Scala")),
+          "status" -> Json.fromString("Open")
+        )
+      )
     )
 
   test("repository guard logs safe failure metadata before returning its typed error") {
@@ -84,7 +90,7 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
     assertEquals(MongoRepositorySupport.writeResult(Some(1)), Right(1))
   }
 
-  test("invalid middle event stops later outbox inserts") {
+  test("invalid middle event rejects the complete outbox list before any insert") {
     val first = jobEvent(1L)
     val invalid = jobEvent(2L).copy(
       eventType = OperationalEventType.APPLICATION_CREATED,
@@ -100,8 +106,8 @@ final class MongoRepositorySupportSpec extends CatsEffectSuite {
         .value
       ids <- written.get
     } yield {
-      assertEquals(result, Left(RepositoryError.InvalidStoredData))
-      assertEquals(ids, Vector(first.eventId.toString))
+      assertEquals(result, Left(RepositoryError.InvalidEvent))
+      assertEquals(ids, Vector.empty)
     }
   }
 

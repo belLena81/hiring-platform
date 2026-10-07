@@ -128,7 +128,13 @@ object MongoHiringRuntime {
       client <- MongoDatabaseProbe.clientResource(config.uri)
       database <- Resource.eval(client.getDatabase(config.databaseName))
       setup <- SetupLifecycle.resource(
-        setupEffect(database, config.vectorSearch, config.resetOnStart, config.diagnostics),
+        setupEffect(
+          database,
+          config.vectorSearch,
+          config.resetOnStart,
+          config.diagnostics,
+          config.kafka.interview.topics
+        ),
         config.diagnostics
       )
       capability <- embeddingCapability(database, client, config, setup.await, embeddingHealth.set, discoveryPolicy)
@@ -139,7 +145,12 @@ object MongoHiringRuntime {
       outbox = MongoOperationalEventOutboxRepository.transactional(database, client, config.diagnostics)
       receipts = new MongoConsumerReceiptRepository(database, config.diagnostics)
       mutationReceipts = MongoMutationReceiptRepository.transactional(database, client, config.diagnostics)
-      erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(database, client, config.diagnostics)
+      erasureRequests = MongoAnalyticsErasureRequestRepository.transactional(
+        database,
+        client,
+        config.diagnostics,
+        config.kafka.interview.topics
+      )
       analyticsReports = MongoAnalyticsReportRepository.transactional(database, client, config.diagnostics)
       quarantine = new MongoEventQuarantineRepository(database, config.diagnostics)
       interviewRepository = MongoInterviewWorkflowRepository.live(
@@ -168,7 +179,7 @@ object MongoHiringRuntime {
       _ <- InterviewSchedulingRuntime.resource(
         config.kafka,
         interviewRepository,
-        new MongoInterviewSubjectCleanup(database),
+        new MongoInterviewSubjectCleanup(database, config.diagnostics, config.kafka.interview.topics),
         config.diagnostics
       )
       metadata = MongoDatabaseProbe.connectionMetadata(config.uri, config.databaseName)
@@ -401,7 +412,8 @@ object MongoHiringRuntime {
       database: MongoDatabase[IO],
       vectorSearch: VectorSearchConfig,
       resetOnStart: Boolean,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair
   ): IO[Unit] =
     MongoHiringSetup.initialize(
       database,
@@ -417,7 +429,8 @@ object MongoHiringRuntime {
         )
       ),
       resetOnStart,
-      diagnostics
+      diagnostics,
+      topics
     )
 
 }

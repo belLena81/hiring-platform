@@ -97,7 +97,11 @@ private[graphql] object HiringGraphQLResolverSupport {
         now,
         now.plusSeconds(7.days.toSeconds)
       )
-      hiring.searchSessionHandoff.enqueue(session, OperationalEvents.searchPerformed(searchEventId(searchId), session))
+      IO.fromEither(
+        OperationalEvents
+          .searchPerformed(searchEventId(searchId), session)
+          .leftMap(_ => new IllegalStateException("Invalid search event contract"))
+      ).flatMap(event => hiring.searchSessionHandoff.enqueue(session, event))
     }
 
   def authenticated[A](context: Context[RequestContext, Unit])(

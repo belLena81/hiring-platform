@@ -290,7 +290,9 @@ final class JobService(
         actorId,
         job.createdAt
       )
-      notifyAfterCommit(UseCase.repository(jobs.createWithEvents(job, job.createdAt, List(event), context)).as(job))
+      UseCase.fromEither(event.leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))).flatMap { valid =>
+        notifyAfterCommit(UseCase.repository(jobs.createWithEvents(job, job.createdAt, List(valid), context)).as(job))
+      }
     }
 
   private def persistUpdatedJob(
@@ -311,9 +313,11 @@ final class JobService(
     UseCase.fromEither(result).flatMap { job =>
       val event =
         OperationalEvents.jobEvent(eventType, eventId(job, eventType, job.updatedAt), job, actorId, job.updatedAt)
-      notifyAfterCommit(
-        UseCase.repository(jobs.updateWithEvents(expected, job, job.updatedAt, List(event), context)).map(_.value)
-      )
+      UseCase.fromEither(event.leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))).flatMap { valid =>
+        notifyAfterCommit(
+          UseCase.repository(jobs.updateWithEvents(expected, job, job.updatedAt, List(valid), context)).map(_.value)
+        )
+      }
     }
 
   private def notifyAfterCommit(result: UseCaseIO[Job]): UseCaseIO[Job] =

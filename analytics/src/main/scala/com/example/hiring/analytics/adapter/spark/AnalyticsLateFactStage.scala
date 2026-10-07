@@ -63,8 +63,8 @@ private[analytics] final class AnalyticsLateFactStage[F[_]: Async](
       AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(events, markerTokens).map { safe =>
         safe
           .withColumn(Columns.EventFingerprint, sha2(col(Columns.RawValue), 256))
-          .withColumn(Columns.ApplicationId, col(Columns.PayloadApplicationId))
-          .withColumn(Columns.JobId, col(Columns.PayloadJobId))
+          .withColumn(Columns.ApplicationId, lower(col(Columns.PayloadApplicationId)))
+          .withColumn(Columns.JobId, lower(col(Columns.PayloadJobId)))
           .withColumn(Columns.NewStatus, col(Columns.PayloadNewStatus))
           .withColumn(Columns.JobSkills, col(Columns.PayloadJobSkills))
           .withColumn(Columns.AdmissionReason, lit(closedDayReason))

@@ -13,13 +13,11 @@ import java.time.Instant
 import java.util.UUID
 
 final case class PendingSearchSessionWork(session: SearchSession, event: OperationalEventEnvelope) {
-  require(
+  def addressesSession: Boolean =
     event.eventType == OperationalEventType.SEARCH_PERFORMED &&
       event.aggregateType == OperationalAggregateType.Search &&
       event.actorId == session.actorId &&
-      Parsing.parseUuid(event.aggregateId).toOption.contains(session.id),
-    "search session work event must address its search session"
-  )
+      Parsing.parseUuid(event.aggregateId).toOption.contains(session.id)
 }
 
 enum SearchSessionWorkState {

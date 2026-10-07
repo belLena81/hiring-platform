@@ -59,7 +59,11 @@ final case class InterviewKafkaConfig(
     password: String,
     protocol: KafkaSaslSecurityProtocol,
     worker: Boolean,
-    partitionConcurrency: Int = 4
+    partitionConcurrency: Int = 4,
+    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
+      com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default,
+    workerGroup: String = "hiring-interview-workers",
+    orchestratorGroup: String = "hiring-interview-orchestrator"
 )
 
 object InterviewKafkaRuntime {
@@ -93,7 +97,7 @@ object InterviewKafkaRuntime {
         .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
     ) { case (current, (key, value)) => current.withProperty(key, value) }
     val role = if (config.worker) InterviewPublisherRole.Worker else InterviewPublisherRole.Orchestrator
-    val output = if (config.worker) InterviewMessageCodec.ResultsTopic else InterviewMessageCodec.CommandsTopic
+    val output = if (config.worker) config.topics.results else config.topics.commands
     for {
       id <- Resource.eval(IO.randomUUID)
       generation = InterviewPublisherGeneration(role, id)
@@ -134,12 +138,12 @@ object InterviewKafkaRuntime {
     val consumerSettings = properties.foldLeft(
       ConsumerSettings(Deserializer[IO, String], Deserializer[IO, Array[Byte]])
         .withBootstrapServers(config.bootstrapServers)
-        .withGroupId(if (config.worker) "hiring-interview-workers" else "hiring-interview-orchestrator")
+        .withGroupId(if (config.worker) config.workerGroup else config.orchestratorGroup)
         .withEnableAutoCommit(false)
         .withAutoOffsetReset(AutoOffsetReset.Earliest)
         .withProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
     ) { case (current, (key, value)) => current.withProperty(key, value) }
-    val input = if (config.worker) InterviewMessageCodec.CommandsTopic else InterviewMessageCodec.ResultsTopic
+    val input = if (config.worker) config.topics.commands else config.topics.results
     val consumer = KafkaPartitionProcessing(
       KafkaConsumer.stream(consumerSettings).subscribeTo(input).partitionedRecords,
       config.partitionConcurrency

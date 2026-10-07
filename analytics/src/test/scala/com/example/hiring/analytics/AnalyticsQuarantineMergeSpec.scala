@@ -251,7 +251,9 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
       )
       val observed = Instant.parse("2026-10-02T12:00:00Z")
       def event(id: String, skill: String): String =
-        s"""{"eventId":"$id","eventType":"JOB_CREATED","occurredAt":"$observed","aggregateType":"Job","aggregateId":"job-1","actorId":"actor-1","payload":{"job":{"skills":["$skill"]}}}"""
+        com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+          s"""{"eventId":"$id","eventType":"JOB_CREATED","occurredAt":"$observed","aggregateType":"Job","aggregateId":"ac15a52e-59f3-33d6-9344-2a598ffab484","actorId":"d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686","payload":{"job":{"skills":["$skill"]}}}"""
+        )
       def parsed(bodies: Vector[String], offsetBase: Long): DataFrame = {
         val raw = spark.createDataFrame(
           bodies.zipWithIndex.map { case (body, index) =>
@@ -279,7 +281,9 @@ final class AnalyticsQuarantineMergeSpec extends CatsEffectSuite {
         suppressed <- execution(parsed(Vector("not-json", event("marked", "Scala")), 20L))
         activeMarkers <- execution {
           spark.createDataFrame(
-            Vector(Row(AnalyticsTestSubjectPseudonymizer.tokenValue(keys, "actor-1"))).asJava,
+            Vector(
+              Row(AnalyticsTestSubjectPseudonymizer.tokenValue(keys, "d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686"))
+            ).asJava,
             StructType(Vector(StructField("subjectToken", StringType, false)))
           )
         }

@@ -14,7 +14,6 @@ import com.example.graphQL.cats.infrastructure.kafka.{
 }
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.port.*
-import munit.CatsEffectSuite
 import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.clients.consumer.{CloseOptions, ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord, RecordMetadata}
@@ -32,14 +31,13 @@ import org.apache.kafka.common.serialization.{
   StringSerializer
 }
 import java.nio.charset.StandardCharsets
-import java.nio.file.{Files, Path}
 import java.time.Duration
 import java.util.{Properties, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Opt-in evidence against the isolated SASL broker and a disposable transactional Mongo replica set. */
-final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
+final class InterviewPublicationFencingIntegrationSpec extends KafkaIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
   private case class Broker(values: Map[String, String]) {
@@ -48,7 +46,16 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
       values(if (worker) "KAFKA_INTERVIEW_WORKER_PASSWORD" else "KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD")
     def username(worker: Boolean): String = if (worker) "interview_result_publisher" else "interview_command_publisher"
     def config(worker: Boolean): InterviewKafkaConfig =
-      InterviewKafkaConfig(bootstrap, username(worker), password(worker), KafkaSaslSecurityProtocol.Plaintext, worker)
+      InterviewKafkaConfig(
+        bootstrap,
+        username(worker),
+        password(worker),
+        KafkaSaslSecurityProtocol.Plaintext,
+        worker,
+        topics = interviewTopics,
+        workerGroup = kafkaNamespace.workers,
+        orchestratorGroup = kafkaNamespace.orchestrator
+      )
     def fencer: Resource[IO, InterviewPublisherFencer] = InterviewProducerFencer.resource(
       bootstrap,
       "interview_fencer",
@@ -58,34 +65,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
     )
   }
 
-  private def broker: IO[Broker] = IO.blocking {
-    val file =
-      Path.of(sys.env.getOrElse("INTERVIEW_KAFKA_PROOF_ROOT", ".local/data/interview-kafka-proof"), "runtime.env")
-    val values =
-      if (!Files.exists(file)) Map.empty[String, String]
-      else
-        Files
-          .readString(file)
-          .linesIterator
-          .filter(line => line.nonEmpty && !line.startsWith("#"))
-          .flatMap { line =>
-            line.split("=", 2).toList match {
-              case key :: value :: Nil =>
-                Some(
-                  key
-                    .stripPrefix("export ")
-                    .trim -> value.trim.stripPrefix("'").stripSuffix("'").stripPrefix("\"").stripSuffix("\"")
-                )
-              case _ => None
-            }
-          }
-          .toMap
-    assume(
-      values.get("INTERVIEW_KAFKA_EVIDENCE").contains("true"),
-      "isolated Kafka evidence must be explicitly enabled"
-    )
-    Broker(values)
-  }
+  private def broker: IO[Broker] = IO.delay(Broker(kafkaEnvironment))
 
   private def success[A](operation: RepositoryIO[A]): IO[A] = operation.value.flatMap {
     case Right(value) => IO.pure(value)
@@ -215,7 +195,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
       MongoEmbeddingWorkEnqueuer.disabled,
       Diagnostics.noop
     )
-    val cleanup = new MongoInterviewSubjectCleanup(database)
+    val cleanup = new MongoInterviewSubjectCleanup(database, topics = interviewTopics)
     for {
       now <- IO.realTimeInstant
       _ <- success(users.deleteAccount(subject, now, "deleted-account", MutationWriteContext.directWrite))
@@ -228,7 +208,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
   test("account deletion fences an authorized paused sender; a fresh generation works only for an unaffected subject") {
     broker.flatMap { kafka =>
       List(false, true).traverse_ { worker =>
-        MongoAccessEvaluationSupport.resource.use { fixture =>
+        mongoResource.use { fixture =>
           val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
           (
             InterviewKafkaRuntime.publisherResource(kafka.config(worker)),
@@ -236,7 +216,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
             kafka.fencer
           ).tupled.use { case (transport, peer, fencer) =>
             for {
-              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
               item <- scheduled(fixture.database, repository, result = worker)
               authorized <- Deferred[IO, ClaimedInterviewWorkflowCommand]
               release <- Deferred[IO, Unit]
@@ -312,7 +292,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
   private def assertInvisible(kafka: Broker, metadata: RecordMetadata, workflowId: UUID): IO[Unit] = {
     val consumer = Resource.make(IO.blocking {
       val values = properties(kafka, kafka.username(true), kafka.password(true))
-      val _ = values.setProperty(ConsumerConfig.GROUP_ID_CONFIG, "hiring-interview-workers")
+      val _ = values.setProperty(ConsumerConfig.GROUP_ID_CONFIG, kafkaNamespace.workers)
       val _ = values.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false")
       val _ = values.setProperty(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed")
       new KafkaConsumer[String, Array[Byte]](values, new StringDeserializer(), new ByteArrayDeserializer())
@@ -342,12 +322,12 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
 
   test("deletion fences an already open transaction and its acknowledged record remains invisible") {
     broker.flatMap { kafka =>
-      MongoAccessEvaluationSupport.resource.use { fixture =>
+      mongoResource.use { fixture =>
         val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
         val generation = InterviewPublisherGeneration(InterviewPublisherRole.Orchestrator, UUID.randomUUID())
         (initializedProducer(kafka, generation), kafka.fencer).tupled.use { case (sender, fencer) =>
           for {
-            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
             item <- scheduled(fixture.database, repository)
             at <- IO.realTimeInstant
             permitted <- success(repository.authorizePublication(item.claim, generation, at))
@@ -357,7 +337,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
               sender
                 .send(
                   new ProducerRecord(
-                    InterviewMessageCodec.CommandsTopic,
+                    interviewTopics.commands,
                     item.workflow.id.value.toString,
                     InterviewMessageCodec.bytes(item.message)
                   )
@@ -377,12 +357,12 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
 
   test("concurrent generation registration and real deletion either deny authorization or capture the generation") {
     broker.flatMap { kafka =>
-      MongoAccessEvaluationSupport.resource.use { fixture =>
+      mongoResource.use { fixture =>
         val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
         (InterviewKafkaRuntime.publisherResource(kafka.config(false)), kafka.fencer).tupled.use {
           case (transport, fencer) =>
             for {
-              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+              _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
               item <- scheduled(fixture.database, repository)
               start <- Deferred[IO, Unit]
               at <- IO.realTimeInstant
@@ -427,7 +407,7 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
       val wrongTopics = List(false, true).traverse_ { worker =>
         val role = if (worker) InterviewPublisherRole.Worker else InterviewPublisherRole.Orchestrator
         initializedProducer(kafka, InterviewPublisherGeneration(role, UUID.randomUUID())).use { value =>
-          val topic = if (worker) InterviewMessageCodec.CommandsTopic else InterviewMessageCodec.ResultsTopic
+          val topic = if (worker) interviewTopics.commands else interviewTopics.results
           IO.blocking {
             value.beginTransaction()
             value.send(new ProducerRecord(topic, UUID.randomUUID().toString, Array[Byte](1))).get()
@@ -461,24 +441,23 @@ final class InterviewPublicationFencingIntegrationSpec extends CatsEffectSuite {
               assert(result.left.exists(denied), "interview fencer must not own operational publisher prefix")
             )
         }
-      val fencerTopics = List(InterviewMessageCodec.CommandsTopic, InterviewMessageCodec.ResultsTopic).traverse_ {
-        topic =>
-          producer(
-            kafka,
-            "interview_fencer",
-            kafka.values("KAFKA_INTERVIEW_FENCER_PASSWORD"),
-            s"hiring-interview-orchestrator-${UUID.randomUUID()}"
-          ).use { value =>
-            IO.blocking {
-              value.initTransactions()
-              value.beginTransaction()
-              value.send(new ProducerRecord(topic, UUID.randomUUID().toString, Array[Byte](1))).get()
-            }.attempt
-              .flatMap(result =>
-                IO(assert(result.left.exists(denied), "fencer must have no topic publication rights")) *>
-                  IO.blocking(value.abortTransaction()).attempt.void
-              )
-          }
+      val fencerTopics = List(interviewTopics.commands, interviewTopics.results).traverse_ { topic =>
+        producer(
+          kafka,
+          "interview_fencer",
+          kafka.values("KAFKA_INTERVIEW_FENCER_PASSWORD"),
+          s"hiring-interview-orchestrator-${UUID.randomUUID()}"
+        ).use { value =>
+          IO.blocking {
+            value.initTransactions()
+            value.beginTransaction()
+            value.send(new ProducerRecord(topic, UUID.randomUUID().toString, Array[Byte](1))).get()
+          }.attempt
+            .flatMap(result =>
+              IO(assert(result.left.exists(denied), "fencer must have no topic publication rights")) *>
+                IO.blocking(value.abortTransaction()).attempt.void
+            )
+        }
       }
       wrongPrefixes *> wrongTopics *> retired *> fencerRestricted *> fencerTopics
     }

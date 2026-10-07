@@ -9,20 +9,19 @@ import com.example.graphQL.cats.service.events.*
 import org.bson.Document
 import com.mongodb.client.model.Filters
 import io.circe.Json
-import munit.CatsEffectSuite
 import java.time.Instant
 import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
-final class MongoProducerRegistrationsIntegrationSpec extends CatsEffectSuite {
+final class MongoProducerRegistrationsIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout = 5.minutes
   private val now = Instant.parse("2026-10-07T08:00:00Z")
   private def success[A](effect: RepositoryIO[A]): IO[A] =
     effect.value.flatMap(value => IO.fromEither(value.leftMap(error => new AssertionError(error.toString))))
 
   test("bounded registration pages persist fencing checkpoints and active generations have no expiry") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UserId(UUID.randomUUID())
       val ids = Vector.fill(130)("hiring-interview-worker-" + UUID.randomUUID())
       val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
@@ -57,7 +56,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends CatsEffectSuite {
   }
 
   test("fair claim scan checkpoints past more than one page of busy subjects") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val hot = UserId(UUID.randomUUID())
       val independent = UserId(UUID.randomUUID())
       val outbox =
@@ -69,7 +68,13 @@ final class MongoProducerRegistrationsIntegrationSpec extends CatsEffectSuite {
         OperationalAggregateType.Job,
         new UUID(1L, n).toString,
         actor,
-        Json.obj("job" -> Json.obj("jobId" -> Json.fromString(new UUID(1L, n).toString)))
+        Json.obj(
+          "job" -> Json.obj(
+            "jobId" -> Json.fromString(new UUID(1L, n).toString),
+            "skills" -> Json.arr(Json.fromString("Scala")),
+            "status" -> Json.fromString("Open")
+          )
+        )
       )
       val desired = event(200L, independent)
       for {
@@ -97,7 +102,7 @@ final class MongoProducerRegistrationsIntegrationSpec extends CatsEffectSuite {
   }
 
   test("maintenance migration replays copied registrations before contracting legacy arrays") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val subject = UUID.randomUUID().toString
       val ids = Vector("hiring-interview-worker-" + UUID.randomUUID(), "hiring-interview-worker-" + UUID.randomUUID())
       for {

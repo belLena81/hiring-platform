@@ -7,7 +7,7 @@ import com.example.graphQL.cats.service.AnalyticsPeriod
 import sangria.schema.Context
 
 private[graphql] object HiringGraphQLAnalyticsResolvers {
-  def analyticsReport(context: Context[RequestContext, Unit]) =
+  def analyticsReport(context: Context[RequestContext, Unit]): HiringGraphQLResult[AnalyticsReportPayload] =
     authenticated(context) { case (actor, hiring) =>
       val period = AnalyticsPeriod(context.arg(analyticsFromArgument), context.arg(analyticsToArgument))
       raiseOnUseCaseError(hiring.analyticsReporting.report(actor, period)).map(AnalyticsReportPayload.apply)

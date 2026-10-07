@@ -6,7 +6,8 @@ import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.domain.workflow.{
   InterviewSubjectCleanup,
   InterviewCleanupState,
-  InterviewRetentionBarrier
+  InterviewRetentionBarrier,
+  InterviewTopicPair
 }
 import com.example.graphQL.cats.service.port.{
   InterviewSubjectCleanupRepository,
@@ -25,8 +26,11 @@ import java.util.{Date, UUID}
 import scala.jdk.CollectionConverters.*
 
 /** Durable deletion evidence. Broker fencing precedes barrier capture in the application worker. */
-final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostics: Diagnostics = Diagnostics.noop)
-    extends InterviewSubjectCleanupRepository {
+final class MongoInterviewSubjectCleanup(
+    database: MongoDatabase[IO],
+    diagnostics: Diagnostics = Diagnostics.noop,
+    topics: InterviewTopicPair = InterviewTopicPair.Default
+) extends InterviewSubjectCleanupRepository {
   private val queue = Mongo4catsCollections.documents(database, MongoCollections.InterviewSubjectCleanup)
   private val workflows = Mongo4catsCollections.documents(database, MongoCollections.InterviewWorkflows)
   private val RelatedCollections = List(
@@ -107,7 +111,7 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
   override def find(subject: UserId): RepositoryIO[Option[InterviewSubjectCleanup]] = guard("interviewCleanup.find") {
     RepositoryIO
       .lift(MongoSessionOperations.findOne(queue, None, MongoFilter.eq(MongoFields.Id, subject.value.toString)))
-      .flatMap(_.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decodeCurrent(row))))
+      .flatMap(_.traverse(row => RepositoryIO.fromEither(MongoInterviewCleanupCodec.decodeCurrent(row, topics))))
   }
 
   /** Malformed evidence cannot certify public deletion completion. */
@@ -132,7 +136,7 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
         RepositoryIO
           .lift(
             queue.flatMap(
-              _.find(eligible(observedAt)).sort(Sorts.descending(MongoFields.Id)).hint("_id_").limit(1).first
+              _.find(eligible(observedAt)).sort(Sorts.descending(MongoFields.Id)).hint(ActiveIndex).limit(1).first
             )
           )
           .flatMap(_.traverse(row => RepositoryIO.fromEither(identity(row).map(id => Sweep(None, id, observedAt)))))
@@ -143,7 +147,7 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
         RepositoryIO
           .lift(
             queue.flatMap(
-              _.find(pageFilter(current)).sort(Sorts.ascending(MongoFields.Id)).hint("_id_").limit(PageSize).all
+              _.find(pageFilter(current)).sort(Sorts.ascending(MongoFields.Id)).hint(ActiveIndex).limit(PageSize).all
             )
           )
           .flatMap { rows =>
@@ -159,7 +163,9 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
                   )
                   .map(_.flatten)
             RepositoryIO.fromEither(
-              next.map(token => InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent), token))
+              next.map(token =>
+                InterviewCleanupPage(selected.map(MongoInterviewCleanupCodec.decodeCurrent(_, topics)), token)
+              )
             )
           }
     }
@@ -182,10 +188,10 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
       }
       for {
         _ <- RepositoryIO.fromEither(
-          InterviewSubjectCleanup.validate(expected).leftMap(_ => RepositoryError.InvalidStoredData)
+          InterviewSubjectCleanup.validate(expected, topics).leftMap(_ => RepositoryError.InvalidStoredData)
         )
         _ <- RepositoryIO.fromEither(
-          InterviewSubjectCleanup.validate(next).leftMap(_ => RepositoryError.InvalidStoredData)
+          InterviewSubjectCleanup.validate(next, topics).leftMap(_ => RepositoryError.InvalidStoredData)
         )
         _ <- RepositoryIO.fromEither(Either.cond(immutableInputs && forward, (), RepositoryError.InvalidStoredData))
         result <- RepositoryIO
@@ -328,12 +334,18 @@ final class MongoInterviewSubjectCleanup(database: MongoDatabase[IO], diagnostic
 private[mongo] object MongoInterviewCleanupCodec {
   private val ProducerIdsField = "interviewTransactionalIds"
 
-  def decodeCurrent(row: Document): Either[RepositoryError, InterviewSubjectCleanup] =
+  def decodeCurrent(
+      row: Document,
+      topics: InterviewTopicPair = InterviewTopicPair.Default
+  ): Either[RepositoryError, InterviewSubjectCleanup] =
     Either
       .cond(Option(row.get("producerRegistry")).contains(java.lang.Boolean.TRUE), (), RepositoryError.InvalidStoredData)
-      .flatMap(_ => decode(row))
+      .flatMap(_ => decode(row, topics))
 
-  def decode(row: Document): Either[RepositoryError, InterviewSubjectCleanup] = for {
+  def decode(
+      row: Document,
+      topics: InterviewTopicPair = InterviewTopicPair.Default
+  ): Either[RepositoryError, InterviewSubjectCleanup] = for {
     id <- string(row, MongoFields.Id).flatMap(value =>
       Either
         .catchNonFatal(UUID.fromString(value))
@@ -353,7 +365,7 @@ private[mongo] object MongoInterviewCleanupCodec {
       case _                   => Left(RepositoryError.InvalidStoredData)
     }
     value <- InterviewSubjectCleanup
-      .validate(InterviewSubjectCleanup(UserId(id), revision, requested, ids, state))
+      .validate(InterviewSubjectCleanup(UserId(id), revision, requested, ids, state), topics)
       .leftMap(_ => RepositoryError.InvalidStoredData)
   } yield value
 

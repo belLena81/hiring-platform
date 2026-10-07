@@ -12,12 +12,11 @@ import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.application.InterviewSchedulingService
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.*
-import munit.CatsEffectSuite
 import java.time.Instant
 import java.util.UUID
 import scala.concurrent.duration.*
 
-final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSuite {
+final class MongoInterviewWorkflowRepositoryIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
   private val now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
@@ -76,7 +75,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("actual publication authorization fences an in-flight candidate embedding write") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val candidate = UserId(UUID.randomUUID())
       val recruiter = UserId(UUID.randomUUID())
       val current = workflow(UUID.randomUUID(), UUID.randomUUID(), candidate, recruiter)
@@ -147,7 +146,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("workflow create and advance are atomic, replayable, and guarded by revision and inbox identity") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val workflowRepository = new MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
@@ -261,7 +260,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("fake calendar reservations serialize overlaps, allow adjacency, and release idempotently") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val workflowRepository = new MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
@@ -374,7 +373,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("expired command claims cannot publish and notification receipts are idempotent") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val workflowRepository = new MongoInterviewWorkflowRepository(
         fixture.database,
         MongoTransactionRunner.sessions(fixture.client, RepositoryError.Conflict, diagnostics = Diagnostics.noop),
@@ -466,7 +465,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("scheduling derives participants, scopes reads, rejects forbidden requests and replays durable requests") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val users = MongoUserRepository.transactional(
         fixture.database,
@@ -541,7 +540,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("Admin interview commit matches the lifecycle state, history and outbox and replays once") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
       val target = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
@@ -666,7 +665,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("repair fences an in-flight notification result from its superseded live claim") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       val calendar = FakeInterviewCalendarProvider.durable(repository)
@@ -803,7 +802,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("expired execution tokens cannot reserve and stale release cannot remove a committed reservation") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
@@ -872,7 +871,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("Admin repair reconciles a partial notification receipt and completion retains deduplication evidence") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val users = MongoUserRepository.transactional(
         fixture.database,
@@ -1051,7 +1050,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
     }
   }
   test("obsolete hiring results terminalize without repair or reservation release") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val calendar = FakeInterviewCalendarProvider.durable(repository)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
@@ -1117,7 +1116,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("failed terminal persistence does not permit another send after publication budget exhaustion") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
@@ -1164,7 +1163,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("concurrent execution claims charge one durable slot and expired claims queue reconciliation") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
@@ -1209,7 +1208,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("migration resumes concurrently, preserves logical slots and converts unknown executions") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val id = UUID.randomUUID().toString
       val queued = new org.bson.Document("_id", s"$id:$id:0:0")
         .append("workflowId", id)
@@ -1271,7 +1270,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("verified workflow validator rejects malformed updates and preserves valid execution accounting") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
@@ -1314,7 +1313,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("cutover rejects mixed BSON identities beyond a full string batch and wrong ledger type") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val id = UUID.randomUUID().toString
       val rows = (0 until 501).toList.map { index =>
         new org.bson.Document("_id", s"$id:$id:0:$index")
@@ -1370,7 +1369,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("necessary result exhaustion retains its receipt and enters repair; a prepaid final slot executes once") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {
@@ -1414,7 +1413,7 @@ final class MongoInterviewWorkflowRepositoryIntegrationSpec extends CatsEffectSu
   }
 
   test("concurrent distinct intents cannot overdraw their shared capability budget") {
-    MongoAccessEvaluationSupport.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
       val value = workflow(UUID.randomUUID(), UUID.randomUUID(), UserId(UUID.randomUUID()), UserId(UUID.randomUUID()))
       for {

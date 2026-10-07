@@ -8,6 +8,7 @@ Copy to `docs/specs/<task-slug>.md` for substantial work. This template is not a
 - Status: draft
 - Coordinator / implementation owners:
 - User outcome:
+- Problem / actors / functional behavior:
 - Authorized scope and non-goals:
 - Dependencies and blocked work:
 
@@ -18,6 +19,7 @@ Copy to `docs/specs/<task-slug>.md` for substantial work. This template is not a
 - Assumptions: explicit, with impact and validation method.
 - Open questions: identify what each blocks; proceed with independent work.
 - Decisions/change notes: choice, basis, affected acceptance criteria.
+- Shared technical/non-functional requirements: link the relevant project guidance; record only feature-specific constraints here.
 
 ## Behavior and contracts
 
@@ -39,10 +41,12 @@ Record workload size/seed, concurrency, environment, latency/throughput or fresh
 
 ## Implementation handoff
 
-- Ordered slices and relevant AC IDs:
+- Ordered, independently verifiable slices and relevant AC IDs:
 - Agent owners, allowed write paths, and dependency boundaries:
 - API/schema/docs updates and integration prerequisites:
 - Current risks and recovery approach:
+
+Keep this section focused on delivery sequencing and temporary implementation details. Keep durable behavior and contract decisions above so the spec remains useful after the current task is done. For a small task, one focused slice is enough; use a separate plan only when decomposition materially improves coordination or verification.
 
 ## Checkpoint and review
 

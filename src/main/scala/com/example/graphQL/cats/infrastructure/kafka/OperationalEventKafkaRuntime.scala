@@ -13,7 +13,6 @@ import com.example.graphQL.cats.service.port.{
   OperationalEventOutboxRepository,
   RepositoryIO
 }
-import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.service.events.OperationalEventJson
@@ -29,6 +28,9 @@ import java.time.Instant
 import scala.concurrent.duration.*
 
 object OperationalEventKafkaRuntime {
+  private val PublicationWaveSize = 4
+  private val OperationalRequestBytes = 1048576
+
   def resource(
       config: KafkaConfig,
       outbox: OperationalEventOutboxRepository,
@@ -58,6 +60,7 @@ object OperationalEventKafkaRuntime {
         .withBootstrapServers(config.bootstrapServers)
         .withProperty(ProducerConfig.ACKS_CONFIG, "all")
         .withProperty(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, "true")
+        .withProperty(ProducerConfig.MAX_REQUEST_SIZE_CONFIG, OperationalRequestBytes.toString)
         .withProperty(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000")
         .withProperty(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000")
     val settings = saslProperties(
@@ -103,78 +106,99 @@ object OperationalEventKafkaRuntime {
       transactionalId: String,
       producer: TransactionalKafkaProducer.WithoutOffsets[IO, String, Array[Byte]]
   ): IO[Unit] =
-    IO.realTimeInstant.flatMap { now =>
-      val leaseUntil = now.plusSeconds(config.publisher.leaseSeconds.toLong)
-      outbox
-        .claim(config.publisher.workerId, transactionalId, now, leaseUntil, config.publisher.batchSize)
-        .value
-        .flatMap {
-          case Left(error) =>
-            IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
-          case Right(claims) =>
-            publishClaims(claims) { claim =>
-              val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
-              val send = producer.produceWithoutOffsets(ProducerRecords.one(record)).void
-              val renewEvery = (config.publisher.leaseSeconds.seconds / 3).max(1.second)
-              def renewalStream: Stream[IO, Unit] =
-                Stream
-                  .awakeEvery[IO](renewEvery)
-                  .evalMap { _ =>
-                    IO.realTimeInstant.flatMap(now =>
-                      requireOutboxSuccess(
-                        outbox.renewLease(
-                          claim.event.eventId,
-                          claim.leaseToken,
-                          claim.subjectIds,
-                          now.plusSeconds(config.publisher.leaseSeconds.toLong)
-                        )
-                      )
-                    )
-                  }
-              val heartbeat = renewalStream.compile.drain
-              IO.race(send.attempt, heartbeat)
-                .flatMap {
-                  case Left(outcome) => IO.pure(outcome)
-                  case Right(_)      =>
-                    IO.raiseError[Either[Throwable, Unit]](
-                      new IllegalStateException("outbox lease heartbeat stopped before Kafka send completed")
-                    )
-                }
-                .flatMap {
-                  case Right(_) =>
-                    IO.realTimeInstant.flatMap(done =>
-                      requireOutboxSuccess(
-                        outbox.markPublished(
-                          claim.event.eventId,
-                          claim.leaseToken,
-                          done,
-                          done.plusSeconds(7.days.toSeconds)
-                        )
-                      )
-                    )
-                  case Left(error) =>
-                    if (isProducerFenced(error)) IO.raiseError(ProducerGenerationFenced(error))
-                    else
-                      diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> IO.realTimeInstant
-                        .flatMap { failedAt =>
-                          if (claim.attempts >= config.publisher.maxAttempts)
-                            requireOutboxSuccess(
-                              outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error))
-                            )
-                          else
-                            requireOutboxSuccess(
-                              outbox.releaseForRetry(
-                                claim.event.eventId,
-                                claim.leaseToken,
-                                failedAt,
-                                failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
-                              )
-                            )
-                        }
-                }
-            }
-        }
+    publishWaves(config.publisher.batchSize) { limit =>
+      IO.realTimeInstant.flatMap { now =>
+        outbox
+          .claim(
+            config.publisher.workerId,
+            transactionalId,
+            now,
+            now.plusSeconds(config.publisher.leaseSeconds.toLong),
+            limit
+          )
+          .value
+          .flatMap {
+            case Right(claims) => IO.pure(claims)
+            case Left(error)   => IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
+          }
+      }
+    } { claim =>
+      val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
+      publishClaim(config, outbox, diagnostics, claim)(producer.produceWithoutOffsets(ProducerRecords.one(record)).void)
     }
+
+  /** Claim only work that can start its lease heartbeat immediately. Kafka owns transaction serialization. */
+  private[kafka] def publishWaves(batchSize: Int)(
+      claim: Int => IO[List[ClaimedOperationalEvent]]
+  )(publish: ClaimedOperationalEvent => IO[Unit]): IO[Unit] = {
+    def loop(remaining: Int): IO[Unit] =
+      if (remaining <= 0) IO.unit
+      else {
+        val limit = remaining.min(PublicationWaveSize)
+        claim(limit).flatMap {
+          case Nil                           => IO.unit
+          case claims if claims.size > limit =>
+            IO.raiseError(new IllegalStateException("outbox claim exceeded requested publication wave"))
+          case claims => publishClaims(claims)(publish) *> loop(remaining - claims.size)
+        }
+      }
+    loop(batchSize)
+  }
+
+  private[kafka] def publishClaim(
+      config: KafkaConfig,
+      outbox: OperationalEventOutboxRepository,
+      diagnostics: Diagnostics,
+      claim: ClaimedOperationalEvent
+  )(send: IO[Unit]): IO[Unit] = {
+    def renew: IO[Unit] = IO.realTimeInstant.flatMap { now =>
+      requireOutboxSuccess(
+        outbox.renewLease(
+          claim.event.eventId,
+          claim.leaseToken,
+          claim.subjectIds,
+          now.plusSeconds(config.publisher.leaseSeconds.toLong)
+        )
+      )
+    }
+    val renewEvery = (config.publisher.leaseSeconds.seconds / 3).max(1.second)
+    val heartbeat = Stream.awakeEvery[IO](renewEvery).evalMap(_ => renew).compile.drain
+    renew *> IO
+      .race(send.attempt, heartbeat)
+      .flatMap {
+        case Left(outcome) => IO.pure(outcome)
+        case Right(_)      =>
+          IO.raiseError[Either[Throwable, Unit]](
+            new IllegalStateException("outbox lease heartbeat stopped before Kafka send completed")
+          )
+      }
+      .flatMap {
+        case Right(_) =>
+          IO.realTimeInstant.flatMap(done =>
+            requireOutboxSuccess(
+              outbox.markPublished(claim.event.eventId, claim.leaseToken, done, done.plusSeconds(7.days.toSeconds))
+            )
+          )
+        case Left(error) if isProducerFenced(error) => IO.raiseError(ProducerGenerationFenced(error))
+        case Left(error)                            =>
+          diagnostics.emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error)) *> IO.realTimeInstant
+            .flatMap { failedAt =>
+              if (claim.attempts >= config.publisher.maxAttempts)
+                requireOutboxSuccess(
+                  outbox.markFailed(claim.event.eventId, claim.leaseToken, failedAt, sanitized(error))
+                )
+              else
+                requireOutboxSuccess(
+                  outbox.releaseForRetry(
+                    claim.event.eventId,
+                    claim.leaseToken,
+                    failedAt,
+                    failedAt.plusSeconds(config.publisher.retryDelaySeconds.toLong)
+                  )
+                )
+            }
+      }
+  }
 
   private def requireOutboxSuccess(result: RepositoryIO[Unit]): IO[Unit] =
     result.value.flatMap {
@@ -182,11 +206,11 @@ object OperationalEventKafkaRuntime {
       case Left(error) => IO.raiseError(new IllegalStateException(s"outbox operation failed: $error"))
     }
 
-  /** Preserve ordering for one Kafka key while overlapping independent keys. */
+  /** Operational facts may arrive out of order; Kafka preserves append order within each partition. */
   private[kafka] def publishClaims(
       claims: List[ClaimedOperationalEvent]
   )(publish: ClaimedOperationalEvent => IO[Unit]): IO[Unit] =
-    claims.groupBy(_.partitionKey).values.toList.parTraverse_(_.traverse_(publish))
+    Stream.emits(claims).covary[IO].parEvalMapUnordered(PublicationWaveSize)(publish).compile.drain
 
   private[kafka] def consumerResource(
       config: KafkaConfig,
@@ -220,7 +244,15 @@ object OperationalEventKafkaRuntime {
         ) { message =>
           val record = message.record
           processRecordBeforeCommit(record.topic, record.partition, record.offset)(
-            handleRecord(config, receipts, quarantine, record.topic, record.partition, record.offset, record.value)
+            handleRecord(
+              config,
+              receipts,
+              quarantine,
+              record.topic,
+              record.partition,
+              record.offset,
+              Option(record.value)
+            )
           )(message.offset.commit)
         },
         1.second
@@ -253,10 +285,10 @@ object OperationalEventKafkaRuntime {
       topic: String,
       partition: Int,
       offset: Long,
-      bytes: Array[Byte]
+      bytes: Option[Array[Byte]]
   ): IO[Boolean] =
     IO.realTimeInstant.flatMap { now =>
-      OperationalEventJson.decode(bytes) match {
+      bytes.toRight("MalformedEnvelope").flatMap(OperationalEventJson.decode) match {
         case Left(_) =>
           quarantineRecord(
             config,
@@ -265,29 +297,20 @@ object OperationalEventKafkaRuntime {
             partition,
             offset,
             OperationalEventFailureCategory.MalformedEnvelope,
-            "malformed event envelope",
-            bytes,
+            bytes.fold("null event envelope")(_ => "malformed event envelope"),
+            bytes.getOrElse(Array.emptyByteArray),
             now
           ).value.map(_.isRight)
         case Right(event) =>
-          receipts.exists(config.consumerGroup, event.eventId).value.flatMap {
-            case Right(true)  => IO.pure(true)
-            case Right(false) =>
-              receipts
-                .record(
-                  config.consumerGroup,
-                  event,
-                  now,
-                  now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)
-                )
-                .value
-                .map {
-                  case Right(_)                       => true
-                  case Left(RepositoryError.Conflict) => true
-                  case Left(_)                        => false
-                }
-            case Left(_) => IO.pure(false)
-          }
+          receipts
+            .record(
+              config.consumerGroup,
+              event,
+              now,
+              now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)
+            )
+            .value
+            .map(_.isRight)
       }
     }
 

@@ -22,14 +22,16 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
       Some("private candidate query"),
       Json.obj("city" -> Json.fromString("Nicosia")),
       Some("test-model"),
-      List(SearchSessionResult("job-1", 1, 0.9d)),
+      List(SearchSessionResult("00000000-0000-0000-0000-000000000804", 1, 0.9d)),
       now,
       now.plusSeconds(3600)
     )
     val stored = MongoSearchSessionWorkCodecs.work(
       PendingSearchSessionWork(
         session,
-        OperationalEvents.searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)
+        OperationalEvents
+          .searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)
+          .fold(error => fail(error.toString), identity)
       ),
       now
     )
@@ -57,7 +59,9 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     val stored = MongoSearchSessionWorkCodecs.work(
       PendingSearchSessionWork(
         session,
-        OperationalEvents.searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)
+        OperationalEvents
+          .searchPerformed(UUID.fromString("00000000-0000-0000-0000-000000000803"), session)
+          .fold(error => fail(error.toString), identity)
       ),
       now
     )
@@ -67,6 +71,19 @@ class MongoSearchSessionWorkCodecsSpec extends FunSuite {
     assertEquals(
       MongoSearchSessionWorkCodecs.readClaim(stored),
       Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.Attempts))
+    )
+  }
+
+  test("a stored event for another actor returns a typed inconsistency") {
+    val session = SearchSession(searchId, actorId, "jobs", None, Json.obj(), None, Nil, now, now.plusSeconds(3600))
+    val event =
+      OperationalEvents.searchPerformed(UUID.randomUUID(), session).fold(error => fail(error.toString), identity)
+    val invalid = PendingSearchSessionWork(session, event.copy(actorId = UserId(UUID.randomUUID())))
+    assert(!invalid.addressesSession)
+    val stored = MongoSearchSessionWorkCodecs.work(invalid, now)
+    assertEquals(
+      MongoSearchSessionWorkCodecs.readWork(stored),
+      Left(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)
     )
   }
 }

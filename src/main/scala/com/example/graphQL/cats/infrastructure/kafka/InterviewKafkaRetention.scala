@@ -16,7 +16,9 @@ object InterviewKafkaRetention {
       bootstrapServers: String,
       username: String,
       password: String,
-      protocol: KafkaSaslSecurityProtocol
+      protocol: KafkaSaslSecurityProtocol,
+      topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
+        com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default
   ): Resource[IO, InterviewKafkaRetention] = {
     val properties = new Properties()
     properties.put("bootstrap.servers", bootstrapServers)
@@ -30,12 +32,15 @@ object InterviewKafkaRetention {
       .foreach { case (key, value) => properties.put(key, value) }
     Resource
       .make(IO.blocking(new KafkaConsumer[String, Array[Byte]](properties)))(consumer => IO.blocking(consumer.close()))
-      .map(new InterviewKafkaRetention(_))
+      .map(new InterviewKafkaRetention(_, topics))
   }
 }
-final class InterviewKafkaRetention private[kafka] (consumer: KafkaConsumer[String, Array[Byte]]) {
+final class InterviewKafkaRetention private[kafka] (
+    consumer: KafkaConsumer[String, Array[Byte]],
+    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair
+) {
   def capture: IO[Vector[InterviewRetentionBarrier]] = IO.blocking {
-    Vector(InterviewMessageCodec.CommandsTopic, InterviewMessageCodec.ResultsTopic).flatMap { topic =>
+    Vector(topics.commands, topics.results).flatMap { topic =>
       val partitions =
         consumer.partitionsFor(topic).asScala.map(info => new TopicPartition(topic, info.partition())).toVector
       val offsets = consumer.endOffsets(partitions.asJava)

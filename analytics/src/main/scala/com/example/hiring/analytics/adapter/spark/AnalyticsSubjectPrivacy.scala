@@ -6,6 +6,7 @@ import com.example.hiring.analytics.domain.SubjectPseudonymizer
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import org.apache.spark.sql.{DataFrame, Row}
+import java.util.Locale
 import org.apache.spark.sql.functions.{array, array_intersect, col, lit, size}
 import org.apache.spark.sql.types.{ArrayType, StringType, StructField}
 
@@ -35,8 +36,9 @@ object AnalyticsSubjectPrivacy {
       val tokenizer = tokenFactory.partitionTokenizer()
       partition.map { row =>
         val payload = Option(row.getAs[Row](payloadIndex))
-        val candidateId = payload.flatMap(value => Option(value.getAs[String]("candidateId"))).fold("")(_.trim)
-        val actorId = Option(row.getAs[String](actorIndex))
+        val candidateId =
+          payload.flatMap(value => Option(value.getAs[String]("candidateId"))).fold("")(_.trim.toLowerCase(Locale.ROOT))
+        val actorId = Option(row.getAs[String](actorIndex)).map(_.toLowerCase(Locale.ROOT))
         val eventType = Option(row.getAs[String](eventTypeIndex))
         val searchKind = payload.flatMap(value => Option(value.getAs[String]("searchKind")))
         val candidateSearch = searchKind.contains("candidateMatches")
@@ -59,6 +61,7 @@ object AnalyticsSubjectPrivacy {
             }
         val tokens = (actorToken.toVector ++ candidateToken.toVector ++ searchResultIds
           .filter(_.trim.nonEmpty)
+          .map(_.toLowerCase(Locale.ROOT))
           .map(tokenizer.primaryToken)).distinct.map(_.value)
         val subjectToken = candidateToken.orElse(actorToken).map(_.value).orNull
         Row.fromSeq(row.toSeq ++ Seq(subjectToken, tokens))

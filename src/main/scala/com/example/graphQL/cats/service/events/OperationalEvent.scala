@@ -1,15 +1,15 @@
 package com.example.graphQL.cats.service.events
 
 import cats.syntax.all.*
-import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId, parse as parseIdentifier}
+import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Application, ApplicationEvent, ApplicationStatus, Job}
 import io.circe.{Decoder, Encoder, Json}
 import io.circe.generic.semiauto.*
 import io.circe.parser.parse
 import java.time.Instant
-import java.nio.charset.StandardCharsets
+import java.nio.charset.{CodingErrorAction, StandardCharsets}
+import java.nio.ByteBuffer
 import java.util.UUID
-import com.example.graphQL.cats.shared.Parsing.parseUuid
 
 enum OperationalEventType {
   case JOB_CREATED, JOB_UPDATED, JOB_CLOSED, JOB_VIEWED, SEARCH_PERFORMED, SEARCH_RESULT_CLICKED,
@@ -35,9 +35,60 @@ final case class OperationalEventEnvelope(
 
 object OperationalEventEnvelope {
   val Topic: String = "hiring.operational-events"
+
+  def fromPayload(
+      eventId: UUID,
+      occurredAt: Instant,
+      actorId: UserId,
+      payload: OperationalEventPayload
+  ): OperationalEventEnvelope = {
+    import OperationalEventPayload.*
+    val (eventType, aggregateType, aggregateId) = payload match {
+      case JobFact(kind, job)              => (kind.eventType, OperationalAggregateType.Job, job.jobId)
+      case ApplicationCreated(id, _, _, _) =>
+        (OperationalEventType.APPLICATION_CREATED, OperationalAggregateType.Application, id)
+      case StatusChanged(id, _, _, _, _) =>
+        (OperationalEventType.APPLICATION_STATUS_CHANGED, OperationalAggregateType.Application, id)
+      case CandidateHired(id, _, _, _) =>
+        (OperationalEventType.CANDIDATE_HIRED, OperationalAggregateType.Application, id)
+      case SearchPerformed(id, _, _) => (OperationalEventType.SEARCH_PERFORMED, OperationalAggregateType.Search, id)
+      case JobViewed(_, id, _, _)    => (OperationalEventType.JOB_VIEWED, OperationalAggregateType.Search, id)
+      case SearchResultClicked(id, _, _, _) =>
+        (OperationalEventType.SEARCH_RESULT_CLICKED, OperationalAggregateType.Search, id)
+    }
+    OperationalEventEnvelope(
+      eventId,
+      eventType,
+      occurredAt,
+      aggregateType,
+      aggregateId.toString,
+      actorId,
+      OperationalEventPayload.json(payload)
+    )
+  }
 }
 
 object OperationalEventJson {
+  // Wire contract budget, independently below the broker's framed-record limit.
+  val MaxEnvelopeBytes: Int = 256 * 1024
+
+  def validate(value: OperationalEventEnvelope): Either[OperationalEventContractError, OperationalEventEnvelope] =
+    for {
+      nonNull <- Option(value).toRight(OperationalEventContractError.MalformedEnvelope)
+      _ <- Either.cond(
+        Option(nonNull.eventId).nonEmpty && Option(nonNull.occurredAt).nonEmpty &&
+          Option(nonNull.actorId).exists(actor => Option(actor.value).nonEmpty) &&
+          Option(nonNull.eventType).nonEmpty && Option(nonNull.aggregateType).nonEmpty &&
+          Option(nonNull.aggregateId).nonEmpty && Option(nonNull.payload).nonEmpty,
+        (),
+        OperationalEventContractError.MalformedEnvelope
+      )
+      _ <- OperationalEventPayload.decode(nonNull)
+      _ <- Either.cond(bytes(nonNull).length <= MaxEnvelopeBytes, (), OperationalEventContractError.EnvelopeTooLarge)
+    } yield nonNull
+
+  def encode(value: OperationalEventEnvelope): Either[OperationalEventContractError, Array[Byte]] =
+    validate(value).map(bytes)
   private val EnvelopeFields = Set(
     "eventId",
     "eventType",
@@ -50,7 +101,7 @@ object OperationalEventJson {
   private given Encoder[UUID] = Encoder.encodeString.contramap(_.toString)
 
   private given Decoder[UUID] = Decoder.decodeString.emap { raw =>
-    parseUuid(raw).left.map(_ => "invalid UUID")
+    OperationalEventPayload.fullUuid(raw)
   }
 
   private given Encoder[Instant] = Encoder.encodeString.contramap(_.toString)
@@ -74,7 +125,7 @@ object OperationalEventJson {
   private given Encoder[UserId] = Encoder.encodeString.contramap(_.value.toString)
 
   private given Decoder[UserId] = Decoder.decodeString.emap { raw =>
-    parseIdentifier(raw)(UserId.apply).left.map(_ => "invalid actorId")
+    OperationalEventPayload.fullUuid(raw).map(UserId.apply)
   }
 
   private given Encoder[OperationalEventEnvelope] = deriveEncoder
@@ -90,15 +141,29 @@ object OperationalEventJson {
     Option(bytes)
       .toRight("MalformedEnvelope")
       .flatMap(value =>
-        parse(new String(value, StandardCharsets.UTF_8)).leftMap(_ => "MalformedEnvelope").flatMap(decode)
+        if (value.length > MaxEnvelopeBytes) Left(OperationalEventContractError.EnvelopeTooLarge.toString)
+        else
+          Either
+            .catchNonFatal(
+              StandardCharsets.UTF_8
+                .newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(value))
+                .toString
+            )
+            .leftMap(_ => "MalformedEnvelope")
+            .flatMap(raw => parse(raw).leftMap(_ => "MalformedEnvelope").flatMap(decode))
       )
 
   def decode(json: Json): Either[String, OperationalEventEnvelope] =
     for {
-      fields <- json.asObject.toRight("MalformedEnvelope")
+      nonNull <- Option(json).toRight("MalformedEnvelope")
+      fields <- nonNull.asObject.toRight("MalformedEnvelope")
       _ <- Either.cond(fields.keys.toSet == EnvelopeFields, (), "MalformedEnvelope")
-      value <- summon[Decoder[OperationalEventEnvelope]].decodeJson(json).leftMap(_ => "MalformedEnvelope")
-    } yield value
+      value <- summon[Decoder[OperationalEventEnvelope]].decodeJson(nonNull).leftMap(_ => "MalformedEnvelope")
+      valid <- validate(value).leftMap(_.toString)
+    } yield valid
 }
 
 final case class SearchSessionResult(
@@ -120,23 +185,10 @@ final case class SearchSession(
 )
 
 object OperationalEvents {
-  def jobSnapshot(job: Job): Json =
-    Json.obj(
-      "jobId" -> Json.fromString(job.id.value.toString),
-      "title" -> Json.fromString(job.title),
-      "description" -> Json.fromString(job.description),
-      "requirements" -> Json.arr(job.requirements.map(Json.fromString)*),
-      "skills" -> Json.arr(job.skills.toList.sorted.map(Json.fromString)*),
-      "location" -> Json.obj(
-        "country" -> Json.fromString(job.location.country),
-        "city" -> Json.fromString(job.location.city),
-        "remote" -> Json.fromBoolean(job.location.remote)
-      ),
-      "status" -> Json.fromString(job.status.toString),
-      "createdAt" -> Json.fromString(job.createdAt.toString),
-      "updatedAt" -> Json.fromString(job.updatedAt.toString),
-      "closedAt" -> job.closedAt.fold(Json.Null)(instant => Json.fromString(instant.toString))
-    )
+  import OperationalEventPayload.*
+
+  private def snapshot(job: Job): JobSnapshot =
+    JobSnapshot(job.id.value, job.skills.toList.sorted, job.status)
 
   def jobEvent(
       eventType: OperationalEventType,
@@ -144,16 +196,12 @@ object OperationalEvents {
       job: Job,
       actorId: UserId,
       occurredAt: Instant
-  ): OperationalEventEnvelope =
-    OperationalEventEnvelope(
-      eventId,
-      eventType,
-      occurredAt,
-      OperationalAggregateType.Job,
-      job.id.value.toString,
-      actorId,
-      Json.obj("job" -> jobSnapshot(job))
-    )
+  ): Either[OperationalEventContractError, OperationalEventEnvelope] =
+    JobKind.values
+      .find(_.eventType == eventType)
+      .toRight(OperationalEventContractError.InvalidPayload)
+      .map(kind => OperationalEventEnvelope.fromPayload(eventId, occurredAt, actorId, JobFact(kind, snapshot(job))))
+      .flatMap(OperationalEventJson.validate)
 
   def applicationCreated(
       eventId: UUID,
@@ -161,76 +209,57 @@ object OperationalEvents {
       actorId: UserId,
       occurredAt: Instant
   ): OperationalEventEnvelope =
-    OperationalEventEnvelope(
+    OperationalEventEnvelope.fromPayload(
       eventId,
-      OperationalEventType.APPLICATION_CREATED,
       occurredAt,
-      OperationalAggregateType.Application,
-      application.id.value.toString,
       actorId,
-      Json.obj(
-        "applicationId" -> Json.fromString(application.id.value.toString),
-        "candidateId" -> Json.fromString(application.candidateId.value.toString),
-        "jobId" -> Json.fromString(application.jobId.value.toString),
-        "status" -> Json.fromString(application.status.toString)
+      ApplicationCreated(
+        application.id.value,
+        application.candidateId.value,
+        application.jobId.value,
+        application.status
       )
     )
 
   def statusChanged(eventId: UUID, application: Application, event: ApplicationEvent): OperationalEventEnvelope =
-    OperationalEventEnvelope(
+    OperationalEventEnvelope.fromPayload(
       eventId,
-      OperationalEventType.APPLICATION_STATUS_CHANGED,
       event.occurredAt,
-      OperationalAggregateType.Application,
-      application.id.value.toString,
       event.actorId,
-      Json.obj(
-        "applicationId" -> Json.fromString(application.id.value.toString),
-        "candidateId" -> Json.fromString(application.candidateId.value.toString),
-        "jobId" -> Json.fromString(application.jobId.value.toString),
-        "previousStatus" -> event.previousStatus.fold(Json.Null)(status => Json.fromString(status.toString)),
-        "newStatus" -> Json.fromString(event.newStatus.toString),
-        "feedback" -> event.feedback.fold(Json.Null)(Json.fromString),
-        "reason" -> event.reason.fold(Json.Null)(Json.fromString)
+      StatusChanged(
+        application.id.value,
+        application.candidateId.value,
+        application.jobId.value,
+        event.previousStatus,
+        event.newStatus
       )
     )
 
   def candidateHired(eventId: UUID, application: Application, event: ApplicationEvent): OperationalEventEnvelope =
-    statusChanged(eventId, application, event).copy(
-      eventType = OperationalEventType.CANDIDATE_HIRED,
-      payload = Json.obj(
-        "applicationId" -> Json.fromString(application.id.value.toString),
-        "candidateId" -> Json.fromString(application.candidateId.value.toString),
-        "jobId" -> Json.fromString(application.jobId.value.toString),
-        "status" -> Json.fromString(ApplicationStatus.Hired.toString)
+    OperationalEventEnvelope.fromPayload(
+      eventId,
+      event.occurredAt,
+      event.actorId,
+      CandidateHired(
+        application.id.value,
+        application.candidateId.value,
+        application.jobId.value,
+        ApplicationStatus.Hired
       )
     )
 
-  def searchPerformed(eventId: UUID, session: SearchSession): OperationalEventEnvelope =
-    OperationalEventEnvelope(
-      eventId,
-      OperationalEventType.SEARCH_PERFORMED,
-      session.occurredAt,
-      OperationalAggregateType.Search,
-      session.id.toString,
-      session.actorId,
-      Json.obj(
-        "searchId" -> Json.fromString(session.id.toString),
-        "searchKind" -> Json.fromString(session.searchKind),
-        "query" -> session.query.fold(Json.Null)(Json.fromString),
-        "filter" -> session.filter,
-        "model" -> session.model.fold(Json.Null)(Json.fromString),
-        "results" -> Json.arr(
-          session.results.map(result =>
-            Json.obj(
-              "resultId" -> Json.fromString(result.resultId),
-              "rank" -> Json.fromInt(result.rank),
-              "score" -> Json.fromDoubleOrNull(result.score)
-            )
-          )*
-        )
+  def searchPerformed(
+      eventId: UUID,
+      session: SearchSession
+  ): Either[OperationalEventContractError, OperationalEventEnvelope] =
+    SearchKind.values
+      .find(_.wire == session.searchKind)
+      .toRight(OperationalEventContractError.InvalidPayload)
+      .map(kind =>
+        OperationalEventEnvelope
+          .fromPayload(eventId, session.occurredAt, session.actorId, SearchPerformed(session.id, kind, session.results))
       )
-    )
+      .flatMap(OperationalEventJson.validate)
 
   def jobViewed(
       eventId: UUID,
@@ -240,17 +269,7 @@ object OperationalEvents {
       rank: Option[Int],
       occurredAt: Instant
   ): OperationalEventEnvelope =
-    interaction(
-      eventId,
-      OperationalEventType.JOB_VIEWED,
-      jobId.value.toString,
-      actorId,
-      searchId,
-      None,
-      jobId.value.toString,
-      rank,
-      occurredAt
-    )
+    OperationalEventEnvelope.fromPayload(eventId, occurredAt, actorId, JobViewed(searchId, jobId.value, None, rank))
 
   def searchResultClicked(
       eventId: UUID,
@@ -260,42 +279,17 @@ object OperationalEvents {
       actorId: UserId,
       rank: Int,
       occurredAt: Instant
-  ): OperationalEventEnvelope =
-    interaction(
-      eventId,
-      OperationalEventType.SEARCH_RESULT_CLICKED,
-      searchId.toString,
-      actorId,
-      Some(searchId),
-      Some(searchKind),
-      resultId,
-      Some(rank),
-      occurredAt
-    )
-
-  private def interaction(
-      eventId: UUID,
-      eventType: OperationalEventType,
-      aggregateId: String,
-      actorId: UserId,
-      searchId: Option[UUID],
-      searchKind: Option[String],
-      resultId: String,
-      rank: Option[Int],
-      occurredAt: Instant
-  ): OperationalEventEnvelope =
-    OperationalEventEnvelope(
-      eventId,
-      eventType,
-      occurredAt,
-      OperationalAggregateType.Search,
-      aggregateId,
-      actorId,
-      Json.obj(
-        "searchId" -> searchId.fold(Json.Null)(id => Json.fromString(id.toString)),
-        "resultId" -> Json.fromString(resultId),
-        "searchKind" -> searchKind.fold(Json.Null)(Json.fromString),
-        "rank" -> rank.fold(Json.Null)(Json.fromInt)
+  ): Either[OperationalEventContractError, OperationalEventEnvelope] =
+    for {
+      id <- OperationalEventPayload.fullUuid(resultId).leftMap(_ => OperationalEventContractError.InvalidPayload)
+      kind <- SearchKind.values.find(_.wire == searchKind).toRight(OperationalEventContractError.InvalidPayload)
+      event <- OperationalEventJson.validate(
+        OperationalEventEnvelope.fromPayload(
+          eventId,
+          occurredAt,
+          actorId,
+          SearchResultClicked(searchId, id, kind, rank)
+        )
       )
-    )
+    } yield event
 }

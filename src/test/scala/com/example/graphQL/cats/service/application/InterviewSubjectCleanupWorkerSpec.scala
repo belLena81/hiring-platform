@@ -193,6 +193,36 @@ final class InterviewSubjectCleanupWorkerSpec extends CatsEffectSuite {
     }
   }
 
+  test("worker persists captured physical topic identities through the configured pure policy") {
+    val topics = InterviewTopicPair("hiring-test-worker.commands", "hiring-test-worker.results")
+    val captured = Vector(
+      InterviewRetentionBarrier(topics.commands, 0, 7L),
+      InterviewRetentionBarrier(topics.results, 0, 8L)
+    )
+    for {
+      state <- Ref.of[IO, InterviewSubjectCleanup](initial.copy(state = InterviewCleanupState.MongoPurged))
+      calls <- Ref.of[IO, Vector[String]](Vector.empty)
+      registrations <- Ref.of[IO, Vector[String]](Vector.empty)
+      fencer = new InterviewPublisherFencer {
+        def fence(ids: Vector[String]) = RepositoryIO.fromEither(Right(()))
+      }
+      worker = new InterviewSubjectCleanupWorker(
+        new Store(state, calls, registrations),
+        fencer,
+        IO.pure(captured),
+        _ => IO.pure(false),
+        Diagnostics.noop,
+        IO.pure(now),
+        topics
+      )
+      progressed <- worker.runOnce(None).value
+      stored <- state.get
+    } yield {
+      assertEquals(progressed.toOption.flatMap(_.firstFailure), None)
+      assertEquals(stored.state, InterviewCleanupState.AwaitingRetention(captured))
+    }
+  }
+
   test("fencer rejection never purges or captures a barrier") {
     for {
       state <- Ref.of[IO, InterviewSubjectCleanup](initial)

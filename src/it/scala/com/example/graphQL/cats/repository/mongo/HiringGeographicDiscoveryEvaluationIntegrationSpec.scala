@@ -10,7 +10,6 @@ import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.search.*
 import fs2.Stream
 import io.circe.Json
-import munit.CatsEffectSuite
 import org.bson.Document
 import com.mongodb.client.model.{Filters, Updates}
 import java.nio.file.{Files, Paths}
@@ -19,7 +18,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Bounded service/driver workload. Results are measurements, never an SLO assertion. */
-final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends CatsEffectSuite {
+final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val support = MongoAccessEvaluationSupport
   private val now = Instant.parse("2026-10-06T12:00:00Z")
@@ -76,7 +75,7 @@ final class HiringGeographicDiscoveryEvaluationIntegrationSpec extends CatsEffec
     values.sorted.apply(math.ceil(values.size * fraction).toInt.max(1) - 1)
 
   test("measure 128 jobs and 32 authenticated candidates over 20 fixed geographic queries at concurrency 1 and 8") {
-    support.resource
+    mongoResource
       .evalMap(fixture => DiscoveryQueryPolicy.create(2.seconds, 4).map(policy => (fixture, policy)))
       .use { case (fixture, policy) =>
         val repository = MongoJobRepository.transactional(

@@ -10,7 +10,6 @@ import com.example.hiring.analytics.config.{AnalyticsStreamingSettings, KafkaCon
 import com.example.hiring.analytics.domain.{AnalyticsTopic, StreamingActivationIdentity, StreamingBatchId}
 import com.example.hiring.analytics.service.streaming.StreamingActivationGate
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
-import munit.CatsEffectSuite
 import org.apache.kafka.clients.admin.{Admin, NewTopic}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig, ProducerRecord}
 import org.apache.kafka.common.serialization.StringSerializer
@@ -28,7 +27,9 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Actual Kafka/Spark callback and Mongo mutex ownership. Grant enforcement has separate authenticated proofs. */
-final class HiringAnalyticsStreamingCancellationIntegrationSpec extends CatsEffectSuite {
+final class HiringAnalyticsStreamingCancellationIntegrationSpec extends AnalyticsMongoIntegrationSuite {
+  private def resource = HiringAnalyticsRecoveryTestSupport.resource(mongoEndpoint)
+
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
   private def awaitJob(started: CountDownLatch): IO[Unit] =
@@ -42,6 +43,13 @@ final class HiringAnalyticsStreamingCancellationIntegrationSpec extends CatsEffe
     Resource
       .make(IO.blocking {
         new KafkaContainer(DockerImageName.parse("apache/kafka:3.9.2"))
+          .withTmpFs(
+            Map(
+              "/etc/kafka/secrets" -> "rw,uid=1000,gid=1000",
+              "/mnt/shared/config" -> "rw,uid=1000,gid=1000",
+              "/var/lib/kafka/data" -> "rw,uid=1000,gid=1000"
+            ).asJava
+          )
           .withEnv(
             "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
             "BROKER:SASL_PLAINTEXT,PLAINTEXT:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT"

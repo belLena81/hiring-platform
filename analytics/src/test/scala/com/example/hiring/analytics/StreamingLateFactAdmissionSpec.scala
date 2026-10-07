@@ -50,12 +50,14 @@ final class StreamingLateFactAdmissionSpec extends CatsEffectSuite {
       .createDataFrame(
         states.indices
           .map { index =>
-            val event = s"late-event-$index"
+            val event = com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"late-event-$index")
             val body =
-              s"""{"eventId":"$event","eventType":"JOB_CREATED","occurredAt":"$at","aggregateType":"Job","aggregateId":"job-$index","actorId":"${UUID
-                  .nameUUIDFromBytes(
-                    event.getBytes("UTF-8")
-                  )}","payload":{"jobId":"job-$index","job":{"skills":["Scala"]}}}"""
+              com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+                s"""{"eventId":"$event","eventType":"JOB_CREATED","occurredAt":"$at","aggregateType":"Job","aggregateId":"job-$index","actorId":"${UUID
+                    .nameUUIDFromBytes(
+                      event.getBytes("UTF-8")
+                    )}","payload":{"jobId":"job-$index","job":{"skills":["Scala"]}}}"""
+              )
             Row("hiring.late.admission", index % 3, index.toLong, body)
           }
           .toVector
@@ -212,11 +214,11 @@ final class StreamingLateFactAdmissionSpec extends CatsEffectSuite {
       execution {
         val input = classified(spark, Vector("OPEN", "CLOSED", "CLOSED", "CLOSED"))
         val closed = input.filter(col("admissionState") === lit("CLOSED"))
-        val conflicts = ids(spark, Vector("late-event-2"))
-        val existing = ids(spark, Vector("late-event-3"))
+        val conflicts = ids(spark, Vector("d5a55669-448e-3e4c-97b6-7cf6a22fa6c0"))
+        val existing = ids(spark, Vector("2d96683c-e07b-370c-bb91-6b7f5c66ebab"))
         val expected = original(closed, input, conflicts, existing)
         val baselineRows = expected.collect().toVector
-        assertEquals(baselineRows.map(_.getAs[String](Columns.EventId)), Vector("late-event-1"))
+        assertEquals(baselineRows.map(_.getAs[String](Columns.EventId)), Vector("c104d623-eef3-3b53-8936-c2e2f94fac23"))
         val selected = SparkStreamingBatchStages.closedDayFactsSource(closed, 2L)(expected)
         assert(selected eq expected, "nonempty selection must preserve the original admission plan")
         assertEquals(selected.schema, expected.schema)

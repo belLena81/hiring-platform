@@ -938,6 +938,134 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     } yield ()
   }
 
+  test("failed authoritative conflict reread retains uncharged durable work") {
+    List(false, true).traverse_ { thrown =>
+      for {
+        usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map.empty)
+        jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+        calls <- Ref.of[IO, Int](0)
+        fetches <- Ref.of[IO, Int](0)
+        write <- Deferred[IO, Either[RepositoryError, Unit]]
+        completion <- Deferred[IO, Either[RepositoryError, Unit]]
+        clock <- Ref.of[IO, Instant](now)
+        work <- InMemoryEmbeddingWorkRepository.create
+        jobs = RecordingEmbeddingWrites(
+          InMemoryJobs(jobsRef),
+          write,
+          writeFailure = Some(RepositoryError.Conflict),
+          rereadFailure = fetches
+            .updateAndGet(_ + 1)
+            .flatMap(count =>
+              if (count == 1) IO.pure(None)
+              else if (thrown) IO.raiseError(new IllegalStateException("reread unavailable"))
+              else IO.pure(Some(RepositoryError.Unavailable))
+            )
+        )
+        key = DurableEmbeddingWorkPublisher.keyFor(EmbeddingWork.JobChanged(jobId))
+        _ <- successful(work.enqueue(key, now))
+        _ <- controlledWorker(
+          ObservableWork(work, completion),
+          InMemoryUsers(usersRef),
+          jobs,
+          CountingEmbeddingService(calls),
+          clock
+        ).use(wakeups => wakeups.offer(()) *> completion.get)
+        snapshot <- work.snapshot
+        count <- calls.get
+      } yield {
+        assertEquals(count, 1)
+        assertEquals(snapshot.get(key.value).map(_.state), Some("Retry"))
+        assertEquals(snapshot.get(key.value).map(_.attempts), Some(0))
+      }
+    }
+  }
+
+  test("conflict reread completes current metadata and removed profiles, and rejects oversized current sources") {
+    List(false, true).traverse_ { candidateWork =>
+      List("current", "oversized", "no-profile").filter(mode => candidateWork || mode != "no-profile").traverse_ {
+        mode =>
+          for {
+            usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
+            jobsRef <- Ref.of[IO, Map[Identifiers.JobId, Job]](Map(jobId -> openJob))
+            started <- Deferred[IO, Unit]
+            release <- Deferred[IO, Unit]
+            calls <- Ref.of[IO, Int](0)
+            clock <- Ref.of[IO, Instant](now)
+            work <- InMemoryEmbeddingWorkRepository.create
+            changed =
+              if (candidateWork) EmbeddingWork.CandidateProfileChanged(candidateId) else EmbeddingWork.JobChanged(jobId)
+            key = DurableEmbeddingWorkPublisher.keyFor(changed)
+            currentProfile = CandidateProfile(Set("Scala", "Cats"), Some("Engineer"), None)
+            source = if (candidateWork) SearchableText.candidate(currentProfile) else SearchableText.job(openJob)
+            embedding = EntityEmbedding(List(0.1f), EmbeddingMeta("voyage-4-lite", SourceHash.sha256(source), now))
+            _ <- successful(work.enqueue(key, now))
+            _ <- controlledWorker(
+              work,
+              InMemoryUsers(usersRef),
+              InMemoryJobs(jobsRef),
+              BlockingEmbeddingService(calls, started, release),
+              clock
+            ).use { wakeups =>
+              for {
+                _ <- wakeups.offer(())
+                _ <- started.get
+                _ <-
+                  if (candidateWork)
+                    usersRef.update(
+                      _.updated(
+                        candidateId,
+                        mode match {
+                          case "current" =>
+                            candidate
+                              .copy(profile = Some(UserProfile.Candidate(currentProfile)), embedding = Some(embedding))
+                          case "no-profile" => candidate.copy(profile = None)
+                          case _            =>
+                            candidate.copy(profile =
+                              Some(
+                                UserProfile.Candidate(
+                                  CandidateProfile(
+                                    Set("Scala"),
+                                    Some("x" * (SearchableText.DocumentMaxChars + 1)),
+                                    None
+                                  )
+                                )
+                              )
+                            )
+                        }
+                      )
+                    )
+                  else
+                    jobsRef.update(
+                      _.updated(
+                        jobId,
+                        if (mode == "current") openJob.copy(updatedAt = now.plusSeconds(1), embedding = Some(embedding))
+                        else openJob.copy(description = "x" * (SearchableText.DocumentMaxChars + 1))
+                      )
+                    )
+                _ <- release.complete(())
+                _ <- eventually(work.snapshot)(snapshot =>
+                  if (mode == "oversized")
+                    snapshot.get(key.value).exists(_.failure.contains(EmbeddingWorkFailure.DocumentTooLarge))
+                  else snapshot.isEmpty
+                )
+                count <- calls.get
+                storedUsers <- usersRef.get
+                storedJobs <- jobsRef.get
+              } yield {
+                assertEquals(count, 1)
+                if (mode == "current") {
+                  val storedEmbedding =
+                    if (candidateWork) storedUsers.get(candidateId).flatMap(_.embedding)
+                    else storedJobs.get(jobId).flatMap(_.embedding)
+                  assertEquals(storedEmbedding, Some(embedding))
+                }
+              }
+            }
+          } yield ()
+      }
+    }
+  }
+
   test("more than eight revision-only conflicts preserve provider failure budget and eventually embed current source") {
     for {
       usersRef <- Ref.of[IO, Map[Identifiers.UserId, User]](Map(candidateId -> candidate))
@@ -1287,7 +1415,8 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
       writeResult: Deferred[IO, Either[RepositoryError, Unit]],
       fetchFailure: Option[RepositoryError] = None,
       writeFailure: Option[RepositoryError] = None,
-      onFind: IO[Unit] = IO.unit
+      onFind: IO[Unit] = IO.unit,
+      rereadFailure: IO[Option[RepositoryError]] = IO.pure(None)
   ) extends JobRepository {
     override def relatedJobs(
         scope: com.example.graphQL.cats.service.read.HiringReadScope,
@@ -1299,7 +1428,11 @@ final class EmbeddingPipelineSpec extends CatsEffectSuite {
     override def findVersioned(
         id: Identifiers.JobId
     ): RepositoryIO[Option[Versioned[Job]]] = RepositoryIO.lift(onFind) *>
-      fetchFailure.fold(delegate.findVersioned(id))(error => RepositoryIO.fromEither(Left(error)))
+      RepositoryIO
+        .lift(rereadFailure)
+        .flatMap(error =>
+          error.orElse(fetchFailure).fold(delegate.findVersioned(id))(failure => RepositoryIO.fromEither(Left(failure)))
+        )
 
     override def findMany(ids: List[Identifiers.JobId]): RepositoryIO[List[Job]] = delegate.findMany(ids)
 

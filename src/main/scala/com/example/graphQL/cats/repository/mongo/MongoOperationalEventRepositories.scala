@@ -6,7 +6,7 @@ import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
-import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, SearchSession}
+import com.example.graphQL.cats.service.events.{OperationalEventEnvelope, OperationalEventJson, SearchSession}
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -89,7 +89,7 @@ final class MongoSearchSessionRepository(
       session: Option[ClientSession[IO]]
   ): RepositoryIO[Boolean] =
     val insert = RepositoryIO
-      .fromEither(MongoHiringCodecs.outboxRecord(event, event.occurredAt).leftMap(_ => RepositoryError.Unavailable))
+      .fromEither(MongoHiringCodecs.outboxRecord(event, event.occurredAt).leftMap(_ => RepositoryError.InvalidEvent))
       .flatMap(document => RepositoryIO.lift(MongoSessionOperations.insertOne(outbox, session, document)))
       .subflatMap(_.fold[Either[RepositoryError, Boolean]](Left(RepositoryError.MissingWriteResult))(_ => Right(true)))
     MongoRepositorySupport
@@ -407,10 +407,62 @@ final class MongoOperationalEventOutboxRepository(
                   )(active => collection.findOneAndUpdate(active, filter.sessionFilter, update.sessionUpdate, options))
                 )
             )
-            .subflatMap(_.traverse(readClaimed).leftMap(_ => RepositoryError.InvalidStoredData))
+            .flatMap {
+              case None           => RepositoryIO.fromEither(Right(None))
+              case Some(document) =>
+                // Keep attributable control evidence even when the immutable event cannot be interpreted.
+                RepositoryIO
+                  .fromEither(
+                    (
+                      requiredSubjectIds(document),
+                      requiredSubjectRefsVersion(document),
+                      requiredInt(document, MongoFields.Attempts)
+                    )
+                      .mapN((_, _, _) => ())
+                      .leftMap(_ => RepositoryError.InvalidStoredData)
+                  )
+                  .flatMap { _ =>
+                    readClaimed(document) match {
+                      case Right(claim) => RepositoryIO.fromEither(Right(Some(claim)))
+                      case Left(_)      => failInvalidClaim(session, eventId, token, now).as(None)
+                    }
+                  }
+            }
         )(_ => Left(RepositoryError.Unavailable))
     }
   }
+
+  private def failInvalidClaim(
+      session: Option[ClientSession[IO]],
+      eventId: String,
+      token: String,
+      now: Instant
+  ): RepositoryIO[Unit] =
+    RepositoryIO
+      .lift(
+        MongoSessionOperations.updateOne(
+          outbox,
+          session,
+          MongoFilter.and(
+            MongoFilter.eq(MongoFields.Id, eventId),
+            MongoFilter.eq(MongoFields.State, "InFlight"),
+            MongoFilter.eq(MongoFields.LeaseToken, token)
+          ),
+          MongoUpdate.combine(
+            MongoUpdate.set(MongoFields.State, "Failed"),
+            MongoUpdate.set(MongoFields.LastError, "INVALID_EVENT_CONTRACT"),
+            MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
+            MongoUpdate.unset(MongoFields.LeaseOwner),
+            MongoUpdate.unset(MongoFields.LeaseToken),
+            MongoUpdate.unset(MongoFields.LeaseUntil)
+          )
+        )
+      )
+      .subflatMap {
+        case Some(result) if result.wasAcknowledged() && result.getMatchedCount == 1L => Right(())
+        case Some(_)                                                                  => Left(RepositoryError.Conflict)
+        case None => Left(RepositoryError.MissingWriteResult)
+      }
 
   private def acquireSubjectLeases(
       session: Option[ClientSession[IO]],
@@ -575,6 +627,17 @@ final class MongoOperationalEventOutboxRepository(
     ).mapN((event, bytes, key, token, attempts, subjects, _) =>
       ClaimedOperationalEvent(event, bytes, key, token, attempts, subjects)
     ).toEither
+      .flatMap { claim =>
+        val invalid = NonEmptyList.one(MongoHiringCodecs.StoredDocumentError.InconsistentDocument)
+        OperationalEventJson.decode(claim.envelopeBytes).leftMap(_ => invalid).flatMap { wire =>
+          // BSON dates have millisecond precision; the immutable wire bytes retain the original Instant.
+          val storedTime = wire.occurredAt.truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+          val consistent = wire.copy(occurredAt = storedTime) == claim.event &&
+            claim.partitionKey == wire.partitionKey &&
+            MongoHiringCodecs.outboxSubjectIds(wire).contains(claim.subjectIds.sorted)
+          Either.cond(consistent, claim.copy(event = wire), invalid)
+        }
+      }
 
   private def envelopeBytes(document: Document): Either[MongoHiringCodecs.StoredDocumentError, Array[Byte]] =
     Option(document.get(MongoFields.EnvelopeBytes)) match {
@@ -592,10 +655,11 @@ final class MongoOperationalEventOutboxRepository(
 
   private def requiredInt(document: Document, field: String): Either[MongoHiringCodecs.StoredDocumentError, Int] =
     Option(document.get(field)) match {
-      case Some(value: java.lang.Integer) => Right(value.intValue)
-      case Some(value: java.lang.Long)    => Right(value.intValue)
-      case None                           => Left(MongoHiringCodecs.StoredDocumentError.MissingField(field))
-      case _                              => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(field))
+      case Some(value: java.lang.Integer) if value.intValue >= 0 => Right(value.intValue)
+      case Some(value: java.lang.Long) if value.longValue >= 0 && value.longValue <= Int.MaxValue =>
+        Right(value.intValue)
+      case None => Left(MongoHiringCodecs.StoredDocumentError.MissingField(field))
+      case _    => Left(MongoHiringCodecs.StoredDocumentError.InvalidField(field))
     }
 
   private def requiredSubjectIds(
@@ -604,7 +668,10 @@ final class MongoOperationalEventOutboxRepository(
     Option(document.get(MongoFields.SubjectIds)) match {
       case Some(values: java.util.List[?]) =>
         val subjects = values.asScala.toList.collect { case value: String => value }
-        if (subjects.nonEmpty && subjects.size == values.size() && subjects.distinct.size == subjects.size)
+        if (
+          subjects.nonEmpty && subjects.size == values.size() && subjects.distinct.size == subjects.size &&
+          subjects.forall(value => com.example.graphQL.cats.shared.Parsing.parseUuid(value).exists(_.toString == value))
+        )
           Right(subjects)
         else Left(MongoHiringCodecs.StoredDocumentError.InvalidField(MongoFields.SubjectIds))
       case None => Left(MongoHiringCodecs.StoredDocumentError.MissingField(MongoFields.SubjectIds))

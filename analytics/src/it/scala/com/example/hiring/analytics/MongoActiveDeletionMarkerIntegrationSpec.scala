@@ -13,39 +13,57 @@ import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.adapter.mongo.*
 
-import cats.effect.{Clock, IO}
+import cats.effect.{Clock, IO, Resource}
 import cats.effect.unsafe.implicits.global
+import cats.syntax.all.*
 import com.mongodb.client.{MongoClient, MongoClients}
 import mongo4cats.client.{MongoClient as CatsMongoClient}
 import org.apache.spark.sql.SparkSession
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
-import munit.FunSuite
 
 import java.nio.file.Files
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.Date
 import java.util.UUID
 import scala.concurrent.duration._
 import scala.jdk.CollectionConverters._
 
-class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 5.minutes
-
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-  private final class MongoContainer extends GenericContainer[MongoContainer](DockerImageName.parse(image))
+class MongoActiveDeletionMarkerIntegrationSpec extends AnalyticsMongoIntegrationSuite {
+  override val munitIOTimeout: FiniteDuration = 5.minutes
 
   private val pseudonymizer =
     AnalyticsTestSubjectPseudonymizer.fromSecret("analytics-integration-secret".padTo(32, 'x').getBytes("UTF-8"))
   private val markerClock = fixedClock(Instant.parse("2026-09-24T12:00:00Z"))
   private given cats.effect.Clock[IO] = markerClock
-  private var mongoContainer: MongoContainer = scala.compiletime.uninitialized
-  private var mongoClient: MongoClient = scala.compiletime.uninitialized
-  private var mongo4catsClient: CatsMongoClient[IO] = scala.compiletime.uninitialized
-  private var releaseMongo4catsClient: IO[Unit] = IO.unit
-  private var spark: SparkSession = scala.compiletime.uninitialized
+  private val clients = ResourceSuiteLocalFixture(
+    "analytics-marker-clients",
+    Resource.eval(IO.delay(endpointUri)).flatMap { uri =>
+      (
+        Resource.make(IO.blocking(MongoClients.create(uri)))(client => IO.blocking(client.close())),
+        CatsMongoClient.fromConnectionString[IO](uri)
+      ).tupled
+    }
+  )
+  private val sparkResource = ResourceSuiteLocalFixture(
+    "analytics-marker-spark",
+    Resource.make(
+      IO.blocking(
+        org.apache.spark.sql.classic.SparkSession
+          .builder()
+          .master("local[2]")
+          .appName("HiringDeletionMarkers")
+          .config("spark.ui.enabled", "false")
+          .config("spark.sql.shuffle.partitions", "2")
+          .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+          .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+          .getOrCreate()
+      )
+    )(spark => IO.blocking(spark.stop()))
+  )
+  override def munitFixtures: List[munit.AnyFixture[?]] = super.munitFixtures ++ List(clients, sparkResource)
+  private def mongoClient: MongoClient = clients()._1
+  private def mongo4catsClient: CatsMongoClient[IO] = clients()._2
+  private def spark: SparkSession = sparkResource()
 
   private def mongo4catsDatabase(name: String): mongo4cats.database.MongoDatabase[IO] =
     mongo4catsClient.getDatabase(name).unsafeRunSync()
@@ -62,44 +80,8 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     override def monotonic: IO[FiniteDuration] = IO.pure(0.nanos)
   }
 
-  override def beforeAll(): Unit = {
-    super.beforeAll()
-    mongoContainer = new MongoContainer
-    mongoContainer
-      .withExposedPorts(27017)
-      .withCommand("mongod", "--bind_ip_all")
-      .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-    mongoContainer.start()
-    mongoClient = MongoClients.create(
-      s"mongodb://${mongoContainer.getHost}:${mongoContainer.getMappedPort(27017)}"
-    )
-    val (client, release) = CatsMongoClient
-      .fromConnectionString[IO](s"mongodb://${mongoContainer.getHost}:${mongoContainer.getMappedPort(27017)}")
-      .allocated
-      .unsafeRunSync()
-    mongo4catsClient = client
-    releaseMongo4catsClient = release
-    spark = org.apache.spark.sql.classic.SparkSession
-      .builder()
-      .master("local[2]")
-      .appName("MongoActiveDeletionMarkerIntegrationSpec")
-      .config("spark.ui.enabled", "false")
-      .config("spark.sql.shuffle.partitions", "2")
-      .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-      .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-      .getOrCreate()
-  }
-
-  override def afterAll(): Unit = {
-    if (spark != null && !spark.sparkContext.isStopped) spark.stop()
-    if (mongoClient != null) mongoClient.close()
-    releaseMongo4catsClient.unsafeRunSync()
-    if (mongoContainer != null) mongoContainer.stop()
-    super.afterAll()
-  }
-
   test("Mongo marker source keeps unexpired completed markers active and ignores expired ones") {
-    val database = mongoClient.getDatabase(s"markers_${UUID.randomUUID()}")
+    val database = mongoClient.getDatabase(testDatabaseName)
     val requests = database.getCollection("analytics_erasure_requests")
     val source = new MongoActiveDeletionMarkerSource[IO](
       mongo4catsDatabase(database.getName),
@@ -138,7 +120,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   }
 
   test("Mongo marker source fails closed for an array-valued completed expiry") {
-    val database = mongoClient.getDatabase(s"array_expiry_${UUID.randomUUID()}")
+    val database = mongoClient.getDatabase(testDatabaseName)
     database
       .getCollection("analytics_erasure_requests")
       .insertOne(
@@ -157,7 +139,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   }
 
   test("missing or malformed Mongo marker data fails before any Delta mutation") {
-    val missingCollectionDatabase = mongoClient.getDatabase(s"missing_${UUID.randomUUID()}")
+    val missingCollectionDatabase = mongoClient.getDatabase(testDatabaseName)
     val missingPaths =
       IntegrationAnalyticsLakehousePaths.unsafe(Files.createTempDirectory("analytics-missing-markers").toUri.toString)
     val missingBatch = AnalyticsBatchTestSupport.newBatch(
@@ -182,7 +164,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, missingPaths.manifests), "assertion failed")
     assert(!io.delta.tables.DeltaTable.isDeltaTable(spark, missingPaths.bronze), "assertion failed")
 
-    val malformedDatabase = mongoClient.getDatabase(s"malformed_${UUID.randomUUID()}")
+    val malformedDatabase = mongoClient.getDatabase(testDatabaseName)
     malformedDatabase
       .getCollection("analytics_erasure_requests")
       .insertOne(new Document("_id", "not-a-uuid").append("state", "Pending"))
@@ -214,7 +196,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
     "array containing Complete" -> (_.append("state", List("Complete").asJava))
   ).foreach { case (label, malformedState) =>
     test(s"$label marker state fails before registry, report reservation, or Delta writes") {
-      val database = mongoClient.getDatabase(s"invalid_state_${UUID.randomUUID()}")
+      val database = mongoClient.getDatabase(testDatabaseName)
       database
         .getCollection("analytics_erasure_requests")
         .insertOne(
@@ -282,7 +264,7 @@ class MongoActiveDeletionMarkerIntegrationSpec extends FunSuite {
   }
 
   test("pending marker overflow fails before any Delta mutation") {
-    val database = mongoClient.getDatabase(s"overflow_${UUID.randomUUID()}")
+    val database = mongoClient.getDatabase(testDatabaseName)
     database
       .getCollection("analytics_erasure_requests")
       .insertMany(

@@ -322,7 +322,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         val eventId = UUID.randomUUID().toString
         val jobId = UUID.randomUUID().toString
         val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
-          s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$OldSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
+          s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$OldSubjectId","payload":{"job":{"jobId":"$jobId","status":"Open","skills":["Scala"]}}}"""
         val producer = new KafkaProducer[String, String](properties)
         try {
           val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()
@@ -430,7 +430,7 @@ object HmacKeyRetirementFixtureMain extends IOApp {
         val eventId = UUID.randomUUID().toString
         val jobId = UUID.randomUUID().toString
         val payload = s"""{"eventId":"$eventId","eventType":"JOB_CREATED","occurredAt":"$at", """ +
-          s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$NewControlSubjectId","payload":{"job":{"skills":["Scala"]}}}"""
+          s""""aggregateType":"Job","aggregateId":"$jobId","actorId":"$NewControlSubjectId","payload":{"job":{"jobId":"$jobId","status":"Open","skills":["Scala"]}}}"""
         val producer = new KafkaProducer[String, String](properties)
         try {
           val metadata = producer.send(new ProducerRecord[String, String](topic, eventId, payload)).get()

@@ -12,7 +12,6 @@ import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.service.application.{InterviewWorkflowWorker, InterviewWorkerSettings}
 import com.example.graphQL.cats.service.port.*
 import io.circe.Json
-import munit.CatsEffectSuite
 import org.bson.Document
 import java.nio.file.{Files, Path}
 import java.time.Instant
@@ -20,7 +19,7 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 /** Opt-in proof uses an isolated SASL broker; it never modifies the normal local topics. */
-final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
+final class InterviewSchedulingWorkerIntegrationSpec extends KafkaIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 8.minutes
 
   private def success[A](operation: RepositoryIO[A]): IO[A] = operation.value.flatMap {
@@ -28,30 +27,7 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
     case Left(error)  => IO.raiseError(new AssertionError(s"Interview repository failure: $error"))
   }
 
-  private def configuration: IO[Map[String, String]] = IO.blocking {
-    val file =
-      Path.of(sys.env.getOrElse("INTERVIEW_KAFKA_PROOF_ROOT", ".local/data/interview-kafka-proof"), "runtime.env")
-    if (!Files.exists(file)) Map.empty
-    else
-      Files
-        .readString(file)
-        .linesIterator
-        .filter(line => line.nonEmpty && !line.startsWith("#"))
-        .flatMap(line =>
-          line.split("=", 2).toList match {
-            case key :: value :: Nil =>
-              Some(
-                key.stripPrefix("export ").trim -> value.trim
-                  .stripPrefix("'")
-                  .stripSuffix("'")
-                  .stripPrefix("\"")
-                  .stripSuffix("\"")
-              )
-            case _ => None
-          }
-        )
-        .toMap
-  }
+  private def configuration: IO[Map[String, String]] = IO.delay(kafkaEnvironment)
 
   private def waitCompleted(
       repository: InterviewWorkflowRepository,
@@ -203,7 +179,10 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
           "interview_command_publisher",
           env("KAFKA_INTERVIEW_ORCHESTRATOR_PASSWORD"),
           KafkaSaslSecurityProtocol.Plaintext,
-          false
+          false,
+          topics = interviewTopics,
+          workerGroup = kafkaNamespace.workers,
+          orchestratorGroup = kafkaNamespace.orchestrator
         ),
         Diagnostics.noop
       ) {
@@ -216,7 +195,10 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
           "interview_result_publisher",
           env("KAFKA_INTERVIEW_WORKER_PASSWORD"),
           KafkaSaslSecurityProtocol.Plaintext,
-          true
+          true,
+          topics = interviewTopics,
+          workerGroup = kafkaNamespace.workers,
+          orchestratorGroup = kafkaNamespace.orchestrator
         ),
         Diagnostics.noop
       ) {
@@ -229,7 +211,10 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
           "interview_result_publisher",
           env("KAFKA_INTERVIEW_WORKER_PASSWORD"),
           KafkaSaslSecurityProtocol.Plaintext,
-          true
+          true,
+          topics = interviewTopics,
+          workerGroup = kafkaNamespace.workers,
+          orchestratorGroup = kafkaNamespace.orchestrator
         ),
         Diagnostics.noop
       ) {
@@ -254,11 +239,11 @@ final class InterviewSchedulingWorkerIntegrationSpec extends CatsEffectSuite {
       if (!env.get("INTERVIEW_KAFKA_EVIDENCE").contains("true"))
         IO.raiseError(new AssertionError("Isolated Kafka proof broker not configured"))
       else
-        MongoAccessEvaluationSupport.resource.use { fixture =>
+        mongoResource.use { fixture =>
           val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
           for {
             now <- IO.realTimeInstant
-            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+            _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, interviewTopics)
             recruiter = UserId(UUID.randomUUID())
             workflows = (0 until 32).toList.map { ordinal =>
               val interval =

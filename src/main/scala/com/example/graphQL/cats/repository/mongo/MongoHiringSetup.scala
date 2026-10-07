@@ -10,6 +10,7 @@ import com.mongodb.ReadPreference
 import org.bson.Document
 import org.bson.conversions.Bson
 import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.domain.workflow.InterviewTopicPair
 
 final case class AtlasSearchIndexConfig(
     jobVectorIndex: String,
@@ -88,6 +89,8 @@ object MongoHiringSetup {
 
   def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics): IO[Unit] =
     initialize(database, None, resetOnStart = false, diagnostics = diagnostics)
+  def initialize(database: MongoDatabase[IO], diagnostics: Diagnostics, topics: InterviewTopicPair): IO[Unit] =
+    initialize(database, None, resetOnStart = false, diagnostics = diagnostics, topics = topics)
   def initialize(
       database: MongoDatabase[IO],
       atlas: Option[AtlasSearchIndexConfig],
@@ -98,10 +101,11 @@ object MongoHiringSetup {
       database: MongoDatabase[IO],
       atlas: Option[AtlasSearchIndexConfig],
       resetOnStart: Boolean,
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      topics: InterviewTopicPair = InterviewTopicPair.Default
   ): IO[Unit] =
     setupDatabase(database).flatMap { setup =>
-      MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics) *>
+      MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics, topics) *>
         MongoHiringValidators.createUserValidator(database) *>
         MongoHiringValidators.createJobValidator(database) *>
         MongoHiringMigrations.verifyJobGeoPoints(setup) *>

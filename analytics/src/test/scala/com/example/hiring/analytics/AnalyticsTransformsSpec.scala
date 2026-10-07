@@ -104,14 +104,16 @@ class AnalyticsTransformsSpec extends FunSuite {
       id: String,
       eventType: String,
       aggregateType: String = "Application",
-      aggregateId: String = "application-1",
+      aggregateId: String = "a053804b-8231-3cb4-8074-834a69aaccab",
       payload: Option[String] = None,
-      actorId: String = "actor-1"
+      actorId: String = "d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686"
   ): String = {
     val defaultPayload =
-      s"""{"applicationId":"$aggregateId","candidateId":"candidate-1","jobId":"job-1","newStatus":"Hired"}"""
-    s"""{"eventId":"$id","eventType":"$eventType","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"$aggregateType","aggregateId":"$aggregateId","actorId":"$actorId","payload":${payload
-        .getOrElse(defaultPayload)}}"""
+      s"""{"applicationId":"$aggregateId","candidateId":"19b46da1-bee5-3018-b5f7-abe9a9fdfb29","jobId":"ac15a52e-59f3-33d6-9344-2a598ffab484","newStatus":"Hired"}"""
+    AnalyticsOperationalEventFixtures.complete(
+      s"""{"eventId":"$id","eventType":"$eventType","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"$aggregateType","aggregateId":"$aggregateId","actorId":"$actorId","payload":${payload
+          .getOrElse(defaultPayload)}}"""
+    )
   }
 
   private def emptyMarkers = AnalyticsSubjectPrivacy.emptyMarkers(records(Seq.empty))
@@ -126,8 +128,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("bronze deduplicates Kafka delivery by topic partition and offset") {
     val source = records(
       Seq(
-        ("hiring.operational-events", 0, 1L, event("event-1", "APPLICATION_CREATED")),
-        ("hiring.operational-events", 0, 1L, event("event-2", "APPLICATION_CREATED"))
+        ("hiring.operational-events", 0, 1L, event("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_CREATED")),
+        ("hiring.operational-events", 0, 1L, event("981f76e8-8247-32ae-a9db-598865bf6ba5", "APPLICATION_CREATED"))
       )
     )
     assertEquals(OperationalEventTransforms.bronze(source).count(), 1L)
@@ -153,7 +155,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       deltaWriter,
       AnalyticsTestOperationalConfig.operational.retention
     )
-    val payload = event("event-stream", "APPLICATION_CREATED")
+    val payload = event("610cb653-75fc-3d31-b2c6-3cd8cee7cd4c", "APPLICATION_CREATED")
     val parsed = OperationalEventTransforms.parseKafkaRecords(
       records(
         Seq(
@@ -178,8 +180,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("silver keeps identical event retries and quarantines conflicting event ids") {
-    val same = event("event-1", "APPLICATION_CREATED")
-    val conflict = event("event-1", "APPLICATION_STATUS_CHANGED")
+    val same = event("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_CREATED")
+    val conflict = event("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_STATUS_CHANGED")
     val parsed = OperationalEventTransforms.parseKafkaRecords(
       records(
         Seq(
@@ -196,7 +198,9 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("active marker exclusion reports each missing token column as a typed error") {
     val parsed = OperationalEventTransforms.parseKafkaRecords(
-      records(Seq(("hiring.operational-events", 0, 1L, event("event-1", "APPLICATION_CREATED"))))
+      records(
+        Seq(("hiring.operational-events", 0, 1L, event("fdc3f116-9f99-3ce6-b429-3eac7ddbba73", "APPLICATION_CREATED")))
+      )
     )
     val events = AnalyticsSubjectPrivacy.withSubjectToken(
       OperationalEventTransforms.validEvents(parsed),
@@ -220,7 +224,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val parsed = OperationalEventTransforms.parseKafkaRecords(
       records(
         Seq(
-          ("hiring.operational-events", 0, 1L, """{"eventId":"event-1"}""")
+          ("hiring.operational-events", 0, 1L, """{"eventId":"fdc3f116-9f99-3ce6-b429-3eac7ddbba73"}""")
         )
       )
     )
@@ -234,19 +238,29 @@ class AnalyticsTransformsSpec extends FunSuite {
         Seq(
           ("hiring.operational-events", 0, 1L, event("", "APPLICATION_CREATED")),
           ("hiring.operational-events", 0, 2L, event("   ", "APPLICATION_CREATED")),
-          ("hiring.operational-events", 0, 3L, event("event-3", "APPLICATION_CREATED", aggregateId = "")),
-          ("hiring.operational-events", 0, 4L, event("event-4", "APPLICATION_CREATED", aggregateId = "   ")),
+          (
+            "hiring.operational-events",
+            0,
+            3L,
+            event("b6a8a57b-5dc7-37dd-ba4d-33531056eab7", "APPLICATION_CREATED", aggregateId = "")
+          ),
+          (
+            "hiring.operational-events",
+            0,
+            4L,
+            event("fb6ec5db-c5ce-325a-876d-5eb7d3bd7cfd", "APPLICATION_CREATED", aggregateId = "   ")
+          ),
           (
             "hiring.operational-events",
             0,
             5L,
-            """{"eventId":"\t","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"application-5","actorId":"actor-1","payload":{}}"""
+            """{"eventId":"\t","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"6e8a2abc-74b9-35ea-aebb-6b275bbdfdf7","actorId":"d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686","payload":{}}"""
           ),
           (
             "hiring.operational-events",
             0,
             6L,
-            """{"eventId":"event-6","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"\n","actorId":"actor-1","payload":{}}"""
+            """{"eventId":"f208fd7c-ebf1-3cd6-a38e-6ce1c9e25278","eventType":"APPLICATION_CREATED","occurredAt":"2026-09-22T10:00:00Z","aggregateType":"Application","aggregateId":"\n","actorId":"d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686","payload":{}}"""
           )
         )
       )
@@ -262,13 +276,13 @@ class AnalyticsTransformsSpec extends FunSuite {
         0,
         index.toLong,
         event(
-          s"created-$index",
+          AnalyticsOperationalEventFixtures.id(s"created-$index"),
           "APPLICATION_CREATED",
-          aggregateId = s"application-$index",
+          aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
           payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
         )
       )
-    ) ++ Seq(("hiring.operational-events", 0, 11L, event("hired-1", "CANDIDATE_HIRED")))
+    ) ++ Seq(("hiring.operational-events", 0, 11L, event("b88def9c-77b1-3622-8c71-7e68ab9f49bf", "CANDIDATE_HIRED")))
     val silver = silverFrame(
       OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(events))),
       pseudonymizer,
@@ -293,9 +307,9 @@ class AnalyticsTransformsSpec extends FunSuite {
         0,
         index.toLong,
         event(
-          s"created-$index",
+          AnalyticsOperationalEventFixtures.id(s"created-$index"),
           "APPLICATION_CREATED",
-          aggregateId = s"application-$index",
+          aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
           payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
         )
       )
@@ -305,10 +319,12 @@ class AnalyticsTransformsSpec extends FunSuite {
       0,
       11L,
       event(
-        "accepted-1",
+        "547c73dd-1fd7-33e3-a346-9380e2c349ce",
         "APPLICATION_STATUS_CHANGED",
-        aggregateId = "application-1",
-        payload = Some("""{"applicationId":"application-1","candidateId":"candidate-1","newStatus":"Accepted"}""")
+        aggregateId = "a053804b-8231-3cb4-8074-834a69aaccab",
+        payload = Some(
+          """{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"19b46da1-bee5-3018-b5f7-abe9a9fdfb29","newStatus":"Accepted"}"""
+        )
       )
     )
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(created :+ oneAccepted))
@@ -320,15 +336,15 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("time-to-hire suppresses eligible and excluded counts when either is below ten") {
     val lifecycle = (1 to 10).flatMap { index =>
-      val applicationId = s"application-$index"
-      val candidateId = s"candidate-$index"
+      val applicationId = AnalyticsOperationalEventFixtures.id(s"application-$index")
+      val candidateId = AnalyticsOperationalEventFixtures.id(s"candidate-$index")
       Seq(
         (
           "hiring.operational-events",
           0,
           index.toLong * 2,
           event(
-            s"created-$index",
+            AnalyticsOperationalEventFixtures.id(s"created-$index"),
             "APPLICATION_CREATED",
             aggregateId = applicationId,
             payload = Some(s"""{"applicationId":"$applicationId","candidateId":"$candidateId"}""")
@@ -339,7 +355,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           index.toLong * 2 + 1,
           event(
-            s"hired-$index",
+            AnalyticsOperationalEventFixtures.id(s"hired-$index"),
             "APPLICATION_STATUS_CHANGED",
             aggregateId = applicationId,
             payload = Some(s"""{"applicationId":"$applicationId","candidateId":"$candidateId","newStatus":"Hired"}""")
@@ -351,10 +367,12 @@ class AnalyticsTransformsSpec extends FunSuite {
       0,
       21L,
       event(
-        "excluded",
+        "c2413b3d-6b01-32ee-a6c1-ee1a90828706",
         "APPLICATION_CREATED",
-        aggregateId = "application-excluded",
-        payload = Some("""{"applicationId":"application-excluded","candidateId":"candidate-excluded"}""")
+        aggregateId = "3d89000a-69ef-382c-b534-bc125b2cf007",
+        payload = Some(
+          """{"applicationId":"3d89000a-69ef-382c-b534-bc125b2cf007","candidateId":"99aa6ff6-e03c-3532-98b4-80c5b0b0d977"}"""
+        )
       )
     )
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(lifecycle))
@@ -366,14 +384,14 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("ten eligible applications from one subject do not satisfy time-to-hire suppression") {
     val lifecycle = (1 to 10).flatMap { index =>
-      val applicationId = s"application-$index"
+      val applicationId = AnalyticsOperationalEventFixtures.id(s"application-$index")
       Seq(
         (
           "hiring.operational-events",
           0,
           index.toLong * 2,
           event(
-            s"created-$index",
+            AnalyticsOperationalEventFixtures.id(s"created-$index"),
             "APPLICATION_CREATED",
             aggregateId = applicationId,
             payload = Some(s"""{"applicationId":"$applicationId","candidateId":"same-candidate"}""")
@@ -384,7 +402,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           index.toLong * 2 + 1,
           event(
-            s"hired-$index",
+            AnalyticsOperationalEventFixtures.id(s"hired-$index"),
             "APPLICATION_STATUS_CHANGED",
             aggregateId = applicationId,
             payload = Some(s"""{"applicationId":"$applicationId","candidateId":"same-candidate","newStatus":"Hired"}""")
@@ -406,11 +424,29 @@ class AnalyticsTransformsSpec extends FunSuite {
         "hiring.operational-events",
         0,
         index.toLong,
-        event(s"job-$index", "JOB_CREATED", "Job", s"job-$index", Some(payload), actorId = s"recruiter-$index")
+        event(
+          AnalyticsOperationalEventFixtures.id(s"job-$index"),
+          "JOB_CREATED",
+          "Job",
+          AnalyticsOperationalEventFixtures.id(s"job-$index"),
+          Some(payload),
+          actorId = AnalyticsOperationalEventFixtures.id(s"recruiter-$index")
+        )
       )
     )
     val update =
-      ("hiring.operational-events", 0, 20L, event("update-1", "JOB_UPDATED", "Job", "job-update", Some(payload)))
+      (
+        "hiring.operational-events",
+        0,
+        20L,
+        event(
+          "bd71f607-f8d6-3452-9cfd-bcdb312263e0",
+          "JOB_UPDATED",
+          "Job",
+          "8e2744bf-6b88-339b-97ea-fe3290044a7b",
+          Some(payload)
+        )
+      )
     val silver = silverFrame(
       OperationalEventTransforms.validEvents(OperationalEventTransforms.parseKafkaRecords(records(created :+ update))),
       pseudonymizer,
@@ -429,7 +465,13 @@ class AnalyticsTransformsSpec extends FunSuite {
         "hiring.operational-events",
         0,
         index.toLong,
-        event(s"job-$index", "JOB_CREATED", "Job", s"job-$index", Some(payload))
+        event(
+          AnalyticsOperationalEventFixtures.id(s"job-$index"),
+          "JOB_CREATED",
+          "Job",
+          AnalyticsOperationalEventFixtures.id(s"job-$index"),
+          Some(payload)
+        )
       )
     )
     val parsed = OperationalEventTransforms.parseKafkaRecords(records(created))
@@ -555,16 +597,21 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           index.toLong,
           event(
-            s"created-$index",
+            AnalyticsOperationalEventFixtures.id(s"created-$index"),
             "APPLICATION_CREATED",
-            aggregateId = s"application-$index",
+            aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
             payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
           )
         )
       ) ++ Seq(
-        ("hiring.operational-events", 0, 11L, event("bad", "APPLICATION_CREATED")),
-        ("hiring.operational-events", 0, 12L, event("bad", "APPLICATION_STATUS_CHANGED")),
-        ("hiring.operational-events", 0, 13L, event("outside", "APPLICATION_CREATED"))
+        ("hiring.operational-events", 0, 11L, event("bae60998-ffe4-323b-931e-3d6e4c19993e", "APPLICATION_CREATED")),
+        (
+          "hiring.operational-events",
+          0,
+          12L,
+          event("bae60998-ffe4-323b-931e-3d6e4c19993e", "APPLICATION_STATUS_CHANGED")
+        ),
+        ("hiring.operational-events", 0, 13L, event("c3016361-5770-38b2-b887-3288e828de41", "APPLICATION_CREATED"))
       )
     )
     val manifest =
@@ -598,9 +645,14 @@ class AnalyticsTransformsSpec extends FunSuite {
     val lakehouse = Files.createTempDirectory("hiring-analytics-conflict-metrics").toUri.toString.stripSuffix("/")
     val input = records(
       Seq(
-        ("hiring.operational-events", 0, 1L, event("event-conflict", "APPLICATION_CREATED")),
-        ("hiring.operational-events", 0, 2L, event("event-conflict", "APPLICATION_CREATED")),
-        ("hiring.operational-events", 0, 3L, event("event-conflict", "APPLICATION_STATUS_CHANGED"))
+        ("hiring.operational-events", 0, 1L, event("f218881d-88d8-3ba4-bb2a-c095006f866f", "APPLICATION_CREATED")),
+        ("hiring.operational-events", 0, 2L, event("f218881d-88d8-3ba4-bb2a-c095006f866f", "APPLICATION_CREATED")),
+        (
+          "hiring.operational-events",
+          0,
+          3L,
+          event("f218881d-88d8-3ba4-bb2a-c095006f866f", "APPLICATION_STATUS_CHANGED")
+        )
       )
     )
     val manifest = validatedManifest(
@@ -630,7 +682,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       fixedClock(Instant.parse("2026-09-22T12:00:00Z"))
     )
     val original = records(
-      Seq(("hiring.operational-events", 0, 1L, event("historical-event", "APPLICATION_CREATED")))
+      Seq(("hiring.operational-events", 0, 1L, event("1885f141-e20c-3605-8e64-57298ba20506", "APPLICATION_CREATED")))
     )
     val changed = records(
       Seq(
@@ -639,9 +691,11 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           2L,
           event(
-            "historical-event",
+            "1885f141-e20c-3605-8e64-57298ba20506",
             "APPLICATION_CREATED",
-            payload = Some("""{"applicationId":"application-1","candidateId":"candidate-2"}""")
+            payload = Some(
+              """{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"d625db79-80ee-34f9-8fc1-0fb01896355f"}"""
+            )
           )
         )
       )
@@ -738,9 +792,9 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           index.toLong,
           event(
-            s"created-$index",
+            AnalyticsOperationalEventFixtures.id(s"created-$index"),
             "APPLICATION_CREATED",
-            aggregateId = s"application-$index",
+            aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
             payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
           )
         )
@@ -770,7 +824,7 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("new raw Delta tables retain replay bytes without copying raw values into transaction log statistics") {
     val lakehouse = Files.createTempDirectory("hiring-analytics-private-delta-stats").toUri.toString.stripSuffix("/")
     val paths = TestAnalyticsLakehousePaths.unsafe(lakehouse)
-    val sensitiveMarker = "raw-log-personal-sentinel-8f17c2"
+    val sensitiveMarker = AnalyticsOperationalEventFixtures.id("raw-log-personal-sentinel-8f17c2")
     val input = records(
       Seq(
         (
@@ -778,7 +832,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           0L,
           event(
-            "private-stats-event",
+            "595c7311-0ae1-39fc-b4cf-167c398ea47c",
             "APPLICATION_CREATED",
             aggregateId = "private-stats-application",
             payload = Some(s"""{"applicationId":"private-stats-application","candidateId":"$sensitiveMarker"}""")
@@ -866,7 +920,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           event(
             s"publication-failure-$index",
             "APPLICATION_CREATED",
-            aggregateId = s"application-$index",
+            aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
             payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
           )
         )
@@ -936,7 +990,7 @@ class AnalyticsTransformsSpec extends FunSuite {
           event(
             s"manifest-retry-$index",
             "APPLICATION_CREATED",
-            aggregateId = s"application-$index",
+            aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
             payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
           )
         )
@@ -1084,9 +1138,9 @@ class AnalyticsTransformsSpec extends FunSuite {
         0,
         index.toLong,
         event(
-          s"created-$index",
+          AnalyticsOperationalEventFixtures.id(s"created-$index"),
           "APPLICATION_CREATED",
-          aggregateId = s"application-$index",
+          aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$index"),
           payload = Some(s"""{"applicationId":"application-$index","candidateId":"candidate-$index"}""")
         )
       )
@@ -1111,17 +1165,19 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           11L,
           event(
-            "created-1",
+            "f2e7cb06-206a-3ab5-902a-1458ee7d0fe2",
             "APPLICATION_CREATED",
-            aggregateId = "application-1",
-            payload = Some("""{"applicationId":"application-1","candidateId":"candidate-1"}""")
+            aggregateId = "a053804b-8231-3cb4-8074-834a69aaccab",
+            payload = Some(
+              """{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"19b46da1-bee5-3018-b5f7-abe9a9fdfb29"}"""
+            )
           )
         ),
         ("hiring.operational-events", 0, 12L, "not-json")
       )
     )
     val token = SubjectToken
-      .fromHmac(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1"))
+      .fromHmac(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))
       .toOption
       .get
     val markers = markerFrame(Seq(token.value))
@@ -1158,8 +1214,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("data frame source honors the manifest offset boundary") {
     val source = records(
       Seq(
-        ("hiring.operational-events", 0, 1L, event("in", "APPLICATION_CREATED")),
-        ("hiring.operational-events", 0, 2L, event("out", "APPLICATION_CREATED"))
+        ("hiring.operational-events", 0, 1L, event("13b5bfe9-6f3e-3fe4-91c9-f66f4a582adf", "APPLICATION_CREATED")),
+        ("hiring.operational-events", 0, 2L, event("c68271a6-3ddb-3431-8307-beb7d2918275", "APPLICATION_CREATED"))
       )
     )
     val manifest =
@@ -1197,8 +1253,8 @@ class AnalyticsTransformsSpec extends FunSuite {
   test("missing partition and interior offset gaps fail before a manifest is written") {
     val input = records(
       Seq(
-        ("topic", 0, 1L, event("first", "APPLICATION_CREATED")),
-        ("topic", 0, 3L, event("third", "APPLICATION_CREATED"))
+        ("topic", 0, 1L, event("8b04d5e3-775d-398e-b845-5efc5ca404d5", "APPLICATION_CREATED")),
+        ("topic", 0, 3L, event("dd5c8bf5-1558-3fcb-a500-7071908e9524", "APPLICATION_CREATED"))
       )
     )
     val scenarios = Vector(
@@ -1235,17 +1291,23 @@ class AnalyticsTransformsSpec extends FunSuite {
   }
 
   test("subject tokens are deterministic opaque HMAC values") {
-    val token = AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")
-    assertEquals(token, AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1"))
-    assertNotEquals(token, AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-2"))
-    assert(!token.contains("candidate-1"))
+    val token = AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29")
+    assertEquals(
+      token,
+      AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29")
+    )
+    assertNotEquals(
+      token,
+      AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "d625db79-80ee-34f9-8fc1-0fb01896355f")
+    )
+    assert(!token.contains("19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))
     assert(token.startsWith("hmac-v1_"))
     assertEquals(pseudonymizer.typedToken(null), Left("subject id must be non-empty"))
     assertEquals(pseudonymizer.typedToken(""), Left("subject id must be non-empty"))
   }
 
   test("pseudonymizer tokens remain deterministic across serialization and concurrent calls") {
-    val subjectIds = Vector.tabulate(128)(index => s"candidate-$index")
+    val subjectIds = Vector.tabulate(128)(index => AnalyticsOperationalEventFixtures.id(s"candidate-$index"))
     val expected = subjectIds.map(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, _))
     val bytes = new java.io.ByteArrayOutputStream()
     val output = new java.io.ObjectOutputStream(bytes)
@@ -1334,15 +1396,15 @@ class AnalyticsTransformsSpec extends FunSuite {
     val oldKey = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", oldSecret, Vector.empty)
     val rotating = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v2", newSecret, Vector("hmac-v1" -> oldSecret))
     assertNotEquals(
-      AnalyticsTestSubjectPseudonymizer.tokenValue(rotating, "candidate-1"),
-      AnalyticsTestSubjectPseudonymizer.tokenValue(oldKey, "candidate-1")
+      AnalyticsTestSubjectPseudonymizer.tokenValue(rotating, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"),
+      AnalyticsTestSubjectPseudonymizer.tokenValue(oldKey, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29")
     )
     assertEquals(
-      rotating.matchingTokens("candidate-1"),
+      rotating.matchingTokens("19b46da1-bee5-3018-b5f7-abe9a9fdfb29"),
       Right(
         Vector(
-          AnalyticsTestSubjectPseudonymizer.token(rotating, "candidate-1"),
-          AnalyticsTestSubjectPseudonymizer.token(oldKey, "candidate-1")
+          AnalyticsTestSubjectPseudonymizer.token(rotating, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"),
+          AnalyticsTestSubjectPseudonymizer.token(oldKey, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29")
         )
       )
     )
@@ -1404,31 +1466,41 @@ class AnalyticsTransformsSpec extends FunSuite {
             "hiring.operational-events",
             0,
             1L,
-            event("deleted", "APPLICATION_CREATED", aggregateId = "application-deleted")
+            event(
+              "da602f0b-162f-3cbf-ab15-0cfcfc7a7379",
+              "APPLICATION_CREATED",
+              aggregateId = "49c89f22-c51f-33e7-a79e-8a532c7a402f"
+            )
           ),
           (
             "hiring.operational-events",
             0,
             2L,
             event(
-              "kept",
+              "4d8b6084-f3d1-37b7-acac-66a22a91be02",
               "APPLICATION_CREATED",
-              aggregateId = "application-kept",
-              payload =
-                Some("{\"applicationId\":\"application-kept\",\"candidateId\":\"candidate-2\",\"jobId\":\"job-1\"}")
+              aggregateId = "b0558b6a-c929-3254-9528-526129ef32e9",
+              payload = Some(
+                "{\"applicationId\":\"b0558b6a-c929-3254-9528-526129ef32e9\",\"candidateId\":\"d625db79-80ee-34f9-8fc1-0fb01896355f\",\"jobId\":\"ac15a52e-59f3-33d6-9344-2a598ffab484\"}"
+              )
             )
           )
         )
       )
     )
-    val markers = markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")))
+    val markers = markerFrame(
+      Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))
+    )
     val silver =
       silverFrame(OperationalEventTransforms.validEvents(parsed), pseudonymizer, markers)
 
-    assertEquals(silver.select("eventId").collect().map(_.getString(0)).toSet, Set("kept"))
+    assertEquals(
+      silver.select("eventId").collect().map(_.getString(0)).toSet,
+      Set("4d8b6084-f3d1-37b7-acac-66a22a91be02")
+    )
     assertEquals(
       silver.select("subjectToken").collect().map(_.getString(0)).toSet,
-      Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-2"))
+      Set(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "d625db79-80ee-34f9-8fc1-0fb01896355f"))
     )
     assert(!silver.columns.contains("actorId"))
     assert(!silver.columns.contains("candidateId"))
@@ -1442,9 +1514,11 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           1L,
           event(
-            "application-event",
+            "cec344a4-e505-3e72-8e87-ed35941dd79a",
             "APPLICATION_CREATED",
-            payload = Some("""{"applicationId":"application-1","candidateId":"candidate-2"}""")
+            payload = Some(
+              """{"applicationId":"a053804b-8231-3cb4-8074-834a69aaccab","candidateId":"d625db79-80ee-34f9-8fc1-0fb01896355f"}"""
+            )
           )
         ),
         (
@@ -1452,14 +1526,14 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           2L,
           event(
-            "candidate-search",
+            "0086e2ca-ae2c-3261-94d1-2d92fb27a252",
             "SEARCH_PERFORMED",
             aggregateType = "Search",
-            aggregateId = "search-1",
+            aggregateId = "0df3d37e-b815-30ee-98f3-08fb0c065aef",
             payload = Some(
-              """{"searchKind":"candidateMatches","results":[{"resultId":"candidate-3"},{"resultId":"candidate-3"}]}"""
+              """{"searchKind":"candidateMatches","results":[{"resultId":"0c3c3b04-71bf-3560-a3a5-50b1169c5876"},{"resultId":"0c3c3b04-71bf-3560-a3a5-50b1169c5876"}]}"""
             ),
-            actorId = "candidate-3"
+            actorId = "0c3c3b04-71bf-3560-a3a5-50b1169c5876"
           )
         )
       )
@@ -1475,21 +1549,23 @@ class AnalyticsTransformsSpec extends FunSuite {
       .toMap
 
     assertEquals(
-      tokenRows("application-event").toSet,
+      tokenRows("cec344a4-e505-3e72-8e87-ed35941dd79a").toSet,
       Set(
-        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "actor-1"),
-        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-2")
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686"),
+        AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "d625db79-80ee-34f9-8fc1-0fb01896355f")
       )
     )
     assertEquals(
-      tokenRows("candidate-search"),
-      List(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-3"))
+      tokenRows("0086e2ca-ae2c-3261-94d1-2d92fb27a252"),
+      List(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "0c3c3b04-71bf-3560-a3a5-50b1169c5876"))
     )
     assertEquals(
       silverFrame(
         valid,
         pseudonymizer,
-        markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "actor-1")))
+        markerFrame(
+          Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686"))
+        )
       ).count(),
       1L
     )
@@ -1497,12 +1573,14 @@ class AnalyticsTransformsSpec extends FunSuite {
       silverFrame(
         valid,
         pseudonymizer,
-        markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-3")))
+        markerFrame(
+          Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "0c3c3b04-71bf-3560-a3a5-50b1169c5876"))
+        )
       ).select("eventId")
         .collect()
         .map(_.getString(0))
         .toSet,
-      Set("application-event")
+      Set("cec344a4-e505-3e72-8e87-ed35941dd79a")
     )
   }
 
@@ -1513,7 +1591,12 @@ class AnalyticsTransformsSpec extends FunSuite {
           "hiring.operational-events",
           0,
           3L,
-          event("unattributed", "APPLICATION_CREATED", payload = Some("{\"candidateId\":\"\"}"), actorId = "")
+          event(
+            "57a7c4f3-03b4-3b62-8f64-f3d007693074",
+            "APPLICATION_CREATED",
+            payload = Some("{\"candidateId\":\"\"}"),
+            actorId = ""
+          )
         )
       )
     )
@@ -1538,9 +1621,11 @@ class AnalyticsTransformsSpec extends FunSuite {
           0,
           1L,
           event(
-            "rotation-application",
+            "2a6934c7-1841-3fd9-9c62-70106f69dcea",
             "APPLICATION_CREATED",
-            payload = Some("""{"applicationId":"rotation-app","candidateId":"rotation-candidate"}""")
+            payload = Some(
+              """{"applicationId":"da28936a-8a76-3972-879c-180dbbce1261","candidateId":"ebba39fc-4f0c-31e6-ac11-0a190dd060ce"}"""
+            )
           )
         )
       )
@@ -1550,23 +1635,23 @@ class AnalyticsTransformsSpec extends FunSuite {
     val tokens = attributed.getAs[scala.collection.Seq[String]]("subjectTokens").toSet
     assertEquals(
       attributed.getAs[String]("subjectToken"),
-      AnalyticsTestSubjectPseudonymizer.tokenValue(current, "rotation-candidate")
+      AnalyticsTestSubjectPseudonymizer.tokenValue(current, "ebba39fc-4f0c-31e6-ac11-0a190dd060ce")
     )
     assertEquals(
       tokens,
       Set(
-        AnalyticsTestSubjectPseudonymizer.tokenValue(current, "actor-1"),
-        AnalyticsTestSubjectPseudonymizer.tokenValue(current, "rotation-candidate")
+        AnalyticsTestSubjectPseudonymizer.tokenValue(current, "d3d4e2cb-8e0c-3a66-8cc2-1379ac3a7686"),
+        AnalyticsTestSubjectPseudonymizer.tokenValue(current, "ebba39fc-4f0c-31e6-ac11-0a190dd060ce")
       )
     )
     assertEquals(
-      current.matchingTokens("rotation-candidate"),
+      current.matchingTokens("ebba39fc-4f0c-31e6-ac11-0a190dd060ce"),
       Right(
         Vector(
-          AnalyticsTestSubjectPseudonymizer.token(current, "rotation-candidate"),
+          AnalyticsTestSubjectPseudonymizer.token(current, "ebba39fc-4f0c-31e6-ac11-0a190dd060ce"),
           AnalyticsTestSubjectPseudonymizer.token(
             AnalyticsTestSubjectPseudonymizer.fromSecret(oldSecret),
-            "rotation-candidate"
+            "ebba39fc-4f0c-31e6-ac11-0a190dd060ce"
           )
         )
       )
@@ -1596,8 +1681,8 @@ class AnalyticsTransformsSpec extends FunSuite {
       .createDataFrame(
         Seq(
           Row(
-            AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1"),
-            Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1")),
+            AnalyticsTestSubjectPseudonymizer.tokenValue(old, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"),
+            Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(old, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29")),
             Timestamp.from(Instant.now().plusSeconds(3600L))
           )
         ).asJava,
@@ -1652,8 +1737,8 @@ class AnalyticsTransformsSpec extends FunSuite {
     val stored = spark.createDataFrame(
       Seq(
         Row(
-          AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1"),
-          Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(rotating, "candidate-1"))
+          AnalyticsTestSubjectPseudonymizer.tokenValue(old, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"),
+          Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(rotating, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))
         )
       ).asJava,
       StructType(
@@ -1697,7 +1782,9 @@ class AnalyticsTransformsSpec extends FunSuite {
     val pseudonymizer = AnalyticsTestSubjectPseudonymizer.fromSecret(hmacKey("legacy-key-material"))
     spark
       .createDataFrame(
-        Seq(Row(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1"))).asJava,
+        Seq(
+          Row(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))
+        ).asJava,
         StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
       )
       .write
@@ -1722,7 +1809,7 @@ class AnalyticsTransformsSpec extends FunSuite {
     val old = AnalyticsTestSubjectPseudonymizer.fromKeyRing("hmac-v1", hmacKey("old-unanchored-key"), Vector.empty)
     spark
       .createDataFrame(
-        Seq(Row(AnalyticsTestSubjectPseudonymizer.tokenValue(old, "candidate-1"))).asJava,
+        Seq(Row(AnalyticsTestSubjectPseudonymizer.tokenValue(old, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))).asJava,
         StructType(Seq(StructField("subjectToken", StringType, nullable = false)))
       )
       .write
@@ -1753,7 +1840,11 @@ class AnalyticsTransformsSpec extends FunSuite {
     val batch = newBatch(paths, pseudonymizer, unavailableMarkers)
     val source =
       DataFrameBatchSource[IO](
-        records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED"))))
+        records(
+          Seq(
+            ("hiring.operational-events", 0, 0L, event("41196390-92e6-3c55-aa8b-e348e4d9260d", "APPLICATION_CREATED"))
+          )
+        )
       )
     intercept[AnalyticsError.MissingMarkerCollection.type] {
       batch
@@ -1820,7 +1911,11 @@ class AnalyticsTransformsSpec extends FunSuite {
     )
     val source =
       DataFrameBatchSource[IO](
-        records(Seq(("hiring.operational-events", 0, 0L, event("event", "APPLICATION_CREATED"))))
+        records(
+          Seq(
+            ("hiring.operational-events", 0, 0L, event("41196390-92e6-3c55-aa8b-e348e4d9260d", "APPLICATION_CREATED"))
+          )
+        )
       )
     intercept[AnalyticsError.LakehouseFailure] {
       batch
@@ -1846,22 +1941,26 @@ class AnalyticsTransformsSpec extends FunSuite {
       paths,
       pseudonymizer,
       DataFrameDeletionMarkerSource[IO](
-        markerFrame(Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "candidate-1")))
+        markerFrame(
+          Seq(AnalyticsTestSubjectPseudonymizer.tokenValue(pseudonymizer, "19b46da1-bee5-3018-b5f7-abe9a9fdfb29"))
+        )
       )
     )
     val source = DataFrameBatchSource[IO](
       records(
         Seq(
-          ("hiring.operational-events", 0, 0L, event("deleted", "APPLICATION_CREATED")),
+          ("hiring.operational-events", 0, 0L, event("da602f0b-162f-3cbf-ab15-0cfcfc7a7379", "APPLICATION_CREATED")),
           (
             "hiring.operational-events",
             0,
             1L,
             event(
-              "retained",
+              "59fcc6f9-5cc4-37f5-ab1f-f33f516582d2",
               "APPLICATION_CREATED",
-              aggregateId = "application-retained",
-              payload = Some("""{"applicationId":"application-retained","candidateId":"candidate-2"}""")
+              aggregateId = "db64e3b2-4dab-3291-b11a-8a6a8ae6d7a9",
+              payload = Some(
+                """{"applicationId":"db64e3b2-4dab-3291-b11a-8a6a8ae6d7a9","candidateId":"d625db79-80ee-34f9-8fc1-0fb01896355f"}"""
+              )
             )
           ),
           ("hiring.operational-events", 0, 2L, "{\"eventId\":\"malformed\"}")
@@ -1880,7 +1979,7 @@ class AnalyticsTransformsSpec extends FunSuite {
 
     assertEquals(publication.outcome, AnalyticsRunOutcome.QualityBlocked)
     assertEquals(bronze.count(), 1L)
-    assertEquals(bronze.select("eventId").head().getString(0), "retained")
+    assertEquals(bronze.select("eventId").head().getString(0), "59fcc6f9-5cc4-37f5-ab1f-f33f516582d2")
     assert(!quarantine.columns.contains("rawValue"))
     assert(!quarantine.columns.contains("actorId"))
     assert(
@@ -1924,8 +2023,8 @@ class AnalyticsTransformsSpec extends FunSuite {
     val root = Files.createTempDirectory("analytics-subject-maintenance")
     val paths = TestAnalyticsLakehousePaths.unsafe(root.toString)
     val at = Instant.parse("2026-09-22T12:00:00Z")
-    val deletedToken = pseudonymizer.typedToken("candidate-deleted").toOption.get
-    val retainedToken = pseudonymizer.typedToken("candidate-retained").toOption.get
+    val deletedToken = pseudonymizer.typedToken("be5aec4f-aa27-3196-bb0b-913181e79e8c").toOption.get
+    val retainedToken = pseudonymizer.typedToken("aba639fc-ca10-35ce-9f4b-7754593ce359").toOption.get
     val rawSchema = StructType(
       Seq(
         StructField("rawValue", StringType, nullable = false),
@@ -1938,10 +2037,14 @@ class AnalyticsTransformsSpec extends FunSuite {
       spark
         .createDataFrame(
           Vector(
-            Row("deleted", Seq(deletedToken.value), Timestamp.from(at.plusSeconds(86400))),
-            Row("retained", Seq(retainedToken.value), Timestamp.from(at.plusSeconds(86400))),
+            Row("da602f0b-162f-3cbf-ab15-0cfcfc7a7379", Seq(deletedToken.value), Timestamp.from(at.plusSeconds(86400))),
+            Row(
+              "59fcc6f9-5cc4-37f5-ab1f-f33f516582d2",
+              Seq(retainedToken.value),
+              Timestamp.from(at.plusSeconds(86400))
+            ),
             Row("expired", Seq(retainedToken.value), Timestamp.from(at)),
-            Row("unattributed", Seq.empty[String], Timestamp.from(at.plusSeconds(86400)))
+            Row("57a7c4f3-03b4-3b62-8f64-f3d007693074", Seq.empty[String], Timestamp.from(at.plusSeconds(86400)))
           ).asJava,
           rawSchema
         )
@@ -1959,7 +2062,7 @@ class AnalyticsTransformsSpec extends FunSuite {
         event(
           s"maintenance-$name",
           "APPLICATION_CREATED",
-          aggregateId = s"application-$name",
+          aggregateId = AnalyticsOperationalEventFixtures.id(s"application-$name"),
           payload = Some(s"""{"applicationId":"application-$name","candidateId":"candidate-$name"}""")
         )
       )
@@ -1973,7 +2076,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       .withColumn(
         "expiresAt",
         org.apache.spark.sql.functions
-          .when(col("eventId") === "maintenance-expired", lit(Timestamp.from(at)))
+          .when(col("eventId") === AnalyticsOperationalEventFixtures.id("maintenance-expired"), lit(Timestamp.from(at)))
           .otherwise(lit(Timestamp.from(at.plusSeconds(86400))))
       )
     silver.coalesce(1).write.format("delta").save(paths.silver)
@@ -1997,12 +2100,12 @@ class AnalyticsTransformsSpec extends FunSuite {
     rawPaths.foreach(path =>
       assertEquals(
         spark.read.format("delta").load(path).select("rawValue").collect().map(_.getString(0)).toVector,
-        Vector("retained")
+        Vector("59fcc6f9-5cc4-37f5-ab1f-f33f516582d2")
       )
     )
     assertEquals(
       spark.read.format("delta").load(paths.silver).select("eventId").collect().map(_.getString(0)).toVector.sorted,
-      retainedNames.map(name => s"maintenance-$name").toVector.sorted
+      retainedNames.map(name => AnalyticsOperationalEventFixtures.id(s"maintenance-$name")).toVector.sorted
     )
     assertEquals(spark.read.format("delta").load(paths.funnelGold).select("created").first().getLong(0), 10L)
     val before = currentFiles
@@ -2048,13 +2151,17 @@ class AnalyticsTransformsSpec extends FunSuite {
 
   test("erasure marker matching shares array, scalar, and unattributed row semantics") {
     val marker = spark.createDataFrame(
-      Vector(Row("deleted"), Row("deleted"), Row(null)).asJava,
+      Vector(
+        Row("da602f0b-162f-3cbf-ab15-0cfcfc7a7379"),
+        Row("da602f0b-162f-3cbf-ab15-0cfcfc7a7379"),
+        Row(null)
+      ).asJava,
       StructType(Seq(StructField("subjectToken", StringType, nullable = true)))
     )
     val arrayRows = spark.createDataFrame(
       Vector(
-        Row("array-hit", Seq("deleted", "alias")),
-        Row("array-miss", Seq("retained")),
+        Row("array-hit", Seq("da602f0b-162f-3cbf-ab15-0cfcfc7a7379", "alias")),
+        Row("array-miss", Seq("59fcc6f9-5cc4-37f5-ab1f-f33f516582d2")),
         Row("array-empty", Seq.empty[String])
       ).asJava,
       StructType(
@@ -2065,7 +2172,10 @@ class AnalyticsTransformsSpec extends FunSuite {
       )
     )
     val scalarRows = spark.createDataFrame(
-      Vector(Row("scalar-hit", "deleted"), Row("scalar-miss", "retained")).asJava,
+      Vector(
+        Row("scalar-hit", "da602f0b-162f-3cbf-ab15-0cfcfc7a7379"),
+        Row("scalar-miss", "59fcc6f9-5cc4-37f5-ab1f-f33f516582d2")
+      ).asJava,
       StructType(
         Seq(
           StructField("rowId", StringType, nullable = false),

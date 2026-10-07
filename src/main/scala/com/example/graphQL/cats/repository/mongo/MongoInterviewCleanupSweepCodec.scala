@@ -12,6 +12,12 @@ import scala.jdk.CollectionConverters.*
 /** Raw BSON identities remain private to Mongo; $literal protects expression-shaped stored keys. */
 private[mongo] object MongoInterviewCleanupSweepCodec {
   val PageSize = 32
+  val ActiveIndex = "interview_cleanup_active_identity"
+  val ActiveStates: Vector[String] = Vector("Pending", "ProducersFenced", "MongoPurged", "AwaitingRetention")
+  def activeFilter: BsonDocument = new BsonDocument(
+    "state",
+    new BsonDocument("$in", new BsonArray(ActiveStates.map(new BsonString(_)).toList.asJava))
+  )
   private val CursorJson = JsonWriterSettings.builder().outputMode(JsonMode.EXTENDED).build()
 
   final case class Sweep(afterId: Option[BsonValue], throughId: BsonValue, startedAt: Instant)
@@ -24,7 +30,7 @@ private[mongo] object MongoInterviewCleanupSweepCodec {
     val requested = new BsonString("$requestedAt")
     val scalarDate = expression("$eq", new BsonDocument("$type", requested), new BsonString("date"))
     val beforeStart = expression("$lte", requested, literal(new BsonDateTime(startedAt.toEpochMilli)))
-    new BsonDocument("state", new BsonDocument("$ne", new BsonString("Complete")))
+    activeFilter
       .append("$expr", expression("$or", expression("$not", scalarDate), beforeStart))
   }
 
@@ -40,6 +46,11 @@ private[mongo] object MongoInterviewCleanupSweepCodec {
       .catchNonFatal(row.toBsonDocument(classOf[Document], MongoClientSettings.getDefaultCodecRegistry))
       .leftMap(_ => RepositoryError.InvalidStoredData)
       .flatMap(value => Option(value.get("_id")).toRight(RepositoryError.InvalidStoredData))
+
+  /** Unlike query comparison type bracketing, expression ordering traverses every stored identity type. */
+  def afterFilter(after: Option[BsonValue]): Bson = after.fold[Bson](new BsonDocument()) { value =>
+    new BsonDocument("$expr", expression("$gt", new BsonString("$_id"), literal(value)))
+  }
 
   def encode(sweep: Sweep, after: BsonValue): InterviewCleanupCursor =
     InterviewCleanupCursor.fromEncoded(

@@ -123,24 +123,35 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
     value
   }
 
-  private def seedOutboxEvent(database: MongoDatabase, subjectId: String, state: String): String = {
+  private def seedOutboxEvent(database: MongoDatabase, subjectId: String, topic: String, state: String): String = {
     assert(Set("Published", "Retryable").contains(state))
     val now = new Date()
     val eventId = UUID.randomUUID().toString
+    val searchId = UUID.randomUUID().toString
+    val payload = new Document("searchId", searchId)
+      .append("searchKind", "jobs")
+      .append("results", java.util.List.of[Document]())
     val eventJson =
-      s"""{"eventId":"$eventId","eventType":"SEARCH_PERFORMED","occurredAt":"${now.toInstant}","aggregateType":"Search","aggregateId":"deletion-proof-$eventId","actorId":"$subjectId","payload":{"searchKind":"jobs","query":"proof","results":[]}}"""
+      new Document("eventId", eventId)
+        .append("eventType", "SEARCH_PERFORMED")
+        .append("occurredAt", now.toInstant.toString)
+        .append("aggregateType", "Search")
+        .append("aggregateId", searchId)
+        .append("actorId", subjectId)
+        .append("payload", payload)
+        .toJson
     val event = new Document("_id", eventId)
-      .append("topic", "hiring.operational-events")
+      .append("topic", topic)
       .append("eventType", "SEARCH_PERFORMED")
       .append("occurredAt", now)
       .append("aggregateType", "Search")
-      .append("aggregateId", s"deletion-proof-$eventId")
+      .append("aggregateId", searchId)
       .append("actorId", subjectId)
       .append("subjectIds", java.util.List.of(subjectId))
       .append("subjectRefsVersion", 1)
-      .append("payload", "{\"searchKind\":\"jobs\",\"query\":\"proof\",\"results\":[]}")
+      .append("payload", payload.toJson)
       .append("envelopeBytes", eventJson.getBytes(StandardCharsets.UTF_8))
-      .append("partitionKey", s"deletion-proof-$eventId")
+      .append("partitionKey", searchId)
       .append("state", state)
       .append("attempts", if (state == "Published") 1 else 0)
       .append("availableAt", now)
@@ -228,13 +239,18 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       Using.resource(heldPublisherTransaction(kafka, "hiring-publisher-deletion-tail-" + nonce)) { producer =>
         partitions.foreach { partition =>
           (0 until 4).foreach { index =>
+            val jobId = UUID.randomUUID().toString
+            val skills = Vector.tabulate(50)(skill => s"$skill-${"t" * 253}").asJava
             val value = new Document("eventId", UUID.randomUUID().toString)
               .append("eventType", "JOB_CREATED")
               .append("occurredAt", Instant.now().toString)
               .append("aggregateType", "Job")
-              .append("aggregateId", UUID.randomUUID().toString)
+              .append("aggregateId", jobId)
               .append("actorId", UUID.randomUUID().toString)
-              .append("payload", new Document("padding", "t" * 12000))
+              .append(
+                "payload",
+                new Document("job", new Document("jobId", jobId).append("skills", skills).append("status", "Open"))
+              )
               .toJson
             val metadata = producer
               .send(
@@ -388,13 +404,14 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       val client: MongoClient = MongoClients.create(uri)
       try {
         val database = client.getDatabase(databaseName)
-        List("users", "event_outbox", "analytics_erasure_requests", "outbox_subject_fences").foreach { name =>
-          assertEquals(
-            database.getCollection(name).countDocuments(),
-            0L,
-            s"task collection $name must have no preexisting rows"
-          )
-        }
+        List("users", "event_outbox", "analytics_erasure_requests", "outbox_subject_fences", "producer_registrations")
+          .foreach { name =>
+            assertEquals(
+              database.getCollection(name).countDocuments(),
+              0L,
+              s"task collection $name must have no preexisting rows"
+            )
+          }
         eventually(
           Option(
             database.getCollection("analytics_worker_heartbeats").find(Filters.eq("_id", "analytics-erasure")).first()
@@ -430,16 +447,28 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
         )
         val (token, subjectId) = authResult(login, "login")
         val (subjectToken, controlToken) = seedAttributedDeltaRows(subjectId)
-        val eventId = seedOutboxEvent(database, subjectId, "Published")
-        val claimEventId = seedOutboxEvent(database, subjectId, "Retryable")
+        val eventId = seedOutboxEvent(database, subjectId, topic, "Published")
+        val claimEventId = seedOutboxEvent(database, subjectId, topic, "Retryable")
         eventually(
           Option(database.getCollection("event_outbox").find(Filters.eq("_id", claimEventId)).first())
         )(_.exists(_.getString("state") == "Published"))
         val registeredIds = eventually(
-          Option(database.getCollection("outbox_subject_fences").find(Filters.eq("_id", subjectId)).first())
-            .flatMap(doc => Option(doc.getList("transactionalIds", classOf[String])))
-            .map(_.asScala.toVector)
-        )(_.exists(_.nonEmpty)).get
+          database
+            .getCollection("producer_registrations")
+            .find(
+              Filters.and(
+                Filters.eq("subjectId", subjectId),
+                Filters.eq("kind", "Operational"),
+                Filters.eq("state", "Active")
+              )
+            )
+            .sort(new Document("registeredAt", 1).append("_id", 1))
+            .limit(64)
+            .into(new java.util.ArrayList[Document]())
+            .asScala
+            .map(_.getString("transactionalId"))
+            .toVector
+        )(_.nonEmpty)
         val heldTransactionalId = registeredIds.last
         val (purgedRequest, deletedFence, receiptId) = Using.resource(
           heldPublisherTransaction(kafka, heldTransactionalId)

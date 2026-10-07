@@ -1,5 +1,9 @@
 # Development Milestones
 
+## Hiring event and test reliability
+
+The [current local refactoring specification](specs/hiring-event-and-test-reliability.md) tracks minimized event contracts, bounded publication, atomic receipt deduplication, audited cleanup validation/indexing and reusable isolated test services. Its criterion-level verification and independent reviews are separate from historical Phase 8–11 evidence. It does not close Atlas, human relevance, provider or deployed retention/availability gates. Its approved local refinement is verified: 678 root and 477 analytics unit passes, 155 root and 41 analytics integration passes, twelve explicit external/opt-in skips, both formatting gates and independent Code, Security and final QA PASS.
+
 ## Retrieval and publication remediation checkpoint
 
 October 7: implementation of the approved MongoDB-informed remediation is tracked by [HRP-01–HRP-18](specs/hiring-retrieval-publication-reliability.md). It covers deletion/embedding convergence, Kafka resource and lease safety, actor-scoped discovery, bounded retrieval/concurrency, producer registry cutover and explicit integrity maintenance. Verification and independent review statuses belong to that specification. This checkpoint does not close Phases 8–11: Atlas, human relevance, real-provider and deployed acceptance retain their existing gates.

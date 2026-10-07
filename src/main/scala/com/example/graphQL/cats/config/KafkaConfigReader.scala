@@ -53,5 +53,9 @@ private[config] final case class RawInterviewRuntimeConfig(
     fencerPassword: Option[String] = None,
     publicationBatchSize: Option[Int] = None,
     clockSkewToleranceMillis: Option[Int] = None,
-    partitionConcurrency: Option[Int] = None
+    partitionConcurrency: Option[Int] = None,
+    commandsTopic: String = "hiring.interview-commands",
+    resultsTopic: String = "hiring.interview-results",
+    workerGroup: String = "hiring-interview-workers",
+    orchestratorGroup: String = "hiring-interview-orchestrator"
 ) derives ConfigReader

@@ -66,9 +66,10 @@ private[config] object KafkaConfigValidation {
           ) <= 64 && raw.clockSkewToleranceMillis.getOrElse(5000) >= 0 && raw.clockSkewToleranceMillis.getOrElse(
             5000
           ) <= 60000 &&
-            raw.partitionConcurrency.getOrElse(4) >= 1 && raw.partitionConcurrency.getOrElse(
-              4
-            ) <= 64 && raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
+            validInterviewTransportNames(raw) && raw.partitionConcurrency.getOrElse(4) >= 1 && raw.partitionConcurrency
+              .getOrElse(
+                4
+              ) <= 64 && raw.maxAttempts >= 1 && raw.maxAttempts <= 100 && raw.retryBaseSeconds >= 1 &&
             raw.retryCapSeconds >= raw.retryBaseSeconds && raw.retryCapSeconds <= 300 &&
             raw.providerTimeoutSeconds >= 1 && raw.providerTimeoutSeconds.toLong + 30L < raw.claimSeconds.toLong &&
             raw.claimSeconds <= 3600 && raw.preCommitDeadlineSeconds >= 1 && raw.preCommitDeadlineSeconds <= 300 && raw.replayRetentionSeconds == 604800L &&
@@ -102,9 +103,19 @@ private[config] object KafkaConfigValidation {
         raw.fencerPassword,
         raw.publicationBatchSize.getOrElse(16),
         raw.clockSkewToleranceMillis.getOrElse(5000),
-        raw.partitionConcurrency.getOrElse(4)
+        raw.partitionConcurrency.getOrElse(4),
+        com.example.graphQL.cats.domain.workflow.InterviewTopicPair(raw.commandsTopic, raw.resultsTopic),
+        raw.workerGroup,
+        raw.orchestratorGroup
       )
     }
+
+  private def validInterviewTransportNames(raw: RawInterviewRuntimeConfig): Boolean = {
+    def topic(value: String): Boolean = value.matches("[A-Za-z0-9._-]{1,249}") && value != "." && value != ".."
+    def group(value: String): Boolean = value.matches("[A-Za-z0-9._-]{1,200}")
+    topic(raw.commandsTopic) && topic(raw.resultsTopic) && raw.commandsTopic != raw.resultsTopic &&
+    group(raw.workerGroup) && group(raw.orchestratorGroup) && raw.workerGroup != raw.orchestratorGroup
+  }
 
   def validKafkaBatchSize(value: Int): ValidatedNel[ConfigError, Int] =
     ConfigBounds.bounded(1, 500, ConfigError.InvalidKafkaBatchSize)(value)

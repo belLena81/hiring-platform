@@ -26,12 +26,11 @@ import org.typelevel.ci.CIString
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import java.time.Instant
-import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Loopback HTTP baseline: authenticated structured GraphQL reads backed by disposable MongoDB. */
-final class HiringStructuredAccessEvaluationIntegrationSpec extends CatsEffectSuite {
+final class HiringStructuredAccessEvaluationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val support = MongoAccessEvaluationSupport
   private val fixtureTime = Instant.parse("2026-10-05T12:00:00Z")
@@ -338,7 +337,7 @@ final class HiringStructuredAccessEvaluationIntegrationSpec extends CatsEffectSu
   }
 
   test("authenticated structured HTTP reads record bounded local latency with verified access outcomes") {
-    support.resource.use { fixture =>
+    mongoResource.use { fixture =>
       for {
         _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
         _ <- (candidates ++ recruiters).traverse_(value =>

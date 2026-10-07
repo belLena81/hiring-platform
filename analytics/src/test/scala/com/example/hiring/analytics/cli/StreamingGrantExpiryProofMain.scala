@@ -155,7 +155,7 @@ object StreamingGrantExpiryProofMain extends IOApp {
       val id = UUID.randomUUID().toString
       val actor = UUID.randomUUID().toString
       val body = s"""{"eventId":"$id","eventType":"JOB_CREATED","occurredAt":"${Instant
-          .now()}","aggregateType":"Job","aggregateId":"$id","actorId":"$actor","payload":{"job":{"skills":["$skill"]}}}"""
+          .now()}","aggregateType":"Job","aggregateId":"$id","actorId":"$actor","payload":{"job":{"jobId":"$id","status":"Open","skills":["$skill"]}}}"""
       val result = producer
         .send(new ProducerRecord[String, String](topic, Int.box(index % 3), id, body))
         .get(20, java.util.concurrent.TimeUnit.SECONDS)

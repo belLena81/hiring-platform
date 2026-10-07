@@ -7,6 +7,7 @@ import mongo4cats.database.MongoDatabase
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.Diagnostics
+import com.example.graphQL.cats.service.events.OperationalEventJson
 import com.mongodb.client.model.{FindOneAndUpdateOptions, ReturnDocument, Sorts, UpdateOptions}
 import org.bson.Document
 
@@ -26,25 +27,36 @@ final class MongoSearchSessionWorkRepository(
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
-  override def enqueue(value: PendingSearchSessionWork, now: Instant): RepositoryIO[Unit] = {
-    val sanitized = MongoSearchSessionWorkCodecs.work(value, now)
-    val filter = MongoFilter.and(
-      MongoFilter.eq(MongoFields.Id, value.session.id.toString),
-      MongoFilter.eq(MongoFields.ActorId, value.session.actorId.value.toString)
-    )
-    MongoRepositorySupport
-      .repositoryGuard(diagnostics, "searchSessionWork.enqueue") {
-        RepositoryIO
-          .lift(
-            MongoSessionOperations
-              .updateOne(work, None, filter, setOnInsertDocument(sanitized), new UpdateOptions().upsert(true))
+  override def enqueue(value: PendingSearchSessionWork, now: Instant): RepositoryIO[Unit] =
+    RepositoryIO
+      .fromEither(
+        OperationalEventJson.validate(value.event).leftMap(_ => RepositoryError.InvalidEvent).flatMap { _ =>
+          Either.cond(
+            value.addressesSession,
+            (),
+            RepositoryError.InvalidEvent
           )
-          .subflatMap {
-            case Some(_) => Right(())
-            case None    => Left(RepositoryError.MissingWriteResult)
-          }
-      }(mapWrite)
-  }
+        }
+      )
+      .flatMap { _ =>
+        val sanitized = MongoSearchSessionWorkCodecs.work(value, now)
+        val filter = MongoFilter.and(
+          MongoFilter.eq(MongoFields.Id, value.session.id.toString),
+          MongoFilter.eq(MongoFields.ActorId, value.session.actorId.value.toString)
+        )
+        MongoRepositorySupport
+          .repositoryGuard(diagnostics, "searchSessionWork.enqueue") {
+            RepositoryIO
+              .lift(
+                MongoSessionOperations
+                  .updateOne(work, None, filter, setOnInsertDocument(sanitized), new UpdateOptions().upsert(true))
+              )
+              .subflatMap {
+                case Some(_) => Right(())
+                case None    => Left(RepositoryError.MissingWriteResult)
+              }
+          }(mapWrite)
+      }
 
   override def findForActor(actorId: UserId, searchId: UUID): RepositoryIO[Option[SearchSessionLookup]] =
     MongoRepositorySupport

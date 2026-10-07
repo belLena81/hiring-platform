@@ -18,7 +18,7 @@ import com.example.graphQL.cats.domain.model.{
 }
 import com.example.graphQL.cats.repository.mongo.MongoDatabaseProbe
 import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, RepositoryIO}
-import com.github.dockerjava.api.model.ExposedPort
+import com.github.dockerjava.api.model.{ExposedPort, Ulimit}
 import com.example.graphQL.cats.service.{DatabaseProbe, Diagnostics, HealthService, LogEvent, LogField, ProbeResult}
 import io.circe.Json
 import munit.CatsEffectSuite
@@ -26,13 +26,15 @@ import org.bson.Document
 import org.http4s.{Method, Request, Status, Uri}
 import org.typelevel.ci.CIString
 import org.http4s.circe.*
-import org.testcontainers.containers.GenericContainer
+import org.testcontainers.containers.{BindMode, GenericContainer}
+import java.nio.file.Files
 import org.testcontainers.containers.wait.strategy.Wait
 import org.testcontainers.utility.DockerImageName
 
 import java.time.{Duration, Instant}
 import java.util.UUID
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
@@ -43,26 +45,52 @@ class MongoDatabaseProbeIntegrationSpec extends CatsEffectSuite {
 
   private def container(auth: Boolean): Resource[IO, (Standalone, String)] = {
     val password = UUID.randomUUID().toString
-    Resource.make(IO.blocking {
-      val instance = new Standalone
-      val _ = instance
-        .withExposedPorts(27017)
-        .withCommand("mongod", "--bind_ip_all")
-        .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-      if (auth) {
-        val _ = instance
-          .withEnv("MONGO_INITDB_ROOT_USERNAME", "foundation")
-          .withEnv("MONGO_INITDB_ROOT_PASSWORD", password)
+    // This drill stops the container; an owned temporary directory preserves its synthetic data across restart.
+    Resource
+      .make(IO.blocking(Files.createTempDirectory("hiring-mongo-readiness-")))(root =>
+        IO.blocking {
+          val files = Files.walk(root)
+          try
+            files
+              .iterator()
+              .asScala
+              .toVector
+              .sortBy(_.getNameCount)
+              .reverse
+              .foreach(path => { val _ = Files.deleteIfExists(path) })
+          finally files.close()
+        }
+      )
+      .flatMap { dataDirectory =>
+        Resource.make(IO.blocking {
+          val instance = new Standalone
+          val _ = instance
+            .withExposedPorts(27017)
+            .withCreateContainerCmdModifier(command => {
+              val _ = command.getHostConfig.withUlimits(Array(new Ulimit("nofile", 65536L, 65536L)))
+              val _ = command.withUser(
+                s"${Files.getAttribute(dataDirectory, "unix:uid")}:${Files.getAttribute(dataDirectory, "unix:gid")}"
+              )
+            })
+            .withFileSystemBind(dataDirectory.toString, "/data/db", BindMode.READ_WRITE)
+            .withTmpFs(Map("/data/configdb" -> "rw").asJava)
+            .withCommand("mongod", "--bind_ip_all")
+            .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
+          if (auth) {
+            val _ = instance
+              .withEnv("MONGO_INITDB_ROOT_USERNAME", "foundation")
+              .withEnv("MONGO_INITDB_ROOT_PASSWORD", password)
+          }
+          try {
+            instance.start()
+            (instance, password)
+          } catch {
+            case error: Throwable =>
+              instance.stop()
+              throw error
+          }
+        }) { case (instance, _) => IO.blocking(instance.stop()) }
       }
-      try {
-        instance.start()
-        (instance, password)
-      } catch {
-        case error: Throwable =>
-          instance.stop()
-          throw error
-      }
-    }) { case (instance, _) => IO.blocking(instance.stop()) }
   }
 
   private def uri(instance: Standalone): String =

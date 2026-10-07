@@ -17,18 +17,16 @@ import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import com.mongodb.client.{MongoClient, MongoClients}
 import com.mongodb.client.model.Updates
-import munit.FunSuite
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
 
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.Date
 import java.util.UUID
 import scala.concurrent.duration.*
 
-class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
+class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegrationSuite {
+  override protected def dedicatedMongo: Boolean = true
+
   private def asRunId(value: String): RunId = RunId.from(value).toOption.get
   private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
   private def asFingerprint(value: String): RangeFingerprint =
@@ -37,52 +35,17 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
       .toOption
       .get
 
-  override val munitTimeout: FiniteDuration = 5.minutes
-
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-  private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
-
-  private def replicaSet(): ReplicaSet = {
-    val container = (new ReplicaSet)
-      .withExposedPorts(27017)
-      .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0", "--setParameter", "enableTestCommands=1")
-      .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-    container.start()
-    val initiated = container.execInContainer(
-      "mongosh",
-      "--quiet",
-      "--eval",
-      "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-    )
-    if (initiated.getExitCode != 0) {
-      container.stop()
-      throw new AssertionError(s"Mongo replica-set initiation failed: ${initiated.getStderr}")
-    }
-    var remaining = 60
-    var primary = false
-    while (remaining > 0 && !primary) {
-      val result = container.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")
-      primary = result.getExitCode == 0 && result.getStdout.trim == "true"
-      if (!primary) Thread.sleep(250L)
-      remaining -= 1
-    }
-    if (!primary) {
-      container.stop()
-      throw new AssertionError("Mongo replica set did not elect a primary")
-    }
-    container
-  }
+  override val munitIOTimeout: FiniteDuration = 5.minutes
 
   test("production report publisher reserves revisions, rejects hidden publication, and restores expired payload") {
-    val container = replicaSet()
     val client: MongoClient = MongoClients.create(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     val reactiveClient = AnalyticsMongo4catsTestSupport.client(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"analytics_report_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       database
         .getCollection("analytics_report_control")
         .insertOne(
@@ -224,13 +187,11 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)
-      container.stop()
     }
   }
 
   test("cancelling a contended lakehouse mutex leaves its owner intact and releases the waiter promptly") {
-    val container = replicaSet()
-    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val uri = endpointUri
     val sync = MongoClients.create(uri)
     val reactive = AnalyticsMongo4catsTestSupport.client(uri)
     try {
@@ -269,17 +230,15 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       sync.close()
       AnalyticsMongo4catsTestSupport.close(reactive)
-      container.stop()
     }
   }
 
   test("pinned reservation survives TTL policy and never refreshes across a completed deletion generation") {
-    val container = replicaSet()
-    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val uri = endpointUri
     val client = MongoClients.create(uri)
     val reactive = AnalyticsMongo4catsTestSupport.client(uri)
     try {
-      val database = client.getDatabase(s"pinned_report_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val control = database.getCollection("analytics_report_control")
       control.insertOne(
         new Document("_id", "analytics-report")
@@ -351,20 +310,18 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactive)
-      container.stop()
     }
   }
 
   test("report revision reservation retries transient Mongo transaction and uncertain commit without duplicates") {
-    val container = replicaSet()
     val client = MongoClients.create(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     val reactiveClient = AnalyticsMongo4catsTestSupport.client(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"report_retry_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val control = database.getCollection("analytics_report_control")
       control.insertOne(
         new Document("_id", "analytics-report")
@@ -406,20 +363,18 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)
-      container.stop()
     }
   }
 
   test("erasure publication reveals the report and writes the TTL independent completion ledger atomically") {
-    val container = replicaSet()
     val client = MongoClients.create(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     val reactiveClient = AnalyticsMongo4catsTestSupport.client(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"analytics_erasure_publish_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val subjectId = UUID.randomUUID().toString
       val token = UUID.randomUUID().toString
       val secondSubjectId = UUID.randomUUID().toString
@@ -527,20 +482,18 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)
-      container.stop()
     }
   }
 
   test("guarded erasure publication rejects another request that has not passed retention") {
-    val container = replicaSet()
     val client = MongoClients.create(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     val reactiveClient = AnalyticsMongo4catsTestSupport.client(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"analytics_erasure_guard_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val subjectId = UUID.randomUUID().toString
       val otherId = UUID.randomUUID().toString
       val token = UUID.randomUUID().toString
@@ -610,20 +563,18 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)
-      container.stop()
     }
   }
 
   test("worker claims resume durable checkpoints, reject stale tokens, and persist broker barriers") {
-    val container = replicaSet()
     val client = MongoClients.create(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     val reactiveClient = AnalyticsMongo4catsTestSupport.client(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"analytics_worker_store_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val subjectId = UUID.randomUUID().toString
       val first = "hiring-publisher-" + UUID.randomUUID().toString
       val second = "hiring-publisher-" + UUID.randomUUID().toString
@@ -756,7 +707,6 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends FunSuite {
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactiveClient)
-      container.stop()
     }
   }
 }

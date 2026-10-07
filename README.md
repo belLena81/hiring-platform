@@ -4,6 +4,8 @@
 
 The current remediation is tracked in [hiring retrieval and publication reliability](docs/specs/hiring-retrieval-publication-reliability.md). Discovery uses a shared four-permit process budget, four costly roots per GraphQL request and a 2000 ms MongoDB query deadline. Search branches return bounded retrieval hits; current authorized documents are hydrated once. Embedding workers renew leases, reschedule revision-conflicted work without charging provider failures and expose recovery health.
 
+Migration `014_deleted_account_embeddings` removes vectors and metadata retained in previously deleted accounts before workers activate. Stop older writers first; failed cleanup remains resumable and a completed cleanup fails closed if retained fields reappear. See [account erasure and recovery](docs/specs/hiring-retrieval-publication-reliability.md#account-erasure-and-recovery-follow-up).
+
 Operational storage cutovers require stopping incompatible application and analytics writers. New migrations preserve producer attribution in separate bounded records and establish strict workflow validators. They do not authorize a data reset. Local implementation and test evidence do not establish Atlas performance, relevance, real-provider acceptance or deployed phase completion.
 
 
@@ -93,6 +95,12 @@ bash scripts/check-local.sh
 ```
 
 The command validates local skills and runs the Docker-independent MUnit suite. Run `sbt 'IntegrationTest / test'` separately for real HTTP lifecycle and disposable MongoDB tests; Docker is required for the database tests. These commands are local checks, not deployment or performance certification.
+
+For repeated local database/Kafka checks, use `scripts/run-local-tests.sh start`, then `scripts/run-local-tests.sh test` or `scripts/run-local-tests.sh analytics`. `status` inspects the owned stack and `stop` stops it. The isolated `compose.test.yaml` stack reuses pinned images and containers, binds separate loopback ports and stores service data in tmpfs. Mongo has a 2 GiB tmpfs and 3 GiB memory limit, including its native free-space reserve and 256 MiB WiredTiger cache; Kafka has a 768 MiB memory limit. These limits are not preallocated; JVM test processes and dedicated drills need additional memory. Its ignored manifest and credentials live under `.local/config/test-services/`; each run owns temporary databases, topics and groups under a locked registry. Endpoint identity must match before writes or cleanup. Ordinary test namespaces are removed on release; server restart/failpoint checks use dedicated containers. Direct sbt integration runs retain suite-owned Testcontainers when reusable mode is absent. Existing application databases and durable analytics proof volumes are outside this test stack. See [the implementation specification](docs/specs/hiring-event-and-test-reliability.md).
+
+For a focused integration rerun with the full root unit suite, use `scripts/run-local-tests.sh test '*MongoJobDiscoveryIntegrationSpec' '*OperationalEventComposeIntegrationSpec'`. With no suite globs, `test` runs every root integration suite. Quote globs to prevent shell expansion; the wrapper accepts only suite-name characters and retains its locked namespace ownership. For analytics integration tests only, use `scripts/run-local-tests.sh analytics '*HiringAnalyticsStreamingRecoveryIntegrationSpec'`; analytics with no globs runs its full unit and integration suites.
+
+Wrapper runs cache compiler output and reports under `.local/data/test-builds/root/target/` or `.local/data/test-builds/analytics/target/`, isolated from IDE and ordinary sbt `target/` output. Each build has its own lock outside that target, so root test/proof commands serialize while root and analytics can run together; an explicit sbt clean cannot remove the held lock. The caches persist across runs and service restarts; ordinary sbt keeps its normal target unless `hiring.test.buildRoot` is explicitly set.
 
 ## Test coverage
 

@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.domain.model.{CandidateProfile, RecruiterProfile, UserProfile, UserRole}
@@ -9,58 +9,22 @@ import com.example.graphQL.cats.service.{AccountError, Diagnostics, UseCaseError
 import com.example.graphQL.cats.service.protocol.{BootstrapAdminInput, IdempotencyRequest, SignUpInput}
 import com.mongodb.client.model.{Filters, InsertOneOptions, UpdateOptions, Updates}
 import io.circe.Json
-import munit.CatsEffectSuite
 import org.bson.{BsonDocument, BsonNull, Document}
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
 
-import java.time.Duration
 import java.util.UUID
 import scala.concurrent.duration.*
 
 /** Executes account registration through the normal resource-owned runtime and transactional mutation receipts. */
-final class MongoAccountRegistrationIntegrationSpec extends CatsEffectSuite {
+final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
 
-  private val image =
-    "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-  private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
+  private def replicaSet = mongoResource
 
-  private def replicaSet: Resource[IO, ReplicaSet] =
-    Resource.make(IO.blocking {
-      val instance = new ReplicaSet
-      val _ = instance
-        .withExposedPorts(27017)
-        .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
-        .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-      try {
-        instance.start()
-        val result = instance.execInContainer(
-          "mongosh",
-          "--quiet",
-          "--eval",
-          "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-        )
-        if (result.getExitCode != 0) throw new AssertionError("Account-registration replica-set initiation failed")
-        instance
-      } catch {
-        case error: Throwable =>
-          instance.stop()
-          throw error
-      }
-    })(instance => IO.blocking(instance.stop()))
-
-  private def awaitPrimary(instance: ReplicaSet, remaining: Int = 60): IO[Unit] =
-    IO.blocking(instance.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")).flatMap {
-      result =>
-        if (result.getExitCode == 0 && result.getStdout.trim == "true") IO.unit
-        else if (remaining > 0) IO.sleep(250.millis) *> awaitPrimary(instance, remaining - 1)
-        else IO.raiseError(new AssertionError("Account-registration replica set did not elect a primary"))
-    }
-
-  private def configuration(instance: ReplicaSet, database: String): IO[MongoHiringRuntime.RuntimeConfig] = {
-    val uri = s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+  private def configuration(
+      instance: MongoAccessEvaluationSupport.Fixture,
+      database: String
+  ): IO[MongoHiringRuntime.RuntimeConfig] = {
+    val uri = instance.uri
     val raw = s"""include classpath("application.conf")
                  |http.host="127.0.0.1"
                  |http.port=8080
@@ -93,8 +57,7 @@ final class MongoAccountRegistrationIntegrationSpec extends CatsEffectSuite {
   test("atomic Admin bootstrap enables Candidate and Recruiter registration without another Admin") {
     replicaSet.use { instance =>
       for {
-        _ <- awaitPrimary(instance)
-        config <- configuration(instance, s"account_registration_${UUID.randomUUID().toString.replace('-', '_')}")
+        config <- configuration(instance, instance.database.underlying.getName)
         _ <- MongoHiringRuntime.resource(config).use { runtime =>
           MongoDatabaseProbe.clientResource(config.uri).use { client =>
             client.getDatabase(config.databaseName).flatMap { database =>
@@ -179,8 +142,7 @@ final class MongoAccountRegistrationIntegrationSpec extends CatsEffectSuite {
   test("missing, null and unknown persisted account initialization states remain closed") {
     replicaSet.use { instance =>
       for {
-        _ <- awaitPrimary(instance)
-        config <- configuration(instance, s"account_registry_${UUID.randomUUID().toString.replace('-', '_')}")
+        config <- configuration(instance, instance.database.underlying.getName)
         _ <- MongoDatabaseProbe.clientResource(config.uri).use { client =>
           client.getDatabase(config.databaseName).flatMap { database =>
             val users =

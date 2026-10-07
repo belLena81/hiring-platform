@@ -40,7 +40,7 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
     }
 
   private def incoming(spark: SparkSession): DataFrame = spark.createDataFrame(
-    Vector(Row("retained"), Row("marked")).asJava,
+    Vector(Row("59fcc6f9-5cc4-37f5-ab1f-f33f516582d2"), Row("5bbf2d67-25b2-3ad8-9db7-c3ab47c50930")).asJava,
     StructType(Vector(StructField(Columns.EventId, StringType, nullable = false)))
   )
 
@@ -93,16 +93,34 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
           val keys = AnalyticsTestSubjectPseudonymizer.fromKeyRing("cache-key", Array.fill[Byte](32)(3), Vector.empty)
           val observed = Instant.parse("2026-10-02T12:00:00Z")
           def envelope(id: String, actor: String, skill: String, time: Instant): String =
-            s"""{"eventId":"$id","eventType":"JOB_CREATED","occurredAt":"$time","aggregateType":"Job","aggregateId":"$id","actorId":"$actor","payload":{"job":{"skills":["$skill"]}}}"""
-          val retained = envelope("retained", "retained-actor", "Scala", observed)
-          val future = envelope("future", "future-actor", "Scala", observed.plusSeconds(301))
-          val closed = envelope("closed", "closed-actor", "Scala", observed.minusSeconds(172800))
+            com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+              s"""{"eventId":"$id","eventType":"JOB_CREATED","occurredAt":"$time","aggregateType":"Job","aggregateId":"$id","actorId":"$actor","payload":{"job":{"skills":["$skill"]}}}"""
+            )
+          val retained =
+            envelope("59fcc6f9-5cc4-37f5-ab1f-f33f516582d2", "c9be63e8-ea05-31cc-b925-5bbbae7d65e2", "Scala", observed)
+          val future = envelope(
+            "da907a1b-8f74-3692-ad93-b025eecfb852",
+            "5f2f2b0f-0b0c-3450-9e50-4eea9d7058dc",
+            "Scala",
+            observed.plusSeconds(301)
+          )
+          val closed = envelope(
+            "349e6863-3072-3975-902e-9ef4f939a5ac",
+            "8de875cb-a6fd-3920-a118-844ce47a6eea",
+            "Scala",
+            observed.minusSeconds(172800)
+          )
           val bodies = Vector(
             retained,
             retained,
-            envelope("marked", "marked-actor", "Scala", observed),
-            envelope("conflict", "conflict-actor", "Scala", observed),
-            envelope("conflict", "conflict-actor", "Kotlin", observed),
+            envelope("5bbf2d67-25b2-3ad8-9db7-c3ab47c50930", "9bd72a38-5f69-3277-8703-36fc02eef621", "Scala", observed),
+            envelope("981f1875-7795-31e7-9585-a2ae43a196fb", "48b49325-d502-33d8-8491-18a1c1869124", "Scala", observed),
+            envelope(
+              "981f1875-7795-31e7-9585-a2ae43a196fb",
+              "48b49325-d502-33d8-8491-18a1c1869124",
+              "Kotlin",
+              observed
+            ),
             future,
             closed
           )
@@ -122,13 +140,25 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
           )
           val parsed = OperationalEventTransforms.parseKafkaRecords(raw)
           val tokenized = AnalyticsSubjectPrivacy.withSubjectToken(OperationalEventTransforms.validEvents(parsed), keys)
-          val marked = AnalyticsTestSubjectPseudonymizer.tokenValue(keys, "marked-actor")
+          val marked = AnalyticsTestSubjectPseudonymizer.tokenValue(keys, "9bd72a38-5f69-3277-8703-36fc02eef621")
           val markers = spark.createDataFrame(
             Vector(Row(marked)).asJava,
             StructType(Vector(StructField(Columns.SubjectToken, StringType, nullable = false)))
           )
-          val fingerprints = Map("retained" -> retained, "future" -> future, "closed" -> closed).view
-            .mapValues(body => AnalyticsDigest.sha256Hex(body.getBytes(StandardCharsets.UTF_8)))
+          val fingerprints = Map(
+            "59fcc6f9-5cc4-37f5-ab1f-f33f516582d2" -> retained,
+            "da907a1b-8f74-3692-ad93-b025eecfb852" -> future,
+            "349e6863-3072-3975-902e-9ef4f939a5ac" -> closed
+          ).view
+            .mapValues(body =>
+              (
+                AnalyticsDigest.sha256Hex(body.getBytes(StandardCharsets.UTF_8)),
+                io.circe.parser
+                  .parse(body)
+                  .flatMap(_.hcursor.get[String]("actorId"))
+                  .fold(error => fail(error.getMessage), identity)
+              )
+            )
             .toMap
           (keys, tokenized, markers, fingerprints)
         }
@@ -148,14 +178,24 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
                 assertEquals(preparedRows.size, 3)
                 val expected = freshRows.toSet
                 assertEquals(preparedRows.toSet, expected)
-                assertEquals(expected.map(_.getAs[String](Columns.EventId)), Set("retained", "future", "closed"))
+                assertEquals(
+                  expected.map(_.getAs[String](Columns.EventId)),
+                  Set(
+                    "59fcc6f9-5cc4-37f5-ab1f-f33f516582d2",
+                    "da907a1b-8f74-3692-ad93-b025eecfb852",
+                    "349e6863-3072-3975-902e-9ef4f939a5ac"
+                  )
+                )
                 expected.foreach { row =>
                   val id = row.getAs[String](Columns.EventId)
                   assertEquals(
                     row.getAs[String](Columns.SubjectToken),
-                    AnalyticsTestSubjectPseudonymizer.tokenValue(source._1, id + "-actor")
+                    AnalyticsTestSubjectPseudonymizer.tokenValue(
+                      source._1,
+                      source._4(id)._2
+                    )
                   )
-                  assertEquals(row.getAs[String](Columns.EventFingerprint), source._4(id))
+                  assertEquals(row.getAs[String](Columns.EventFingerprint), source._4(id)._1)
                 }
               }
             }
@@ -279,7 +319,7 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
         refreshed <- execution.either(
           AnalyticsSubjectPrivacy.excludeActiveDeletionMarkers(
             source,
-            source.filter(col(Columns.EventId) === "marked").select(Columns.SubjectToken)
+            source.filter(col(Columns.EventId) === "5bbf2d67-25b2-3ad8-9db7-c3ab47c50930").select(Columns.SubjectToken)
           )
         )
         second <- SparkStreamingBatchStages
@@ -289,7 +329,7 @@ final class StreamingAdmissionCacheSpec extends CatsEffectSuite {
         _ <- IO {
           assertEquals(first, 2L)
           assertEquals(firstLevel, StorageLevel.NONE)
-          assertEquals(second, Vector("retained"))
+          assertEquals(second, Vector("59fcc6f9-5cc4-37f5-ab1f-f33f516582d2"))
           assertEquals(after, Set.empty[Int])
         }
       } yield ()

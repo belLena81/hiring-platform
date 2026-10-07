@@ -37,6 +37,9 @@ lazy val root = (project in file("."))
     name := "hiring-graphql-platform",
     description := "Hiring Management Platform with Cats Effect and Sangria.",
     version := "0.1.0",
+    target := sys.props
+      .get("hiring.test.buildRoot")
+      .fold(baseDirectory.value / "target")(path => file(path) / "target"),
     publish / skip := true,
     Compile / run / fork := true,
     Compile / run / javaOptions += "-Dcats.effect.trackFiberContext=true",
@@ -44,6 +47,7 @@ lazy val root = (project in file("."))
     IntegrationTest / resourceDirectory := baseDirectory.value / "src" / "it" / "resources",
     IntegrationTest / parallelExecution := false,
     Test / fork := true,
+    Test / unmanagedSourceDirectories += baseDirectory.value / "test-support" / "src" / "main" / "scala",
     Test / javaOptions += "-Dcats.effect.trackFiberContext=true",
     IntegrationTest / javaOptions += "-Dcats.effect.trackFiberContext=true",
     scalacOptions ++= Seq(

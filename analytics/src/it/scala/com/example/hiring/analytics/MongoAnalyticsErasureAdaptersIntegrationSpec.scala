@@ -21,11 +21,8 @@ import com.mongodb.client.{MongoClient, MongoClients}
 import com.mongodb.event.{CommandFailedEvent, CommandListener, CommandStartedEvent, CommandSucceededEvent}
 import org.bson.Document
 import org.apache.spark.sql.SparkSession
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
 
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.nio.file.Files
 import java.util.Date
 import java.util.UUID
@@ -33,15 +30,12 @@ import java.util.concurrent.{CountDownLatch, TimeUnit}
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.concurrent.duration.*
 
-class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
+class MongoAnalyticsErasureAdaptersIntegrationSpec extends AnalyticsMongoIntegrationSuite {
   private def assert(condition: Boolean, clue: => Any): Unit =
     if (!condition) throw new AssertionError(clue.toString)
 
   private def asAccountSubjectId(value: String): AccountSubjectId = AccountSubjectId.from(value).toOption.get
-  override val munitTimeout: FiniteDuration = 5.minutes
-
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-  private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
+  override val munitIOTimeout: FiniteDuration = 5.minutes
 
   private val mongo4catsBySync = new java.util.IdentityHashMap[MongoClient, mongo4cats.client.MongoClient[IO]]()
   private def syncClient(uri: String): MongoClient = {
@@ -64,48 +58,16 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
     super.afterEach(context)
   }
 
-  private def replicaSet(): ReplicaSet = {
-    val container = (new ReplicaSet)
-      .withExposedPorts(27017)
-      .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
-      .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-    container.start()
-    val initiated = container.execInContainer(
-      "mongosh",
-      "--quiet",
-      "--eval",
-      "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-    )
-    if (initiated.getExitCode != 0) {
-      container.stop()
-      throw new AssertionError(s"Mongo replica-set initiation failed: ${initiated.getStderr}")
-    }
-    var remaining = 60
-    var primary = false
-    while (remaining > 0 && !primary) {
-      val result = container.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary")
-      primary = result.getExitCode == 0 && result.getStdout.trim == "true"
-      if (!primary) Thread.sleep(250L)
-      remaining -= 1
-    }
-    if (!primary) {
-      container.stop()
-      throw new AssertionError("Mongo replica set did not elect a primary")
-    }
-    container
-  }
-
-  private def fixedClock(at: Instant): Clock[IO] = new Clock[IO] {
-    override val applicative: Applicative[IO] = Applicative[IO]
-    override def monotonic: IO[FiniteDuration] = IO.pure(0L.nanoseconds)
-    override def realTime: IO[FiniteDuration] = IO.pure(FiniteDuration(at.toEpochMilli, MILLISECONDS))
+  private def fixedClock(now: Instant): Clock[IO] = new Clock[IO] {
+    override val applicative: Applicative[IO] = summon[Applicative[IO]]
+    override def realTime: IO[FiniteDuration] = IO.pure(now.toEpochMilli.millis)
+    override def monotonic: IO[FiniteDuration] = IO.pure(0.nanos)
   }
 
   test("expired worker lease resumes its checkpoint across client restart and fences in-flight evidence writes") {
-    val container = replicaSet()
     val connectionString =
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
-    val databaseName = s"analytics_erasure_recovery_${UUID.randomUUID()}"
+      endpointUri
+    val databaseName = testDatabaseName
     val pauseEvidenceWrite = new AtomicBoolean(false)
     val evidenceWriteStarted = new CountDownLatch(1)
     val competingClaimStarted = new CountDownLatch(1)
@@ -344,15 +306,13 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       resumeEvidenceWrite.countDown()
       if (restartedClient != null) restartedClient.close()
       if (client != null) client.close()
-      container.stop()
     }
   }
 
   test("erasure preflight rejects an int registry proof and recovers after restoring its long version") {
-    val container = replicaSet()
-    val uri = s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+    val uri = endpointUri
     val client = syncClient(uri)
-    val name = s"registry_proof_${UUID.randomUUID()}"
+    val name = testDatabaseName
     try {
       val database = client.getDatabase(name)
       List(
@@ -383,15 +343,13 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       assert(stores.queue.preflight.attempt.unsafeRunSync().isRight, "restored BSON long proof must recover")
     } finally {
       client.close()
-      container.stop()
     }
   }
 
   test("erasure processing restarts from the durable Delta checkpoint and publishes completion") {
-    val container = replicaSet()
     val connectionString =
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
-    val databaseName = s"erasure_restart_${UUID.randomUUID()}"
+      endpointUri
+    val databaseName = testDatabaseName
     val requestId = UUID.randomUUID().toString
     val receiptId = UUID.randomUUID().toString
     val startedAt = Instant.now()
@@ -615,17 +573,15 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       if (spark != null) spark.stop()
       if (restartedClient != null) restartedClient.close()
       if (client != null) client.close()
-      container.stop()
     }
   }
 
   test("a failed publisher fence leaves deletion pending without a barrier or outbox purge") {
-    val container = replicaSet()
     val client: MongoClient = syncClient(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"analytics_fence_failure_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val requestId = UUID.randomUUID().toString
       val transactionalId = "hiring-publisher-" + UUID.randomUUID().toString
       val now = Instant.now()
@@ -729,17 +685,15 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       assertEquals(outboxCount, 1L)
     } finally {
       client.close()
-      container.stop()
     }
   }
 
   test("repair-required erasure stays pending and can be requeued only against observed attempt and lease state") {
-    val container = replicaSet()
     val client = syncClient(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"analytics_erasure_repair_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val collection = database.getCollection(AnalyticsCollections.ErasureRequests)
       val requestId = UUID.randomUUID().toString
       val now = Instant.now()
@@ -781,15 +735,13 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       assertEquals(persisted.getBoolean("repairRequired"), Boolean.box(false))
     } finally {
       client.close()
-      container.stop()
     }
   }
 
   test("a failure write paused before Mongo cannot overwrite a reclaimed lease or its repair state") {
-    val container = replicaSet()
     val connectionString =
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
-    val databaseName = s"erasure_failure_race_${UUID.randomUUID()}"
+      endpointUri
+    val databaseName = testDatabaseName
     val staleWriteStarted = new CountDownLatch(1)
     val releaseStaleWrite = new CountDownLatch(1)
     val pauseStaleWrite = new AtomicBoolean(true)
@@ -876,17 +828,15 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       releaseStaleWrite.countDown()
       currentClient.close()
       staleClient.close()
-      container.stop()
     }
   }
 
   test("concurrent repair requeues and worker claims preserve one lease and the durable checkpoint") {
-    val container = replicaSet()
     val client = syncClient(
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     )
     try {
-      val database = client.getDatabase(s"erasure_repair_race_${UUID.randomUUID()}")
+      val database = client.getDatabase(testDatabaseName)
       val collection = database.getCollection(AnalyticsCollections.ErasureRequests)
       val users = database.getCollection("users")
       val reportControl = database.getCollection("analytics_report_control")
@@ -999,16 +949,14 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       assertEquals(reportState.getLong("lastPublishedRevision"), Long.box(3L))
     } finally {
       client.close()
-      container.stop()
     }
   }
 
   test("typed HMAC authorization and preparation stores round trip derived records") {
-    val container = replicaSet()
     val connectionString =
-      s"mongodb://${container.getHost}:${container.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
+      endpointUri
     val client = syncClient(connectionString)
-    val databaseName = s"analytics_hmac_records_${UUID.randomUUID()}"
+    val databaseName = testDatabaseName
     val database = mongo4catsDatabase(client, databaseName)
     val root = s"s3a://analytics-test/${UUID.randomUUID()}"
     val lakehouseId = MongoAnalyticsLakehouseLock.lockId(root).toOption.get
@@ -1063,7 +1011,6 @@ class MongoAnalyticsErasureAdaptersIntegrationSpec extends munit.FunSuite {
       )
     } finally {
       client.close()
-      container.stop()
     }
   }
 }

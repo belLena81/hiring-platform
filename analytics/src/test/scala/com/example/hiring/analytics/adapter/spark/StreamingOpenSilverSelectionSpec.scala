@@ -130,7 +130,9 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
       val actor = UUID.nameUUIDFromBytes(s"subject-$index".getBytes("UTF-8"))
       val skill = if (changed) "Changed" else "Scala"
       val body =
-        s"""{"eventId":"event-$index","eventType":"JOB_CREATED","occurredAt":"$at","aggregateType":"Job","aggregateId":"job-$index","actorId":"$actor","payload":{"jobId":"job-$index","job":{"skills":["$skill"]}}}"""
+        com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+          s"""{"eventId":"event-$index","eventType":"JOB_CREATED","occurredAt":"$at","aggregateType":"Job","aggregateId":"job-$index","actorId":"$actor","payload":{"jobId":"job-$index","job":{"skills":["$skill"]}}}"""
+        )
       Row("hiring.quarantine.test", 0, offset.toLong, body)
     }
     val raw = spark
@@ -293,9 +295,18 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
             val valid = parsed(spark, Vector(100, 101, 104, 105, 106, 107), false)
               .withColumn(
                 "occurredAt",
-                when(col("eventId") === lit("event-105"), lit(Timestamp.from(at.plusSeconds(60))))
-                  .when(col("eventId") === lit("event-106"), lit(Timestamp.from(at.plusSeconds(600))))
-                  .when(col("eventId") === lit("event-107"), lit(Timestamp.from(at.minusSeconds(3 * 86400))))
+                when(
+                  col("eventId") === lit("a08ccb20-0a4d-322d-9bfa-96e87be08bfd"),
+                  lit(Timestamp.from(at.plusSeconds(60)))
+                )
+                  .when(
+                    col("eventId") === lit("b43e85e2-2e6a-3aff-9663-943b82c7a312"),
+                    lit(Timestamp.from(at.plusSeconds(600)))
+                  )
+                  .when(
+                    col("eventId") === lit("ef543f7d-3f40-3ea4-b421-63fe88093094"),
+                    lit(Timestamp.from(at.minusSeconds(3 * 86400)))
+                  )
                   .otherwise(col("occurredAt"))
               )
             val malformed = parsed(spark, Vector(103), false)
@@ -311,23 +322,38 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
           markers <- execution(
             AnalyticsSubjectPrivacy
               .withSubjectToken(OperationalEventTransforms.validEvents(input), keys)
-              .filter(col("eventId") === lit("event-104"))
+              .filter(col("eventId") === lit("e8421b79-de4b-33d4-9323-d78939c470e2"))
               .select("subjectToken")
           )
           _ <- stage.quarantinePreparation(spark, AnalyticsBronzeInput(input, at, 10L, 9L, 1L), markers, true).use {
             prepared =>
               execution {
                 // Actual normalizer retains one identical event100 and removes both conflicting event102s.
-                assertEquals(prepared.incomingSilver.filter(col("eventId") === lit("event-100")).count(), 1L)
-                assertEquals(prepared.incomingSilver.filter(col("eventId").isin("event-102", "event-104")).count(), 0L)
-                val extra = prepared.incomingSilver.filter(col("eventId") === lit("event-105")).select("eventId")
+                assertEquals(
+                  prepared.incomingSilver
+                    .filter(col("eventId") === lit("cdeb21df-44ce-3deb-868c-5f5af1e3b52c"))
+                    .count(),
+                  1L
+                )
+                assertEquals(
+                  prepared.incomingSilver
+                    .filter(
+                      col("eventId")
+                        .isin("7aa3f2c1-61d5-3dbe-a9d8-df183b2e6e73", "e8421b79-de4b-33d4-9323-d78939c470e2")
+                    )
+                    .count(),
+                  0L
+                )
+                val extra = prepared.incomingSilver
+                  .filter(col("eventId") === lit("a08ccb20-0a4d-322d-9bfa-96e87be08bfd"))
+                  .select("eventId")
                 val superset = prepared.copy(conflicts = prepared.conflicts.unionByName(extra).distinct())
                 val selected = selection(superset, direct, at, Some(at.minusSeconds(86400)))
                 assertEquals(selected.schema, prepared.incomingSilver.schema)
                 if (direct)
                   assertEquals(
                     selected
-                      .filter(col("eventId") === lit("event-105"))
+                      .filter(col("eventId") === lit("a08ccb20-0a4d-322d-9bfa-96e87be08bfd"))
                       .select("occurredAt")
                       .first()
                       .getAs[Timestamp](0)
@@ -341,7 +367,7 @@ final class StreamingOpenSilverSelectionSpec extends CatsEffectSuite {
             val silver = spark.read.format("delta").load(paths.silver)
             assertEquals(
               silver.select("eventId").collect().toVector.map(_.getString(0)).sorted,
-              Vector("event-100", "event-101")
+              Vector("cdeb21df-44ce-3deb-868c-5f5af1e3b52c", "258507d9-c11b-30ea-b41a-519e5d254cd0").sorted
             )
             assertEquals(silver.filter(col("expiresAt") <= lit(Timestamp.from(at))).count(), 0L)
             val quarantine = spark.read.format("delta").load(paths.quarantine)

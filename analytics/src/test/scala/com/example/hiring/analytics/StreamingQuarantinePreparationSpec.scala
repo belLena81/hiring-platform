@@ -104,7 +104,9 @@ final class StreamingQuarantinePreparationSpec extends CatsEffectSuite {
       val actor = UUID.nameUUIDFromBytes(s"subject-$index".getBytes("UTF-8"))
       val skill = if (changed) "Changed" else "Scala"
       val body =
-        s"""{"eventId":"event-$index","eventType":"JOB_CREATED","occurredAt":"$at","aggregateType":"Job","aggregateId":"job-$index","actorId":"$actor","payload":{"jobId":"job-$index","job":{"skills":["$skill"]}}}"""
+        com.example.hiring.analytics.AnalyticsOperationalEventFixtures.complete(
+          s"""{"eventId":"event-$index","eventType":"JOB_CREATED","occurredAt":"$at","aggregateType":"Job","aggregateId":"job-$index","actorId":"$actor","payload":{"jobId":"job-$index","job":{"skills":["$skill"]}}}"""
+        )
       Row("hiring.quarantine.test", 0, offset.toLong, body)
     }
     val raw = spark
@@ -135,7 +137,17 @@ final class StreamingQuarantinePreparationSpec extends CatsEffectSuite {
             OperationalEventTransforms.silver(OperationalEventTransforms.validEvents(seed), keys, markers)
           )
           _ <- writer.merge(
-            writer.withExpiry(silver.filter(!col("eventId").isin((6000 until 7500).map(i => s"event-$i")*)), at, 30),
+            writer.withExpiry(
+              silver.filter(
+                !col("eventId").isin(
+                  (6000 until 7500).map(i =>
+                    com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"event-$i")
+                  )*
+                )
+              ),
+              at,
+              30
+            ),
             paths.silver,
             "target.eventId = source.eventId"
           )
@@ -147,7 +159,12 @@ final class StreamingQuarantinePreparationSpec extends CatsEffectSuite {
           late <- execution(
             AnalyticsSubjectPrivacy
               .withSubjectToken(OperationalEventTransforms.validEvents(seed), keys)
-              .filter(col("eventId").isin((6000 until 7500).map(i => s"event-$i")*))
+              .filter(
+                col("eventId").isin(
+                  (6000 until 7500)
+                    .map(i => com.example.hiring.analytics.AnalyticsOperationalEventFixtures.id(s"event-$i"))*
+                )
+              )
           )
           _ <- new AnalyticsLateFactStage[IO](paths, execution, writer).persistClosedDayFacts(late, markers, at)
           incoming <- execution {
@@ -246,7 +263,7 @@ final class StreamingQuarantinePreparationSpec extends CatsEffectSuite {
           markers <- execution {
             val tokens = AnalyticsSubjectPrivacy
               .withSubjectToken(OperationalEventTransforms.validEvents(input), keys)
-              .filter(col("eventId") === "event-100")
+              .filter(col("eventId") === "cdeb21df-44ce-3deb-868c-5f5af1e3b52c")
               .select("subjectToken")
             if (active) tokens else tokens.limit(0)
           }
@@ -269,7 +286,11 @@ final class StreamingQuarantinePreparationSpec extends CatsEffectSuite {
               assertEquals(prepared.quarantinedRecords, 1L)
               assertEquals(prepared.conflictingEventIds, 0L)
               val silverIds = silver.select("eventId").collect().toVector.map(_.getString(0)).sorted
-              assertEquals(silverIds, if (active) Vector("event-101") else Vector("event-100", "event-101"))
+              assertEquals(
+                silverIds,
+                if (active) Vector("258507d9-c11b-30ea-b41a-519e5d254cd0")
+                else Vector("cdeb21df-44ce-3deb-868c-5f5af1e3b52c", "258507d9-c11b-30ea-b41a-519e5d254cd0").sorted
+              )
               val quarantineRows = quarantine.toJSON.collect().toVector.sorted
               assertEquals(quarantineRows.size, if (active) 0 else 1)
               if (!active) {

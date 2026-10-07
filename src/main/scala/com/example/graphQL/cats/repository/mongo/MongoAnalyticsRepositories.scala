@@ -74,7 +74,9 @@ private[mongo] object MongoAnalyticsRepositoryOperations {
 final class MongoAnalyticsErasureRequestRepository(
     database: MongoDatabase[IO],
     transactionRunner: MongoTransactionRunner,
-    diagnostics: Diagnostics
+    diagnostics: Diagnostics,
+    topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
+      com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default
 ) extends AnalyticsErasureRequestRepository {
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsErasureRequests)
   private val subjectFences = Mongo4catsCollections.documents(database, MongoCollections.OutboxSubjectFences)
@@ -277,7 +279,7 @@ final class MongoAnalyticsErasureRequestRepository(
         .flatMap {
           case AccountDeletionStatus.Complete =>
             RepositoryIO
-              .lift(new MongoInterviewSubjectCleanup(database).complete(userId))
+              .lift(new MongoInterviewSubjectCleanup(database, diagnostics, topics).complete(userId))
               .map(if (_) AccountDeletionStatus.Complete else AccountDeletionStatus.Pending)
           case other => RepositoryIO.fromEither(Right(other))
         }
@@ -393,12 +395,15 @@ object MongoAnalyticsErasureRequestRepository {
   def transactional(
       database: MongoDatabase[IO],
       client: MongoClient[IO],
-      diagnostics: Diagnostics
+      diagnostics: Diagnostics,
+      topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
+        com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default
   ): MongoAnalyticsErasureRequestRepository =
     new MongoAnalyticsErasureRequestRepository(
       database,
       MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = diagnostics),
-      diagnostics
+      diagnostics,
+      topics
     )
 }
 

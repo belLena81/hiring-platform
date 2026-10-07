@@ -1,6 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Resource, Deferred, Ref}
 import cats.syntax.all.*
 import com.example.graphQL.cats.service.Diagnostics
 import com.example.graphQL.cats.domain.model.*
@@ -8,66 +8,24 @@ import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.AccountValueFixtures.email
 import com.example.graphQL.cats.service.port.*
 import com.mongodb.client.model.Filters
-import munit.CatsEffectSuite
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.containers.wait.strategy.Wait
-import org.testcontainers.utility.DockerImageName
 
-import java.time.{Duration, Instant}
+import java.time.Instant
 import java.util.{Date, UUID}
 import scala.concurrent.duration.*
 
-final class MongoEmbeddingWorkIntegrationSpec extends CatsEffectSuite {
+final class MongoEmbeddingWorkIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val now = Instant.parse("2026-10-06T12:00:00Z")
-  private val image = "mongo:8.0.32-noble@sha256:01354084d2ae665d2e79b79b0cdc50c2c0c98873618912d9a2c8c9cb5c3d24e6"
-  private final class ReplicaSet extends GenericContainer[ReplicaSet](DockerImageName.parse(image))
-
   private def database: Resource[IO, (MongoDatabase[IO], MongoTransactionRunner)] =
-    Resource
-      .make(IO.blocking {
-        val instance = new ReplicaSet
-        val _ = instance
-          .withExposedPorts(27017)
-          .withCommand("mongod", "--bind_ip_all", "--replSet", "rs0")
-          .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofSeconds(90)))
-        try {
-          instance.start()
-          val result = instance.execInContainer(
-            "mongosh",
-            "--quiet",
-            "--eval",
-            "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
-          )
-          if (result.getExitCode != 0) throw new AssertionError(result.getStderr)
-          instance
-        } catch {
-          case error: Throwable => instance.stop(); throw error
-        }
-      })(instance => IO.blocking(instance.stop()))
-      .flatMap { instance =>
-        def awaitPrimary(remaining: Int): IO[Unit] =
-          IO.blocking(instance.execInContainer("mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary"))
-            .flatMap { result =>
-              if (result.getExitCode == 0 && result.getStdout.trim == "true") IO.unit
-              else if (remaining > 0) IO.sleep(250.millis) *> awaitPrimary(remaining - 1)
-              else IO.raiseError(new AssertionError("Mongo primary election failed"))
-            }
-        Resource.eval(awaitPrimary(60)) *> MongoDatabaseProbe
-          .clientResource(
-            s"mongodb://${instance.getHost}:${instance.getMappedPort(27017)}/?replicaSet=rs0&directConnection=true"
-          )
-          .evalMap { client =>
-            client
-              .getDatabase(s"embedding_work_${UUID.randomUUID()}")
-              .map(
-                _ ->
-                  MongoTransactionRunner.sessions(client, RepositoryError.Conflict, diagnostics = Diagnostics.noop)
-              )
-          }
-      }
+    mongoResource.map { fixture =>
+      fixture.database -> MongoTransactionRunner.sessions(
+        fixture.client,
+        RepositoryError.Conflict,
+        diagnostics = Diagnostics.noop
+      )
+    }
 
   private def successful[A](result: RepositoryIO[A]): IO[A] =
     result.value.flatMap(_.fold(error => IO.raiseError(new AssertionError(s"Repository failure: $error")), IO.pure))
@@ -114,6 +72,193 @@ final class MongoEmbeddingWorkIntegrationSpec extends CatsEffectSuite {
       }
     }
   }
+
+  test("deletion during an in-flight provider call leaves a raw embedding-free tombstone") {
+    database.use { case (db, transactions) =>
+      val users = new MongoUserRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+      val jobs = new MongoJobRepository(db, transactions, MongoEmbeddingWorkEnqueuer.disabled, Diagnostics.noop)
+      val work = new MongoEmbeddingWorkRepository(db, Diagnostics.noop)
+      val id = UserId(UUID.randomUUID())
+      val user = User(
+        id,
+        None,
+        "Candidate",
+        UserRole.Candidate,
+        Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None))),
+        now
+      )
+      val key = EmbeddingWorkKey(EmbeddingWorkKind.CandidateProfile, id.value.toString)
+      for {
+        _ <- successful(users.insert(user))
+        _ <- successful(work.enqueue(key, now))
+        started <- Deferred[IO, Unit]
+        release <- Deferred[IO, Unit]
+        provider = new EmbeddingService {
+          def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+            (started.complete(()).void *> release.get).as(Right(EmbeddingVector(List(0.1f), "voyage-4-lite", 1)))
+        }
+        _ <- com.example.graphQL.cats.service.search.EmbeddingPipeline
+          .resource(
+            work,
+            users,
+            jobs,
+            provider,
+            "voyage-4-lite",
+            8,
+            1,
+            1,
+            10.millis,
+            30.seconds,
+            diagnostics = Diagnostics.noop
+          )
+          .use { publisher =>
+            publisher.wake *> started.get *>
+              successful(users.deleteAccount(id, now, "Deleted candidate", MutationWriteContext.directWrite)) *>
+              release.complete(()).void *> awaitAbsent(db, key)
+          }
+        raw <- MongoRepositoryTestSupport
+          .findOne(db, MongoCollections.Users, Filters.eq(MongoFields.Id, id.value.toString))
+          .flatMap(IO.fromOption(_)(new AssertionError("Missing tombstone")))
+        deleted <- successful(users.find(id)).flatMap(IO.fromOption(_)(new AssertionError("Missing tombstone")))
+      } yield {
+        assertEquals(deleted.accountStatus, AccountStatus.Deleted)
+        assert(!raw.containsKey(MongoFields.Embedding))
+        assert(!raw.containsKey(MongoFields.EmbeddingMeta))
+      }
+    }
+  }
+
+  test("in-flight embeddings recover after real interview scheduling fences candidate and job revisions") {
+    List(false, true).traverse_ { candidateWork =>
+      mongoResource.use { fixture =>
+        val at = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS)
+        val candidateId = UserId(UUID.randomUUID())
+        val recruiterId = UserId(UUID.randomUUID())
+        val starts = at.plusSeconds(172800)
+        val ends = starts.plusSeconds(3600)
+        val workflow = com.example.graphQL.cats.domain.workflow.InterviewWorkflow
+          .create(
+            com.example.graphQL.cats.domain.workflow.InterviewWorkflowId(UUID.randomUUID()),
+            com.example.graphQL.cats.domain.model.Identifiers.ApplicationId(UUID.randomUUID()),
+            candidateId,
+            recruiterId,
+            com.example.graphQL.cats.domain.workflow.InterviewInterval(starts, ends),
+            at.plusSeconds(300),
+            UUID.randomUUID(),
+            ApplicationStatus.Accepted
+          )
+          .fold(error => fail(s"Invalid workflow: $error"), identity)
+        val users = MongoUserRepository.transactional(
+          fixture.database,
+          fixture.client,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop
+        )
+        val jobs = MongoJobRepository.transactional(
+          fixture.database,
+          fixture.client,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop
+        )
+        val applications = MongoApplicationRepository.transactional(fixture.database, fixture.client, Diagnostics.noop)
+        val workflows = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        val scheduling = new com.example.graphQL.cats.service.application.InterviewSchedulingService(
+          users,
+          jobs,
+          applications,
+          workflows,
+          5.minutes
+        )
+        val work = new MongoEmbeddingWorkRepository(fixture.database, Diagnostics.noop)
+        for {
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+          _ <- InterviewSchedulingFixtures.seed(fixture.database, List(workflow), at)
+          application <- successful(applications.find(workflow.applicationId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing application")))
+          beforeUser <- successful(users.findVersioned(candidateId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
+          beforeJob <- successful(jobs.findVersioned(application.jobId))
+            .flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+          started <- Deferred[IO, Unit]
+          release <- Deferred[IO, Unit]
+          calls <- Ref.of[IO, Int](0)
+          provider = new EmbeddingService {
+            def embed(input: EmbeddingInput): IO[Either[EmbeddingError, EmbeddingVector]] =
+              calls
+                .updateAndGet(_ + 1)
+                .flatMap(count =>
+                  (if (count == 1) started.complete(()).void *> release.get else IO.unit)
+                    .as(Right(EmbeddingVector(List(0.1f), "voyage-4-lite", 1)))
+                )
+          }
+          changed =
+            if (candidateWork)
+              com.example.graphQL.cats.service.search.EmbeddingWork.CandidateProfileChanged(candidateId)
+            else com.example.graphQL.cats.service.search.EmbeddingWork.JobChanged(application.jobId)
+          key = com.example.graphQL.cats.service.search.DurableEmbeddingWorkPublisher.keyFor(changed)
+          _ <- successful(work.enqueue(key, at))
+          _ <- com.example.graphQL.cats.service.search.EmbeddingPipeline
+            .resource(
+              work,
+              users,
+              jobs,
+              provider,
+              "voyage-4-lite",
+              8,
+              1,
+              1,
+              10.millis,
+              30.seconds,
+              diagnostics = Diagnostics.noop,
+              durableRetryBase = 10.millis,
+              durableRetryCap = 20.millis
+            )
+            .use { publisher =>
+              for {
+                _ <- publisher.wake
+                _ <- started.get
+                scheduled <- scheduling
+                  .schedule(
+                    com.example.graphQL.cats.service.ActorContext(recruiterId, UserRole.Recruiter),
+                    workflow.applicationId,
+                    starts,
+                    ends,
+                    UUID.randomUUID()
+                  )
+                  .value
+                _ = assert(scheduled.isRight, s"Scheduling failed: $scheduled")
+                fencedUser <- successful(users.findVersioned(candidateId))
+                  .flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
+                fencedJob <- successful(jobs.findVersioned(application.jobId))
+                  .flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+                _ = assert(fencedUser.version > beforeUser.version)
+                _ = assert(fencedJob.version > beforeJob.version)
+                _ <- release.complete(())
+                _ <- awaitAbsent(fixture.database, key)
+              } yield ()
+            }
+          count <- calls.get
+          user <- successful(users.find(candidateId)).flatMap(IO.fromOption(_)(new AssertionError("Missing candidate")))
+          job <- successful(jobs.find(application.jobId)).flatMap(IO.fromOption(_)(new AssertionError("Missing job")))
+        } yield {
+          assertEquals(count, 2)
+          val source =
+            if (candidateWork) user.candidateProfile.map(SearchableText.candidate) else Some(SearchableText.job(job))
+          val metadata = if (candidateWork) user.embedding.map(_.meta) else job.embedding.map(_.meta)
+          assertEquals(metadata.map(_.sourceHash), source.map(com.example.graphQL.cats.shared.crypto.SourceHash.sha256))
+        }
+      }
+    }
+  }
+
+  private def awaitAbsent(db: MongoDatabase[IO], key: EmbeddingWorkKey, remaining: Int = 200): IO[Unit] =
+    MongoRepositoryTestSupport
+      .findOne(db, MongoCollections.EmbeddingWork, Filters.eq(MongoFields.Id, key.value))
+      .flatMap {
+        case None                     => IO.unit
+        case Some(_) if remaining > 0 => IO.sleep(20.millis) *> awaitAbsent(db, key, remaining - 1)
+        case Some(record)             => IO.raiseError(new AssertionError(s"Work did not complete: $record"))
+      }
 
   test("singleton Admin can inspect and CAS-repair failed work; other actors and stale generations cannot") {
     database.use { case (db, transactions) =>

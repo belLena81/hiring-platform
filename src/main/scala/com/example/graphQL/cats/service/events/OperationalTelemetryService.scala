@@ -7,6 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.JobId
 import com.example.graphQL.cats.service.events.OperationalEvents
 import com.example.graphQL.cats.service.port.{
   JobRepository,
+  RepositoryError,
   SearchSessionLookup,
   SearchSessionRepository,
   SearchSessionWorkRepository,
@@ -81,14 +82,18 @@ final class OperationalTelemetryService(
       for {
         verified <- verifiedSearchResult(actor, searchId, resultId)
         now <- UseCase.liftIO(clock.realTimeInstant)
-        event = OperationalEvents.searchResultClicked(
-          eventId,
-          searchId,
-          resultId,
-          verified._2,
-          actor.userId,
-          verified._1,
-          now
+        event <- UseCase.fromEither(
+          OperationalEvents
+            .searchResultClicked(
+              eventId,
+              searchId,
+              resultId,
+              verified._2,
+              actor.userId,
+              verified._1,
+              now
+            )
+            .leftMap(_ => UseCaseError.Repository(RepositoryError.InvalidEvent))
         )
         _ <- UseCase.repository(searchSessions.recordInteraction(event, context))
       } yield ()

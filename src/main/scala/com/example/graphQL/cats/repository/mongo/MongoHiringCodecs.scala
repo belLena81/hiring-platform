@@ -191,11 +191,17 @@ private[mongo] object MongoHiringCodecs {
       uuid(MongoFields.ActorId, value.actorId).toValidatedNel.map(UserId.apply),
       parseJson(MongoFields.Payload, value.payload).toValidatedNel
     ).mapN(OperationalEventEnvelope.apply)
+      .andThen(event =>
+        OperationalEventJson.validate(event).leftMap(_ => InvalidField(MongoFields.Payload)).toValidatedNel
+      )
 
   def outboxRecord(value: OperationalEventEnvelope, now: Instant): Either[String, Document] =
     for {
-      subjectIds <- outboxSubjectIds(value)
-      document = outboxDocument(value, now, subjectIds)
+      valid <- OperationalEventJson.validate(value).leftMap(_.toString)
+      subjectIds <- outboxSubjectIds(valid)
+      document <- Either
+        .catchNonFatal(outboxDocument(valid, now, subjectIds))
+        .leftMap(_ => "Invalid outbox representation")
     } yield document
 
   private def outboxDocument(value: OperationalEventEnvelope, now: Instant, subjectIds: List[String]): Document = {
@@ -225,42 +231,12 @@ private[mongo] object MongoHiringCodecs {
     )
   }
 
-  private def outboxSubjectIds(value: OperationalEventEnvelope): Either[String, List[String]] = {
-    val payload = value.payload.hcursor
-    def requiredUuid(field: String): Either[String, String] =
-      payload.get[String](field).leftMap(_ => s"missing outbox subject field: $field").flatMap(parseSubjectId)
-
-    def parseSubjectId(raw: String): Either[String, String] =
-      Parsing.parseUuid(raw).leftMap(_ => "invalid outbox subject id").map(_.toString)
-
-    val candidates: Either[String, List[String]] = value.eventType match {
-      case OperationalEventType.APPLICATION_CREATED | OperationalEventType.APPLICATION_STATUS_CHANGED |
-          OperationalEventType.CANDIDATE_HIRED =>
-        requiredUuid(MongoFields.CandidateId).map(List(_))
-      case OperationalEventType.SEARCH_PERFORMED =>
-        payload.get[String](MongoFields.SearchKind).leftMap(_ => "search event has no search kind").flatMap {
-          case "candidateMatches" =>
-            payload
-              .get[List[io.circe.Json]](MongoFields.Results)
-              .leftMap(_ => "candidate search event has malformed results")
-              .flatMap(
-                _.traverse(_.hcursor.get[String](MongoFields.ResultId).leftMap(_ => "candidate result has no id"))
-              )
-              .flatMap(_.traverse(parseSubjectId))
-          case "jobs" | "recommendedJobs" | "semanticJobSearch" => Right(Nil)
-          case _                                                => Left("search event has an unknown search kind")
-        }
-      case OperationalEventType.SEARCH_RESULT_CLICKED =>
-        payload.get[String](MongoFields.SearchKind).leftMap(_ => "search click has no search kind").flatMap {
-          case "candidateMatches"                               => requiredUuid(MongoFields.ResultId).map(List(_))
-          case "jobs" | "recommendedJobs" | "semanticJobSearch" => Right(Nil)
-          case _                                                => Left("search click has an unknown search kind")
-        }
-      case _ => Right(Nil)
-    }
-
-    candidates.map(values => (value.actorId.value.toString :: values).distinct.sorted)
-  }
+  private[mongo] def outboxSubjectIds(value: OperationalEventEnvelope): Either[String, List[String]] =
+    OperationalEventPayload
+      .decode(value)
+      .flatMap(_.subjectIds)
+      .leftMap(_.toString)
+      .map(subjects => (value.actorId.value :: subjects).map(_.toString).distinct.sorted)
 
   def searchSession(value: SearchSession): Document =
     MongoHiringPersistenceCodecs.searchSession(

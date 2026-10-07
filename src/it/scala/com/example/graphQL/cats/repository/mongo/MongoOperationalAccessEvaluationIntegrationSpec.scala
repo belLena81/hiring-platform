@@ -7,11 +7,7 @@ import com.example.graphQL.cats.domain.model.Identifiers.*
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.{ActorContext, Diagnostics, RepositoryError}
 import com.example.graphQL.cats.service.auth.ActorAuthorization
-import com.example.graphQL.cats.service.events.{
-  OperationalAggregateType,
-  OperationalEventEnvelope,
-  OperationalEventType
-}
+import com.example.graphQL.cats.service.events.{OperationalEvents, OperationalEventType}
 import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.read.{HiringReadScope, JobRelationKey, UserRelationKey}
 import com.example.graphQL.cats.service.search.{
@@ -22,7 +18,6 @@ import com.example.graphQL.cats.service.search.{
 }
 import io.circe.Json
 import io.circe.parser.parse
-import munit.CatsEffectSuite
 import org.bson.{BsonDocument, BsonValue, Document}
 import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
@@ -31,7 +26,7 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** A bounded baseline of production adapter calls, separate from performance acceptance. */
-final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSuite {
+final class MongoOperationalAccessEvaluationIntegrationSpec extends MongoIntegrationSuite {
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val support = MongoAccessEvaluationSupport
   private val now = Instant.parse("2026-10-05T12:00:00Z")
@@ -121,7 +116,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
   private final case class Observation(latencyMillis: Double, returned: Int, error: Option[String])
 
   test("production operational access records bounded commands, plans and reproducible local baselines") {
-    support.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val database = fixture.database
       val users = new MongoUserRepository(
         database,
@@ -546,7 +541,7 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
   }
 
   test("production candidate predicates execute the true false absent consent truth table on Mongo") {
-    support.resource.use { fixture =>
+    mongoResource.use { fixture =>
       val model = "synthetic-model"
       val optedIn = CandidateProfile(
         Set("Scala"),
@@ -711,14 +706,13 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           clearCollection(fixture, MongoCollections.EventOutbox) *>
             clearCollection(fixture, MongoCollections.OutboxSubjectFences) *>
             jobs.zipWithIndex.traverse_ { case (job, index) =>
-              val event = OperationalEventEnvelope(
+              val event = OperationalEvents.jobViewed(
                 support.deterministicId(s"publisher-event:$index"),
-                OperationalEventType.JOB_VIEWED,
-                now,
-                OperationalAggregateType.Job,
-                job.id.value.toString,
+                job.id,
                 publisherActors(if (sharedSubject) 0 else index).id,
-                Json.obj("jobId" -> Json.fromString(job.id.value.toString))
+                None,
+                None,
+                now
               )
               MongoHiringCodecs
                 .outboxRecord(event, now)
@@ -772,19 +766,21 @@ final class MongoOperationalAccessEvaluationIntegrationSpec extends CatsEffectSu
           id = support.deterministicId(s"created-job:$index")
           eventId = support.deterministicId(s"created-job-event:$index")
           value = jobs.head.copy(id = JobId(id))
-          event = OperationalEventEnvelope(
-            eventId,
-            OperationalEventType.JOB_CREATED,
-            now,
-            OperationalAggregateType.Job,
-            id.toString,
-            value.recruiterId,
-            Json.obj("jobId" -> Json.fromString(id.toString))
-          )
+          event = OperationalEvents
+            .jobEvent(OperationalEventType.JOB_CREATED, eventId, value, value.recruiterId, now)
+            .fold(error => fail(error.toString), identity)
           _ <- successful(jobRepository.createWithEvents(value, now, List(event), MutationWriteContext.directWrite))
         } yield 1
         val claimAndPublish =
-          successful(outbox.claim("synthetic-publisher", "synthetic-transaction", now, now.plusSeconds(60), 1))
+          successful(
+            outbox.claim(
+              "synthetic-publisher",
+              "hiring-publisher-" + support.deterministicId("synthetic-publisher-generation").toString,
+              now,
+              now.plusSeconds(60),
+              1
+            )
+          )
             .flatMap(values =>
               values
                 .traverse_(value =>

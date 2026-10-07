@@ -21,9 +21,13 @@ lazy val analytics = (project in file("."))
   .settings(
     name := "hiring-analytics",
     version := "0.1.0-SNAPSHOT",
+    target := sys.props
+      .get("hiring.test.buildRoot")
+      .fold(baseDirectory.value / "target")(path => file(path) / "target"),
     publish / skip := true,
     Compile / run / fork := true,
     Test / fork := true,
+    Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "test-support" / "src" / "main" / "scala",
     Test / parallelExecution := false,
     Test / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",
     IntegrationTest / scalaSource := baseDirectory.value / "src" / "it" / "scala",

@@ -9,7 +9,6 @@ import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.HiringAnalyticsRecoveryTestSupport.*
 import io.delta.tables.DeltaTable
-import munit.FunSuite
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.functions.col
 import org.bson.Document
@@ -22,8 +21,10 @@ import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
 
 /** Composes the production replay service, Delta stages, Mongo journal, report publisher and lakehouse lock. */
-final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends FunSuite {
-  override val munitTimeout: FiniteDuration = 15.minutes
+final class HiringAnalyticsLateFactReplayRecoveryIntegrationSpec extends AnalyticsMongoIntegrationSuite {
+  private def resource = HiringAnalyticsRecoveryTestSupport.resource(mongoEndpoint)
+
+  override val munitIOTimeout: FiniteDuration = 15.minutes
 
   private def seed(harness: Harness): IO[(AnalyticsLateFactReplayRequest, Instant, Instant)] = {
     val observed = Instant.now().minusSeconds(25L * 86400L).truncatedTo(ChronoUnit.MICROS)
