@@ -15,7 +15,7 @@ The approved [search and publication reliability slice](specs/hiring-search-publ
 - **Phase 10:** local radius search and exact structured facets are recorded complete. Atlas search/lag evidence remains open; lexical-query facets and personalization are separate open/deferred capabilities.
 - **Phase 11:** the approved local scheduling, acknowledgment recovery, broker-outage and cleanup criteria are recorded complete. Real providers, production redundancy and deployed retention remain external; cancellation/rescheduling is outside the approved scheduling slice.
 
-The [workflow specification](specs/durable-hiring-workflows.md) contains a newer evidence reconciliation that supersedes the historical October 6 counts and corrects the former DHW-12 outage-test status. The README keeps Phases 8–11 unchecked while any whole-phase Atlas, human-review, retrieval-quality, or deployed acceptance criteria remain unresolved.
+The [workflow specification](specs/durable-hiring-workflows.md) contains a newer evidence reconciliation that supersedes the historical October 6 counts and corrects the former DHW-12 outage-test status. The README marks Phases 8–11 `[~]` (local scope done, not complete) while any whole-phase Atlas, human-review, retrieval-quality, or deployed acceptance criteria remain unresolved.
 
 ## Hiring event and test reliability
 
