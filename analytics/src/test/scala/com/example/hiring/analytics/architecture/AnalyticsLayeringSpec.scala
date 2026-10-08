@@ -99,9 +99,7 @@ final class AnalyticsLayeringSpec extends FunSuite {
       "adapter/local/LocalHmacKeyWriterExclusion.scala",
       "adapter/local/LocalProcess.scala",
       "adapter/mongo/HmacKeyRetirementPreparation.scala",
-      "adapter/spark/HmacKeyRetirementCoordinator.scala",
-      "cli/HmacKeyRetirementAuthorizationMain.scala",
-      "cli/HmacKeyRetirementFixtureMain.scala"
+      "adapter/spark/HmacKeyRetirementCoordinator.scala"
     )
 
     files.foreach { file =>
