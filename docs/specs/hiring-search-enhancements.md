@@ -8,7 +8,7 @@ The remaining task evidence is retained as a historical record unless explicitly
 
 ## Status and outcome
 
-- Status: in review; implemented locally, final QA and live Atlas gates remain open
+- Status: local embedding/evaluation tooling is complete for the reviewed scope; Phase 9 remains partial pending human judgment review and live Atlas evidence. The historic HSE feature review and its criterion-specific gates remain distinct from the later local tooling review.
 - Actor: candidates searching open jobs; recruiters matching candidates against jobs they own
 - Outcome: expose deterministic match evidence, support recruiter-entered natural language plus structured candidate filters, and provide selectable MongoDB hybrid-ranking and embedding-evaluation paths without changing the default search behavior.
 - Authorized scope: additive candidate search-profile fields and GraphQL inputs/outputs, Mongo persistence and setup, semantic search adapters/services, local search evaluation, docs, and focused tests.
@@ -104,7 +104,7 @@ Verified on October 5, 2026; these are the original preimplementation observatio
 
 Independent planning reviews: Architect/Data Engineer PASS after the queue repair and session-guard details were included; evaluation design READY for local preparation; Security Engineer PASS for local spec readiness. These are preimplementation verdicts only. Implementation verdicts and runtime evidence are recorded in the current checkpoint below.
 
-Implementation checkpoint: before production changes, `IntegrationTest / testOnly *MongoEmbeddingWorkIntegrationSpec` compiled and failed its single real replica-set active-enqueue regression with `Repository failure: Unavailable` (exit 1). This reproduces the state-excluding upsert defect; it is not passing acceptance evidence. Next action: atomic pipeline repair followed by generation/transaction/replay checks.
+Historical red checkpoint: before the repair, `IntegrationTest / testOnly *MongoEmbeddingWorkIntegrationSpec` compiled and failed its single real replica-set active-enqueue regression with `Repository failure: Unavailable` (exit 1). This reproduced the state-excluding upsert defect. The later implementation checkpoint below records the repair and passing local Mongo checks; this failed run is not acceptance evidence.
 
 Evaluation proceeds in two explicitly reported stages. First run deterministic synthetic evaluation to test runner isolation, numerical behavior, reproducibility and retrieval fidelity. Then build a small curated corpus of realistic **fabricated** jobs, candidate summaries and queries with human-authored relevance judgments. Synthetic labels and human labels remain distinguishable in every report; neither real personal data nor an embedding model's own nearest neighbors may silently supply the human truth set.
 
@@ -217,9 +217,9 @@ Final Scala fingerprint: `cd6bb78a5356aa26ab8522c20859f0451319d672e47f3dad4b054e
 
 Final independent Code Reviewer **PASS**, Security Engineer **PASS**, and QA **PASS** for the authorized follow-up. Local tooling and policy readiness are complete; the user explicitly keeps human judgment review pending. Actual Atlas/semantic relevance/privacy/billing observations and ranking adoption remain open.
 
-Historical HSE source/regression applicability was reviewed against the current local suites. This does not close blanket historical HSE QA: HSE-01 still lacks criterion-specific runtime tests for interrupted migration 002 restart and malformed residence/status/consent verification. That pre-existing gap and all HSE live gates remain separate from this follow-up; no migration behavior was changed here.
+Historical HSE source/regression applicability was reviewed against the current local suites. At that checkpoint, HSE-01 still lacked criterion-specific runtime tests for interrupted migration 002 restart and malformed residence/status/consent verification. [CDI-04](candidate-discovery-and-interview-integrity.md#acceptance-and-evidence) subsequently closes that specific local evidence gap without changing applied migration 002. This does not retroactively close blanket HSE review or the HSE live gates.
 
-Subsequent local correction: [CDI-04](candidate-discovery-and-interview-integrity.md#acceptance-and-evidence) now supplies the missing migration 002 evidence: three 501-record interrupted-batch cases covering malformed residence, availability and consent, explicit repair/restart, unchanged data/revisions and absent consent defaulting to false. This closes that specific local evidence gap without changing applied migration 002; broader historical HSE and live gates retain their own status.
+Subsequent local correction: [CDI-04](candidate-discovery-and-interview-integrity.md#acceptance-and-evidence) supplies migration 002 evidence: three 501-record interrupted-batch cases covering malformed residence, availability and consent, explicit repair/restart, unchanged data/revisions and absent consent defaulting to false. This closes that specific local evidence gap without changing applied migration 002; broader historical HSE and live gates retain their own status.
 
 ### Review remediation checkpoint (2026-10-06)
 
