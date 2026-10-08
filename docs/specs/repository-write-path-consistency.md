@@ -53,7 +53,7 @@ The remaining task evidence is retained as a historical record unless explicitly
 
 - Mongo/repository owner: `MongoHiringRepositories.scala`, `MongoMutationReceiptRepository.scala`, `HiringRepositories.scala`, their focused unit/integration tests, and affected test adapters; implement RWC-01 through RWC-04.
 - GraphQL owner: failure catalog, schema execution/type comments, resolver support, and focused GraphQL tests; implement RWC-05 and RWC-06 without SDL changes.
-- Product Manager owner: this spec and `.agents/skills/scala-developer/SKILL.md`; implement RWC-07 while preserving existing text.
+- Product Manager owner: this spec and `.claude/skills/scala-developer/SKILL.md`; implement RWC-07 while preserving existing text.
 - Code Reviewer and Security Engineer inspect the integrated final state independently; QA runs final acceptance after required fixes.
 
 ## Checkpoint and review

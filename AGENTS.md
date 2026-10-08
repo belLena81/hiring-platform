@@ -8,7 +8,7 @@ Hiring Management Platform for Candidate, Recruiter, and singleton Admin.
 - Current build: Scala 3.9 LTS on Java 17+, Cats Effect, Sangria/http4s, and MUnit. The application implements hiring/account GraphQL, transactional MongoDB persistence, semantic/hybrid search, durable embedding work and operational event publication. A separate Scala 3.7.4 analytics build implements Spark/Delta batch, erasure and opt-in streaming. Inspect build, source, and current specifications before changes; implementation and local evidence do not establish production activation.
 - Explicit user instructions take precedence. This file governs workflow; README and architecture/plan documents describe intent; source/build describe implemented behavior. Report mismatches and resolve material ambiguity before dependent changes.
 - Read relevant sections of `README.md`, `ARCHITECTURE.md`, `docs/mongodb-design.md`, `docs/big-data-architecture.md`, `docs/use-cases.md`, and `docs/development-milestones.md`. Keep these canonical documents current; supporting documentation belongs in `docs/`, not numbered copies in root.
-- `docs/agent-development.md` explains baseline, usage, handoffs, and evidence. Load role instructions only from this project's `.agents/skills/*/SKILL.md` files. Do not use global skills or substitute a same-named global role; if a required project skill is missing, report it and restore it within the project.
+- `docs/agent-development.md` explains baseline, usage, handoffs, and evidence. Load role instructions only from this project's `.claude/skills/*/SKILL.md` files. Do not use global skills or substitute a same-named global role; if a required project skill is missing, report it and restore it within the project.
 - Apply `docs/engineering-quality.md` for pure FP, debugging, local checks, and review discipline; apply `docs/schema-evolution.md` for data or public-contract changes. This project has no CI/CD pipeline: required verification runs locally, without automatic commit/push/deploy hooks.
 - Apply `docs/engineering-quality.md` as the shared baseline for typed configuration, typed errors, dependency use, query efficiency, and authorization. Specialist skills refine these rules for their boundary; they do not weaken them.
 
@@ -26,18 +26,18 @@ Follow the documented roadmap in small vertical slices: Foundation → Domain/Mo
 
 ## Agents and orchestration
 
-Product Manager coordinates delivery. Load `.agents/skills/product-manager/SKILL.md`, then only relevant specialist skills. These are role instructions used with available delegation tools, not a background scheduler.
+Product Manager coordinates delivery. Load `.claude/skills/product-manager/SKILL.md`, then only relevant specialist skills. These are role instructions used with available delegation tools, not a background scheduler.
 
 | Role | Skill | Required routing |
 |---|---|---|
-| Product Manager | `.agents/skills/product-manager/SKILL.md` | Scope, acceptance, priorities, dependencies, orchestration, multi-phase tracking |
-| Software Architect | `.agents/skills/software-architect/SKILL.md` | Before structural changes, new modules, cross-system contracts, language/store migrations |
-| Scala Developer | `.agents/skills/scala-developer/SKILL.md` | Scala/API/service implementation and related tests |
-| Data Engineer | `.agents/skills/data-engineer/SKILL.md` | Operational schema, migrations, indexes, integrity, query performance |
-| Big Data Engineer | `.agents/skills/big-data-engineer/SKILL.md` | Kafka, Spark, streaming, lakehouse, analytical quality and evaluation |
-| Security Engineer | `.agents/skills/security-engineer/SKILL.md` | Auth/RBAC/admin, mutations, user data, DB access, secrets/config, integrations, dependencies, agent permission rules |
-| Code Reviewer | `.agents/skills/code-reviewer/SKILL.md` | Independent review of all nontrivial tasks, refactors, schema/shared/performance changes |
-| QA Engineer | `.agents/skills/qa-engineer/SKILL.md` | Independent final validation of every implementation task |
+| Product Manager | `.claude/skills/product-manager/SKILL.md` | Scope, acceptance, priorities, dependencies, orchestration, multi-phase tracking |
+| Software Architect | `.claude/skills/software-architect/SKILL.md` | Before structural changes, new modules, cross-system contracts, language/store migrations |
+| Scala Developer | `.claude/skills/scala-developer/SKILL.md` | Scala/API/service implementation and related tests |
+| Data Engineer | `.claude/skills/data-engineer/SKILL.md` | Operational schema, migrations, indexes, integrity, query performance |
+| Big Data Engineer | `.claude/skills/big-data-engineer/SKILL.md` | Kafka, Spark, streaming, lakehouse, analytical quality and evaluation |
+| Security Engineer | `.claude/skills/security-engineer/SKILL.md` | Auth/RBAC/admin, mutations, user data, DB access, secrets/config, integrations, dependencies, agent permission rules |
+| Code Reviewer | `.claude/skills/code-reviewer/SKILL.md` | Independent review of all nontrivial tasks, refactors, schema/shared/performance changes |
+| QA Engineer | `.claude/skills/qa-engineer/SKILL.md` | Independent final validation of every implementation task |
 
 1. Inspect applicable instructions and relevant files; summarize actual architecture and propose a short minimal plan before coding.
 2. Define acceptance criteria, non-goals, dependencies, and relevant workload/cost assumptions. Use the guide's handoff template for sustained tasks.

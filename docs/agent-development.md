@@ -20,7 +20,7 @@ Startup preserves hiring-owned MongoDB data by default. Set `mongo.reset-on-star
 Start a task with:
 
 ```text
-Use $product-manager to deliver the next scoped roadmap slice. Inspect the current
+Use the product-manager skill to deliver the next scoped roadmap slice. Inspect the current
 code and decisions, define acceptance criteria, delegate relevant specialists,
 and finish with independent code/security reviews as applicable and final QA.
 ```
@@ -28,14 +28,14 @@ and finish with independent code/security reviews as applicable and final QA.
 Or ask a specialist directly:
 
 ```text
-Use $data-engineer to review the UC08 access pattern and index tradeoffs.
-Use $big-data-engineer to plan UC11 replay and idempotency with local fixtures.
-Use $qa-engineer to validate the final changes against the task criteria.
+Use the data-engineer skill to review the UC08 access pattern and index tradeoffs.
+Use the big-data-engineer skill to plan UC11 replay and idempotency with local fixtures.
+Use the qa-engineer subagent to validate the final changes against the task criteria.
 ```
 
-Role skills are stored once as real files at this project's `.agents/skills/<role>/SKILL.md`, where Codex discovers them. This uses the documented [Codex skill mechanism](https://developers.openai.com/codex/skills/). Start a fresh session and check `/skills` after installation. If discovery is unavailable, ask the agent to read the exact `.agents/skills/<role>/SKILL.md` path. These are role instructions used with available delegation tools, not separately provisioned workers or a background scheduler.
+Canonical Claude Code layout: role skills are real files at `.claude/skills/<role>/SKILL.md` (invoke with the Skill tool or `/<role>`). Delegated roles are subagent definitions at `.claude/agents/<role>.md`; reviewers and QA are read-only by tool list. Root rules live in `AGENTS.md`, imported by `CLAUDE.md`. Shared settings and the skill-layout hook are in `.claude/settings.json`; personal overrides belong in the ignored `.claude/settings.local.json`. Run `python3 -I scripts/check-skills.py` after changing skills or agents.
 
-Root rules and the canonical `.agents/skills/*/SKILL.md` files define the agent workflow. Use these project skills only; do not fall back to a global installation. There are no duplicate skill stores or links to a home-directory installation. Existing `.codex/config.toml` model/permission preferences remain separate.
+Use these project skills and agents only; do not fall back to a global installation or substitute a same-named global role. Existing `.codex/config.toml` model/permission preferences remain local and separate.
 
 Product Manager coordinates; Architect decides technical boundaries; Scala Developer implements application code; Data Engineer owns operational data; Big Data Engineer owns analytical pipelines; Code Reviewer and Security Engineer review their scopes; QA independently validates the final result. Direct specialist tasks still follow the root review gates.
 

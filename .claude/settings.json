@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "autoMemoryEnabled": false,
+  "permissions": {
+    "allow": [
+      "Bash(sbt test)",
+      "Bash(sbt compile)",
+      "Bash(sbt scalafmtCheckAll)",
+      "Bash(scripts/check-local.sh)",
+      "Bash(python3 -I scripts/check-skills.py)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git check-ignore:*)"
+    ],
+    "ask": [
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(docker:*)",
+      "Bash(sbt run:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./.local/config/**)",
+      "Read(./.aws/**)",
+      "Read(./.codex/**)",
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Edit(./.env)",
+      "Edit(./.env.*)",
+      "Edit(./.local/config/**)",
+      "Write(./.env)",
+      "Write(./.env.*)",
+      "Write(./.local/config/**)",
+      "Bash(git push -f:*)",
+      "Bash(git push --force-with-lease:*)",
+      "Bash(git clean:*)",
+      "Bash(git stash drop:*)",
+      "Bash(git branch -D:*)",
+      "Bash(git reset --hard:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR\"/scripts/check-skills.py"
+          }
+        ]
+      }
+    ]
+  }
+}
