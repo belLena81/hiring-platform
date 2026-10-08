@@ -112,6 +112,7 @@ JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repo
 
 ## Documentation
 
+- [Current application architecture wiki](docs/wiki/README.md): use cases, domain entities, collections, workflows, design patterns, security and operations
 - [Current roadmap and acceptance gates](docs/development-milestones.md)
 - [Detailed specifications for remaining phases](docs/development-milestones.md#remaining-delivery-order-and-acceptance), including behavior, code style, boundaries, alternatives and verification requirements
 - [Architecture](ARCHITECTURE.md), [MongoDB design](docs/mongodb-design.md), and [use cases](docs/use-cases.md)

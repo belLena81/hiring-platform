@@ -1,5 +1,7 @@
 # MVP Use Cases
 
+The [architecture wiki operation map](wiki/domain-and-use-cases.md) traces these use cases through the current GraphQL API, services, domain policies and persistence. See [wiki home](wiki/README.md) for storage and workflow details.
+
 The [discovery and interview integrity follow-up](specs/candidate-discovery-and-interview-integrity.md) covers candidate city-filter correctness, geographic boundary/pagination evidence, complete interview deletion across attribution batches and local hiring acceptance during an isolated broker-process outage. Existing consent, ownership and lifecycle rules remain authoritative.
 
 ## Retrieval and recovery implementation checkpoint

@@ -1,5 +1,7 @@
 # MongoDB design
 
+See the [current collection inventory](wiki/mongodb-and-analytics.md) for every operational and analytics MongoDB collection, relationships, indexes, retention and use-case links.
+
 ## Candidate residence and interview deletion integrity
 
 [Current local corrections](specs/candidate-discovery-and-interview-integrity.md) retain bounded workflow attribution until linked commands/inbox/provider records are deleted. Each batch deletes only selected workflow identities. Migration `016_candidate_residence_integrity` audits the existing residence shape without modifying user data or aggregate revisions; installed validation requires display and canonical city fields together. Completed proof and validator drift fail closed. Stop incompatible writers before cutover and explicitly repair malformed data before rerunning startup.

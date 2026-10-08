@@ -1,5 +1,7 @@
 # Hiring Analytics Architecture
 
+The [architecture wiki](wiki/README.md) connects analytics to hiring use cases; its [storage page](wiki/mongodb-and-analytics.md) inventories MongoDB control collections and Delta datasets.
+
 ## Producer retirement and erasure checkpoint
 
 The [reliability specification](specs/hiring-retrieval-publication-reliability.md) tracks the current cross-build contract. Analytics erasure requires completed operational migration `012_attributable_producer_registrations` and the `producer_registrations` collection before readiness. The pre-MVP active contract uses registry-backed deletion requests; it has no legacy fallback. Stop incompatible operational and analytics writers before cutover.
