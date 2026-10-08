@@ -392,6 +392,7 @@ class AppConfigSpec extends FunSuite {
         "HTTP_HOST" -> "::1",
         "HTTP_PORT" -> "9090",
         "HTTP_ADMISSION_PERMITS" -> "96",
+        "HTTP_REQUEST_TIMEOUT_MS" -> "30000",
         "MONGODB_URI" -> "mongodb://127.0.0.1:27018",
         "AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901",
         "VOYAGE_MODEL" -> "voyage-4-lite"
@@ -401,6 +402,17 @@ class AppConfigSpec extends FunSuite {
       result.map(config => (config.host.toString, config.port.value, config.admissionPermits, config.mongoUri)),
       Right(("::1", 9090, 96, "mongodb://127.0.0.1:27018"))
     )
+    assertEquals(result.map(_.requestTimeout), Right(30.seconds))
+  }
+
+  test("packaged application config names the environment variable it reads for the timeout and restart delay") {
+    val raw = resource("application.conf")
+    val base = Map("AUTH_JWT_HS256_SECRET" -> "01234567890123456789012345678901", "VOYAGE_MODEL" -> "voyage-4-lite")
+    def keys(extra: (String, String)) =
+      AppConfig.fromConfig(raw, base + extra).swap.toOption.toList.flatMap(_.toList.map(_.key))
+    assert(keys("HTTP_REQUEST_TIMEOUT_MS" -> "99999999").contains("HTTP_REQUEST_TIMEOUT_MS"))
+    assertEquals(ConfigError.InvalidKafkaRestartMaxDelay.key, "HIRING_KAFKA_RESTART_MAX_DELAY_SECONDS")
+    assert(raw.contains("${?HIRING_KAFKA_RESTART_MAX_DELAY_SECONDS}"))
   }
 
   test("CFG-AC02 injected env resolution ignores process system properties") {

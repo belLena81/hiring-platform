@@ -17,7 +17,7 @@ enum ConfigError(val key: String) {
   case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
   case InvalidAdminSeed extends ConfigError("AUTH_ADMIN_SEED")
-  case InvalidKafkaRestartMaxDelay extends ConfigError("KAFKA_RESTART_MAX_DELAY_SECONDS")
+  case InvalidKafkaRestartMaxDelay extends ConfigError("HIRING_KAFKA_RESTART_MAX_DELAY_SECONDS")
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidReceiptFingerprintSecret extends ConfigError("AUTH_RECEIPT_FP_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
@@ -170,7 +170,10 @@ final case class JwtAuthConfig(
     receiptFingerprintSecret: Option[String] = None
 ) {
 
-  /** Idempotency-receipt key; independent of JWT signing so rotating the signing secret keeps receipts valid. */
+  /** Idempotency-receipt HMAC key. Independent of JWT signing only when `receiptFingerprintSecret` is set; otherwise it
+    * is the signing secret, and changing either then invalidates stored authentication receipt matches. Key rotation is
+    * manual and out of scope before MVP.
+    */
   def receiptSecret: String = receiptFingerprintSecret.getOrElse(hmacSecret)
   override def toString: String = s"JwtAuthConfig($issuer, $audience, [REDACTED])"
 }

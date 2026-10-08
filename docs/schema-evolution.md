@@ -3,7 +3,7 @@
 ## Authentication receipt protection and trusted Admin seed
 
 
-Receipt fingerprints are keyed by `auth.jwt.receipt-fingerprint-secret` (`AUTH_RECEIPT_FP_SECRET`, at least 32 bytes), falling back to the JWT secret when unset. Pre-MVP there is no receipt conversion: older receipt shapes expire by TTL. Changing the receipt key invalidates existing authentication receipt matches, so use new idempotency keys. Public GraphQL `bootstrapAdmin` is removed under the pre-MVP single-active-shape policy; trusted `auth.admin-seed` startup configuration owns provisioning and never resets an existing singleton. Existing users and non-authentication mutation receipts are preserved. See [acceptance evidence](specs/hiring-security-and-runtime-reliability.md).
+Receipt fingerprints are keyed by `auth.jwt.receipt-fingerprint-secret` (`AUTH_RECEIPT_FP_SECRET`, at least 32 bytes), falling back to the JWT secret when unset. Pre-MVP there is no receipt conversion: older receipt shapes expire by TTL. Changing the receipt key (or the JWT secret when no separate receipt secret is set) invalidates existing authentication receipt matches, so use new idempotency keys. Key rotation is manual and out of scope before MVP. Public GraphQL `bootstrapAdmin` is removed under the pre-MVP single-active-shape policy; trusted `auth.admin-seed` startup configuration owns provisioning and never resets an existing singleton. Existing users and non-authentication mutation receipts are preserved. See [acceptance evidence](specs/hiring-security-and-runtime-reliability.md).
 
 ## Candidate residence integrity
 
