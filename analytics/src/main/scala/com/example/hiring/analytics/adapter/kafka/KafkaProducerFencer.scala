@@ -28,7 +28,9 @@ object KafkaProducerFencer {
   )(afterSubmission: org.apache.kafka.common.KafkaFuture[Void] => F[Unit]): F[Unit] =
     if (transactionalIds.isEmpty) Async[F].unit
     else
-      Async[F].fromEither(KafkaClientProperties.clientProperties(connection)).flatMap { clientProperties =>
+      (KafkaConnection.preflight[F](connection) *> Async[F].fromEither(
+        KafkaClientProperties.clientProperties(connection)
+      )).flatMap { clientProperties =>
         val properties = new Properties()
         properties.put("bootstrap.servers", connection.bootstrapServers)
         clientProperties.foreach { case (key, value) => properties.setProperty(key, value) }

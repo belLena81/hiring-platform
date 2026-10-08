@@ -17,5 +17,6 @@ private[config] final case class TransportSettings(
 private[config] final case class AuthSettings(
     jwt: JwtAuthConfig,
     passwordHash: PasswordHashConfig,
-    rateLimit: AuthRateLimitConfig
+    rateLimit: AuthRateLimitConfig,
+    adminSeed: AdminSeedConfig
 )

@@ -1,5 +1,7 @@
 # Development Milestones
 
+The [security/runtime reliability refactoring](specs/hiring-security-and-runtime-reliability.md) addresses the architecture review findings. Implementation and required local verification are complete, with independent code/security/QA PASS; that specification records the evidence and skipped opt-in gates.
+
 ## Candidate discovery and interview integrity
 
 The October 8 [local correction specification](specs/candidate-discovery-and-interview-integrity.md) closes audited retrieval/workflow defects and missing geographic, migration-recovery and broker-outage evidence. The final local run passed 707 units and 180 executed integrations, with nine explicit skips; formatting and independent Code, Security and final QA returned PASS for that correction scope. This supplements earlier Phase 8–11 evidence; Atlas, human relevance, real providers and deployed acceptance remain separate gates.

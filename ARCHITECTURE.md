@@ -1,5 +1,7 @@
 # Architecture
 
+The [security/runtime reliability slice](docs/specs/hiring-security-and-runtime-reliability.md) moves Admin provisioning to startup seed, protects authentication receipt fingerprints and replay, bounds provider responses and recovery backoff, and preserves pure policies and existing transaction boundaries.
+
 See the [current application architecture wiki](docs/wiki/README.md) for a source-derived use-case map, domain and collection inventories, workflow patterns, security and runtime boundaries.
 
 The [discovery and interview integrity correction](docs/specs/candidate-discovery-and-interview-integrity.md) retains the existing pure decisions and durable interpreters. Deletion removes selected workflows' children before their last attribution records; transport quarantine uses a bounded deterministic digest of record coordinates, payload digest and rejection reason. Residence integrity is a narrow Mongo startup proof over the existing document shape.

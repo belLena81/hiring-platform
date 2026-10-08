@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.infrastructure.embedding
 
-import cats.effect.{IO, Ref}
+import cats.effect.{IO, Ref, Resource}
+import fs2.Stream
 import cats.data.Kleisli
 import com.example.graphQL.cats.service.port.{EmbeddingError, EmbeddingInput, EmbeddingInputType, EmbeddingVector}
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
@@ -229,6 +230,65 @@ final class VoyageEmbeddingServiceSpec extends CatsEffectSuite {
       .attempt
       .map(result => assert(result.isLeft))
   }
+
+  test("rejects multiple vectors for a single embedding input") {
+    val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+      IO.pure(jsonResponse(Status.Ok, """{"data":[{"embedding":[0.1,0.2]},{"embedding":[0.3,0.4]}]}"""))
+    }
+    provider(Client.fromHttpApp[IO](app))
+      .embed(input)
+      .map(result => assertEquals(result, Left(EmbeddingError.InvalidResponse)))
+  }
+
+  test("accepts a chunked response exactly at the byte limit") {
+    val valid = """{"data":[{"embedding":[0.1,0.2]}]}"""
+    val limit = 64 * 1024 + 32 * 2
+    val body = valid + " " * (limit - valid.length)
+    val app: HttpApp[IO] = Kleisli { (_: Request[IO]) =>
+      IO.pure(
+        jsonResponse(Status.Ok, body).withBodyStream(
+          Stream.emits(body.getBytes(java.nio.charset.StandardCharsets.UTF_8)).covary[IO].chunkN(127).unchunks
+        )
+      )
+    }
+    provider(Client.fromHttpApp[IO](app))
+      .embed(input)
+      .map(result => assertEquals(result, Right(EmbeddingVector(List(0.1f, 0.2f), "voyage-4-lite", 2))))
+  }
+
+  test("rejects oversized chunked JSON before decoding and releases the response") {
+    val valid = """{"data":[{"embedding":[0.1,0.2]}]}"""
+    val limit = 64 * 1024 + 32 * 2
+    for {
+      released <- Ref.of[IO, Boolean](false)
+      body = Stream
+        .emits((valid + " " * (limit * 2)).getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        .covary[IO]
+        .chunkN(127)
+        .unchunks ++ Stream.raiseError[IO](new AssertionError("read beyond response budget"))
+      client = Client[IO](_ =>
+        Resource.make(
+          IO.pure(jsonResponse(Status.Ok, "").withBodyStream(body))
+        )(_ => released.set(true))
+      )
+      result <- provider(client).embed(input)
+      wasReleased <- released.get
+    } yield {
+      assertEquals(result, Left(EmbeddingError.InvalidResponse))
+      assert(wasReleased)
+    }
+  }
+
+  private def provider(client: Client[IO]): VoyageEmbeddingService =
+    new VoyageEmbeddingService(
+      client,
+      "test-key",
+      endpoint,
+      "voyage-4-lite",
+      2,
+      1.second,
+      diagnostics = Diagnostics.noop
+    )
 
   private def jsonResponse(status: Status, body: String): Response[IO] =
     Response[IO](status).withEntity(body).putHeaders(Header.Raw(CIString("Content-Type"), "application/json"))

@@ -23,6 +23,12 @@ Start with `$product-manager` to coordinate specialist work and independent revi
 
 The build uses Scala 3.9 LTS and Java 17+, with Cats Effect/FS2, Sangria/http4s Ember, Circe, MongoDB reactive driver, fs2-kafka, Logback, and MUnit/Testcontainers core. It serves the current hiring API with a resource-managed MongoDB client.
 
+## Trusted Admin initialization
+
+Public Admin bootstrap has been removed. Before first startup, place `auth.admin-seed.enabled = true`, `auth.admin-seed.name`, and `auth.admin-seed.password` in explicitly loaded, ignored local HOCON configuration (or use `ADMIN_SEED_ENABLED`, `ADMIN_SEED_NAME`, `ADMIN_SEED_PASSWORD` substitutions). Seeding runs after Mongo setup/migration and before workers or HTTP. Disable seeding after initialization. An existing valid Admin with the same canonical name is preserved, including its password; a conflicting identity or registry blocks startup. Seeding returns no token; authenticate through `login`.
+
+Login/signup idempotency receipts use domain-separated HMAC fingerprints derived from `AUTH_JWT_HS256_SECRET`, and replay verifies credentials. Stop old account writers before upgrading through migration `017_authentication_receipt_protection`; keep the JWT secret unchanged until migration completes. Later JWT secret rotation invalidates outstanding authentication receipt matches: retry with a new idempotency key. See [security/runtime reliability](docs/specs/hiring-security-and-runtime-reliability.md) for acceptance evidence and verification limits.
+
 ## Local build
 
 `sbt run` forks a separate JVM so Cats Effect `IOApp` owns the application lifecycle. Start MongoDB locally, then run the application on `127.0.0.1:8080`:

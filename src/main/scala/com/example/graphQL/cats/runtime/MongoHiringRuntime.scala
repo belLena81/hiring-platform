@@ -16,7 +16,7 @@ import com.example.graphQL.cats.service.{
   ProbeResult
 }
 import com.example.graphQL.cats.service.application.ApplicationService
-import com.example.graphQL.cats.service.auth.{Argon2PasswordHasher, UserAccountService, UserAuthenticationService}
+import com.example.graphQL.cats.service.auth.{UserAccountService, UserAuthenticationService}
 import com.example.graphQL.cats.service.job.JobService
 import com.example.graphQL.cats.service.mutation.Idempotent
 import com.example.graphQL.cats.service.protocol.{AccountUseCases, JobUseCases, SearchUseCases, UserAuthenticator}
@@ -33,12 +33,18 @@ import com.example.graphQL.cats.config.{
   VectorSearchConfig,
   DiscoveryConfig
 }
-import com.example.graphQL.cats.infrastructure.auth.JwtAccessTokenIssuer
+import com.example.graphQL.cats.infrastructure.auth.{
+  JwtAccessTokenIssuer,
+  Argon2PasswordHasher,
+  HmacAuthenticationFingerprint
+}
 import com.example.graphQL.cats.infrastructure.kafka.OperationalEventKafkaRuntime
 import scala.concurrent.duration.*
 import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository,
+  MongoAdminSeed,
+  MongoAuthenticationReceiptMigration,
   MongoInterviewWorkflowRepository,
   MongoInterviewSubjectCleanup,
   MongoConsumerReceiptRepository,
@@ -115,7 +121,8 @@ object MongoHiringRuntime {
       resetOnStart: Boolean,
       embeddingService: (VectorSearchConfig, String, Diagnostics) => Resource[IO, EmbeddingService] =
         voyageEmbeddingService,
-      discovery: DiscoveryConfig = DiscoveryConfig()
+      discovery: DiscoveryConfig = DiscoveryConfig(),
+      adminSeed: com.example.graphQL.cats.config.AdminSeedConfig = com.example.graphQL.cats.config.AdminSeedConfig()
   )
 
   def resource(config: RuntimeConfig): Resource[IO, MongoHiringRuntime] =
@@ -137,6 +144,27 @@ object MongoHiringRuntime {
         ),
         config.diagnostics
       )
+      _ <- Resource.eval(setup.awaitSuccessful)
+      _ <- Resource.eval(
+        MongoAuthenticationReceiptMigration.initialize(
+          database,
+          new HmacAuthenticationFingerprint(config.jwtAuth.hmacSecret)
+        )
+      )
+      seedAccounts = MongoUserRepository.transactional(
+        database,
+        client,
+        MongoEmbeddingWorkEnqueuer.disabled,
+        config.diagnostics
+      )
+      _ <- Argon2PasswordHasher
+        .resource(
+          config.passwordHash.iterations,
+          config.passwordHash.memoryKilobytes,
+          config.passwordHash.parallelism,
+          passwordHashPermits
+        )
+        .evalMap(hasher => MongoAdminSeed.run(database, seedAccounts, hasher, config.adminSeed))
       capability <- embeddingCapability(database, client, config, setup.await, embeddingHealth.set, discoveryPolicy)
       users = capability.users
       applications = MongoApplicationRepository.transactional(database, client, config.diagnostics)
@@ -174,7 +202,6 @@ object MongoHiringRuntime {
         passwordHashPermits,
         config.diagnostics
       )
-      _ <- Resource.eval(setup.awaitSuccessful)
       _ <- OperationalEventKafkaRuntime.resource(config.kafka, outbox, receipts, quarantine, config.diagnostics)
       _ <- InterviewSchedulingRuntime.resource(
         config.kafka,
@@ -344,6 +371,7 @@ object MongoHiringRuntime {
                     users,
                     hasher,
                     tokenIssuer,
+                    new HmacAuthenticationFingerprint(jwtAuth.hmacSecret),
                     erasureRequests,
                     disabledEmbeddingPublisher,
                     idempotent,
@@ -359,6 +387,7 @@ object MongoHiringRuntime {
                     users,
                     hasher,
                     tokenIssuer,
+                    new HmacAuthenticationFingerprint(jwtAuth.hmacSecret),
                     erasureRequests,
                     publisher,
                     idempotent,

@@ -1,5 +1,7 @@
 # MVP Use Cases
 
+Authentication supporting these use cases now uses trusted startup Admin seeding and credential-verified login/signup receipt replay. [Security/runtime reliability](specs/hiring-security-and-runtime-reliability.md) tracks these contract changes and the recovery refinements.
+
 The [architecture wiki operation map](wiki/domain-and-use-cases.md) traces these use cases through the current GraphQL API, services, domain policies and persistence. See [wiki home](wiki/README.md) for storage and workflow details.
 
 The [discovery and interview integrity follow-up](specs/candidate-discovery-and-interview-integrity.md) covers candidate city-filter correctness, geographic boundary/pagination evidence, complete interview deletion across attribution batches and local hiring acceptance during an isolated broker-process outage. Existing consent, ownership and lifecycle rules remain authoritative.

@@ -493,6 +493,17 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
     }
   }
 
+  test("restart delay remains bounded without giving up during a prolonged outage") {
+    val policy = OperationalEventKafkaRuntime.restartPolicy(1.second, 30.seconds)
+    (0 to 1000).toList.traverse_ { count =>
+      policy.decideNextRetry((), retry.RetryStatus(count, 1.day, Some(30.seconds))).map {
+        case retry.PolicyDecision.DelayAndRetry(delay) =>
+          assert(delay >= Duration.Zero && delay <= 30.seconds)
+        case retry.PolicyDecision.GiveUp => fail("Recovery must remain retryable")
+      }
+    }
+  }
+
   test("resilient stream retries failed effects until they recover") {
     for {
       attempts <- Ref.of[IO, Int](0)
@@ -504,7 +515,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
             else IO.unit
           }
         },
-        1.millis
+        1.millis,
+        maxDelay = 30.seconds
       )
       _ <- stream.compile.drain
       result <- attempts.get
@@ -549,7 +561,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
               Diagnostics.noop,
               generation,
               1.millis,
-              OperationalEventKafkaRuntime.isProducerFenced
+              OperationalEventKafkaRuntime.isProducerFenced,
+              maxDelay = 30.seconds
             )
             .handleErrorWith {
               case error if OperationalEventKafkaRuntime.isProducerFenced(error) => Stream.empty
@@ -588,7 +601,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
               else IO.unit
             }
           },
-          1.millis
+          1.millis,
+          maxDelay = 30.seconds
         )
         .compile
         .drain
@@ -608,7 +622,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
           fs2.Stream.eval(
             attempted.complete(()) *> IO.raiseError[Unit](new IllegalStateException("broker unavailable"))
           ),
-          1.hour
+          1.hour,
+          maxDelay = 30.seconds
         )
         .compile
         .drain

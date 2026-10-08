@@ -234,20 +234,30 @@ object AnalyticsRuntimeConfig {
   private given ConfigReader[AnalyticsConfigValues] = KebabCaseConfigReader.derive[AnalyticsConfigValues]
 
   def loadBatch[F[_]: Async]: F[AnalyticsBatchSettings] =
-    load[F].flatMap(raw => Async[F].fromEither(batch(raw)))
+    load[F]
+      .flatMap(raw => Async[F].fromEither(batch(raw)))
+      .flatTap(settings => KafkaConnection.preflight(settings.common.kafka))
 
   def loadWorker[F[_]: Async]: F[AnalyticsWorkerSettings] =
-    load[F].flatMap(raw => Async[F].fromEither(worker(raw)))
+    load[F]
+      .flatMap(raw => Async[F].fromEither(worker(raw)))
+      .flatTap(settings =>
+        KafkaConnection.preflight(settings.common.kafka) *> KafkaConnection.preflight(settings.fencerKafka)
+      )
 
   def loadStreaming[F[_]: Async]: F[AnalyticsStreamingRuntimeSettings] =
-    (load[F], AnalyticsStreamingSettings.load[F]).tupled.flatMap { case (raw, streaming) =>
-      Async[F].fromEither(
-        complete(common(raw).map(settings => AnalyticsStreamingRuntimeSettings(settings, streaming, raw.kafka.topic)))
-      )
-    }
+    (load[F], AnalyticsStreamingSettings.load[F]).tupled
+      .flatMap { case (raw, streaming) =>
+        Async[F].fromEither(
+          complete(common(raw).map(settings => AnalyticsStreamingRuntimeSettings(settings, streaming, raw.kafka.topic)))
+        )
+      }
+      .flatTap(settings => KafkaConnection.preflight(settings.common.kafka))
 
   def loadLateFactReplay[F[_]: Async]: F[AnalyticsLateFactReplaySettings] =
-    load[F].flatMap(raw => Async[F].fromEither(lateFactReplay(raw)))
+    load[F]
+      .flatMap(raw => Async[F].fromEither(lateFactReplay(raw)))
+      .flatTap(settings => KafkaConnection.preflight(settings.common.kafka))
 
   def loadKeyRetirementAudit[F[_]: Async]: F[AnalyticsKeyRetirementAuditSettings] =
     load[F].flatMap(raw => Async[F].fromEither(keyRetirementAudit(raw)))

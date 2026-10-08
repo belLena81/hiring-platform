@@ -1,5 +1,11 @@
 # Current Contract and Persistence Evolution
 
+## Authentication receipt protection and trusted Admin seed
+
+Migration `017_authentication_receipt_protection` changes only password-bearing `login`, `signUp`, and historical `bootstrapAdmin` receipt fingerprints. Stop incompatible account writers before startup. Primary/majority reads and journaled majority writes pin the derived HMAC key in the Running ledger before converting batches of at most 500 with exact old-value guards. Receipt identity, authoritative result and expiry remain intact; malformed rows block progress. Restart uses the same key and saved checkpoint, and completion verifies every relevant fingerprint has the protected shape. A completed startup also verifies no plain fingerprints were reintroduced. No legacy runtime reader or rollback to the old account binary is supported.
+
+JWT secret rotation after completion invalidates existing authentication receipt matches; use new idempotency keys. Migration cannot remediate previously captured backups. Public GraphQL `bootstrapAdmin` is removed under the pre-MVP single-active-shape policy; trusted `auth.admin-seed` startup configuration owns provisioning and never resets an existing same-name singleton. Existing users and non-authentication mutation receipts are preserved. See [acceptance evidence](specs/hiring-security-and-runtime-reliability.md).
+
 ## Candidate residence integrity
 
 Migration `016_candidate_residence_integrity` supplements the unchanged `002_candidate_search_profile_verification` ledger. Stop incompatible user writers before cutover. The user validator requires display/canonical city fields to be both absent or both present; a bounded restartable audit verifies their existing canonical values using the application's normalization. It changes only its ledger, preserving user data and revisions. Failed batches retain the preceding checkpoint and block startup until explicit repair. Completed proof and the exact installed validator are checked before the audit is skipped; validator drift is not silently overwritten. No public or stored field shape changes, normalization backfill or data reset is introduced. Evidence is tracked in [candidate discovery and interview integrity](specs/candidate-discovery-and-interview-integrity.md).

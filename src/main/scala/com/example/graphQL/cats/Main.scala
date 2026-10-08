@@ -46,7 +46,8 @@ object Main extends IOApp {
         config.passwordHash,
         config.kafka,
         config.resetOnStart,
-        discovery = config.discovery
+        discovery = config.discovery,
+        adminSeed = config.adminSeed
       )
     )
     contextFactory <- RequestContextFactory.resource

@@ -144,6 +144,7 @@ q=json.dumps
 def mongo_uri(operator): return f"mongodb://{'proof_operator' if operator else 'proof_api'}:{credentials['operatorPassword' if operator else 'apiPassword']}@127.0.0.1:{mongo}/?authSource={'admin' if operator else database}&replicaSet=rs0&directConnection=true"
 for operator in (True,False):
  conf='include classpath("application.conf")\n'+f'mongo.uri={q(mongo_uri(operator))}\nmongo.database={q(database)}\nmongo.reset-on-start=false\nhttp.host="127.0.0.1"\nhttp.port={api}\nauth.jwt.hs256-secret={q(credentials["jwtSecret"])}\nkafka.enabled=true\nkafka.bootstrap-servers={q("127.0.0.1:"+str(kafka))}\nkafka.sasl-security-protocol="SASL_PLAINTEXT"\nkafka.topic={q(topic)}\nkafka.publisher.sasl-username="hiring_publisher_v2"\nkafka.publisher.sasl-password={q(os.environ["KAFKA_PUBLISHER_V2_PASSWORD"])}\n'
+ conf+=f'auth.admin-seed.enabled=true\nauth.admin-seed.name={q("Proof Admin "+nonce)}\nauth.admin-seed.password={q("proof-password-"+nonce)}\n'
  (p/('api-operator.conf' if operator else 'api-runtime.conf')).write_text(conf)
 with (p/'replay-outcome-log4j2.properties').open('x',encoding='utf-8') as replay_logging:
  os.fchmod(replay_logging.fileno(),0o600)
@@ -209,7 +210,7 @@ def provisioning_failure(field,role,body):
   if isinstance(extensions,dict): codes.append(safe_code(extensions.get('code')))
  print('STREAMING_PROOF_ROLE_PROVISIONING_FAILED '+json.dumps({'field':field,'role':role,'typename':typename,'codes':sorted(set(codes))}),file=sys.stderr)
  raise RuntimeError('authenticated synthetic role provisioning failed')
-for field,role in [('bootstrapAdmin','Admin'),('signUp','Candidate'),('signUp','Recruiter')]:
+for field,role in [('login','Admin'),('signUp','Candidate'),('signUp','Recruiter')]:
  fields=f'idempotencyKey: "{uuid.uuid4()}", name: "Proof {role} {nonce}", password: "proof-password-{nonce}"'
  if field=='signUp':
   fields+=f', role: {role.upper()}'

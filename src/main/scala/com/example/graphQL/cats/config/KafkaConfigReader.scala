@@ -14,7 +14,8 @@ private[config] final case class RawKafkaConfig(
     publisher: RawKafkaPublisherConfig,
     consumer: RawKafkaConsumerConfig,
     saslSecurityProtocol: Option[String] = None,
-    interview: Option[RawInterviewRuntimeConfig] = None
+    interview: Option[RawInterviewRuntimeConfig] = None,
+    restartMaxDelaySeconds: Option[Int] = None
 ) derives ConfigReader
 private[config] final case class RawKafkaPublisherConfig(
     workerId: NonBlankStr,

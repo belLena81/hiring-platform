@@ -64,11 +64,15 @@ object SearchSessionHandoff {
     (IO.realTimeInstant.flatMap { now =>
       repository.claim(config.workerId, now, now.plusMillis(config.lease.toMillis)).value.flatMap {
         case Right(Some(claim)) =>
-          repository.complete(claim, now).value.flatMap {
-            case Right(())                                       => IO.unit
-            case Left(_) if claim.attempts >= config.maxAttempts =>
-              repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now).value.void
-            case Left(_) => repository.retry(claim, now.plusMillis(config.retryDelay.toMillis)).value.void
+          processClaim(repository, config, claim, now).flatMap {
+            case WorkOutcome.Completed | WorkOutcome.RetryScheduled | WorkOutcome.Failed => IO.unit
+            case WorkOutcome.OwnershipLost                                               =>
+              diagnostics.emit(LogEvent.RuntimeFailed, fields = Map(LogField.Outcome -> "OWNERSHIP_LOST"))
+            case WorkOutcome.RecoveryDeferred(error) =>
+              diagnostics.emit(
+                LogEvent.RuntimeFailed,
+                fields = Map(LogField.Outcome -> "RECOVERY_DEFERRED", LogField.ErrorType -> errorType(error))
+              ) *> IO.sleep(config.pollInterval)
           }
         case Right(None) => IO.sleep(config.pollInterval)
         case Left(error) =>
@@ -82,6 +86,33 @@ object SearchSessionHandoff {
           ) *> IO.sleep(config.pollInterval)
       }
     }).foreverM
+
+  private[events] enum WorkOutcome {
+    case Completed, RetryScheduled, Failed, OwnershipLost
+    case RecoveryDeferred(error: RepositoryError)
+  }
+
+  private[events] def processClaim(
+      repository: SearchSessionWorkRepository,
+      config: SearchSessionHandoffConfig,
+      claim: com.example.graphQL.cats.service.port.ClaimedSearchSessionWork,
+      now: java.time.Instant
+  ): IO[WorkOutcome] =
+    repository.complete(claim, now).value.flatMap {
+      case Right(()) => IO.pure(WorkOutcome.Completed)
+      case Left(_)   =>
+        // Persisted attempts count prior failed executions, starting at zero.
+        val exhausted = claim.attempts.toLong + 1L >= config.maxAttempts.toLong
+        val transition =
+          if (exhausted) repository.fail(claim, SearchSessionWorkFailure.RetryExhausted, now)
+          else repository.retry(claim, now.plusMillis(config.retryDelay.toMillis))
+        transition.value.map {
+          case Right(())                      => if (exhausted) WorkOutcome.Failed else WorkOutcome.RetryScheduled
+          case Left(RepositoryError.Conflict) => WorkOutcome.OwnershipLost
+          // Leave the guarded claim for lease recovery; never pretend the write succeeded.
+          case Left(error) => WorkOutcome.RecoveryDeferred(error)
+        }
+    }
 
   private def errorType(error: RepositoryError): String =
     error match {

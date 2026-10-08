@@ -159,15 +159,11 @@ private[graphql] object HiringGraphQLInputs {
     Argument("input", declineApplicationInputType)
   lazy val signUpInputType: InputObjectType[SignUpGraphQLInput] =
     deriveInputObjectType[SignUpGraphQLInput](InputObjectTypeName("SignUpInput"))
-  lazy val bootstrapAdminInputType: InputObjectType[BootstrapAdminGraphQLInput] =
-    deriveInputObjectType[BootstrapAdminGraphQLInput](InputObjectTypeName("BootstrapAdminInput"))
   lazy val loginInputType: InputObjectType[LoginGraphQLInput] =
     deriveInputObjectType[LoginGraphQLInput](InputObjectTypeName("LoginInput"))
   lazy val updateProfileInputType: InputObjectType[UpdateProfileGraphQLInput] =
     deriveInputObjectType[UpdateProfileGraphQLInput](InputObjectTypeName("UpdateMyProfileInput"))
   lazy val signUpInputArgument: Argument[SignUpGraphQLInput] = Argument("input", signUpInputType)
-  lazy val bootstrapAdminInputArgument: Argument[BootstrapAdminGraphQLInput] =
-    Argument("input", bootstrapAdminInputType)
   lazy val loginInputArgument: Argument[LoginGraphQLInput] = Argument("input", loginInputType)
   lazy val updateProfileInputArgument: Argument[UpdateProfileGraphQLInput] = Argument("input", updateProfileInputType)
   lazy val deleteMyAccountInputType: InputObjectType[DeleteMyAccountGraphQLInput] =

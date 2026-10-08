@@ -1,5 +1,7 @@
 # Hiring Analytics Architecture
 
+[Runtime reliability](specs/hiring-security-and-runtime-reliability.md) reconciles uncertain mutex acquisition only for its original owner, using majority reads and bounded retries; unresolved ownership still requires manual recovery. Report receipt compaction checks candidate pages of at most 500 against all lineages and active replay dependencies under the existing mutex, rechecks report controls transactionally and deletes at most 1,000 per pass. Memory is bounded; scan duration is not fixed. DNS preflight is effectful and runs on the blocking boundary.
+
 The [architecture wiki](wiki/README.md) connects analytics to hiring use cases; its [storage page](wiki/mongodb-and-analytics.md) inventories MongoDB control collections and Delta datasets.
 
 ## Producer retirement and erasure checkpoint

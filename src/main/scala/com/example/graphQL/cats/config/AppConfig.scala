@@ -21,7 +21,8 @@ final case class AppConfig(
     vectorSearch: VectorSearchConfig,
     kafka: KafkaConfig,
     resetOnStart: Boolean = false,
-    discovery: DiscoveryConfig = DiscoveryConfig()
+    discovery: DiscoveryConfig = DiscoveryConfig(),
+    adminSeed: AdminSeedConfig = AdminSeedConfig()
 ) {
   override def toString: String = "AppConfig([REDACTED])"
 }

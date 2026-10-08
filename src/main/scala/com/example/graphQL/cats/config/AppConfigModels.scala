@@ -16,6 +16,8 @@ enum ConfigError(val key: String) {
   case InvalidMongoUri extends ConfigError("MONGODB_URI")
   case InvalidMongoDatabase extends ConfigError("MONGODB_DATABASE")
   case InvalidMaskSensitive extends ConfigError("LOG_MASK_SENSITIVE")
+  case InvalidAdminSeed extends ConfigError("AUTH_ADMIN_SEED")
+  case InvalidKafkaRestartMaxDelay extends ConfigError("KAFKA_RESTART_MAX_DELAY_SECONDS")
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
@@ -74,6 +76,8 @@ object ConfigError {
     InvalidMongoUri,
     InvalidMongoDatabase,
     InvalidMaskSensitive,
+    InvalidAdminSeed,
+    InvalidKafkaRestartMaxDelay,
     InvalidJwtSecret,
     InvalidJwtIssuer,
     InvalidJwtAudience,
@@ -192,7 +196,8 @@ final case class KafkaConfig(
     publisher: KafkaPublisherConfig,
     consumer: KafkaConsumerConfig,
     saslSecurityProtocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls,
-    interview: InterviewRuntimeConfig = InterviewRuntimeConfig()
+    interview: InterviewRuntimeConfig = InterviewRuntimeConfig(),
+    restartMaxDelaySeconds: Int = 30
 )
 
 type Port = Int :| Interval.Closed[1, 65535]
@@ -253,3 +258,11 @@ final case class InterviewRuntimeConfig(
 )
 
 final case class DiscoveryConfig(maxTimeMillis: Int = 2000, permits: Int = 4, maxRoots: Int = 4)
+
+final case class AdminSeedConfig(
+    enabled: Boolean = false,
+    name: Option[String] = None,
+    password: Option[String] = None
+) {
+  override def toString: String = "AdminSeedConfig([REDACTED])"
+}

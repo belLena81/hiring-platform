@@ -63,7 +63,8 @@ final case class InterviewKafkaConfig(
     topics: com.example.graphQL.cats.domain.workflow.InterviewTopicPair =
       com.example.graphQL.cats.domain.workflow.InterviewTopicPair.Default,
     workerGroup: String = "hiring-interview-workers",
-    orchestratorGroup: String = "hiring-interview-orchestrator"
+    orchestratorGroup: String = "hiring-interview-orchestrator",
+    restartMaxDelaySeconds: Int = 30
 )
 
 object InterviewKafkaRuntime {
@@ -187,7 +188,13 @@ object InterviewKafkaRuntime {
       )(message.offset.commit)
     }
     Resource
-      .make(OperationalEventKafkaRuntime.resilientStream(diagnostics, consumer, 1.second).compile.drain.start)(_.cancel)
+      .make(
+        OperationalEventKafkaRuntime
+          .resilientStream(diagnostics, consumer, 1.second, maxDelay = config.restartMaxDelaySeconds.seconds)
+          .compile
+          .drain
+          .start
+      )(_.cancel)
       .void
   }
 }

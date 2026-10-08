@@ -87,7 +87,8 @@ object OperationalEventKafkaRuntime {
                 .awakeEvery[IO](config.publisher.pollIntervalMillis.millis)
                 .evalMap(_ => publishBatch(config, outbox, diagnostics, transactionalId, producer)),
               config.publisher.retryDelaySeconds.seconds,
-              stopRetrying = isProducerFenced
+              stopRetrying = isProducerFenced,
+              maxDelay = config.restartMaxDelaySeconds.seconds
             )
           }
           .handleErrorWith {
@@ -276,7 +277,8 @@ object OperationalEventKafkaRuntime {
             )
           )(message.offset.commit)
         },
-        1.second
+        1.second,
+        maxDelay = config.restartMaxDelaySeconds.seconds
       )
     )
   }
@@ -375,17 +377,21 @@ object OperationalEventKafkaRuntime {
       diagnostics: Diagnostics,
       stream: Stream[IO, Unit],
       baseDelay: FiniteDuration,
-      stopRetrying: Throwable => Boolean = _ => false
+      stopRetrying: Throwable => Boolean = _ => false,
+      maxDelay: FiniteDuration
   ): Stream[IO, Unit] =
     Stream.eval(
       retryingOnErrors(stream.compile.drain)(
-        policy = RetryPolicies.fullJitter[IO](baseDelay),
+        policy = restartPolicy(baseDelay, maxDelay),
         errorHandler = (error, _) =>
           diagnostics
             .emit(LogEvent.RuntimeFailed, fields = LogFields.failure(error))
             .as(if (stopRetrying(error)) HandlerDecision.Stop else HandlerDecision.Continue)
       )
     )
+
+  private[kafka] def restartPolicy(baseDelay: FiniteDuration, maxDelay: FiniteDuration): retry.RetryPolicy[IO, Any] =
+    RetryPolicies.capDelay(maxDelay, RetryPolicies.fullJitter[IO](baseDelay))
 
   private def background(stream: Stream[IO, ?]): Resource[IO, Unit] =
     Resource.make(stream.compile.drain.start)(_.cancel).void

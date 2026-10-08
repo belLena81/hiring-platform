@@ -8,7 +8,6 @@ lazy val pureConfigVersion = "0.17.10"
 lazy val circeVersion = "0.14.16"
 lazy val typesafeConfigVersion = "1.4.9"
 lazy val ironVersion = "3.3.2"
-lazy val catsRetryVersion = "4.0.0"
 lazy val mongo4catsVersion = "0.7.18"
 lazy val munitScalaCheckVersion = "1.3.1"
 lazy val archUnitVersion = "1.5.1"
@@ -41,7 +40,6 @@ lazy val analytics = (project in file("."))
       "org.typelevel" %% "cats-core" % "2.13.0",
       "org.typelevel" %% "cats-effect" % "3.7.1",
       "com.monovore" %% "decline-effect" % "2.6.1",
-      "com.github.cb372" %% "cats-retry" % catsRetryVersion,
       "com.github.pureconfig" %% "pureconfig-core" % pureConfigVersion,
       "io.circe" %% "circe-core" % circeVersion,
       "io.circe" %% "circe-generic" % circeVersion,

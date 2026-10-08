@@ -72,6 +72,9 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                            |http.host = "127.0.0.1"
                            |http.port = $port
                            |auth.jwt.hs256-secret = "$secret"
+                           |auth.admin-seed.enabled = true
+                           |auth.admin-seed.name = "Recovery Admin"
+                           |auth.admin-seed.password = "password-password"
                            |kafka.enabled = false
                            |vector-search.enabled = false
                            |kafka.interview.enabled = false
@@ -298,52 +301,12 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
       )
   }
 
-  private def bootstrapCandidateFixtureAndLogin(apiBase: String, database: MongoDatabase): IO[(String, String)] =
-    for {
-      adminJson <- graphql(
-        apiBase,
-        s"""mutation { bootstrapAdmin(input: { idempotencyKey: "${UUID
-            .randomUUID()}", name: "Recovery Admin", password: "password-password" }) { $authFragment } }"""
-      )
-      adminId = authSuccess(adminJson, "bootstrapAdmin")._2
-      registryState <- IO.blocking(
-        Option(database.getCollection("account_registry").find(new Document("_id", "user-account-registry")).first())
-          .map(_.getString("state"))
-      )
-      adminPersisted <- IO.blocking(
-        database.getCollection("users").find(new Document("_id", adminId)).first() != null
-      )
-      _ <- IO.raiseUnless(registryState.contains("Initialized") && adminPersisted)(
-        new AssertionError(
-          s"bootstrapAdmin response was not committed to the recovery database (registry=$registryState, user=$adminPersisted)"
-        )
-      )
-      _ <- IO.blocking {
-        val result = database
-          .getCollection("users")
-          .updateOne(
-            new Document("_id", adminId),
-            new Document(
-              "$set",
-              new Document("role", "Candidate")
-                .append(
-                  "profile",
-                  new Document("kind", "Candidate")
-                    .append("skills", java.util.List.of("Scala"))
-                    .append("skillsCanonical", java.util.List.of("scala"))
-                    .append("recruiterSearchOptIn", false)
-                )
-            ).append("$unset", new Document("adminSingletonKey", ""))
-          )
-        assertEquals(result.getMatchedCount, 1L)
-      }
-      candidateJson <- graphql(
-        apiBase,
-        s"""mutation { login(input: { idempotencyKey: "${UUID
-            .randomUUID()}", name: "Recovery Admin", password: "password-password" }) { $authFragment } }"""
-      )
-      candidate = authSuccess(candidateJson, "login")
-    } yield candidate
+  private def registerCandidateFixture(apiBase: String): IO[(String, String)] =
+    graphql(
+      apiBase,
+      s"""mutation { signUp(input: { idempotencyKey: "${UUID
+          .randomUUID()}", name: "Recovery Candidate", role: CANDIDATE, skills: ["Scala"], password: "password-password" }) { $authFragment } }"""
+    ).map(authSuccess(_, "signUp"))
 
   private def deleteAccount(apiBase: String, token: String): IO[String] =
     graphql(
@@ -435,7 +398,7 @@ final class AccountDeletionRecoveryIntegrationSpec extends munit.FunSuite {
                 ) != null
             )
             _ <- IO.raiseWhen(!claimedFixture)(new AssertionError("recovery database is not owned by this harness"))
-            (candidateToken, requestId) <- bootstrapCandidateFixtureAndLogin(apiBase, database)
+            (candidateToken, requestId) <- registerCandidateFixture(apiBase)
             _ <- seedOutboxWork(database, requestId, transactionalId)
             result <- Resource
               .make(openPublisherTransaction(transactionalId, requestId, namespace))(producer =>

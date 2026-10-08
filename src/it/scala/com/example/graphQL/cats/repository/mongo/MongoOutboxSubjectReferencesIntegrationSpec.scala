@@ -503,6 +503,9 @@ class MongoOutboxSubjectReferencesIntegrationSpec extends MongoIntegrationSuite 
             users,
             NoopPasswordHasher,
             NoopAccessTokenIssuer,
+            new com.example.graphQL.cats.infrastructure.auth.HmacAuthenticationFingerprint(
+              "synthetic-test-authentication-key-material"
+            ),
             erasures,
             com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
             idempotent = Idempotent(mutationReceipts),

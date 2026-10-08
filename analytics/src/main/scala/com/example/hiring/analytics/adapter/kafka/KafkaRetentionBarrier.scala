@@ -111,6 +111,7 @@ private[analytics] object KafkaRetentionAdapter {
       driverExecution: SparkBlockingExecution[F]
   ): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
     for {
+      _ <- Resource.eval(KafkaConnection.preflight[F](connection))
       clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
       client <- Resource.make(driverExecution.blocking {
         val properties = new Properties()

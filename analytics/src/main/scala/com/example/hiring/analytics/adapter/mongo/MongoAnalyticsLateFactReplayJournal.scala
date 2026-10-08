@@ -15,6 +15,7 @@ import java.time.Instant
 import java.util.Date
 import java.util.concurrent.TimeUnit
 import scala.util.control.NonFatal
+import scala.jdk.CollectionConverters.*
 
 /** Natural-key Mongo journal. Completed request digests survive detailed-coordinate compaction. */
 private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
@@ -24,6 +25,9 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
 ) extends AnalyticsLateFactReplayJournal[F] {
   import MongoAnalyticsLateFactReplayJournal.*
   private val F = Async[F]
+  // PCRE equivalent of Character.isWhitespace, used by Iron Blank.
+  private val blankRunIdPattern =
+    "^[\\x{0009}-\\x{000D}\\x{001C}-\\x{0020}\\x{1680}\\x{2000}-\\x{2006}\\x{2008}-\\x{200A}\\x{2028}\\x{2029}\\x{205F}\\x{3000}]*$"
   private val lakehouseId = AnalyticsLakehouseIdentity
     .from(lakehouseRoot)
     .leftMap(_ => AnalyticsError.InvalidConfiguration("replay journal lakehouse identity is invalid"))
@@ -219,14 +223,39 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
   } yield result.getModifiedCount)
 
   /** Preserve receipts for all unfinished requests and completed requests with retained detail. */
-  def activePublicationRunIds: F[Set[RunId]] = guarded(for {
+  def referencedPublicationRunIds(candidates: Set[RunId]): F[Set[RunId]] = guarded(for {
     root <- F.fromEither(lakehouseId)
+    _ <- records
+      .flatMap(value =>
+        streams.optional(
+          value.underlying
+            .find(
+              Filters.and(
+                Filters.eq("lakehouseId", root),
+                Filters.or(Filters.ne("progress", "Published"), Filters.exists("coordinates", true)),
+                Filters
+                  .or(
+                    Filters.expr(
+                      new org.bson.Document(
+                        "$ne",
+                        Vector[AnyRef](new org.bson.Document("$type", "$runId"), "string").asJava
+                      )
+                    ),
+                    Filters.regex("runId", blankRunIdPattern)
+                  )
+              )
+            )
+            .first
+        )
+      )
+      .flatMap(value => F.raiseWhen(value.nonEmpty)(Conflict))
     dependencies <- records.flatMap(value =>
       streams
         .stream(
           value.underlying.find(
             Filters.and(
               Filters.eq("lakehouseId", root),
+              Filters.in("runId", candidates.toVector.map(_.value).asJava),
               Filters.or(Filters.ne("progress", "Published"), Filters.exists("coordinates", true))
             )
           )

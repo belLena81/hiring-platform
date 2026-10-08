@@ -70,7 +70,8 @@ private[runtime] object InterviewSchedulingRuntime {
             partitionConcurrency = settings.partitionConcurrency,
             topics = settings.topics,
             workerGroup = settings.workerGroup,
-            orchestratorGroup = settings.orchestratorGroup
+            orchestratorGroup = settings.orchestratorGroup,
+            restartMaxDelaySeconds = config.restartMaxDelaySeconds
           )
           val resultConfig = InterviewKafkaConfig(
             config.bootstrapServers,
@@ -81,7 +82,8 @@ private[runtime] object InterviewSchedulingRuntime {
             partitionConcurrency = settings.partitionConcurrency,
             topics = settings.topics,
             workerGroup = settings.workerGroup,
-            orchestratorGroup = settings.orchestratorGroup
+            orchestratorGroup = settings.orchestratorGroup,
+            restartMaxDelaySeconds = config.restartMaxDelaySeconds
           )
           def receive(handler: InterviewMessage => IO[Boolean])(value: Either[String, InterviewMessage]): IO[Boolean] =
             value.fold(

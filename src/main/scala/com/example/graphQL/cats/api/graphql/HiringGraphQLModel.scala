@@ -160,9 +160,6 @@ private[graphql] object HiringGraphQLModel {
       jobTitle: Option[String]
   ) derives Decoder,
         Encoder
-  final case class BootstrapAdminGraphQLInput(idempotencyKey: UUID, name: String, password: String)
-      derives Decoder,
-        Encoder
   final case class LoginGraphQLInput(idempotencyKey: UUID, name: String, password: String) derives Decoder, Encoder
   final case class UpdateProfileGraphQLInput(
       idempotencyKey: UUID,

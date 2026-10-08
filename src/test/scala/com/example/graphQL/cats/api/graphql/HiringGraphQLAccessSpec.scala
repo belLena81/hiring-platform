@@ -27,7 +27,6 @@ import com.example.graphQL.cats.service.ServiceFixtures.{InMemoryApplications, I
 import com.example.graphQL.cats.service.protocol.{
   AccountProfileInput,
   AccountUseCases,
-  BootstrapAdminInput,
   IdempotencyRequest,
   LoginInput,
   SignUpInput,
@@ -187,17 +186,25 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       }
   }
 
+  test("anonymous Admin bootstrap is absent from the public schema") {
+    val query = "mutation { bootstrapAdmin(input: {name: \"Admin\", password: \"password-password\"}) { __typename } }"
+    for {
+      request <- parseRequest(query)
+      result <- TestGraphQLSupport
+        .context(IO.pure(ProbeResult.Ready), None)
+        .use(TestGraphQLSupport.parseAndExecute(request, _))
+    } yield assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+  }
+
   test("public account mutations are unavailable until hiring setup is ready") {
     val signUp =
       """mutation { signUp(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", role: CANDIDATE, password: "password-password", skills: ["Scala"] }) { __typename } }"""
-    val bootstrap =
-      """mutation { bootstrapAdmin(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Admin", password: "password-password" }) { __typename } }"""
     val login =
       """mutation { login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000001", name: "Candidate", password: "password-password" }) { __typename } }"""
     for {
       calls <- Ref.of[IO, Int](0)
       service = new PublicAccountService(calls)
-      results <- List(signUp, bootstrap, login).traverse(query =>
+      results <- List(signUp, login).traverse(query =>
         executeWithUsers(
           query,
           None,
@@ -1212,12 +1219,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
       UseCaseIO.left(unsupported)
 
-    override def bootstrapAdmin(
-        request: IdempotencyRequest,
-        input: BootstrapAdminInput
-    ): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.left(unsupported)
-
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
       UseCaseIO.left(unsupported)
 
@@ -1256,12 +1257,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
       UseCaseIO.liftIO(calls.update(_ + 1)) *> unavailable
 
-    override def bootstrapAdmin(
-        request: IdempotencyRequest,
-        input: BootstrapAdminInput
-    ): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.liftIO(calls.update(_ + 1)) *> unavailable
-
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
       UseCaseIO.liftIO(calls.update(_ + 1)) *> unavailable
 
@@ -1283,12 +1278,6 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
 
     override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
       UseCaseIO.left(UseCaseError.Account(com.example.graphQL.cats.service.AccountError.NameTaken))
-
-    override def bootstrapAdmin(
-        request: IdempotencyRequest,
-        input: BootstrapAdminInput
-    ): UseCaseIO[(User, AccountToken)] =
-      UseCaseIO.left(unsupported)
 
     override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
       UseCaseIO.left(unsupported)

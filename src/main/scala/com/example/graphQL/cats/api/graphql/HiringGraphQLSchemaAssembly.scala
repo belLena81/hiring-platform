@@ -184,7 +184,6 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       ),
       resultField("signUp", signUpResultType, signUpInputArgument :: Nil)(signUp),
       resultField("login", loginResultType, loginInputArgument :: Nil)(login),
-      resultField("bootstrapAdmin", bootstrapAdminResultType, bootstrapAdminInputArgument :: Nil)(bootstrapAdmin),
       resultField("updateMyProfile", updateMyProfileResultType, updateProfileInputArgument :: Nil)(updateMyProfile),
       resultField("deleteMyAccount", deleteMyAccountResultType, deleteMyAccountInputArgument :: Nil)(deleteMyAccount),
       resultField("recordJobView", recordJobViewResultType, recordJobViewInputArgument :: Nil)(recordJobView),

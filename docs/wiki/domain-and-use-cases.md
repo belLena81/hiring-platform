@@ -98,8 +98,8 @@ These capabilities support the numbered use cases rather than introducing extra 
 
 | Operation | Behavior |
 |---|---|
-| `signUp` | Public, rate-limited mutation creates Candidate/Recruiter with role-appropriate profile and hashed password. Rejects Admin and rejects signup until the account registry is initialized by bootstrap. |
-| `bootstrapAdmin` | Public, rate-limited mutation creates the singleton Admin and returns an authentication token. The transaction requires an Uninitialized account registry and an empty user collection, then marks the registry Initialized. This resolver does not require an existing authenticated actor or a bootstrap secret. |
+| `signUp` | Public, rate-limited mutation creates Candidate/Recruiter with role-appropriate profile and hashed password. Rejects Admin and rejects signup until the account registry is initialized by trusted startup seeding. |
+| Startup Admin seed | Explicit disabled-by-default `auth.admin-seed` configuration initializes the singleton before workers/HTTP. Same-name valid singleton is preserved without a password reset; conflicting registry/identity fails startup. No public bootstrap mutation or seed token exists. |
 | `login` | Public, rate-limited account-name/password authentication; successful active-account login returns user and expiring token. |
 | `me` | Resolves the authenticated active user. |
 | `updateMyProfile` | Updates the current role-appropriate profile and associated derived-search work; Admin profile updates are rejected. |

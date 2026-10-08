@@ -31,13 +31,15 @@ object GraphQLDocumentCache {
   private val ExpirySeconds = 60L
 
   def resource: Resource[IO, GraphQLDocumentCache] =
-    Resource.pure(
-      new GraphQLDocumentCache(
-        Caffeine
-          .newBuilder()
-          .maximumSize(MaximumEntries)
-          .expireAfterWrite(ExpirySeconds, TimeUnit.SECONDS)
-          .build[String, Document]()
+    Resource.eval(
+      IO.delay(
+        new GraphQLDocumentCache(
+          Caffeine
+            .newBuilder()
+            .maximumSize(MaximumEntries)
+            .expireAfterWrite(ExpirySeconds, TimeUnit.SECONDS)
+            .build[String, Document]()
+        )
       )
     )
 }

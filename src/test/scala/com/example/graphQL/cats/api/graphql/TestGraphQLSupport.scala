@@ -14,7 +14,6 @@ import com.example.graphQL.cats.service.protocol.{
   AccountProfileInput,
   AccountUseCases,
   ApplicationUseCases,
-  BootstrapAdminInput,
   HiringReadModel,
   IdempotencyRequest,
   JobUseCases,
@@ -36,7 +35,6 @@ object TestGraphQLSupport {
 
   val accountService: AccountUseCases = new AccountUseCases {
     def signUp(request: IdempotencyRequest, input: SignUpInput) = unsupported
-    def bootstrapAdmin(request: IdempotencyRequest, input: BootstrapAdminInput) = unsupported
     def login(request: IdempotencyRequest, input: LoginInput) = unsupported
     def me(actor: ActorContext) = unsupported
     def updateMyProfile(request: IdempotencyRequest, actor: ActorContext, input: AccountProfileInput) = unsupported

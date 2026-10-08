@@ -32,7 +32,7 @@ private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
 
   override def read(spark: SparkSession, manifest: AnalyticsRunManifest): F[DataFrame] =
     for {
-      _ <- Async[F].fromEither(KafkaConnection.validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply))
+      _ <- KafkaConnection.preflight[F](connection)
       _ <- AnalyticsOffsetRanges.requireNonEmpty(manifest)
       _ <- KafkaOffsetRangeSource.verifyAvailable(connection, manifest, driverExecution)
       options <- Async[F].fromEither(KafkaClientProperties.sparkOptions(connection))
@@ -62,6 +62,7 @@ object KafkaOffsetRangeSource {
       driverExecution: SparkBlockingExecution[F]
   ): F[(String, String)] =
     for {
+      _ <- KafkaConnection.preflight[F](connection)
       clientProperties <- Async[F].fromEither(KafkaClientProperties.clientProperties(connection))
       identity <- driverExecution
         .blocking {
@@ -102,6 +103,7 @@ object KafkaOffsetRangeSource {
       driverExecution: SparkBlockingExecution[F]
   ): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
     for {
+      _ <- Resource.eval(KafkaConnection.preflight[F](connection))
       clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
       client <- Resource.make(driverExecution.blocking {
         val settings = new Properties()

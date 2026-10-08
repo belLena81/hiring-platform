@@ -8,13 +8,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLResolverSupport.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.error.DomainValidationError
 import com.example.graphQL.cats.service.{AccountError, UseCaseError}
-import com.example.graphQL.cats.service.protocol.{
-  AccountProfileInput,
-  BootstrapAdminInput,
-  LoginInput,
-  SignUpInput,
-  UseCaseIO
-}
+import com.example.graphQL.cats.service.protocol.{AccountProfileInput, LoginInput, SignUpInput, UseCaseIO}
 import sangria.schema.Context
 import java.time.Instant
 
@@ -37,21 +31,6 @@ private[graphql] object HiringGraphQLAccountResolvers {
                 )
                 .map(authSuccess)
             )
-        )
-      }
-    }
-
-  def bootstrapAdmin(context: Context[RequestContext, Unit]): HiringGraphQLResult[MutationOutcome[AuthSuccess]] =
-    rateLimited(context, Operation.BootstrapAdmin).flatMap { _ =>
-      val input = context.arg(bootstrapAdminInputArgument)
-      publicMutation(context) { hiring =>
-        mutationResult(
-          hiring.accountService
-            .bootstrapAdmin(
-              idempotencyRequest(input.idempotencyKey, input.idempotencyPayload),
-              BootstrapAdminInput(input.name, input.password)
-            )
-            .map(authSuccess)
         )
       }
     }

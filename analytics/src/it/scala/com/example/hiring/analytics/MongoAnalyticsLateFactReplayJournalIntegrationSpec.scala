@@ -54,7 +54,11 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends Analytics
           assert(persisted.get("preparedAt").isInstanceOf[java.util.Date], "preparedAt must persist as BSON Date")
           assert(persisted.get("updatedAt").isInstanceOf[java.util.Date], "updatedAt must persist as BSON Date")
         }
-        preparedDependencies <- checked("prepared dependencies")(journal.activePublicationRunIds)
+        preparedDependencies <- checked("prepared dependencies")(
+          journal.referencedPublicationRunIds(
+            Set(reservation(request, 0).runId, reservation(request, 1, 1L).runId, reservation(unfinished, 0).runId)
+          )
+        )
         _ = assertEquals(preparedDependencies, Set(reservation(request, 0).runId))
         duplicate <- checked("duplicate prepare")(
           journal.prepare(request, reservation(request, 0), now.plusSeconds(1L))
@@ -70,7 +74,11 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends Analytics
         _ = assertEquals(conflict.left.toOption, Some(AnalyticsError.LateFactReplayRequestConflict))
         _ <- checked("initial facts merged")(journal.markFactsMerged(request, now))
         _ <- checked("idempotent facts merged")(journal.markFactsMerged(request, now))
-        mergedDependencies <- checked("merged dependencies")(journal.activePublicationRunIds)
+        mergedDependencies <- checked("merged dependencies")(
+          journal.referencedPublicationRunIds(
+            Set(reservation(request, 0).runId, reservation(request, 1, 1L).runId, reservation(unfinished, 0).runId)
+          )
+        )
         _ = assertEquals(mergedDependencies, Set(reservation(request, 0).runId))
         next <- checked("advance attempt")(
           journal.advancePublicationAttempt(request, 0, reservation(request, 1, 1L), now)
@@ -86,11 +94,19 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends Analytics
         _ <- checked("published")(journal.markPublished(request, now))
         _ <- checked("published")(journal.markPublished(request, now))
         _ <- checked("unfinished prepare")(journal.prepare(unfinished, reservation(unfinished, 0), now))
-        retainedDependencies <- checked("retained dependencies")(journal.activePublicationRunIds)
+        retainedDependencies <- checked("retained dependencies")(
+          journal.referencedPublicationRunIds(
+            Set(reservation(request, 0).runId, reservation(request, 1, 1L).runId, reservation(unfinished, 0).runId)
+          )
+        )
         _ = assertEquals(retainedDependencies, Set(reservation(request, 1, 1L).runId, reservation(unfinished, 0).runId))
         compacted <- checked("compaction")(journal.compactCompleted(now.plusSeconds(32L * 86400L)))
         _ = assertEquals(compacted, 1L)
-        compactedDependencies <- checked("compacted dependencies")(journal.activePublicationRunIds)
+        compactedDependencies <- checked("compacted dependencies")(
+          journal.referencedPublicationRunIds(
+            Set(reservation(request, 0).runId, reservation(request, 1, 1L).runId, reservation(unfinished, 0).runId)
+          )
+        )
         _ = assertEquals(compactedDependencies, Set(reservation(unfinished, 0).runId))
         published <- checked("published load")(journal.load(request.requestId))
         pending <- checked("unfinished load")(journal.load(unfinished.requestId))
@@ -102,6 +118,13 @@ final class MongoAnalyticsLateFactReplayJournalIntegrationSpec extends Analytics
       } yield ()).unsafeRunSync()
       val records = sync.getDatabase(name).getCollection(MongoAnalyticsLateFactReplayJournal.CollectionName)
       assertEquals(records.countDocuments(), 2L)
+      records.updateOne(
+        new Document("requestId", unfinished.requestId.value),
+        new Document("$set", new Document("runId", "\u2003"))
+      )
+      val malformed = journal.referencedPublicationRunIds(Set(reservation(request, 0).runId)).attempt.unsafeRunSync()
+      assert(malformed.isLeft, "Unicode blank active references must fail closed even outside candidate IDs")
+
       val completed = records.find(new Document("requestId", "selected")).first()
       val pending = records.find(new Document("requestId", "unfinished")).first()
       assert(!completed.containsKey("coordinates"))

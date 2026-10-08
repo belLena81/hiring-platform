@@ -19,6 +19,17 @@ class AppConfigSpec extends FunSuite {
       case other        => fail(s"Expected invalid configuration result, got $other")
     }
 
+  test("admin seed defaults disabled and requires credentials only when enabled") {
+    assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.adminSeed), Right(AdminSeedConfig()))
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "\nauth.admin-seed.enabled=true", Map.empty),
+      ConfigError.InvalidAdminSeed
+    )
+    val enabled = defaultConfig + "\nauth.admin-seed { enabled=true, name=Admin, password=synthetic-password }"
+    assertEquals(AppConfig.fromConfig(enabled, Map.empty).map(_.adminSeed.enabled), Right(true))
+    assert(!AdminSeedConfig(true, Some("private-name"), Some("private-password")).toString.contains("private"))
+  }
+
   private val defaultConfig =
     """http {
       |  host = "127.0.0.1"

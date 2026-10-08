@@ -23,6 +23,7 @@ import java.time.Instant
 import java.util.Date
 import java.util.UUID
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegrationSuite {
   override protected def dedicatedMongo: Boolean = true
@@ -190,6 +191,36 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
     }
   }
 
+  test("ambiguous duplicate acknowledgement reconciles majority ownership and releases the real Mongo mutex") {
+    val sync = MongoClients.create(endpointUri)
+    val reactive = AnalyticsMongo4catsTestSupport.client(endpointUri)
+    try {
+      val database = sync.getDatabase(s"mutex_acknowledgement_${UUID.randomUUID()}")
+      Vector[Throwable](
+        new java.io.IOException("injected lost acknowledgement"),
+        new com.mongodb.MongoException(11000, "injected duplicate acknowledgement after successful retry")
+      ).foreach { failure =>
+        val mutex = new MongoAnalyticsLakehouseLock[IO](
+          AnalyticsMongo4catsTestSupport.database(reactive, database.getName),
+          AnalyticsTestOperationalConfig.streams,
+          afterInsertOverride = Some(IO.raiseError(failure))
+        )
+        mutex
+          .resource("file:///tmp/acknowledgement-" + UUID.randomUUID())
+          .use { _ =>
+            IO.blocking {
+              assertEquals(database.getCollection("analytics_lakehouse_mutexes").countDocuments(), 1L)
+            }
+          }
+          .unsafeRunSync()
+        assertEquals(database.getCollection("analytics_lakehouse_mutexes").countDocuments(), 0L)
+      }
+    } finally {
+      sync.close()
+      AnalyticsMongo4catsTestSupport.close(reactive)
+    }
+  }
+
   test("cancelling a contended lakehouse mutex leaves its owner intact and releases the waiter promptly") {
     val uri = endpointUri
     val sync = MongoClients.create(uri)
@@ -300,13 +331,64 @@ class MongoAnalyticsReportPublisherIntegrationSpec extends AnalyticsMongoIntegra
       runs.insertOne(oldPublished("removable-completed"))
       runs.insertOne(oldPublished("protected-replay"))
       runs.insertOne(oldPublished("stream-maintenance-abandoned").append("state", "Reserved"))
-      val removed = publisher.compactPublished(Set(asRunId("protected-replay")), now).unsafeRunSync()
+      val removed =
+        publisher.compactPublished(ids => IO.pure(ids.intersect(Set(asRunId("protected-replay")))), now).unsafeRunSync()
       assertEquals(removed, 2L)
       assertEquals(runs.countDocuments(new Document("_id", "removable-completed")), 0L)
       assertEquals(runs.countDocuments(new Document("_id", "protected-replay")), 1L)
       assertEquals(runs.countDocuments(new Document("_id", run.value)), 1L) // unfinished reservation
       assertEquals(runs.countDocuments(new Document("_id", next.runId.value)), 1L) // current snapshot
-      assertEquals(publisher.compactPublished(Set(asRunId("protected-replay")), now).unsafeRunSync(), 0L)
+      assertEquals(
+        publisher
+          .compactPublished(ids => IO.pure(ids.intersect(Set(asRunId("protected-replay")))), now)
+          .unsafeRunSync(),
+        0L
+      )
+      val protectedPrefix = (0 until 600).map(index => f"aaa-protected-$index%04d").toSet
+      runs.insertMany(
+        (protectedPrefix.toVector.map(oldPublished) ++
+          (0 until 1100).map(index => oldPublished(f"zzz-removable-$index%04d"))).asJava
+      )
+      val pages = scala.collection.mutable.ArrayBuffer.empty[Int]
+      val boundedRemoved = publisher
+        .compactPublished(
+          ids =>
+            IO {
+              pages += ids.size
+              ids.filter(id => protectedPrefix(id.value) || id.value == "protected-replay")
+            },
+          now
+        )
+        .unsafeRunSync()
+      assertEquals(boundedRemoved, 1000L)
+      assert(pages.size >= 4)
+      assert(pages.forall(_ <= 500))
+      assertEquals(runs.countDocuments(new Document("_id", new Document("$regex", "^aaa-protected-"))), 600L)
+      assertEquals(runs.countDocuments(new Document("_id", new Document("$regex", "^zzz-removable-"))), 100L)
+      val lastEligible = runs
+        .find(new Document("_id", new Document("$regex", "^zzz-removable-")))
+        .sort(new Document("_id", 1))
+        .first()
+        .getString("_id")
+      var checkedPage = false
+      val afterControlChange = publisher
+        .compactPublished(
+          ids =>
+            IO.blocking {
+              if (!checkedPage) {
+                checkedPage = true
+                runs.insertOne(oldPublished("zzzz-created-after-maintenance-start"))
+                control.updateOne(new Document("_id", "analytics-report"), Updates.set("lastRunId", lastEligible))
+              }
+              ids.filter(id => protectedPrefix(id.value) || id.value == "protected-replay")
+            },
+          now
+        )
+        .unsafeRunSync()
+      assertEquals(afterControlChange, 99L)
+      assertEquals(runs.countDocuments(new Document("_id", lastEligible)), 1L)
+      assertEquals(runs.countDocuments(new Document("_id", "zzzz-created-after-maintenance-start")), 1L)
+
     } finally {
       client.close()
       AnalyticsMongo4catsTestSupport.close(reactive)

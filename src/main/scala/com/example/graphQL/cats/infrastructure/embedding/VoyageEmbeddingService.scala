@@ -2,6 +2,7 @@ package com.example.graphQL.cats.infrastructure.embedding
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
+import fs2.Stream
 import com.example.graphQL.cats.service.port.{
   EmbeddingError,
   EmbeddingInput,
@@ -60,9 +61,16 @@ final class VoyageEmbeddingService(
             if (!response.status.isSuccess)
               IO.pure(Left(EmbeddingError.ProviderUnavailable))
             else
-              response.attemptAs[VoyageEmbeddingResponse](using jsonOf[IO, VoyageEmbeddingResponse]).value.map {
-                decoded =>
-                  decoded.leftMap(_ => EmbeddingError.InvalidResponse).flatMap(validate)
+              response.body.take(maximumResponseBytes + 1L).compile.toVector.flatMap { bytes =>
+                if (bytes.size.toLong > maximumResponseBytes) IO.pure(Left(EmbeddingError.InvalidResponse))
+                else
+                  response
+                    .withBodyStream(Stream.emits(bytes).covary[IO])
+                    .attemptAs[VoyageEmbeddingResponse](using jsonOf[IO, VoyageEmbeddingResponse])
+                    .value
+                    .map { decoded =>
+                      decoded.leftMap(_ => EmbeddingError.InvalidResponse).flatMap(validate)
+                    }
               }
           }
           .timeout(timeout)
@@ -75,17 +83,19 @@ final class VoyageEmbeddingService(
     }
   }
 
+  private val maximumResponseBytes: Long = 64L * 1024L + 32L * dimension.toLong
+
   private def validate(response: VoyageEmbeddingResponse): Either[EmbeddingError, EmbeddingVector] =
-    response.data.headOption
-      .map { item =>
+    response.data match {
+      case item :: Nil =>
         val values = item.embedding
         Either.cond(
           values.size == dimension && values.forall(_.isFinite) && response.model.forall(_ == model),
           EmbeddingVector(values, response.model.getOrElse(model), values.size),
           EmbeddingError.InvalidResponse
         )
-      }
-      .getOrElse(Left(EmbeddingError.InvalidResponse))
+      case _ => Left(EmbeddingError.InvalidResponse)
+    }
 
   private def inputType(inputType: EmbeddingInputType): String =
     inputType match {

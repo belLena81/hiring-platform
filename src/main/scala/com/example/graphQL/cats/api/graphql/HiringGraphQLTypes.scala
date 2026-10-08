@@ -445,8 +445,6 @@ private[graphql] object HiringGraphQLTypes {
     mutationResultType("SignUpResult", authSuccessType)
   lazy val loginResultType: OutputType[MutationOutcome[AuthSuccess]] =
     mutationResultType("LoginResult", authSuccessType)
-  lazy val bootstrapAdminResultType: OutputType[MutationOutcome[AuthSuccess]] =
-    mutationResultType("BootstrapAdminResult", authSuccessType)
   lazy val updateMyProfileResultType: OutputType[MutationOutcome[User]] =
     mutationResultType("UpdateMyProfileResult", userType)
   lazy val deleteMyAccountResultType: OutputType[MutationOutcome[DeletionReceipt]] =

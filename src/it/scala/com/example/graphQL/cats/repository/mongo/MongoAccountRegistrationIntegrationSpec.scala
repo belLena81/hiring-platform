@@ -6,10 +6,10 @@ import com.example.graphQL.cats.config.AppConfig
 import com.example.graphQL.cats.domain.model.{CandidateProfile, RecruiterProfile, UserProfile, UserRole}
 import com.example.graphQL.cats.runtime.MongoHiringRuntime
 import com.example.graphQL.cats.service.{AccountError, Diagnostics, UseCaseError}
-import com.example.graphQL.cats.service.protocol.{BootstrapAdminInput, IdempotencyRequest, SignUpInput}
+import com.example.graphQL.cats.service.protocol.{IdempotencyRequest, SignUpInput}
 import com.mongodb.client.model.{Filters, InsertOneOptions, UpdateOptions, Updates}
 import io.circe.Json
-import org.bson.{BsonDocument, BsonNull, Document}
+import org.bson.{BsonNull, Document}
 
 import java.util.UUID
 import scala.concurrent.duration.*
@@ -54,87 +54,67 @@ final class MongoAccountRegistrationIntegrationSpec extends MongoIntegrationSuit
   private def request(value: String): IdempotencyRequest =
     IdempotencyRequest.fromCanonicalInput(UUID.randomUUID(), value)
 
-  test("atomic Admin bootstrap enables Candidate and Recruiter registration without another Admin") {
+  test("startup Admin seed enables registration and repeats without changing credentials") {
     replicaSet.use { instance =>
       for {
-        config <- configuration(instance, instance.database.underlying.getName)
+        base <- configuration(instance, instance.database.underlying.getName)
+        seed = com.example.graphQL.cats.config
+          .AdminSeedConfig(true, Some("Synthetic admin"), Some("synthetic-admin-password"))
+        config = base.copy(adminSeed = seed)
         _ <- MongoHiringRuntime.resource(config).use { runtime =>
-          MongoDatabaseProbe.clientResource(config.uri).use { client =>
-            client.getDatabase(config.databaseName).flatMap { database =>
-              val users = MongoUserRepository.transactional(
-                database,
-                client,
-                MongoEmbeddingWorkEnqueuer.disabled,
-                Diagnostics.noop
+          for {
+            candidate <- runtime.services.accountService
+              .signUp(
+                request("candidate"),
+                SignUpInput(
+                  "Synthetic candidate",
+                  UserRole.Candidate,
+                  "synthetic-candidate-password",
+                  Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+                )
               )
-              val candidateInput = SignUpInput(
-                "Synthetic candidate",
-                UserRole.Candidate,
-                "synthetic-password-for-registration",
-                Some(UserProfile.Candidate(CandidateProfile(Set("Scala"), None, None)))
+              .value
+            recruiter <- runtime.services.accountService
+              .signUp(
+                request("recruiter"),
+                SignUpInput(
+                  "Synthetic recruiter",
+                  UserRole.Recruiter,
+                  "synthetic-recruiter-password",
+                  Some(UserProfile.Recruiter(RecruiterProfile("Synthetic organization", None)))
+                )
               )
-              val candidateRequest = request("candidate-registration")
-              for {
-                uninitialized <- users.initialized.value
-                rejected <- runtime.services.accountService.signUp(candidateRequest, candidateInput).value
-                beforeUsers <- MongoRepositoryTestSupport.count(database, MongoCollections.Users)
-                bootstrapped <- runtime.services.accountService
-                  .bootstrapAdmin(
-                    request("admin-bootstrap"),
-                    BootstrapAdminInput("Synthetic admin", "synthetic-admin-password")
-                  )
-                  .value
-                initialized <- users.initialized.value
-                registry <- Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry)
-                storedRegistry <- registry.find(Filters.eq(MongoFields.Id, "user-account-registry")).first
-                candidate <- runtime.services.accountService
-                  .signUp(request("candidate-after-bootstrap"), candidateInput)
-                  .value
-                recruiter <- runtime.services.accountService
-                  .signUp(
-                    request("recruiter-registration"),
-                    SignUpInput(
-                      "Synthetic recruiter",
-                      UserRole.Recruiter,
-                      "synthetic-recruiter-password",
-                      Some(UserProfile.Recruiter(RecruiterProfile("Synthetic hiring organization", None)))
-                    )
-                  )
-                  .value
-                anotherAdmin <- runtime.services.accountService
-                  .bootstrapAdmin(
-                    request("another-admin"),
-                    BootstrapAdminInput("Another admin", "synthetic-admin-password")
-                  )
-                  .value
-                documents <- Mongo4catsCollections.documents(database, MongoCollections.Users)
-                storedUsers <- documents.find(new BsonDocument()).limit(4).boundedStream(4).compile.toVector
-                _ <- IO {
-                  assertEquals(uninitialized, Right(false))
-                  assertEquals(rejected, Left(UseCaseError.Account(AccountError.BootstrapRequired)))
-                  assertEquals(beforeUsers, 0L)
-                  val admin = bootstrapped.toOption.getOrElse(fail("Normal Admin bootstrap did not succeed"))
-                  assertEquals(admin._1.role, UserRole.Admin)
-                  assert(admin._1.adminSingleton)
-                  assert(admin._2.value.nonEmpty)
-                  assertEquals(initialized, Right(true))
-                  assertEquals(storedRegistry.map(_.getString(MongoFields.State)), Some("Initialized"))
-                  assertEquals(storedRegistry.map(_.getString(MongoFields.AdminId)), Some(admin._1.id.value.toString))
-                  assert(candidate.exists { case (user, token) =>
-                    user.role == UserRole.Candidate && token.value.nonEmpty
-                  })
-                  assert(recruiter.exists { case (user, token) =>
-                    user.role == UserRole.Recruiter && token.value.nonEmpty
-                  })
-                  assertEquals(anotherAdmin, Left(UseCaseError.Account(AccountError.AlreadyBootstrapped)))
-                  assertEquals(storedUsers.size, 3)
-                  assertEquals(storedUsers.count(_.getString(MongoFields.Role) == "Admin"), 1)
-                  assertEquals(storedUsers.count(_.getString(MongoFields.AdminSingletonKey) == "singleton-admin"), 1)
-                }
-              } yield ()
-            }
-          }
+              .value
+            _ <- IO { assert(candidate.isRight); assert(recruiter.isRight) }
+          } yield ()
         }
+        _ <- MongoHiringRuntime
+          .resource(config.copy(adminSeed = seed.copy(password = Some("changed-password-unused"))))
+          .use { runtime =>
+            for {
+              old <- runtime.services.accountService
+                .login(
+                  request("old-password"),
+                  com.example.graphQL.cats.service.protocol.LoginInput("Synthetic admin", "synthetic-admin-password")
+                )
+                .value
+              changed <- runtime.services.accountService
+                .login(
+                  request("changed-password"),
+                  com.example.graphQL.cats.service.protocol.LoginInput("Synthetic admin", "changed-password-unused")
+                )
+                .value
+              _ <- IO {
+                assert(old.exists(_._1.role == UserRole.Admin));
+                assertEquals(changed, Left(UseCaseError.Account(AccountError.InvalidCredentials)))
+              }
+            } yield ()
+          }
+        conflict <- MongoHiringRuntime
+          .resource(config.copy(adminSeed = seed.copy(name = Some("Another admin"))))
+          .use(_ => IO.unit)
+          .attempt
+        _ <- IO(assert(conflict.isLeft))
       } yield ()
     }
   }

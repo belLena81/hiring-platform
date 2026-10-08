@@ -46,7 +46,7 @@ object AuthRateLimiter {
   final case class RateLimited(retryAfter: FiniteDuration) {
     def retryAfterSeconds: Long = math.max(1L, (retryAfter + 999.millis).toSeconds)
   }
-  enum Operation { case Login, SignUp, BootstrapAdmin }
+  enum Operation { case Login, SignUp }
 
   private final case class Bucket(hits: Int, expiresAtNanos: Long)
   private val NanosPerSecond = 1000000000L

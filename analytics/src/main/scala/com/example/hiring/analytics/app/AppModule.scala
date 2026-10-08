@@ -6,6 +6,7 @@ import com.example.hiring.analytics.adapter.spark.*
 import com.example.hiring.analytics.service.batch.HiringAnalyticsBatch
 import com.example.hiring.analytics.service.erasure.AnalyticsErasureWorker
 import com.example.hiring.analytics.config.{
+  KafkaConnection,
   AnalyticsBatchSettings,
   AnalyticsCommonSettings,
   AnalyticsErasureWorkerPolicy,
@@ -330,6 +331,7 @@ object AppModule {
       appName: String
   ): Resource[F, Shared[F]] =
     for {
+      _ <- Resource.eval(KafkaConnection.preflight[F](common.kafka))
       paths <- Resource.eval(Async[F].fromEither(resolveLakehousePaths(common.lakehouseRoot)))
       (spark, client, sparkExecution) <- sparkMongo[F](
         common.mongoUri,
@@ -442,9 +444,10 @@ object AppModule {
       replayJournal = new MongoAnalyticsLateFactReplayJournal[F](shared.database, shared.streams, common.lakehouseRoot)
       _ <- replayJournal.ensureIndexes
       _ <- replayJournal.compactCompleted(at)
-      streamReceiptIds <- journal.allRetainedPublicationRunIds
-      replayReceiptIds <- replayJournal.activePublicationRunIds
-      _ <- publisher.compactPublished(streamReceiptIds ++ replayReceiptIds, at)
+      _ <- publisher.compactPublished(
+        ids => (journal.referencedPublicationRunIds(ids), replayJournal.referencedPublicationRunIds(ids)).mapN(_ ++ _),
+        at
+      )
       _ <- shared.maintenance.reclaimExpiredFiles
       _ <- authorize
     } yield ()

@@ -136,6 +136,11 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
   test("signup replay reissues an access token for the active account") {
     for {
       accounts <- TestAccounts.create(initialized = true)
+      _ <- accounts.values.set(
+        Map(
+          AccountName.canonical(recruiter.name) -> AccountCredentials(recruiter, passwordHash("hash:password-password"))
+        )
+      )
       service = accountService(
         new TestUsers(Map(recruiter.id -> recruiter)),
         accounts,
@@ -153,6 +158,93 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         )
         .value
     } yield assertEquals(result, Right(recruiter -> AccountToken(s"token-${recruiter.id.value}", now.plusSeconds(900))))
+  }
+
+  test("login replay verifies credentials and uses unknown-user hashing when the account is missing") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      unknownChecks <- Ref.of[IO, Int](0)
+      hasher = new PasswordHasher {
+        def hash(password: String): IO[PasswordHash] = TestHasher.hash(password)
+        def verify(encoded: PasswordHash, password: String): IO[Boolean] = TestHasher.verify(encoded, password)
+        def verifyUnknown(password: String): IO[Unit] = unknownChecks.update(_ + 1)
+      }
+      service = accountService(
+        new TestUsers(Map.empty),
+        accounts,
+        hasher = hasher,
+        idempotent = Idempotent(ReplayReceipts(MutationEntityReference("user", recruiter.id.value.toString)))
+      )
+      missing <- service.login(request, LoginInput("Recruiter", "password-password")).value
+      _ <- accounts.values.set(
+        Map("recruiter" -> AccountCredentials(recruiter, passwordHash("hash:password-password")))
+      )
+      valid <- service.login(request, LoginInput("Recruiter", "password-password")).value
+      unknown <- unknownChecks.get
+    } yield {
+      assertEquals(missing, Left(UseCaseError.Account(AccountError.InvalidCredentials)))
+      assertEquals(valid, Right(recruiter -> AccountToken(s"token-${recruiter.id.value}", now.plusSeconds(900))))
+      assertEquals(unknown, 1)
+    }
+  }
+
+  test("login and signup replay require the referenced active identity and current password") {
+    val scenarios = List(
+      (recruiter, recruiter.id.value.toString, "wrong-password", "user"),
+      (deletedRecruiter, recruiter.id.value.toString, "password-password", "user"),
+      (recruiter, userId.value.toString, "password-password", "user"),
+      (recruiter, recruiter.id.value.toString, "password-password", "job")
+    )
+    import cats.syntax.all.*
+    scenarios.traverse_ { case (storedUser, referencedId, suppliedPassword, entityType) =>
+      for {
+        accounts <- TestAccounts.create(initialized = true)
+        _ <- accounts.values.set(
+          Map("recruiter" -> AccountCredentials(storedUser, passwordHash("hash:password-password")))
+        )
+        service = accountService(
+          new TestUsers(Map.empty),
+          accounts,
+          idempotent = Idempotent(ReplayReceipts(MutationEntityReference(entityType, referencedId)))
+        )
+        login <- service.login(request, LoginInput("Recruiter", suppliedPassword)).value
+        signup <- service
+          .signUp(request, SignUpInput("Recruiter", UserRole.Recruiter, suppliedPassword, recruiter.profile))
+          .value
+        _ <- IO {
+          assertEquals(login, Left(UseCaseError.Account(AccountError.InvalidCredentials)))
+          assertEquals(signup, Left(UseCaseError.Account(AccountError.InvalidCredentials)))
+        }
+      } yield ()
+    }
+  }
+
+  test("authentication fingerprints reach the receipt repository protected with operation and scope") {
+    val protector = new com.example.graphQL.cats.infrastructure.auth.HmacAuthenticationFingerprint(
+      "synthetic-test-key-material-for-authentication"
+    )
+    val receipts = new MutationReceiptRepository {
+      override def execute[A, E](
+          key: MutationReceiptKey,
+          fingerprint: MutationReceiptFingerprint,
+          now: Instant,
+          expiresAt: Instant
+      )(
+          write: MutationWriteContext => RepositoryIO[MutationWriteOutcome[A, E]]
+      ): RepositoryIO[MutationReceiptExecution[A, E]] = {
+        assertEquals(fingerprint, protector.protect(key.operation, key.actorScope, request.fingerprint))
+        assertNotEquals(fingerprint, request.fingerprint)
+        RepositoryIO.fromEither(Right(MutationReceiptExecution.InProgress))
+      }
+    }
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      service = accountService(new TestUsers(Map.empty), accounts, idempotent = Idempotent(receipts))
+      _ <- service.login(request, LoginInput("Recruiter", "password-password")).value
+      _ <- service
+        .signUp(request, SignUpInput("Recruiter", UserRole.Recruiter, "password-password", recruiter.profile))
+        .value
+    } yield ()
   }
 
   test("signup reports a blank name once while retaining other registration validation") {
@@ -353,12 +445,14 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
 
   test("Argon2 unknown-user verification accepts arbitrary credentials without retaining their hash") {
     Semaphore[IO](1).flatMap { permits =>
-      Argon2PasswordHasher.resource(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits).use { hasher =>
-        hasher
-          .verifyUnknown("first-password")
-          .flatMap(_ => hasher.verifyUnknown("second-password"))
-          .map(assertEquals(_, ()))
-      }
+      com.example.graphQL.cats.infrastructure.auth.Argon2PasswordHasher
+        .resource(iterations = 1, memoryKilobytes = 8192, parallelism = 1, permits)
+        .use { hasher =>
+          hasher
+            .verifyUnknown("first-password")
+            .flatMap(_ => hasher.verifyUnknown("second-password"))
+            .map(assertEquals(_, ()))
+        }
     }
   }
 
@@ -452,6 +546,9 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
       accounts,
       hasher,
       tokenIssuer,
+      new com.example.graphQL.cats.infrastructure.auth.HmacAuthenticationFingerprint(
+        "synthetic-test-key-material-for-authentication"
+      ),
       erasureRequests = erasureRequests,
       embeddingWork = com.example.graphQL.cats.service.search.TestEmbeddingWorkPublisher.noop,
       idempotent = idempotent,

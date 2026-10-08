@@ -7,6 +7,7 @@ private[config] object KafkaConfigValidation {
   def read(kafka: RawKafkaConfig): ValidatedNel[ConfigError, KafkaConfig] =
     (
       validKafkaSaslSecurityProtocol(kafka.saslSecurityProtocol, kafka.bootstrapServers),
+      ConfigBounds.bounded(1, 300, ConfigError.InvalidKafkaRestartMaxDelay)(kafka.restartMaxDelaySeconds.getOrElse(30)),
       validKafkaCredentials(kafka.enabled, kafka.publisher.saslUsername, kafka.publisher.saslPassword),
       validKafkaCredentials(
         kafka.enabled && kafka.consumer.enabled,
@@ -21,7 +22,7 @@ private[config] object KafkaConfigValidation {
         kafka.enabled,
         List(kafka.publisher.saslUsername, kafka.consumer.saslUsername).flatten
       )
-    ).mapN { (saslSecurityProtocol, _, _, _, interview) =>
+    ).mapN { (saslSecurityProtocol, restartMaxDelaySeconds, _, _, _, interview) =>
       KafkaConfig(
         kafka.enabled,
         kafka.bootstrapServers,
@@ -46,7 +47,8 @@ private[config] object KafkaConfigValidation {
           kafka.consumer.partitionConcurrency.getOrElse(4)
         ),
         saslSecurityProtocol,
-        interview
+        interview,
+        restartMaxDelaySeconds
       )
     }
 

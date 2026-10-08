@@ -101,6 +101,9 @@ cat > "$config" <<EOF
 include classpath("application.conf")
 mongo.database = "$database"
 kafka.topic = "$topic"
+auth.admin-seed.enabled = true
+auth.admin-seed.name = "Compose Proof Admin"
+auth.admin-seed.password = "password-password"
 EOF
 chmod 600 "$config"
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64

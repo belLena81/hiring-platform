@@ -101,14 +101,6 @@ type AuthSuccess {
   expiresAt: Instant!
 }
 
-input BootstrapAdminInput {
-  idempotencyKey: UUID!
-  name: String!
-  password: String!
-}
-
-union BootstrapAdminResult = AuthSuccess | ValidationError | DomainError
-
 enum CandidateAvailabilityStatus {
   AVAILABLE_NOW
   UNAVAILABLE
@@ -321,7 +313,6 @@ type Mutation {
   declineApplication(input: DeclineApplicationInput!): DeclineApplicationResult!
   signUp(input: SignUpInput!): SignUpResult!
   login(input: LoginInput!): LoginResult!
-  bootstrapAdmin(input: BootstrapAdminInput!): BootstrapAdminResult!
   updateMyProfile(input: UpdateMyProfileInput!): UpdateMyProfileResult!
   deleteMyAccount(input: DeleteMyAccountInput!): DeleteMyAccountResult!
   recordJobView(input: RecordJobViewInput!): RecordJobViewResult!

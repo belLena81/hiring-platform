@@ -319,12 +319,24 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
       states <- ids.traverse(journal.load)
       watermark <- journal.latestWatermark(pruningLineage)
       _ <- journal.prune(pruningLineage, Set(ids(1).batchId), at, 7.days)
-      requiredReceipts <- journal.retainedPublicationRunIds(pruningLineage)
-      allReceipts <- journal.allRetainedPublicationRunIds
+      requiredReceipts <- journal.referencedPublicationRunIds(
+        (0 to 7).map(i => asRunIdForMaintenance(s"prune-$i")).toSet
+      )
+      allReceipts <- journal.referencedPublicationRunIds(
+        requiredReceipts + asRunIdForMaintenance("peer-stream-receipt")
+      )
+      subset <- journal.referencedPublicationRunIds(
+        Set(
+          asRunIdForMaintenance("peer-stream-receipt"),
+          asRunIdForMaintenance("prune-1"),
+          asRunIdForMaintenance("absent")
+        )
+      )
     } yield {
       assertEquals(requiredReceipts.map(_.value), Set("prune-1", "prune-2", "prune-3", "prune-4", "prune-6", "prune-7"))
       assert(allReceipts.map(_.value).contains("peer-stream-receipt"))
       assert(requiredReceipts.subsetOf(allReceipts))
+      assertEquals(subset.map(_.value), Set("peer-stream-receipt", "prune-1"))
       assertEquals(states.zipWithIndex.collect { case (Some(_), index) => index }.toSet, Set(1, 2, 3, 4, 6, 7))
       assertEquals(watermark, decision.candidateWatermark)
       val decisions = spark.read
@@ -337,6 +349,36 @@ final class DeltaStreamingBatchJournalSpec extends CatsEffectSuite {
         .toSet
       assertEquals(decisions, Set(1L, 2L, 3L, 4L, 6L, 7L))
     }
+  }
+
+  private def asRunIdForMaintenance(value: String): RunId = RunId.from(value).toOption.get
+
+  test("receipt dependency lookup fails closed on whitespace-only retained IDs outside the candidate set") {
+    val malformedIdentity = StreamingBatchIdentity(right(StreamingLineage.from("blank-receipt")), identity.batchId)
+    val original = decision.publicationReservation.runId
+    for {
+      _ <- journal.prepare(prepared.copy(identity = malformedIdentity))
+      _ <- journal.appendDecision(decision.copy(identity = malformedIdentity))
+      _ <- execution {
+        io.delta.tables.DeltaTable
+          .forPath(spark, paths.streamingDecisions)
+          .update(
+            org.apache.spark.sql.functions.col("lineage") === malformedIdentity.lineage.value,
+            Map("publicationRunId" -> org.apache.spark.sql.functions.lit(" \t\n"))
+          )
+      }
+      result <- journal
+        .referencedPublicationRunIds(Set(original))
+        .attempt
+        .guarantee(execution {
+          io.delta.tables.DeltaTable
+            .forPath(spark, paths.streamingDecisions)
+            .update(
+              org.apache.spark.sql.functions.col("lineage") === malformedIdentity.lineage.value,
+              Map("publicationRunId" -> org.apache.spark.sql.functions.lit(original.value))
+            )
+        })
+    } yield assert(result.left.exists(_.isInstanceOf[AnalyticsError.InvalidConfiguration]))
   }
 
   override def afterAll(): Unit = {

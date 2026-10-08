@@ -21,13 +21,13 @@ import com.example.graphQL.cats.service.search.EmbeddingWorkPublisher
 import com.example.graphQL.cats.shared.Parsing
 import java.text.Normalizer
 import java.time.Instant
-import java.util.UUID
 
 final class UserAccountService(
     users: UserRepository,
     accounts: UserAccountRepository,
     hasher: PasswordHasher,
     tokenIssuer: AccessTokenIssuer,
+    authenticationFingerprint: AuthenticationFingerprint,
     erasureRequests: AnalyticsErasureRequestRepository = AnalyticsErasureRequestRepository.unavailable,
     embeddingWork: EmbeddingWorkPublisher,
     idempotent: Idempotent,
@@ -39,13 +39,18 @@ final class UserAccountService(
   private val authorization = ActorAuthorization(users)
 
   override def signUp(request: IdempotencyRequest, input: SignUpInput): UseCaseIO[(User, AccountToken)] =
-    idempotent.execute("signUp", Idempotent.publicActorScope(input.name), request, accountReference, replayAccount) {
-      context =>
-        for {
-          now <- UseCaseIO.liftIO(clock.realTimeInstant)
-          userId <- UseCaseIO.liftIO(uuidGen.randomUUID.map(UserId.apply))
-          result <- signUpOnce(input, now, userId, context)
-        } yield result
+    idempotent.execute(
+      "signUp",
+      Idempotent.publicActorScope(input.name),
+      protectedRequest("signUp", input.name, request),
+      accountReference,
+      replayAccount(input.name, input.password)
+    ) { context =>
+      for {
+        now <- UseCaseIO.liftIO(clock.realTimeInstant)
+        userId <- UseCaseIO.liftIO(uuidGen.randomUUID.map(UserId.apply))
+        result <- signUpOnce(input, now, userId, context)
+      } yield result
     }
 
   private def signUpOnce(
@@ -72,47 +77,15 @@ final class UserAccountService(
         }
       } yield issued).semiflatTap(_ => wakeCandidateAfterCommit)
 
-  override def bootstrapAdmin(
-      request: IdempotencyRequest,
-      input: BootstrapAdminInput
-  ): UseCaseIO[(User, AccountToken)] =
-    idempotent.execute(
-      "bootstrapAdmin",
-      Idempotent.publicActorScope(input.name),
-      request,
-      accountReference,
-      replayAccount
-    ) { context =>
-      for {
-        now <- UseCaseIO.liftIO(clock.realTimeInstant)
-        userId <- UseCaseIO.liftIO(uuidGen.randomUUID.map(UserId.apply))
-        result <- bootstrapAdminOnce(input, now, userId, context)
-      } yield result
-    }
-
-  private def bootstrapAdminOnce(
-      input: BootstrapAdminInput,
-      now: Instant,
-      userId: UserId,
-      context: MutationWriteContext
-  ): UseCaseIO[(User, AccountToken)] =
-    for {
-      _ <- UseCaseIO.fromEither(
-        validateCredentials(input.name, input.password).toEither.leftMap(UseCaseError.ValidationFailed.apply)
-      )
-      hash <- UseCaseIO.liftIO(hasher.hash(input.password))
-      user = toUser(userId, input.name, UserRole.Admin, None, now).copy(adminSingleton = true)
-      issued <- token(user, now)
-      _ <- accounts.bootstrap(user, hash, context).leftMap {
-        case RepositoryError.Conflict => UseCaseError.Account(AccountError.AlreadyBootstrapped)
-        case error                    => UseCaseError.Repository(error)
-      }
-    } yield issued
-
   override def login(request: IdempotencyRequest, input: LoginInput): UseCaseIO[(User, AccountToken)] =
-    idempotent.execute("login", Idempotent.publicActorScope(input.name), request, accountReference, replayAccount) {
-      _ =>
-        UseCaseIO.liftIO(clock.realTimeInstant).flatMap(now => loginOnce(input, now))
+    idempotent.execute(
+      "login",
+      Idempotent.publicActorScope(input.name),
+      protectedRequest("login", input.name, request),
+      accountReference,
+      replayAccount(input.name, input.password)
+    ) { _ =>
+      UseCaseIO.liftIO(clock.realTimeInstant).flatMap(now => loginOnce(input, now))
     }
 
   private def loginOnce(input: LoginInput, now: Instant): UseCaseIO[(User, AccountToken)] =
@@ -126,15 +99,6 @@ final class UserAccountService(
         UseCaseIO.liftIO(hasher.verifyUnknown(input.password)) *>
           UseCaseIO.left(UseCaseError.Account(AccountError.InvalidCredentials))
     }
-
-  private def issueToken(userId: UserId, now: Instant): UseCaseIO[(User, AccountToken)] =
-    UseCaseIO
-      .repository(users.find(userId))
-      .subflatMap {
-        case Some(user) if user.accountStatus == AccountStatus.Active => Right(user)
-        case _ => Left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
-      }
-      .flatMap(user => token(user, now))
 
   override def me(actor: ActorContext): UseCaseIO[User] =
     authorization.resolve(actor)
@@ -223,10 +187,28 @@ final class UserAccountService(
         case _ => UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
       }
 
-  private def replayAccount(
+  private def protectedRequest(operation: String, name: String, request: IdempotencyRequest): IdempotencyRequest =
+    request.copy(fingerprint =
+      authenticationFingerprint.protect(operation, Idempotent.publicActorScope(name), request.fingerprint)
+    )
+
+  private def replayAccount(name: String, password: String)(
       reference: com.example.graphQL.cats.service.port.MutationEntityReference
   ): UseCaseIO[(User, AccountToken)] =
-    parseUserId(reference).flatMap(userId => UseCaseIO.liftIO(clock.realTimeInstant).flatMap(issueToken(userId, _)))
+    UseCaseIO.repository(accounts.findByCanonicalName(canonicalName(name))).flatMap {
+      case Some(credentials)
+          if reference.entityType == "user" &&
+            credentials.user.id.value.toString == reference.entityId &&
+            credentials.user.accountStatus == AccountStatus.Active &&
+            canonicalName(credentials.user.name) == canonicalName(name) =>
+        UseCaseIO.liftIO(hasher.verify(credentials.passwordHash, password)).flatMap {
+          case true  => UseCaseIO.liftIO(clock.realTimeInstant).flatMap(token(credentials.user, _))
+          case false => UseCaseIO.left(UseCaseError.Account(AccountError.InvalidCredentials))
+        }
+      case _ =>
+        UseCaseIO.liftIO(hasher.verifyUnknown(password)) *>
+          UseCaseIO.left(UseCaseError.Account(AccountError.InvalidCredentials))
+    }
 
   private def replayUser(
       actor: ActorContext,

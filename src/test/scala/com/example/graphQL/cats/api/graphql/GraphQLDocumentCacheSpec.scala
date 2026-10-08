@@ -42,6 +42,20 @@ final class GraphQLDocumentCacheSpec extends CatsEffectSuite {
     }
   }
 
+  test("reacquiring one resource value creates an independent cache") {
+    val resource = GraphQLDocumentCache.resource
+    val query = "{ health { status } }"
+    for {
+      _ <- resource.use { cache =>
+        cache.document(query).flatMap {
+          case Right(document) => cache.store(query, document.document)
+          case Left(failure)   => IO.raiseError(new AssertionError(s"Unexpected cache failure: $failure"))
+        }
+      }
+      result <- resource.use(_.document(query))
+    } yield assert(result.exists(document => !document.cached))
+  }
+
   test("does not parse or cache malformed documents") {
     GraphQLDocumentCache.resource.use { cache =>
       cache.document("{ health").map(result => assertEquals(result, Left(HiringGraphQLSchema.Failure.InvalidQuery)))

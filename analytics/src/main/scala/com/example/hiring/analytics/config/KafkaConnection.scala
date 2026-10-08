@@ -1,5 +1,7 @@
 package com.example.hiring.analytics.config
 
+import cats.effect.Async
+import com.example.hiring.analytics.errors.AnalyticsError
 import cats.data.ValidatedNec
 import cats.syntax.all.*
 import pureconfig.ConfigReader
@@ -45,7 +47,7 @@ object KafkaConnection {
       connection.securityProtocol match {
         case KafkaSecurityProtocol.SaslSsl => connection.validNec
         case KafkaSecurityProtocol.SaslPlaintext
-            if connection.allowPlaintext && localPlaintextBootstrap(connection.bootstrapServers) =>
+            if connection.allowPlaintext && structurallyLocal(connection.bootstrapServers) =>
           connection.validNec
         case KafkaSecurityProtocol.SaslPlaintext if !connection.allowPlaintext =>
           "Kafka SASL_PLAINTEXT requires analytics.kafka.allow-plaintext=true".invalidNec
@@ -54,11 +56,32 @@ object KafkaConnection {
       }
     ).mapN((_, _, _) => connection)
 
+  private def structurallyLocal(servers: String): Boolean =
+    servers.trim.nonEmpty && servers
+      .split(",", -1)
+      .forall(endpoint => BootstrapEndpoint.parse(endpoint).exists(_.allowedHost))
+
+  def preflight[F[_]: Async](connection: KafkaConnection): F[Unit] =
+    preflightUsing(connection, host => Try(InetAddress.getAllByName(host).toVector).toOption)
+
+  private[analytics] def preflightUsing[F[_]: Async](
+      connection: KafkaConnection,
+      resolveAddresses: String => Option[Vector[InetAddress]]
+  ): F[Unit] =
+    Async[F].fromEither(validate(connection).toEither.leftMap(AnalyticsError.InvalidInput.apply)) *>
+      (if (connection.securityProtocol == KafkaSecurityProtocol.SaslPlaintext)
+         Async[F]
+           .blocking(localPlaintextBootstrapUsing(connection.bootstrapServers, resolveAddresses))
+           .flatMap(valid =>
+             Async[F].raiseUnless(valid)(
+               AnalyticsError
+                 .InvalidConfiguration("Kafka plaintext endpoint did not resolve exclusively to loopback addresses")
+             )
+           )
+       else Async[F].unit)
+
   private[analytics] def localPlaintextBootstrap(bootstrapServers: String): Boolean =
-    localPlaintextBootstrapUsing(
-      bootstrapServers,
-      host => Try(InetAddress.getAllByName(host).toVector).toOption.filter(_.nonEmpty)
-    )
+    structurallyLocal(bootstrapServers)
 
   private[analytics] def localPlaintextBootstrapUsing(
       bootstrapServers: String,
@@ -69,6 +92,10 @@ object KafkaConnection {
     }
 
   private final case class BootstrapEndpoint(host: String, port: Int) {
+    def allowedHost: Boolean =
+      (host.equalsIgnoreCase("kafka") && port == 9092) || host.equalsIgnoreCase("localhost") ||
+        (host.nonEmpty && host.forall(char => char.isDigit || char == '.' || char == ':'))
+
     def isLocal(resolveAddresses: String => Option[Vector[InetAddress]]): Boolean =
       (host.equalsIgnoreCase("kafka") && port == 9092) ||
         ((host.equalsIgnoreCase("localhost") || (host.nonEmpty && host.forall(char =>

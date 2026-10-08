@@ -99,25 +99,31 @@ private[analytics] final class DeltaStreamingBatchJournal[F[_]: Async](
       }
     }
 
-  /** Receipt cleanup uses every retained decision, including obsolete revisions needed by recovery. */
-  def retainedPublicationRunIds(lineage: StreamingLineage): F[Set[RunId]] = retainedPublicationRunIdsFor(Some(lineage))
-
-  /** Root-wide receipt cleanup must also protect decisions belonging to other stream lineages. */
-  def allRetainedPublicationRunIds: F[Set[RunId]] = retainedPublicationRunIdsFor(None)
-
-  private def retainedPublicationRunIdsFor(lineage: Option[StreamingLineage]): F[Set[RunId]] = execution.either {
-    if (!deltaTableExists(paths.streamingDecisions)) Right(Set.empty)
+  /** Candidate-filtered across every lineage and every retained decision revision. */
+  def referencedPublicationRunIds(candidates: Set[RunId]): F[Set[RunId]] = execution.either {
+    if (candidates.isEmpty || !deltaTableExists(paths.streamingDecisions)) Right(Set.empty)
     else {
       ensureDecisionSchema()
       val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.streamingDecisions))
-      lineage
-        .fold(stored)(value => stored.filter(col(LineageColumn) === lit(value.value)))
-        .select(col(PublicationRunIdColumn))
-        .distinct()
-        .collect()
-        .toVector
-        .traverse(row => RunId.from(row.getString(0)).leftMap(_ => malformedProgress))
-        .map(_.toSet)
+      if (
+        stored
+          .filter(
+            col(PublicationRunIdColumn).isNull || col(PublicationRunIdColumn).rlike("^[\\p{javaWhitespace}]*$")
+          )
+          .limit(1)
+          .count() != 0
+      )
+        Left(malformedProgress)
+      else
+        stored
+          .filter(col(PublicationRunIdColumn).isin(candidates.toVector.map(_.value)*))
+          .select(col(PublicationRunIdColumn))
+          .distinct()
+          .limit(candidates.size)
+          .collect()
+          .toVector
+          .traverse(row => RunId.from(row.getString(0)).leftMap(_ => malformedProgress))
+          .map(_.toSet)
     }
   }
 

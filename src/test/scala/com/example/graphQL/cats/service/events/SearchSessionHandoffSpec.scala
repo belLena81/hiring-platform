@@ -32,8 +32,56 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
         )
         .use(_ => terminal.get *> (retried.get, failed.get).tupled)
     } yield {
-      assertEquals(result._1, Vector(1, 2))
-      assertEquals(result._2, Vector(3 -> SearchSessionWorkFailure.RetryExhausted))
+      assertEquals(result._1, Vector(0, 1))
+      assertEquals(result._2, Vector(2 -> SearchSessionWorkFailure.RetryExhausted))
+    }
+  }
+
+  List(RepositoryError.Conflict, RepositoryError.Unavailable).foreach { error =>
+    test(s"failed retry persistence reports $error without claiming success") {
+      for {
+        retried <- Ref.of[IO, Vector[Int]](Vector.empty)
+        failed <- Ref.of[IO, Vector[(Int, SearchSessionWorkFailure)]](Vector.empty)
+        claimed <- Ref.of[IO, Int](0)
+        terminal <- Deferred[IO, Unit]
+        repository = failingRepository(claimed, retried, failed, terminal, Some(error))
+        claim <- repository.claim("worker", now, now.plusSeconds(30)).value.flatMap {
+          case Right(Some(value)) => IO.pure(value)
+          case other              => IO.raiseError(new AssertionError(other.toString))
+        }
+        outcome <- SearchSessionHandoff.processClaim(repository, SearchSessionHandoffConfig(), claim, now)
+      } yield assertEquals(
+        outcome,
+        if (error == RepositoryError.Conflict) SearchSessionHandoff.WorkOutcome.OwnershipLost
+        else SearchSessionHandoff.WorkOutcome.RecoveryDeferred(error)
+      )
+    }
+    test(s"failed terminal persistence reports $error and preserves lease recovery") {
+      for {
+        retried <- Ref.of[IO, Vector[Int]](Vector.empty)
+        failed <- Ref.of[IO, Vector[(Int, SearchSessionWorkFailure)]](Vector.empty)
+        claimed <- Ref.of[IO, Int](0)
+        terminal <- Deferred[IO, Unit]
+        repository = failingRepository(claimed, retried, failed, terminal, Some(error))
+        claim <- repository.claim("worker", now, now.plusSeconds(30)).value.flatMap {
+          case Right(Some(value)) => IO.pure(value)
+          case other              => IO.raiseError(new AssertionError(other.toString))
+        }
+        outcome <- SearchSessionHandoff.processClaim(
+          repository,
+          SearchSessionHandoffConfig(maxAttempts = 1),
+          claim,
+          now
+        )
+        retries <- retried.get
+      } yield {
+        assertEquals(retries, Vector.empty)
+        assertEquals(
+          outcome,
+          if (error == RepositoryError.Conflict) SearchSessionHandoff.WorkOutcome.OwnershipLost
+          else SearchSessionHandoff.WorkOutcome.RecoveryDeferred(error)
+        )
+      }
     }
   }
 
@@ -41,7 +89,8 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       claimed: Ref[IO, Int],
       retried: Ref[IO, Vector[Int]],
       failed: Ref[IO, Vector[(Int, SearchSessionWorkFailure)]],
-      terminal: Deferred[IO, Unit]
+      terminal: Deferred[IO, Unit],
+      transitionError: Option[RepositoryError] = None
   ): SearchSessionWorkRepository = {
     val session = SearchSession(
       searchId,
@@ -75,7 +124,7 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
       ): RepositoryIO[Option[ClaimedSearchSessionWork]] =
         com.example.graphQL.cats.service.port.RepositoryIO.fromIOEither(claimed.modify { attempt =>
           val next = attempt + 1
-          if (next <= 3) (next, Right(Some(ClaimedSearchSessionWork(work, next, s"lease-$next"))))
+          if (next <= 3) (next, Right(Some(ClaimedSearchSessionWork(work, attempt, s"lease-$next"))))
           else (attempt, Right(None))
         })
 
@@ -84,14 +133,16 @@ final class SearchSessionHandoffSpec extends CatsEffectSuite {
 
       override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
         com.example.graphQL.cats.service.port.RepositoryIO
-          .fromIOEither(retried.update(_ :+ claim.attempts).as(Right(())))
+          .fromIOEither(retried.update(_ :+ claim.attempts).as(transitionError.toLeft(())))
 
       override def fail(
           claim: ClaimedSearchSessionWork,
           failure: SearchSessionWorkFailure,
           failedAt: Instant
       ): RepositoryIO[Unit] = com.example.graphQL.cats.service.port.RepositoryIO
-        .fromIOEither(failed.update(_ :+ (claim.attempts -> failure)) *> terminal.complete(()).as(Right(())))
+        .fromIOEither(
+          failed.update(_ :+ (claim.attempts -> failure)) *> terminal.complete(()).as(transitionError.toLeft(()))
+        )
     }
   }
 }

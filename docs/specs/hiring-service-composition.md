@@ -36,7 +36,7 @@ The fingerprint format changes immediately. Existing receipts contain only the p
 
 | Operation | Scope | Fingerprint source | Entity reference | Replay |
 |---|---|---|---|---|
-| `signUp`, `bootstrapAdmin`, `login` | `public:` plus `name.trim.toLowerCase(Locale.ROOT)` | input-json | `user` / stored user ID | Load the current active user and issue a fresh token; login replay does not recheck the password |
+| `signUp`, `login` | `public:` plus `name.trim.toLowerCase(Locale.ROOT)` | HMAC-protected canonical input digest, operation and scope | `user` / stored user ID | Verify referenced active identity, canonical name and password before issuing a fresh token; Admin provisioning is startup seed only |
 | `updateMyProfile` | authenticated user ID | input-json | `user` / updated user ID | Re-run current `me` authorization/read only |
 | `deleteMyAccount` | authenticated user ID | input-json | `analytics-erasure-receipt` / random receipt ID | Return the same durable deletion receipt on replay, including through a still-valid verified token for the now-deleted account; status queries require that token's owner to match the receipt; do not repeat the deletion transaction or erasure enqueue |
 | `createJob`, `updateJob`, `publishJob`, `closeJob` | authenticated user ID | input-json | `job` / job ID | Re-run current `viewJob` authorization/read only |

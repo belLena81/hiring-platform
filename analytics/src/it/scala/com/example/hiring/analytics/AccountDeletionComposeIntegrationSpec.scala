@@ -404,7 +404,7 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
       val client: MongoClient = MongoClients.create(uri)
       try {
         val database = client.getDatabase(databaseName)
-        List("users", "event_outbox", "analytics_erasure_requests", "outbox_subject_fences", "producer_registrations")
+        List("event_outbox", "analytics_erasure_requests", "outbox_subject_fences", "producer_registrations")
           .foreach { name =>
             assertEquals(
               database.getCollection(name).countDocuments(),
@@ -417,35 +417,14 @@ final class AccountDeletionComposeIntegrationSpec extends FunSuite {
             database.getCollection("analytics_worker_heartbeats").find(Filters.eq("_id", "analytics-erasure")).first()
           )
         )(_.exists(_.getString("state") == "Ready"))
-        val admin = graphql(
+        val seededAdmins = database.getCollection("users").countDocuments(Filters.eq("role", "Admin"))
+        assertEquals(seededAdmins, 1L, "trusted startup must seed exactly one Admin")
+        val candidate = graphql(
           api,
-          s"""mutation { bootstrapAdmin(input: { idempotencyKey: "${UUID
-              .randomUUID()}", name: "Compose Proof Candidate", password: "password-password" }) { $authFields } }"""
+          s"""mutation { signUp(input: { idempotencyKey: "${UUID
+              .randomUUID()}", name: "Compose Proof Candidate", role: CANDIDATE, skills: ["Scala"], password: "password-password" }) { $authFields } }"""
         )
-        val adminId = authResult(admin, "bootstrapAdmin")._2
-        val changed = database
-          .getCollection("users")
-          .updateOne(
-            Filters.eq("_id", adminId),
-            new Document(
-              "$set",
-              new Document("role", "Candidate").append(
-                "profile",
-                new Document("kind", "Candidate")
-                  .append("skills", java.util.List.of("Scala"))
-                  .append("skillsCanonical", java.util.List.of("scala"))
-                  .append("recruiterSearchOptIn", false)
-              )
-            )
-              .append("$unset", new Document("adminSingletonKey", ""))
-          )
-        assertEquals(changed.getMatchedCount, 1L)
-        val login = graphql(
-          api,
-          s"""mutation { login(input: { idempotencyKey: "${UUID
-              .randomUUID()}", name: "Compose Proof Candidate", password: "password-password" }) { $authFields } }"""
-        )
-        val (token, subjectId) = authResult(login, "login")
+        val (token, subjectId) = authResult(candidate, "signUp")
         val (subjectToken, controlToken) = seedAttributedDeltaRows(subjectId)
         val eventId = seedOutboxEvent(database, subjectId, topic, "Published")
         val claimEventId = seedOutboxEvent(database, subjectId, topic, "Retryable")

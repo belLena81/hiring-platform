@@ -106,6 +106,10 @@ Paths are relative to the configured lakehouse root, from [AnalyticsLakehousePat
 
 Defaults in [analytics configuration](../../analytics/src/main/resources/application.conf) include Bronze/quarantine 7 days, Silver 30 days, published snapshots 30 days, completed deletion markers 31 days, Delta vacuum safety 7 days and Delta log retention 30 days. These are configurable policies, not evidence that old physical files have already disappeared. Mongo TTL is asynchronous and applies only where an expiry field/index is installed; business correctness does not depend on instant deletion at the deadline.
 
+Authentication receipt migration `017_authentication_receipt_protection` uses the existing migration ledger and receipt collection. Before workers start, it converts historical authentication fingerprints in pages of 500, pins the derived HMAC key during recovery, and verifies completion with primary/majority reads. Stop old writers before upgrading; see [migration and key rotation](../schema-evolution.md).
+
+Published-report receipt maintenance scans ascending candidate pages of at most 500 IDs through a fixed initial high-water mark. Each page checks references across all Delta lineage/revision states and active Mongo replay states, then rechecks controls and deletion eligibility transactionally. Protected prefixes do not prevent later eligible receipts from being considered; one invocation deletes at most 1,000 receipts. This bounds materialization and deletions, not total scan duration. The lakehouse mutex reconciles ambiguous insertion only against its original owner token and fails closed if ownership cannot be established.
+
 ## Analytics flow and operational boundary
 
 ```mermaid

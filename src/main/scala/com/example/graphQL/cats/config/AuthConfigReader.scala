@@ -9,7 +9,8 @@ import _root_.pureconfig.*
 private[config] final case class RawAuthConfig(
     jwt: RawJwtAuthConfig,
     passwordHash: Option[RawPasswordHashConfig],
-    rateLimit: RawAuthRateLimitConfig
+    rateLimit: RawAuthRateLimitConfig,
+    adminSeed: Option[RawAdminSeedConfig]
 ) derives ConfigReader
 private[config] final case class RawJwtAuthConfig(
     hs256Secret: Option[String],
@@ -32,3 +33,8 @@ private[config] final case class RawPasswordHashConfig(
     parallelism: PasswordHashParallelism
 ) derives ConfigReader
 private[config] val defaultPasswordHash = RawPasswordHashConfig(iterations = 2, memoryKib = 19456, parallelism = 1)
+
+private[config] final case class RawAdminSeedConfig(enabled: Boolean, name: Option[String], password: Option[String])
+    derives ConfigReader {
+  override def toString: String = "RawAdminSeedConfig([REDACTED])"
+}

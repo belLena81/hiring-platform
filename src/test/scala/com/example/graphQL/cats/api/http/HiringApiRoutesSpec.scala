@@ -568,12 +568,12 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         |    }
         |  }
         |}""".stripMargin
-    val aliasedBootstrap =
+    val aliasedLogin =
       """mutation {
-        |  ...BootstrapFragment
+        |  ...AliasedLoginFragment
         |}
-        |fragment BootstrapFragment on Mutation {
-        |  firstAdmin: bootstrapAdmin(input: { idempotencyKey: "00000000-0000-0000-0000-000000000016", name: "Admin", password: "password-password" }) {
+        |fragment AliasedLoginFragment on Mutation {
+        |  aliased: login(input: { idempotencyKey: "00000000-0000-0000-0000-000000000016", name: "Admin", password: "password-password" }) {
         | __typename
         |  }
         |}""".stripMargin
@@ -589,18 +589,18 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
       limitedNamedLogin <- http(request(namedLogin))
       firstInlineSignup <- http(request(inlineSignup))
       limitedInlineSignup <- http(request(inlineSignup))
-      firstBootstrap <- http(request(aliasedBootstrap))
-      limitedBootstrap <- http(request(aliasedBootstrap))
+      firstAliasedLogin <- http(request(aliasedLogin))
+      limitedAliasedLogin <- http(request(aliasedLogin))
       limitedNamedLoginBody <- limitedNamedLogin.as[Json]
       limitedInlineSignupBody <- limitedInlineSignup.as[Json]
-      limitedBootstrapBody <- limitedBootstrap.as[Json]
+      limitedAliasedLoginBody <- limitedAliasedLogin.as[Json]
     } yield {
       assertEquals(firstNamedLogin.status, Status.Ok)
       assertEquals(limitedNamedLogin.status, Status.Ok)
       assertEquals(firstInlineSignup.status, Status.Ok)
       assertEquals(limitedInlineSignup.status, Status.Ok)
-      assertEquals(firstBootstrap.status, Status.Ok)
-      assertEquals(limitedBootstrap.status, Status.Ok)
+      assertEquals(firstAliasedLogin.status, Status.Ok)
+      assertEquals(limitedAliasedLogin.status, Status.Ok)
       assertEquals(
         limitedNamedLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
         Right("RATE_LIMITED")
@@ -610,7 +610,7 @@ final class HiringApiRoutesSpec extends CatsEffectSuite {
         Right("RATE_LIMITED")
       )
       assertEquals(
-        limitedBootstrapBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
+        limitedAliasedLoginBody.hcursor.downField("errors").downArray.downField("extensions").get[String]("code"),
         Right("RATE_LIMITED")
       )
     }

@@ -37,6 +37,8 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     database: MongoDatabase[F],
     operational: AnalyticsOperationalSettings
 ) extends AnalyticsReportPublisher[F] {
+  private val receiptPageSize = 500
+  private val receiptDeletionLimit = 1000L
   private val clock = Clock[F]
   private val streams = new MongoPublisherStream(operational)
   private val controlProjection = Projections.include(
@@ -700,22 +702,42 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
     * intents carry no resumable input; abandoned intents age out with completed receipts.
     */
   private[analytics] def compactPublished(
-      requiredRunIds: Set[RunId],
+      references: Set[RunId] => F[Set[RunId]],
       observedAt: Instant
   ): F[Long] = rethrow(withCollections { collections =>
-    transactional { session =>
-      val cutoff = observedAt.minusSeconds(operational.retention.deletionMarkerDays.value.toLong * 86400L)
-      val eligible = Filters.and(
-        Filters.or(
-          Filters.eq(AnalyticsCollections.Fields.State, "Published"),
-          Filters.and(
-            Filters.eq(AnalyticsCollections.Fields.State, "Reserved"),
-            Filters.regex(AnalyticsCollections.Fields.Id, "^stream-maintenance-")
-          )
-        ),
-        Filters.lt(AnalyticsCollections.Fields.CreatedAt, Date.from(cutoff)),
-        Filters.eq(AnalyticsCollections.Fields.ExpiresAt, null)
-      )
+    val cutoff = observedAt.minusSeconds(operational.retention.deletionMarkerDays.value.toLong * 86400L)
+    val eligible = Filters.and(
+      Filters.or(
+        Filters.eq(AnalyticsCollections.Fields.State, "Published"),
+        Filters.and(
+          Filters.eq(AnalyticsCollections.Fields.State, "Reserved"),
+          Filters.regex(AnalyticsCollections.Fields.Id, "^stream-maintenance-")
+        )
+      ),
+      Filters.lt(AnalyticsCollections.Fields.CreatedAt, Date.from(cutoff)),
+      Filters.eq(AnalyticsCollections.Fields.ExpiresAt, null)
+    )
+    def page(after: Option[String], high: String): F[Vector[String]] =
+      streams
+        .stream(
+          collections.reservations.underlying
+            .find(
+              Filters.and(
+                eligible,
+                Filters.lte("_id", high),
+                after.fold[Bson](new Document())(id => Filters.gt("_id", id))
+              )
+            )
+            .sort(Indexes.ascending("_id"))
+            .limit(receiptPageSize)
+            .projection(reservationProjection)
+        )
+        .evalMap(record => Async[F].fromEither(MongoAnalyticsReportRecords.decodeRun(record)))
+        .map(_.reservation.runId.value)
+        .compile
+        .toVector
+
+    def remove(candidates: Vector[String], requiredRunIds: Set[RunId], remaining: Int) = transactional { session =>
       for {
         rawControl <- lift(
           streams.optional(
@@ -738,12 +760,12 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
           streams
             .stream(
               collections.reservations.underlying
-                .find(session.underlying, eligible)
+                .find(session.underlying, Filters.and(eligible, Filters.in("_id", candidates.asJava)))
                 .projection(reservationProjection)
             )
             .evalMap(record => Async[F].fromEither(MongoAnalyticsReportRecords.decodeRun(record)))
             .filterNot(record => protectedIds.contains(record.reservation.runId.value))
-            .take(1000)
+            .take(remaining.toLong)
             .map(record => record.reservation.runId.value)
             .compile
             .toVector
@@ -763,6 +785,40 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
             )
       } yield deleted
     }
+    def loop(after: Option[String], high: String, removed: Long): F[Long] =
+      if (removed >= receiptDeletionLimit) Async[F].pure(removed)
+      else
+        page(after, high).flatMap { candidates =>
+          if (candidates.isEmpty) Async[F].pure(removed)
+          else
+            for {
+              ids <- Async[F].fromEither(
+                candidates
+                  .traverse(RunId.from)
+                  .leftMap(_ => AnalyticsError.InvalidConfiguration("invalid receipt identity"))
+              )
+              required <- references(ids.toSet)
+              deleted <- rethrow(remove(candidates, required, (receiptDeletionLimit - removed).toInt))
+              total <- loop(candidates.lastOption, high, removed + deleted)
+            } yield total
+        }
+    lift(
+      streams
+        .optional(
+          collections.reservations.underlying
+            .find(eligible)
+            .sort(Indexes.descending("_id"))
+            .projection(reservationProjection)
+            .first
+        )
+        .flatMap {
+          case None         => Async[F].pure(0L)
+          case Some(record) =>
+            Async[F]
+              .fromEither(MongoAnalyticsReportRecords.decodeRun(record))
+              .flatMap(value => loop(None, value.reservation.runId.value, 0L))
+        }
+    )
   })
 
   private def casUpdate(
