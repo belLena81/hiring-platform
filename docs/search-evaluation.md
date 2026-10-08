@@ -81,6 +81,10 @@ The application continues to write Voyage embeddings through its durable work qu
 
 Recorded run (October 8, 2026, Atlas Local reporting MongoDB 8.3.11): a direct `$search`, `$vectorSearch` (ANN with filter and exact), `$rankFusion` and `$scoreFusion` probe executed against READY indexes. `AtlasHiringSearchIntegrationSpec` passed 3/4 (consent truth table, `MongoRankFusion` and `MongoScoreFusion` capability gates); the native `$rerank` gate failed with its explicit BLOCKED assertion because the local image does not provide it. Both Atlas runners initially terminated with a `StackOverflowError` because they passed `mongo4cats.bson.Document.fromJava(...)` to `runCommand`; they now use `MongoAccessEvaluationSupport.command` and complete locally. `HiringSearchEvaluationAtlasRunner` wrote its three curated capture files (semantic quality and privacy acceptance remain unobserved), and `SearchEvaluationAtlasRunner` completed a 500-document, 20-query synthetic ANN/ENN run (20/20 successful, no errors; the recorded latency and recall figures are local-container values, not Atlas results).
 
+## Tabulating recorded runs
+
+`sbt 'Test / runMain com.example.graphQL.cats.service.search.SearchEvaluationRecordTable --input .local/data/search-evaluation'` reads the recorded `curated-*.json` and `search-evaluation-*.json` files without opening any client and prints one row per run: strategy, deployment label, outcome counts, recall@K, NDCG@K, recall against exact search (the ANN-versus-exact drift) and latency percentiles. Runners label loopback deployments `local-container`; the table repeats that label and states that such rows are correctness evidence, not Atlas figures. Records written before 2026-10-08 labelled local runs as Atlas and should be regenerated.
+
 ## Current evidence
 
 `SearchEvaluationMetrics` implements Recall@K and NDCG@K for offline run analysis. The recorded evidence contains no authorized live Atlas benchmark or Automated Embedding run. It establishes no live latency, recall, throughput, resource, or cost result; verify environment availability before any newly authorized benchmark.

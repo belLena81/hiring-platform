@@ -5,6 +5,18 @@ import scala.jdk.CollectionConverters.*
 
 /** Explicit authorization for synthetic writes to an exact, operator-selected test deployment. */
 object DisposableAtlas {
+  private val Loopback = Set("localhost", "127.0.0.1", "::1", "[::1]")
+
+  /** Evidence label: a loopback-only deployment is a local container, never an Atlas measurement. */
+  def deployment(uri: String): String =
+    scala.util
+      .Try(new ConnectionString(uri).getHosts.asScala.toList)
+      .toOption
+      .filter(hosts =>
+        hosts.nonEmpty && hosts.forall(host => Loopback.contains(host.replaceAll(":\\d+$", "").toLowerCase))
+      )
+      .fold("atlas")(_ => "local-container")
+
   def authorizedUri(environment: Map[String, String]): Either[String, String] = {
     val failure =
       "Disposable Atlas requires ATLAS_TEST_URI, ATLAS_TEST_DISPOSABLE=true and exact ATLAS_TEST_ALLOWED_HOSTS"

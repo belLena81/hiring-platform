@@ -18,6 +18,14 @@ final class DisposableAtlasSpec extends FunSuite {
       Right("mongodb+srv://test.example/")
     )
   }
+  test("labels loopback deployments as local containers and everything else as atlas") {
+    assertEquals(DisposableAtlas.deployment("mongodb://127.0.0.1:27018/?directConnection=true"), "local-container")
+    assertEquals(DisposableAtlas.deployment("mongodb://localhost:27018/"), "local-container")
+    assertEquals(DisposableAtlas.deployment("mongodb://test.example:27017/"), "atlas")
+    assertEquals(DisposableAtlas.deployment("mongodb://127.0.0.1:27018,test.example:27017/"), "atlas")
+    assertEquals(DisposableAtlas.deployment("mongodb+srv://cluster.example.mongodb.net/"), "atlas")
+    assertEquals(DisposableAtlas.deployment("not-a-uri"), "atlas")
+  }
   test("rejects missing authorization, host ambiguity and an application database before connection") {
     val rejected = List(
       environment - "ATLAS_TEST_DISPOSABLE",

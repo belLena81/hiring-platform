@@ -61,7 +61,9 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
                 .make(
                   IO(UUID.randomUUID()).flatMap(nonce => client.getDatabase(ownedDatabaseName(nonce)))
                 )(db => MongoAccessEvaluationSupport.command(db, new Document("dropDatabase", 1)).attempt.void)
-                .use(database => evaluate(database, settings))
+                .use(database =>
+                  evaluate(database, settings, com.example.hiring.testing.DisposableAtlas.deployment(uri))
+                )
             }
             .attempt
             .flatMap {
@@ -94,7 +96,7 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
     _ <- MongoAtlasSearchSetup.provision(MongoHiringSetup.SetupDatabase(database, Map.empty), indexes)
   } yield ()
 
-  private def evaluate(database: MongoDatabase[IO], settings: Settings): IO[Unit] = for {
+  private def evaluate(database: MongoDatabase[IO], settings: Settings, deployment: String): IO[Unit] = for {
     _ <- seed(database)
     fingerprint <- SearchEvaluationArtifacts.sourceFingerprint
     timestamp <- IO.realTimeInstant
@@ -116,7 +118,7 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
     }
     indexIdentity = SourceHash.sha256(definitions.flatten.mkString("\n"))
     environment = SearchEvaluationFixtures.environment.copy(
-      identity = s"curated-disposable-Atlas-${database.underlying.getName}",
+      identity = s"curated-disposable-$deployment-${database.underlying.getName}",
       atlasVersion = version,
       telemetryUnavailable =
         ((SearchEvaluationFixtures.environment.telemetryUnavailable - SearchEvaluationTelemetry.Latency - SearchEvaluationTelemetry.AtlasVersion)

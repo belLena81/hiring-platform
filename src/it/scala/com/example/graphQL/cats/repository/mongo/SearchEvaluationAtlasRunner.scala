@@ -424,7 +424,7 @@ object SearchEvaluationAtlasRunner extends IOApp {
         timestamp,
         Option.when(durationMillis > 0L)(durationMillis),
         SearchEvaluationEnvironment(
-          "disposable synthetic Atlas",
+          s"disposable synthetic ${com.example.hiring.testing.DisposableAtlas.deployment(settings.uri)}",
           Some(atlasVersion),
           indexBytes,
           None,
