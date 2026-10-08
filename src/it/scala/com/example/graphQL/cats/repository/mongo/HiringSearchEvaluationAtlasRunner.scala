@@ -60,7 +60,7 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
               Resource
                 .make(
                   IO(UUID.randomUUID()).flatMap(nonce => client.getDatabase(ownedDatabaseName(nonce)))
-                )(db => MongoAccessEvaluationSupport.command(db, new Document("dropDatabase", 1)).void)
+                )(db => MongoAccessEvaluationSupport.command(db, new Document("dropDatabase", 1)).attempt.void)
                 .use(database => evaluate(database, settings))
             }
             .attempt

@@ -1,5 +1,8 @@
 # Hiring Analytics Lakehouse
 
+
+> Harness removal (2026-10-08): the Compose proof overlays, `scripts/run-*-proof.sh`, `scripts/verify-account-deletion-compose-proof.sh`, the `*ProofMain`/HMAC fixture mains and `AnalyticsRetentionProofIntegrationSpec` were removed. Checkpoints and acceptance rows below that cite them are historical evidence of past runs; they cannot be re-run, and criteria that depended on them (for example AC-SMOKE-01, the retention and HMAC rotation proofs) are open until re-homed in a scoped task.
+
 ## Identity and scope
 
 - Status: Phase 6 local implementation complete on October 3; independent final QA passes HAL-01–HAL-14 on source `bd342489a784e5e76a42857d3a2582278e360304129a9509691f7cd3302bc53f`. Production activation remains gated by genuine deployed retention, writer exclusion, guarded key retirement and operational signoff. Phase 7 runtime acceptance is tracked separately in the continuous analytics specification.

@@ -24,7 +24,7 @@ Preserve pure domain lifecycle/Saga decisions, IO/EitherT ports, transactional o
 
 ## Contracts and recovery
 
-Remove bootstrap GraphQL field/input/result and update SDL/operations/tests/docs together under pre-MVP single-active-shape policy. Keep login/signup public inputs/idempotency keys. No receipt conversion or old-fingerprint reader exists pre-MVP; older receipts expire by TTL. Preserve other mutation receipts and all users.
+Remove bootstrap GraphQL field/input/result and update SDL/operations/tests/docs together under pre-MVP single-active-shape policy. Keep login/signup public inputs/idempotency keys. No receipt conversion or old-fingerprint reader exists pre-MVP; older receipts expire by TTL (receipts written before HMAC protection can remain readable to a database operator for up to the 7-day receipt TTL after deploy; a one-off delete of login/signUp receipts removes that window). Preserve other mutation receipts and all users.
 
 First-run seed creates the singleton Admin (name via AccountName canonicalization); once the registry is Initialized with a valid admin identity the seed is a no-op, so later renames, status or password changes never fail startup and the seed never changes an existing account password. Seed emits no token and redacts credentials. Account receipt actor scopes remain unchanged for replay continuity.
 

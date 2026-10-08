@@ -1,5 +1,8 @@
 # Analytics Review Remediation and Layered Packages
 
+
+> Harness removal (2026-10-08): the Compose proof overlays, `scripts/run-*-proof.sh`, `scripts/verify-account-deletion-compose-proof.sh`, the `*ProofMain`/HMAC fixture mains and `AnalyticsRetentionProofIntegrationSpec` were removed. Checkpoints and acceptance rows below that cite them are historical evidence of past runs; they cannot be re-run, and criteria that depended on them (for example AC-SMOKE-01, the retention and HMAC rotation proofs) are open until re-homed in a scoped task.
+
 ## Identity and scope
 
 - Task / use case / roadmap phase: Analytics correctness, effect boundaries, and internal architecture cleanup.

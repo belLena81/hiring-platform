@@ -1,6 +1,11 @@
 # Cloud-shaped overlay for compose.yaml: analytics workers run against externally managed MongoDB and Kafka.
 # Usage: docker compose -f compose.yaml -f compose.cloud.yaml --profile analytics up analytics-batch
 # Everything is injected from the environment or a secret store; no provisioning or paid service is created here.
+# Requires Docker Compose 2.24+ (!reset/!override). Compose still interpolates the base file's required variables for the
+# disabled local services, so set KAFKA_BROKER_PASSWORD, KAFKA_PUBLISHER_V2_PASSWORD and the KAFKA_INTERVIEW_*_PASSWORD
+# variables to placeholders in the environment; they are not used by the analytics workers in this overlay.
+# Required real values: KAFKA_BOOTSTRAP_SERVERS, MONGODB_URI, ANALYTICS_LAKEHOUSE_ROOT, ANALYTICS_KAFKA_USERNAME/PASSWORD,
+# ANALYTICS_KAFKA_FENCER_USERNAME/PASSWORD and HIRING_ANALYTICS_HMAC_SECRET_BASE64 (all from a secret store, never committed).
 services:
   mongodb:
     profiles: ["local-infra"]
@@ -15,6 +20,8 @@ services:
       ANALYTICS_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:?Set the managed Kafka bootstrap servers}
       ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_SSL
       ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "false"
+      ANALYTICS_KAFKA_USERNAME: ${ANALYTICS_KAFKA_USERNAME:?Set the managed Kafka username}
+      ANALYTICS_KAFKA_PASSWORD: ${ANALYTICS_KAFKA_PASSWORD:?Set the managed Kafka password}
       ANALYTICS_LAKEHOUSE_ROOT: ${ANALYTICS_LAKEHOUSE_ROOT:?Set the object-store lakehouse root URI}
       MONGODB_URI: ${MONGODB_URI:?Set the managed MongoDB connection string}
     volumes: !override
@@ -29,6 +36,8 @@ services:
     <<: *analytics-cloud
     environment:
       <<: *analytics-cloud-environment
+      ANALYTICS_KAFKA_FENCER_USERNAME: ${ANALYTICS_KAFKA_FENCER_USERNAME:?Set the managed Kafka fencer username}
+      ANALYTICS_KAFKA_FENCER_PASSWORD: ${ANALYTICS_KAFKA_FENCER_PASSWORD:?Set the managed Kafka fencer password}
 
 volumes:
   analytics-scratch:
