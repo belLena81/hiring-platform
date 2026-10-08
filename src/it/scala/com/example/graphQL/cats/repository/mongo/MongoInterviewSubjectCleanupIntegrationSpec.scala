@@ -28,6 +28,7 @@ import scala.jdk.CollectionConverters.*
 import io.circe.parser.parse
 
 final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegrationSuite {
+  override protected def dedicatedMongo: Boolean = true
   override val munitIOTimeout: FiniteDuration = 5.minutes
   private val barriers = Vector(
     InterviewRetentionBarrier("hiring.interview-commands", 0, 4L),
@@ -754,6 +755,186 @@ final class MongoInterviewSubjectCleanupIntegrationSpec extends MongoIntegration
         assertEquals(absentAfter, Right(true))
         assertEquals(receipts, 0L)
         assertEquals(commands, 0L)
+      }
+    }
+  }
+
+  private enum CleanupAttribution {
+    case RequestReceipt, CalendarReservation, NotificationReceipt, Workflow
+  }
+
+  private val cleanupDataCollections = Vector(
+    MongoCollections.InterviewWorkflows,
+    MongoCollections.InterviewWorkflowCommands,
+    MongoCollections.InterviewWorkflowInbox,
+    MongoCollections.FakeInterviewCalendarReservations,
+    MongoCollections.FakeInterviewNotificationReceipts
+  )
+
+  private def seedCleanupData(
+      database: mongo4cats.database.MongoDatabase[IO],
+      subject: UserId,
+      ids: Vector[String],
+      attribution: Set[CleanupAttribution]
+  ): IO[Unit] = {
+    val at = Date.from(Instant.now())
+    ids.toList.traverse_ { id =>
+      val sources = attribution.toList.map {
+        case CleanupAttribution.RequestReceipt =>
+          MongoCollections.InterviewWorkflows -> new Document("_id", s"request:${subject.value}:$id")
+            .append("documentType", "requestReceipt")
+            .append("requestWorkflowId", id)
+        case CleanupAttribution.CalendarReservation =>
+          MongoCollections.FakeInterviewCalendarReservations -> new Document("_id", id)
+            .append("workflowId", id)
+            .append("participants", java.util.List.of(subject.value.toString))
+            .append("releaseKey", s"$id:release")
+        case CleanupAttribution.NotificationReceipt =>
+          MongoCollections.FakeInterviewNotificationReceipts -> new Document("_id", s"$id:notify:Candidate")
+            .append("workflowId", id)
+            .append("recipientId", subject.value.toString)
+        case CleanupAttribution.Workflow =>
+          MongoCollections.InterviewWorkflows -> new Document("_id", id)
+            .append("candidateId", subject.value.toString)
+      }
+      val children = List(
+        MongoCollections.InterviewWorkflowCommands -> new Document("_id", s"$id:command")
+          .append("workflowId", id)
+          .append("stepId", "command")
+          .append("revision", Long.box(0L))
+          .append("attempts", Int.box(0))
+          .append("executionAttempts", Int.box(0))
+          .append("commandState", "Pending")
+          .append("availableAt", at)
+          .append("occurredAt", at)
+          .append("command", new Document("kind", "requireRepair").append("reason", "Cleanup verification")),
+        MongoCollections.InterviewWorkflowInbox -> new Document("_id", s"$id:receipt")
+          .append("workflowId", id)
+      )
+      (sources ++ children).traverse_ { case (name, row) =>
+        MongoRepositoryTestSupport.insertOne(database, name, row)
+      }
+    }
+  }
+
+  private def cleanupCounts(database: mongo4cats.database.MongoDatabase[IO]): IO[Vector[Long]] =
+    cleanupDataCollections.traverse(name => MongoRepositoryTestSupport.count(database, name))
+
+  test("cleanup removes linked children across more than one request receipt batch and preserves another subject") {
+    mongoResource.use { fixture =>
+      val subject = UserId(UUID.randomUUID())
+      val other = UserId(UUID.randomUUID())
+      val ids = Vector.fill(137)(UUID.randomUUID().toString)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- seedCleanupData(
+          fixture.database,
+          other,
+          Vector(UUID.randomUUID().toString),
+          Set(CleanupAttribution.RequestReceipt)
+        )
+        preserved <- cleanupCounts(fixture.database)
+        _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.RequestReceipt))
+        _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
+        _ <- List.fill(4)(()).traverse_(_ => step(cleanup, passed = true))
+        complete <- cleanup.complete(subject)
+        remaining <- cleanupCounts(fixture.database)
+      } yield {
+        assert(complete)
+        assertEquals(remaining, preserved)
+      }
+    }
+  }
+
+  test("cleanup discovers provider-only workflows across batches and deduplicates overlapping attribution") {
+    mongoResource.use { fixture =>
+      val subject = UserId(UUID.randomUUID())
+      val other = UserId(UUID.randomUUID())
+      val firstCalendar = UUID.randomUUID().toString
+      val calendarOnly = firstCalendar +: Vector.fill(136)(UUID.randomUUID().toString)
+      val notificationOnly = Vector.fill(137)(UUID.randomUUID().toString)
+      val shared = UUID.randomUUID().toString
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- seedCleanupData(
+          fixture.database,
+          other,
+          Vector(UUID.randomUUID().toString),
+          CleanupAttribution.values.toSet
+        )
+        preserved <- cleanupCounts(fixture.database)
+        _ <- seedCleanupData(fixture.database, subject, calendarOnly, Set(CleanupAttribution.CalendarReservation))
+        _ <- seedCleanupData(fixture.database, subject, notificationOnly, Set(CleanupAttribution.NotificationReceipt))
+        _ <- seedCleanupData(fixture.database, subject, Vector(shared), CleanupAttribution.values.toSet)
+        // The surviving participant's receipt is attributable through the reservation, not its own recipient.
+        _ <- MongoRepositoryTestSupport.insertOne(
+          fixture.database,
+          MongoCollections.FakeInterviewNotificationReceipts,
+          new Document("_id", s"$firstCalendar:notify:Recruiter")
+            .append("workflowId", firstCalendar)
+            .append("recipientId", other.value.toString)
+        )
+        _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
+        _ <- List.fill(4)(()).traverse_(_ => step(cleanup, passed = true))
+        complete <- cleanup.complete(subject)
+        remaining <- cleanupCounts(fixture.database)
+      } yield {
+        assert(complete)
+        assertEquals(remaining, preserved)
+      }
+    }
+  }
+
+  test("interrupted cleanup preserves attribution after child removal and converges on retry") {
+    mongoResource.use { fixture =>
+      val subject = UserId(UUID.randomUUID())
+      val ids = Vector.fill(137)(UUID.randomUUID().toString)
+      val cleanup = new MongoInterviewSubjectCleanup(fixture.database)
+      for {
+        _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop)
+        _ <- seedCleanupData(fixture.database, subject, ids, Set(CleanupAttribution.CalendarReservation))
+        _ <- cleanup.enqueue(subject, Instant.now(), None).value.flatMap(result => IO(assert(result.isRight)))
+        _ <- step(cleanup)
+        admin <- fixture.client.getDatabase("admin")
+        _ <- MongoAccessEvaluationSupport.command(
+          admin,
+          new Document("configureFailPoint", "failCommand")
+            .append("mode", new Document("skip", 2))
+            .append("data", new Document("failCommands", List("delete").asJava).append("errorCode", 11601))
+        )
+        interrupted <- worker(cleanup, false)
+          .runOnce(None)
+          .value
+          .guarantee(
+            MongoAccessEvaluationSupport
+              .command(
+                admin,
+                new Document("configureFailPoint", "failCommand").append("mode", "off")
+              )
+              .void
+          )
+        retained <- cleanup.find(subject).value
+        commands <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflowCommands)
+        receipts <- MongoRepositoryTestSupport.count(fixture.database, MongoCollections.InterviewWorkflowInbox)
+        providers <- MongoRepositoryTestSupport.count(
+          fixture.database,
+          MongoCollections.FakeInterviewCalendarReservations
+        )
+        absent <- cleanup.absent(subject).value
+        _ = assert(interrupted.toOption.exists(_.firstFailure.nonEmpty))
+        _ = assertEquals(retained.toOption.flatten.map(_.state), Some(InterviewCleanupState.ProducersFenced))
+        _ = assertEquals(commands, 9L)
+        _ = assertEquals(receipts, 9L)
+        _ = assertEquals(providers, 137L)
+        _ = assertEquals(absent, Right(false))
+        _ <- List.fill(3)(()).traverse_(_ => step(cleanup, passed = true))
+        complete <- cleanup.complete(subject)
+        remaining <- cleanupCounts(fixture.database)
+      } yield {
+        assert(complete)
+        assertEquals(remaining, Vector.fill(cleanupDataCollections.size)(0L))
       }
     }
   }

@@ -17,14 +17,16 @@ import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFie
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.mongodb.{MongoException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts}
+import org.bson.Document
+
 import scala.jdk.CollectionConverters.*
 import java.time.Instant
 import org.bson.conversions.Bson
 
 /** Effectfully acquired document collections used by repository adapters. */
 private[mongo] object Mongo4catsCollections {
-  def documents(database: MongoDatabase[IO], name: String): IO[MongoCollection[IO, org.bson.Document]] =
-    database.getCollection(name).map(_.as[org.bson.Document])
+  def documents(database: MongoDatabase[IO], name: String): IO[MongoCollection[IO, Document]] =
+    database.getCollection(name).map(_.as[Document])
 }
 
 /** Paired predicates keep the raw-BSON non-session overload and typed session overload in lockstep. */
@@ -79,13 +81,13 @@ private[mongo] object MongoUpdate {
 }
 
 private[mongo] object MongoSessionOperations {
-  type Documents = MongoCollection[IO, org.bson.Document]
+  type Documents = MongoCollection[IO, Document]
 
   def findOne(
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
       filter: MongoFilter
-  ): IO[Option[org.bson.Document]] =
+  ): IO[Option[Document]] =
     collection.flatMap(c =>
       session.fold(c.find(filter.bson).first)(active => c.find(active, filter.sessionFilter).first)
     )
@@ -93,7 +95,7 @@ private[mongo] object MongoSessionOperations {
   def insertOne(
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
-      document: org.bson.Document
+      document: Document
   ): IO[Option[InsertOneResult]] =
     collection.flatMap(c =>
       session.fold(c.insertOne(document, new InsertOneOptions).map(Some(_)))(active =>
@@ -150,7 +152,7 @@ private[mongo] object MongoSessionOperations {
       collection: IO[Documents],
       session: Option[ClientSession[IO]],
       filter: MongoFilter,
-      document: org.bson.Document,
+      document: Document,
       options: ReplaceOptions = new ReplaceOptions
   ): IO[Option[UpdateResult]] =
     collection.flatMap(c =>
@@ -205,7 +207,7 @@ private[mongo] trait MongoConflictWriteMapping {
 
 private[mongo] trait MongoApplicationEventInsertion {
   protected final def insertApplicationEvent(
-      events: IO[MongoCollection[IO, org.bson.Document]],
+      events: IO[MongoCollection[IO, Document]],
       session: Option[ClientSession[IO]],
       event: ApplicationEvent
   ): IO[Option[InsertOneResult]] =
@@ -215,7 +217,7 @@ private[mongo] trait MongoApplicationEventInsertion {
 
 private[mongo] trait MongoOperationalEventInsertion {
   protected final def insertOperationalEvents(
-      outbox: IO[MongoCollection[IO, org.bson.Document]],
+      outbox: IO[MongoCollection[IO, Document]],
       session: Option[ClientSession[IO]],
       events: List[OperationalEventEnvelope],
       now: Instant,
@@ -237,7 +239,7 @@ private[mongo] trait MongoOperationalEventInsertion {
 
 private[mongo] object MongoOperationalEventInsertion {
   def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
-      write: org.bson.Document => RepositoryIO[Unit]
+      write: Document => RepositoryIO[Unit]
   ): RepositoryIO[Unit] =
     RepositoryIO
       .fromEither(
@@ -267,8 +269,8 @@ private[mongo] object MongoStoredDocumentDecoding {
 }
 
 private[mongo] object MongoKeysetPaging {
-  def byId[A](collection: IO[MongoCollection[IO, org.bson.Document]], ids: List[String])(
-      read: org.bson.Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
+  def byId[A](collection: IO[MongoCollection[IO, Document]], ids: List[String])(
+      read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A]
   )(diagnostics: Diagnostics): RepositoryIO[List[A]] =
     if (ids.isEmpty) RepositoryIO.fromEither(Right(Nil))
     else
@@ -288,11 +290,11 @@ private[mongo] object MongoKeysetPaging {
         )(_ => Left(RepositoryError.Unavailable))
 
   def page[A](
-      collection: IO[MongoCollection[IO, org.bson.Document]],
+      collection: IO[MongoCollection[IO, Document]],
       filter: MongoFilter,
       timestampField: String,
       pageSize: PageSize
-  )(read: org.bson.Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A])(
+  )(read: Document => ValidatedNel[MongoHiringCodecs.StoredDocumentError, A])(
       diagnostics: Diagnostics
   ): RepositoryIO[List[A]] =
     MongoRepositorySupport

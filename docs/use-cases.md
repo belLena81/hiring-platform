@@ -1,5 +1,7 @@
 # MVP Use Cases
 
+The [discovery and interview integrity follow-up](specs/candidate-discovery-and-interview-integrity.md) covers candidate city-filter correctness, geographic boundary/pagination evidence, complete interview deletion across attribution batches and local hiring acceptance during an isolated broker-process outage. Existing consent, ownership and lifecycle rules remain authoritative.
+
 ## Retrieval and recovery implementation checkpoint
 
 The [reliability specification](specs/hiring-retrieval-publication-reliability.md) records the current changes and pending gates. Nearby jobs and exact facets validate the active trusted actor in their database query, preserve authorized empty results and bound costly request roots, process concurrency and query duration. Search hydrates current public data after deduplicating bounded hits. These limits do not change visibility, consent, required-skills semantics or exact facet counts.

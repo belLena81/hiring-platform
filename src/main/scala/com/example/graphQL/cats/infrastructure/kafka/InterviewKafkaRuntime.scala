@@ -68,6 +68,22 @@ final case class InterviewKafkaConfig(
 
 object InterviewKafkaRuntime {
 
+  private[kafka] def rejectionIdentity(
+      topic: String,
+      partition: Int,
+      offset: Long,
+      payload: Option[Array[Byte]],
+      reason: String
+  ): String = {
+    val digest = java.util.HexFormat
+      .of()
+      .formatHex(
+        java.security.MessageDigest.getInstance("SHA-256").digest(payload.getOrElse(Array.emptyByteArray))
+      )
+    "transport:" + com.example.graphQL.cats.shared.crypto.SourceHash
+      .sha256(s"$topic:$partition:$offset:$digest:$reason")
+  }
+
   /** Callback true means inbox/state/outgoing intent or bounded quarantine has committed durably. A false response
     * tears down the consumer before any later offset can be committed.
     */
@@ -157,16 +173,17 @@ object InterviewKafkaRuntime {
         .parse(message.record.value)
         .flatMap(value => Either.cond(value.workflowId.toString == message.record.key, value, "workflow key mismatch"))
       OperationalEventKafkaRuntime.processRecordBeforeCommit(input, message.record.partition, message.record.offset)(
-        receive(parsed.left.map(reason => {
-          val digest = java.util.HexFormat
-            .of()
-            .formatHex(
-              java.security.MessageDigest
-                .getInstance("SHA-256")
-                .digest(Option(message.record.value).getOrElse(Array.emptyByteArray))
+        receive(
+          parsed.left.map(reason =>
+            rejectionIdentity(
+              input,
+              message.record.partition,
+              message.record.offset,
+              Option(message.record.value),
+              reason
             )
-          s"$input:${message.record.partition}:${message.record.offset}:$digest:$reason"
-        }))
+          )
+        )
       )(message.offset.commit)
     }
     Resource

@@ -1,6 +1,7 @@
 package com.example.graphQL.cats.repository.mongo
 
 import cats.effect.IO
+import fs2.interop.reactivestreams.*
 import mongo4cats.database.MongoDatabase
 import com.mongodb.MongoCommandException
 import org.bson.Document
@@ -34,7 +35,7 @@ private[mongo] object MongoHiringValidators {
       )
       .void
 
-  def createUserValidator(database: MongoDatabase[IO]): IO[Unit] = {
+  def userValidator: Document = {
     def active(role: String, required: String) = new Document("required", List(required).asJava).append(
       "properties",
       new Document()
@@ -50,6 +51,18 @@ private[mongo] object MongoHiringValidators {
           MongoFields.CurrentResidence,
           new Document("bsonType", "object")
             .append("required", List(MongoFields.Country, MongoFields.CountryCanonical).asJava)
+            .append(
+              "oneOf",
+              List(
+                new Document("required", List(MongoFields.City, MongoFields.CityCanonical).asJava),
+                new Document(
+                  "allOf",
+                  List(MongoFields.City, MongoFields.CityCanonical)
+                    .map(field => new Document("not", new Document("required", List(field).asJava)))
+                    .asJava
+                )
+              ).asJava
+            )
             .append(
               "properties",
               new Document()
@@ -78,7 +91,7 @@ private[mongo] object MongoHiringValidators {
     admin
       .get("properties", classOf[Document])
       .append(MongoFields.AdminSingletonKey, new Document("enum", List("singleton-admin").asJava))
-    val schema = new Document(
+    new Document(
       "$jsonSchema",
       new Document("bsonType", "object")
         .append("required", List(MongoFields.Role, MongoFields.AccountStatus, MongoFields.Version).asJava)
@@ -96,17 +109,37 @@ private[mongo] object MongoHiringValidators {
           ).asJava
         )
     )
+  }
+
+  def userValidatorMatches(database: MongoDatabase[IO]): IO[Boolean] = {
+    val command = new Document("listCollections", 1)
+      .append("filter", new Document("name", MongoCollections.Users))
+    IO.delay(database.underlying.runCommand(command, classOf[Document]))
+      .flatMap(_.toStreamBuffered[IO](1).compile.lastOrError)
+      .map { result =>
+        Option(result.get("cursor", classOf[Document])).toList
+          .flatMap(cursor => Option(cursor.getList("firstBatch", classOf[Document])).toList.flatMap(_.asScala))
+          .exists { entry =>
+            Option(entry.get("options", classOf[Document])).exists { options =>
+              Option(options.get("validationLevel")).contains("strict") &&
+              Option(options.get("validationAction")).contains("error") &&
+              Option(options.get("validator", classOf[Document])).contains(userValidator)
+            }
+          }
+      }
+  }
+
+  def createUserValidator(database: MongoDatabase[IO]): IO[Unit] =
     database.createCollection(MongoCollections.Users).void.recoverWith {
       case error: MongoCommandException if error.getErrorCode == 48 => IO.unit
     } *> database
       .runCommand(
         new Document("collMod", MongoCollections.Users)
-          .append("validator", schema)
+          .append("validator", userValidator)
           .append("validationLevel", "strict")
           .append("validationAction", "error")
       )
       .void
-  }
 
   def createJobValidator(database: MongoDatabase[IO]): IO[Unit] = {
     val geoPoint = new Document("bsonType", "object")

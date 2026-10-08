@@ -286,14 +286,17 @@ final class MongoInterviewSubjectCleanup(
         .map(_.toList)
     ).map(_.flatten)
       .flatMap { found =>
-        val ids = found.toList.flatMap(row =>
-          Option(row.getString("workflowId"))
-            .orElse(Option(row.getString("requestWorkflowId")))
-            .orElse(Option(row.getString("_id")))
-        )
+        val ids = found.toList
+          .flatMap(row =>
+            Option(row.getString("workflowId"))
+              .orElse(Option(row.getString("requestWorkflowId")))
+              .orElse(Option(row.getString("_id")))
+          )
+          .distinct
         if (ids.isEmpty) IO.unit
         else {
-          val byWorkflow = MongoFilter.or(MongoFilter.in("workflowId", ids), subjectPredicate)
+          // Retain unselected attribution until its linked children have been purged.
+          val byWorkflow = MongoFilter.in("workflowId", ids)
           List(
             MongoCollections.InterviewWorkflowCommands,
             MongoCollections.InterviewWorkflowInbox,
@@ -307,7 +310,7 @@ final class MongoInterviewSubjectCleanup(
               .flatMap(
                 _.deleteMany(
                   MongoFilter
-                    .or(MongoFilter.in("_id", ids), MongoFilter.in("requestWorkflowId", ids), subjectPredicate)
+                    .or(MongoFilter.in("_id", ids), MongoFilter.in("requestWorkflowId", ids))
                     .bson
                 )
               )

@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.JobId
@@ -133,7 +134,7 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
       } yield ()
     }
   }
-  test("Mongo maximum distance includes its computed radius boundary and excludes a point two metres outside") {
+  test("Mongo maximum distance observes its measured boundary within one metre and excludes two metres outside") {
     discoveryResource.use { case (fixture, policy, scope) =>
       val repository = MongoJobRepository.transactional(
         fixture.database,
@@ -148,10 +149,93 @@ final class MongoJobDiscoveryIntegrationSpec extends MongoJobDiscoveryFixture {
         _ <- MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
         measured <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, 10d, filter), 2))
         distance = measured.head.distanceKm
+        boundary <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, distance, filter), 2))
         included <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, distance + 0.001d, filter), 2))
         excluded <- success(repository.nearbyJobs(scope, NearbyJobsQuery(center, distance - 0.002d, filter), 2))
         _ = assertEquals(included.map(_.job.id), List(value.id))
+        _ = assert(boundary.isEmpty || boundary.map(_.job.id) == List(value.id))
+        _ = assert(boundary.forall(hit => math.abs(hit.distanceKm - distance) <= 0.001d))
         _ = assertEquals(excluded, Nil)
+        _ <- IO.println(s"Geographic boundary observation: distanceKm=$distance exactBoundaryMatches=${boundary.size}")
+      } yield ()
+    }
+  }
+
+  List(
+    ("antimeridian", GeoPoint(0d, 179.9d), GeoPoint(0d, -179.9d), GeoPoint(0d, -179d), 30d),
+    ("north pole", GeoPoint(90d, 0d), GeoPoint(89.9d, 180d), GeoPoint(89d, 0d), 20d),
+    ("negative longitude", GeoPoint(51.5d, -0.12d), GeoPoint(51.51d, -0.12d), GeoPoint(51.7d, -0.12d), 2d)
+  ).foreach { case (name, origin, inside, outside, radius) =>
+    test(s"nearby jobs and exact facets agree across $name") {
+      discoveryResource.use { case (fixture, policy, scope) =>
+        val repository = MongoJobRepository.transactional(
+          fixture.database,
+          fixture.client,
+          MongoEmbeddingWorkEnqueuer.disabled,
+          Diagnostics.noop,
+          Some(policy)
+        )
+        val values = List(
+          job(1, Some(origin)),
+          job(2, Some(inside)),
+          job(3, Some(outside)),
+          job(4, Some(inside), remote = true),
+          job(5, None),
+          job(6, Some(inside)).copy(status = JobStatus.Closed)
+        )
+        for {
+          _ <- values.traverse_(value =>
+            MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
+          )
+          hits <- success(repository.nearbyJobs(scope, NearbyJobsQuery(origin, radius, filter), 10))
+          facets <- success(
+            repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(origin, radius))))
+          )
+          _ = assertEquals(hits.map(_.job.id), values.take(2).map(_.id))
+          _ = assertEquals(facets.skills.find(_.value == "Scala").map(_.count), Some(hits.size.toLong))
+          _ = assertEquals(
+            facets.skills.toSet,
+            Set(JobFacetBucket("Scala", 2L), JobFacetBucket("Skill1", 1L), JobFacetBucket("Skill2", 1L))
+          )
+          _ = assertEquals(facets.remote, List(JobFacetBucket("false", 2L)))
+          _ = assertEquals(facets.cities, List(JobFacetBucket("Nicosia", 2L)))
+          _ = assert(hits.forall(hit => hit.distanceKm >= 0d && hit.distanceKm <= radius))
+        } yield ()
+      }
+    }
+  }
+
+  test("zero-distance ties survive encoded cursor pagination to exhaustion without gaps or duplicates") {
+    discoveryResource.use { case (fixture, policy, scope) =>
+      val repository = MongoJobRepository.transactional(
+        fixture.database,
+        fixture.client,
+        MongoEmbeddingWorkEnqueuer.disabled,
+        Diagnostics.noop,
+        Some(policy)
+      )
+      val query = NearbyJobsQuery(center, 10d, filter)
+      val values = (1 to 24).toList.map(job(_))
+      def pages(after: Option[NearbyJobCursor], remaining: Int): IO[List[NearbyJob]] =
+        if (remaining == 0) IO.raiseError(new AssertionError("Nearby cursor pagination did not terminate"))
+        else
+          success(repository.nearbyJobs(scope, query.copy(after = after), 7)).flatMap { page =>
+            page.lastOption.fold(IO.pure(List.empty[NearbyJob])) { last =>
+              val encoded = NearbyJobCursorCodec.encode(last.distanceKm, last.job.id, query)
+              IO.fromEither(
+                NearbyJobCursorCodec.decode(encoded, query).leftMap(error => new AssertionError(error.message))
+              ).flatMap(cursor => pages(Some(cursor), remaining - 1).map(page ++ _))
+            }
+          }
+      for {
+        _ <- values.traverse_(value =>
+          MongoRepositoryTestSupport.insertOne(fixture.database, MongoCollections.Jobs, MongoHiringCodecs.job(value))
+        )
+        hits <- pages(None, 6)
+        facets <- success(repository.jobDiscoveryFacets(scope, JobFacetQuery(filter, Some(NearbyRadius(center, 10d)))))
+        _ = assertEquals(hits.map(_.job.id), values.map(_.id))
+        _ = assert(hits.forall(_.distanceKm == 0d))
+        _ = assertEquals(facets.skills.find(_.value == "Scala").map(_.count), Some(24L))
       } yield ()
     }
   }

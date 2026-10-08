@@ -1,5 +1,7 @@
 # Hiring Management Platform
 
+The [candidate discovery and interview integrity specification](docs/specs/candidate-discovery-and-interview-integrity.md) tracks the current local corrections to bounded deletion attribution, Kafka quarantine identity and candidate residence verification, plus geographic and broker-outage acceptance tests. Its verification status is separate from Atlas, relevance and deployed acceptance.
+
 ## Retrieval and publication reliability checkpoint
 
 The current remediation is tracked in [hiring retrieval and publication reliability](docs/specs/hiring-retrieval-publication-reliability.md). Discovery uses a shared four-permit process budget, four costly roots per GraphQL request and a 2000 ms MongoDB query deadline. Search branches return bounded retrieval hits; current authorized documents are hydrated once. Embedding workers renew leases, reschedule revision-conflicted work without charging provider failures and expose recovery health.

@@ -105,8 +105,10 @@ object MongoHiringSetup {
       topics: InterviewTopicPair = InterviewTopicPair.Default
   ): IO[Unit] =
     setupDatabase(database).flatMap { setup =>
-      MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics, topics) *>
+      (if (resetOnStart) IO.unit else MongoCandidateResidenceIntegrityMigrations.verifyCompleted(setup)) *>
+        MongoHiringMigrations.initialize(setup, resetOnStart, diagnostics, topics) *>
         MongoHiringValidators.createUserValidator(database) *>
+        MongoCandidateResidenceIntegrityMigrations.initialize(setup) *>
         MongoHiringValidators.createJobValidator(database) *>
         MongoHiringMigrations.verifyJobGeoPoints(setup) *>
         MongoHiringIndexSetup.create(database) *>

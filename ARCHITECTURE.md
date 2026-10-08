@@ -1,5 +1,7 @@
 # Architecture
 
+The [discovery and interview integrity correction](docs/specs/candidate-discovery-and-interview-integrity.md) retains the existing pure decisions and durable interpreters. Deletion removes selected workflows' children before their last attribution records; transport quarantine uses a bounded deterministic digest of record coordinates, payload digest and rejection reason. Residence integrity is a narrow Mongo startup proof over the existing document shape.
+
 ## Retrieval and durable publication boundaries
 
 The [reliability specification](docs/specs/hiring-retrieval-publication-reliability.md) owns this implementation checkpoint. Pure search eligibility criteria render separately into ordinary MongoDB and Atlas Search filters. Ranked retrieval hits contain identity, score and embedding metadata; authoritative hydration supplies current public data. Geo/facet queries begin with the trusted active actor and return a typed authority failure when that actor is absent.

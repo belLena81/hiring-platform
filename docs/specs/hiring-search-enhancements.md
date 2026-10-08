@@ -219,6 +219,8 @@ Final independent Code Reviewer **PASS**, Security Engineer **PASS**, and QA **P
 
 Historical HSE source/regression applicability was reviewed against the current local suites. This does not close blanket historical HSE QA: HSE-01 still lacks criterion-specific runtime tests for interrupted migration 002 restart and malformed residence/status/consent verification. That pre-existing gap and all HSE live gates remain separate from this follow-up; no migration behavior was changed here.
 
+Subsequent local correction: [CDI-04](candidate-discovery-and-interview-integrity.md#acceptance-and-evidence) now supplies the missing migration 002 evidence: three 501-record interrupted-batch cases covering malformed residence, availability and consent, explicit repair/restart, unchanged data/revisions and absent consent defaulting to false. This closes that specific local evidence gap without changing applied migration 002; broader historical HSE and live gates retain their own status.
+
 ### Review remediation checkpoint (2026-10-06)
 
 - `Job.validate` now forwards optional coordinates to `Location.validate`; valid coordinates survive create/update and invalid/nonfinite values produce typed validation errors without persisting a change. Four regression cases were first run red (19 existing pass, 4 fail), then passed after the correction.

@@ -1,5 +1,9 @@
 # MongoDB design
 
+## Candidate residence and interview deletion integrity
+
+[Current local corrections](specs/candidate-discovery-and-interview-integrity.md) retain bounded workflow attribution until linked commands/inbox/provider records are deleted. Each batch deletes only selected workflow identities. Migration `016_candidate_residence_integrity` audits the existing residence shape without modifying user data or aggregate revisions; installed validation requires display and canonical city fields together. Completed proof and validator drift fail closed. Stop incompatible writers before cutover and explicitly repair malformed data before rerunning startup.
+
 ### Measured admission and publication access
 
 The October 7 [bounded local comparison](specs/hiring-search-publication-reliability.md) retained strict ID/status/revision submission projection: read throughput improved 66–283% across three pairs at concurrency 1/8, with worst write p95 growth 8.8%. Popular-job concurrency-eight writes still encounter expected revision conflicts; the atomic Open/revision guard remains authoritative. These are synthetic repository measurements, not API or deployed SLOs.

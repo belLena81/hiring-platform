@@ -1,5 +1,9 @@
 # Development Milestones
 
+## Candidate discovery and interview integrity
+
+The [current local correction specification](specs/candidate-discovery-and-interview-integrity.md) closes the audited retrieval/workflow defects and missing geographic, migration-recovery and broker-outage evidence. Local validation passed 707 units and 180 executed integrations with nine explicit skips; formatting and independent Code, Security and final QA returned PASS. This supplements local Phase 8–11 evidence; Atlas, human relevance, real providers and deployed acceptance remain separate gates.
+
 The approved [search and publication reliability slice](specs/hiring-search-publication-reliability.md) implements embedding provenance, projected admission, isolated recovery/Atlas guards, bounded publication scheduling and measured scaling candidates. Local checks passed 701 root units, 161 root integrations, 477 analytics units, 41 analytics integrations, four measurement tests, safe service reuse and the isolated recovery drill. Paired measurements retained submission projection and immediate full-batch publication, and rejected both outbox partial-index candidates. Independent final QA and refreshed review of the last recovery-fixture corrections remain blocked by the agent thread limit; existing Atlas, relevance, provider and deployed acceptance gates remain open.
 
 ## Hiring event and test reliability

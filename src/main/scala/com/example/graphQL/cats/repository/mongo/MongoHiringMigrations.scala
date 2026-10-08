@@ -294,14 +294,12 @@ private[mongo] object MongoHiringMigrations {
     val coordinates = Option(point.get("coordinates")) collect { case values: java.util.List[?] =>
       values.asScala.toList
     }
-    val longitudeLatitude = coordinates.filter(_.size == 2).flatMap { values =>
-      values match {
-        case List(longitude: Number, latitude: Number) =>
-          val lon = longitude.doubleValue()
-          val lat = latitude.doubleValue()
-          Option.when(lon.isFinite && lat.isFinite && lon >= -180d && lon <= 180d && lat >= -90d && lat <= 90d)(())
-        case _ => None
-      }
+    val longitudeLatitude = coordinates.filter(_.size == 2).flatMap {
+      case List(longitude: Number, latitude: Number) =>
+        val lon = longitude.doubleValue()
+        val lat = latitude.doubleValue()
+        Option.when(lon.isFinite && lat.isFinite && lon >= -180d && lon <= 180d && lat >= -90d && lat <= 90d)(())
+      case _ => None
     }
     point.get("type") == "Point" && longitudeLatitude.isDefined
   }

@@ -103,7 +103,7 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
       observed <- Ref.of[IO, Vector[String]](Vector.empty)
       _ <- InterviewKafkaRuntime
         .resource(config(worker = true), Diagnostics.noop) {
-          case Left(identity) if identity.endsWith("invalid null interview message") =>
+          case Left(identity) if identity.startsWith("transport:") =>
             observed.update(_ :+ "quarantined").as(true)
           case Right(value) if value.workflowId == workflowId => observed.update(_ :+ "valid").as(true)
           case _                                              => IO.pure(true)
@@ -132,6 +132,126 @@ class InterviewKafkaRestartIntegrationSpec extends KafkaIntegrationSuite {
           }
         }
     } yield ()
+  }
+  test("maximum-length topic rejection persists before acknowledgment and later work; replay deduplicates") {
+    val topics = com.example.graphQL.cats.domain.workflow.InterviewTopicPair(
+      "hiring.quarantine." + "a" * (249 - "hiring.quarantine.".length),
+      "hiring.quarantine-results"
+    )
+    InterviewBrokerFixture.resource(topics).use { broker =>
+      mongoResource.use { fixture =>
+        val repository = MongoInterviewWorkflowRepository.live(fixture.database, fixture.client, Diagnostics.noop)
+        val workflowId = UUID.randomUUID()
+        val now = Instant.now()
+        val message = InterviewMessage(
+          UUID.randomUUID(),
+          workflowId,
+          "after-invalid",
+          InterviewStep.Reserve,
+          0L,
+          UUID.randomUUID(),
+          now.plusSeconds(300),
+          None,
+          now
+        )
+        val principal = broker.config(worker = false)
+        val settings = OperationalEventKafkaRuntime
+          .saslProperties(Some(principal.username), Some(principal.password), principal.protocol)
+          .foldLeft(
+            ProducerSettings(Serializer[IO, String], Serializer[IO, Array[Byte]])
+              .withBootstrapServers(principal.bootstrapServers)
+          ) { case (current, (key, value)) =>
+            current.withProperty(key, value)
+          }
+        for {
+          _ <- MongoHiringSetup.initialize(fixture.database, Diagnostics.noop, topics)
+          metadata <- KafkaProducer.resource(settings).use { producer =>
+            for {
+              first <- producer
+                .produce(
+                  ProducerRecords.one(
+                    ProducerRecord(topics.commands, workflowId.toString, null: Array[Byte])
+                  )
+                )
+                .flatten
+              second <- producer
+                .produce(
+                  ProducerRecords.one(
+                    ProducerRecord(topics.commands, workflowId.toString, InterviewMessageCodec.bytes(message))
+                  )
+                )
+                .flatten
+            } yield (first.toList.head._2, second.toList.head._2)
+          }
+          (first, second) = metadata
+          identity = InterviewKafkaRuntime.rejectionIdentity(
+            topics.commands,
+            first.partition(),
+            first.offset(),
+            None,
+            "invalid null interview message"
+          )
+          target = Filters.eq("_id", s"quarantine:$identity")
+          _ = assertEquals(identity.length, 74)
+          received <- Deferred[IO, Unit]
+          saved <- Ref.of[IO, Vector[String]](Vector.empty)
+          kafka = KafkaConfig(
+            true,
+            broker.bootstrap,
+            topics.commands,
+            broker.config(true).workerGroup,
+            KafkaPublisherConfig("test", 1, 60, 1, 5, 1000),
+            KafkaConsumerConfig(true, 8, 7, Some(broker.config(true).username), Some(broker.config(true).password)),
+            KafkaSaslSecurityProtocol.Plaintext
+          )
+          partition = new TopicPartition(topics.commands, first.partition())
+          _ <- InterviewKafkaRuntime
+            .consumerResource(broker.config(worker = true), Diagnostics.noop) {
+              case Left(observed) =>
+                for {
+                  _ <- IO(assertEquals(observed, identity))
+                  before <- committed(kafka, partition)
+                  _ <- IO(assert(before.forall(_ <= first.offset()), clues(before, first.offset())))
+                  durable <- repository.quarantine(observed, now).value
+                  _ <- IO(assertEquals(durable, Right(())))
+                  rows <- count(fixture.database, "interview_workflow_inbox", target)
+                  _ <- IO(assertEquals(rows, 1L))
+                  _ <- saved.update(_ :+ "quarantined")
+                } yield true
+              case Right(value) if value.messageId == message.messageId =>
+                count(fixture.database, "interview_workflow_inbox", target).flatMap { rows =>
+                  IO(assertEquals(rows, 1L)) *> saved.update(_ :+ "valid") *> received.complete(()).as(true)
+                }
+              case _ => IO.pure(true)
+            }
+            .use { _ =>
+              received.get.timeout(45.seconds) *>
+                awaitCommitted(kafka, partition, second.offset() + 1L).timeout(30.seconds)
+            }
+          order <- saved.get
+          _ = assertEquals(order.take(2), Vector("quarantined", "valid"))
+          failedCommit <- OperationalEventKafkaRuntime
+            .processRecordBeforeCommit(topics.commands, first.partition(), first.offset())(
+              repository.quarantine(identity, now).value.map(_.isRight)
+            )(IO.raiseError(new IllegalStateException("synthetic acknowledgment failure")))
+            .attempt
+          _ = assert(failedCommit.isLeft)
+          acknowledged <- Ref.of[IO, Boolean](false)
+          _ <- OperationalEventKafkaRuntime.processRecordBeforeCommit(
+            topics.commands,
+            first.partition(),
+            first.offset()
+          )(
+            repository.quarantine(identity, now).value.map(_.isRight)
+          )(acknowledged.set(true))
+          replayRows <- count(fixture.database, "interview_workflow_inbox", target)
+          replayAck <- acknowledged.get
+        } yield {
+          assertEquals(replayRows, 1L)
+          assert(replayAck)
+        }
+      }
+    }
   }
   test("operational tombstones retry failed quarantine before later valid records progress") {
     assume(enabled, "BLOCKED: isolated Kafka restart proof credentials absent")

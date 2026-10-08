@@ -1,5 +1,9 @@
 # Current Contract and Persistence Evolution
 
+## Candidate residence integrity
+
+Migration `016_candidate_residence_integrity` supplements the unchanged `002_candidate_search_profile_verification` ledger. Stop incompatible user writers before cutover. The user validator requires display/canonical city fields to be both absent or both present; a bounded restartable audit verifies their existing canonical values using the application's normalization. It changes only its ledger, preserving user data and revisions. Failed batches retain the preceding checkpoint and block startup until explicit repair. Completed proof and the exact installed validator are checked before the audit is skipped; validator drift is not silently overwritten. No public or stored field shape changes, normalization backfill or data reset is introduced. Evidence is tracked in [candidate discovery and interview integrity](specs/candidate-discovery-and-interview-integrity.md).
+
 ## Deleted account embedding cleanup
 
 Migration `014_deleted_account_embeddings` removes `embedding` and `embeddingMeta` from existing Deleted-account tombstones in guarded batches of at most 500. Stop older writers before initialization. Both fields are unset atomically; successful removal is the restart checkpoint. Existing active accounts and every other tombstone field remain unchanged. This privacy maintenance operation deliberately preserves aggregate revisions as an exception to ordinary aggregate writes. Existing validation stays enabled; malformed data or an unsupported ledger blocks startup without bypassing validation or repairing revisions implicitly.
