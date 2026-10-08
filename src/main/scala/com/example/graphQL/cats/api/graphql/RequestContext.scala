@@ -13,7 +13,7 @@ import com.example.graphQL.cats.service.{
   LogFields,
   ProbeResult
 }
-import com.example.graphQL.cats.service.AnalyticsReportingUseCases
+import com.example.graphQL.cats.service.{AnalyticsReportingUseCases, EmbeddingCoverageUseCases}
 import com.example.graphQL.cats.service.Diagnostics.*
 import com.example.graphQL.cats.domain.model.Identifiers.{JobId, UserId}
 import com.example.graphQL.cats.domain.model.{Job, User}
@@ -42,7 +42,8 @@ final case class HiringGraphQLServices(
     interactionService: InteractionUseCases = InteractionUseCases.noop,
     searchSessionHandoff: SearchSessionHandoff = SearchSessionHandoff.noop,
     analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
-    interviewScheduling: Option[com.example.graphQL.cats.service.application.InterviewSchedulingService] = None
+    interviewScheduling: Option[com.example.graphQL.cats.service.application.InterviewSchedulingService] = None,
+    embeddingCoverage: EmbeddingCoverageUseCases = EmbeddingCoverageUseCases.denyAll
 )
 
 final case class EmailVisibility(userId: UserId)

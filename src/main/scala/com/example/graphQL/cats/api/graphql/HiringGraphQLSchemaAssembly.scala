@@ -6,6 +6,7 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLAccountResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLApplicationResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLAnalyticsResolvers.*
+import com.example.graphQL.cats.api.graphql.HiringGraphQLEmbeddingCoverageResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLInteractionResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLJobResolvers.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLSearchResolvers.*
@@ -27,7 +28,17 @@ private[graphql] object HiringGraphQLSchemaAssembly {
   private val facetComplexity: (RequestContext, Args, Double) => Double =
     (_, _, child) => 100d + child
   private val expensiveRoots =
-    Set("nearbyJobs", "jobDiscoveryFacets", "semanticJobSearch", "recommendedJobs", "candidateMatches")
+    Set(
+      "nearbyJobs",
+      "jobDiscoveryFacets",
+      "semanticJobSearch",
+      "recommendedJobs",
+      "candidateMatches",
+      "embeddingCoverage"
+    )
+  // Each embedding coverage root starts bounded but full scans; two roots exceed MaxQueryComplexity.
+  private val coverageComplexity: (RequestContext, Args, Double) => Double =
+    (_, _, child) => 600d + child
   private val expensiveRootBudget = new QueryReducer[RequestContext, RequestContext] {
     type Acc = Int
     val initial = 0
@@ -74,6 +85,12 @@ private[graphql] object HiringGraphQLSchemaAssembly {
       resultField("analyticsReport", analyticsReportType, analyticsFromArgument :: analyticsToArgument :: Nil)(
         analyticsReport
       ),
+      resultField(
+        "embeddingCoverage",
+        embeddingCoverageReportType,
+        expectedModelArgument :: Nil,
+        complexity = Some(coverageComplexity)
+      )(embeddingCoverage),
       resultField("accountDeletionStatus", accountDeletionStatusType, deletionReceiptIdArgument :: Nil)(
         accountDeletionStatus
       ),

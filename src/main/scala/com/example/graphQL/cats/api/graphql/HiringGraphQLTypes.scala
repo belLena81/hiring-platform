@@ -5,6 +5,8 @@ import com.example.graphQL.cats.api.graphql.HiringGraphQLInputs.*
 import com.example.graphQL.cats.api.graphql.HiringGraphQLModel.*
 import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.service.ProbeResult
+import com.example.graphQL.cats.service.port.{EmbeddingWorkFailure, EmbeddingWorkKind}
+import com.example.graphQL.cats.service.search.*
 import sangria.schema.*
 import sangria.schema.Action.deferredAction
 
@@ -424,6 +426,119 @@ private[graphql] object HiringGraphQLTypes {
         simple("skillPostingActivity", ListType(analyticsSkillPostingDayType))(_.snapshot.skillPostingActivity)
       )
     )
+
+  lazy val embeddingCoverageEntityKindType: EnumType[EmbeddingWorkKind] = EnumType(
+    "EmbeddingCoverageEntityKind",
+    values = List(
+      EnumValue("JOB", value = EmbeddingWorkKind.Job),
+      EnumValue("CANDIDATE_PROFILE", value = EmbeddingWorkKind.CandidateProfile)
+    )
+  )
+  lazy val embeddingFreshnessType: EnumType[EmbeddingFreshness] = EnumType(
+    "EmbeddingFreshness",
+    values = List(
+      EnumValue("CURRENT", value = EmbeddingFreshness.Current),
+      EnumValue("CONTENT_CHANGED", value = EmbeddingFreshness.ContentChanged),
+      EnumValue("MODEL_MISMATCH", value = EmbeddingFreshness.ModelMismatch),
+      EnumValue("NOT_EMBEDDED", value = EmbeddingFreshness.NotEmbedded)
+    )
+  )
+  lazy val embeddingRepairStateType: EnumType[EmbeddingRepairState] = EnumType(
+    "EmbeddingRepairState",
+    values = List(
+      EnumValue("NO_QUEUED_WORK", value = EmbeddingRepairState.NoQueuedWork),
+      EnumValue("WAITING", value = EmbeddingRepairState.Waiting),
+      EnumValue("RETRYING", value = EmbeddingRepairState.Retrying),
+      EnumValue("IN_PROGRESS", value = EmbeddingRepairState.InProgress),
+      EnumValue("LEASE_EXPIRED", value = EmbeddingRepairState.LeaseExpired),
+      EnumValue("FAILED", value = EmbeddingRepairState.Failed)
+    )
+  )
+  lazy val embeddingFailureReasonType: EnumType[EmbeddingWorkFailure] = EnumType(
+    "EmbeddingFailureReason",
+    values = List(
+      EnumValue("RETRY_EXHAUSTED", value = EmbeddingWorkFailure.RetryExhausted),
+      EnumValue("DOCUMENT_TOO_LARGE", value = EmbeddingWorkFailure.DocumentTooLarge),
+      EnumValue("INVALID_WORK_KEY", value = EmbeddingWorkFailure.InvalidWorkKey),
+      EnumValue("INVALID_RESPONSE", value = EmbeddingWorkFailure.InvalidResponse)
+    )
+  )
+  lazy val embeddingCoverageCheckNameType: EnumType[EmbeddingCoverageCheckName] = EnumType(
+    "EmbeddingCoverageCheckName",
+    values = List(
+      EnumValue("NO_ORPHANED_GAP", value = EmbeddingCoverageCheckName.NoOrphanedGap),
+      EnumValue("NO_STUCK_WORK", value = EmbeddingCoverageCheckName.NoStuckWork)
+    )
+  )
+  lazy val embeddingCoverageCheckStatusType: EnumType[EmbeddingCoverageCheckStatus] = EnumType(
+    "EmbeddingCoverageCheckStatus",
+    values = List(
+      EnumValue("PASSED", value = EmbeddingCoverageCheckStatus.Passed),
+      EnumValue("FAILED", value = EmbeddingCoverageCheckStatus.Failed),
+      EnumValue("INCONCLUSIVE", value = EmbeddingCoverageCheckStatus.Inconclusive)
+    )
+  )
+  lazy val embeddingCoverageKindSummaryType: ObjectType[RequestContext, EmbeddingCoverageKindSummary] = ObjectType(
+    "EmbeddingCoverageKindSummary",
+    fields[RequestContext, EmbeddingCoverageKindSummary](
+      simple("kind", embeddingCoverageEntityKindType)(_.kind),
+      simple("searchableCount", LongType)(_.searchableCount),
+      simple("scannedCount", LongType)(_.scannedCount),
+      simple("truncated", BooleanType)(_.truncated),
+      simple("coverageShare", OptionType(FloatType))(_.coverageShare)
+    )
+  )
+  lazy val embeddingCoverageCellType: ObjectType[RequestContext, EmbeddingCoverageCell] = ObjectType(
+    "EmbeddingCoverageCell",
+    fields[RequestContext, EmbeddingCoverageCell](
+      simple("kind", embeddingCoverageEntityKindType)(_.kind),
+      simple("freshness", embeddingFreshnessType)(_.freshness),
+      simple("repairState", embeddingRepairStateType)(_.repairState),
+      simple("failureReason", OptionType(embeddingFailureReasonType))(_.failure),
+      simple("count", LongType)(_.count)
+    )
+  )
+  lazy val embeddingObservedModelType: ObjectType[RequestContext, EmbeddingObservedModel] = ObjectType(
+    "EmbeddingObservedModel",
+    fields[RequestContext, EmbeddingObservedModel](
+      simple("kind", embeddingCoverageEntityKindType)(_.kind),
+      simple("model", StringType)(_.model),
+      simple("count", LongType)(_.count)
+    )
+  )
+  lazy val embeddingCoverageLagType: ObjectType[RequestContext, EmbeddingCoverageLag] = ObjectType(
+    "EmbeddingCoverageLag",
+    fields[RequestContext, EmbeddingCoverageLag](
+      simple("p50Seconds", LongType)(_.p50Seconds),
+      simple("p95Seconds", LongType)(_.p95Seconds),
+      simple("p99Seconds", LongType)(_.p99Seconds),
+      simple("sampleCount", LongType)(_.sampleCount)
+    )
+  )
+  lazy val embeddingCoverageCheckType: ObjectType[RequestContext, EmbeddingCoverageCheck] = ObjectType(
+    "EmbeddingCoverageCheck",
+    fields[RequestContext, EmbeddingCoverageCheck](
+      simple("check", embeddingCoverageCheckNameType)(_.name),
+      simple("status", embeddingCoverageCheckStatusType)(_.status),
+      simple("offendingCount", LongType)(_.offendingCount)
+    )
+  )
+  lazy val embeddingCoverageReportType: ObjectType[RequestContext, EmbeddingCoverageReport] = ObjectType(
+    "EmbeddingCoverageReport",
+    fields[RequestContext, EmbeddingCoverageReport](
+      instantField("asOf", _.asOf),
+      simple("expectedModel", OptionType(StringType))(_.expectedModel),
+      simple("kinds", ListType(embeddingCoverageKindSummaryType))(_.kinds),
+      simple("cells", ListType(embeddingCoverageCellType))(_.cells),
+      simple("observedModels", ListType(embeddingObservedModelType))(_.observedModels),
+      simple("queueTruncated", BooleanType)(_.queueTruncated),
+      simple("oldestQueuedWorkAgeSeconds", OptionType(LongType))(_.oldestQueuedWorkAgeSeconds),
+      simple("oldestNotCurrentAgeSeconds", OptionType(LongType))(_.oldestNotCurrentAgeSeconds),
+      simple("lagEntityKinds", ListType(embeddingCoverageEntityKindType))(_.lagEntityKinds),
+      simple("lagSeconds", OptionType(embeddingCoverageLagType))(_.lagSeconds),
+      simple("checks", ListType(embeddingCoverageCheckType))(_.checks)
+    )
+  )
 
   lazy val createJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("CreateJobResult", jobType)
   lazy val updateJobResultType: OutputType[MutationOutcome[Job]] = mutationResultType("UpdateJobResult", jobType)

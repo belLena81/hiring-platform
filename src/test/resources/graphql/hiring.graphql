@@ -178,6 +178,94 @@ type DomainError implements UserError {
   message: String!
 }
 
+type EmbeddingCoverageCell {
+  kind: EmbeddingCoverageEntityKind!
+  freshness: EmbeddingFreshness!
+  repairState: EmbeddingRepairState!
+  failureReason: EmbeddingFailureReason
+  count: Long!
+}
+
+type EmbeddingCoverageCheck {
+  check: EmbeddingCoverageCheckName!
+  status: EmbeddingCoverageCheckStatus!
+  offendingCount: Long!
+}
+
+enum EmbeddingCoverageCheckName {
+  NO_ORPHANED_GAP
+  NO_STUCK_WORK
+}
+
+enum EmbeddingCoverageCheckStatus {
+  PASSED
+  FAILED
+  INCONCLUSIVE
+}
+
+enum EmbeddingCoverageEntityKind {
+  JOB
+  CANDIDATE_PROFILE
+}
+
+type EmbeddingCoverageKindSummary {
+  kind: EmbeddingCoverageEntityKind!
+  searchableCount: Long!
+  scannedCount: Long!
+  truncated: Boolean!
+  coverageShare: Float
+}
+
+type EmbeddingCoverageLag {
+  p50Seconds: Long!
+  p95Seconds: Long!
+  p99Seconds: Long!
+  sampleCount: Long!
+}
+
+type EmbeddingCoverageReport {
+  asOf: Instant!
+  expectedModel: String
+  kinds: [EmbeddingCoverageKindSummary!]!
+  cells: [EmbeddingCoverageCell!]!
+  observedModels: [EmbeddingObservedModel!]!
+  queueTruncated: Boolean!
+  oldestQueuedWorkAgeSeconds: Long
+  oldestNotCurrentAgeSeconds: Long
+  lagEntityKinds: [EmbeddingCoverageEntityKind!]!
+  lagSeconds: EmbeddingCoverageLag
+  checks: [EmbeddingCoverageCheck!]!
+}
+
+enum EmbeddingFailureReason {
+  RETRY_EXHAUSTED
+  DOCUMENT_TOO_LARGE
+  INVALID_WORK_KEY
+  INVALID_RESPONSE
+}
+
+enum EmbeddingFreshness {
+  CURRENT
+  CONTENT_CHANGED
+  MODEL_MISMATCH
+  NOT_EMBEDDED
+}
+
+type EmbeddingObservedModel {
+  kind: EmbeddingCoverageEntityKind!
+  model: String!
+  count: Long!
+}
+
+enum EmbeddingRepairState {
+  NO_QUEUED_WORK
+  WAITING
+  RETRYING
+  IN_PROGRESS
+  LEASE_EXPIRED
+  FAILED
+}
+
 type GeoPoint {
   latitude: Float!
   longitude: Float!
@@ -349,6 +437,7 @@ type Query {
   readiness: Readiness!
   me: User
   analyticsReport(from: Instant!, to: Instant!): AnalyticsReport!
+  embeddingCoverage(expectedModel: String): EmbeddingCoverageReport!
   accountDeletionStatus(receiptId: ID!): AccountDeletionStatus!
   users(first: Int!, after: String, role: UserRole, status: UserStatus): UserConnection!
   jobs(first: Int!, after: String, city: String, skills: [String!], createdAfter: Instant, searchId: UUID): JobConnection!

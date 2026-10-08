@@ -101,6 +101,7 @@ private[graphql] object HiringGraphQLInputs {
   lazy val analyticsFromArgument: Argument[Instant] = Argument("from", instantType)
   lazy val deletionReceiptIdArgument: Argument[String] = Argument("receiptId", IDType)
   lazy val analyticsToArgument: Argument[Instant] = Argument("to", instantType)
+  lazy val expectedModelArgument: Argument[Option[String]] = Argument("expectedModel", OptionInputType(StringType))
   lazy val searchIdArgument: Argument[Option[UUID]] = Argument("searchId", OptionInputType(uuidType))
   lazy val candidateSearchQueryArgument: Argument[Option[String]] =
     Argument("query", OptionInputType(StringType))

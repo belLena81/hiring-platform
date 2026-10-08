@@ -46,6 +46,10 @@ GraphQL SDL, cursors, operational-event payloads, and embedding metadata describ
 
 Critical integrity remains enforced by MongoDB uniqueness and transactional identity, ownership, status, and state predicates. Resetting local data does not relax authorization, lifecycle, duplicate-application, or closed-job invariants.
 
+## Embedding coverage report contract
+
+The Admin-only `embeddingCoverage(expectedModel: String)` query and its `EmbeddingCoverage*`, `EmbeddingFreshness`, `EmbeddingRepairState`, `EmbeddingFailureReason` and `EmbeddingObservedModel` types are an additive, read-only API change. They add no persisted field, index, migration, event or cursor, and reuse the existing `VECTOR_SEARCH_UNAVAILABLE`, `UNAUTHORIZED` and `VALIDATION_FAILED` codes. The SDL snapshot, the validated `embedding-coverage.graphql` operation, `docs/api.md` and the [specification](specs/embedding-coverage-report.md) change together. Enum labels use SCREAMING_CASE while the internal states keep their existing representation. Each entity page and its queue rows are read at one point in time under snapshot read concern; the report as a whole is a sequence of such pages, not a transaction. The root is an expensive root with fixed complexity, so one coverage scan runs per request. The scan adds no write and no index.
+
 ## Geographic discovery and interview scheduling contracts
 
 Job location has one optional geographic point. API inputs validate finite latitude/longitude; MongoDB stores the active GeoJSON Point shape in longitude/latitude order. Existing jobs keep an absent point. Nearby cursors carry full-precision distance, job identity and a fingerprint of the center, radius, normalized structured filters and ordering; mismatched cursors are rejected rather than interpreted under another query. SDL and executable operations describe the current nearby, facet and scheduling fields.

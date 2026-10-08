@@ -375,7 +375,6 @@ final class MongoEmbeddingWorkRepository(database: MongoDatabase[IO], diagnostic
     Option(document.get(field)).collect { case value: Number => value }.toRight(StoredWorkError.InvalidDocument)
 }
 
-enum EmbeddingWorkState { case Ready, Retry, Processing, Failed }
 final case class EmbeddingWorkInspection(
     generation: Long,
     attempts: Int,

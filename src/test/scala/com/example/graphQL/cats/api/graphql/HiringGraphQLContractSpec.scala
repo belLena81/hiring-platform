@@ -46,6 +46,34 @@ final class HiringGraphQLContractSpec extends CatsEffectSuite {
     }
   }
 
+  test("embedding coverage operation matches the active public schema") {
+    fixture("embedding-coverage.graphql").map { operation =>
+      val document = sangria.parser.QueryParser.parse(operation).get
+      val violations =
+        sangria.validation.QueryValidator.default.validateQuery(HiringGraphQLSchema.schema, document, Map.empty, None)
+      assertEquals(violations.toList, Nil)
+    }
+  }
+
+  test("ECR-07 the embedding coverage report exposes no identifiers, names, text, vectors or payloads") {
+    val reportTypes = HiringGraphQLSchema.schema.allTypes.values.collect {
+      case objectType: sangria.schema.ObjectType[?, ?] if objectType.name.startsWith("EmbeddingCoverage") => objectType
+      case objectType: sangria.schema.ObjectType[?, ?] if objectType.name == "EmbeddingObservedModel"     => objectType
+    }.toList
+    val fieldNames = reportTypes.flatMap(_.fieldsByName.keys)
+    assertEquals(reportTypes.size, 6)
+    val forbidden = Set("id", "ids", "name", "text", "vector", "embedding", "payload", "entityId", "title")
+    assertEquals(fieldNames.filter(forbidden.contains), Nil)
+    assertEquals(
+      HiringGraphQLSchema.schema.allTypes.values
+        .collect { case enumType: sangria.schema.EnumType[?] => enumType }
+        .filter(_.name.startsWith("Embedding"))
+        .flatMap(_.values.map(_.name))
+        .forall(label => label == label.toUpperCase),
+      true
+    )
+  }
+
   test("served SDL matches the deterministic contract fixture") {
     fixture("hiring.graphql").map(expected => assertEquals(HiringGraphQLSchema.sdl, expected))
   }

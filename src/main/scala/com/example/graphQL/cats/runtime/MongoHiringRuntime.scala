@@ -8,6 +8,8 @@ import com.example.graphQL.cats.service.port.EmbeddingService
 import com.example.graphQL.cats.service.{
   AnalyticsReportingService,
   DatabaseProbe,
+  EmbeddingCoverageService,
+  EmbeddingCoverageUseCases,
   Diagnostics,
   HiringReadService,
   LogEvent,
@@ -54,6 +56,7 @@ import com.example.graphQL.cats.repository.mongo.{
   DiscoveryQueryPolicy,
   MongoAnalyticsErasureRequestRepository,
   MongoAnalyticsReportRepository,
+  MongoEmbeddingCoverageRepository,
   MongoMutationReceiptRepository,
   MongoOperationalEventOutboxRepository,
   MongoSearchSessionRepository,
@@ -189,6 +192,8 @@ object MongoHiringRuntime {
         mutationReceipts,
         erasureRequests,
         analyticsReports,
+        new MongoEmbeddingCoverageRepository(database, config.diagnostics),
+        config.vectorSearch.durableRetryCapMillis.millis,
         interviewRepository,
         config.kafka,
         config.jwtAuth,
@@ -304,6 +309,8 @@ object MongoHiringRuntime {
       mutationReceipts: MongoMutationReceiptRepository,
       erasureRequests: MongoAnalyticsErasureRequestRepository,
       analyticsReports: MongoAnalyticsReportRepository,
+      embeddingCoverage: MongoEmbeddingCoverageRepository,
+      durableRetryCap: FiniteDuration,
       interviewRepository: MongoInterviewWorkflowRepository,
       kafka: KafkaConfig,
       jwtAuth: JwtAuthConfig,
@@ -325,6 +332,7 @@ object MongoHiringRuntime {
     def assemble(
         jobService: JobUseCases,
         accountService: AccountUseCases,
+        coverageService: EmbeddingCoverageUseCases,
         semanticSearch: Option[SearchUseCases] = None,
         searchSessionHandoff: SearchSessionHandoff
     ): HiringGraphQLServices =
@@ -346,7 +354,8 @@ object MongoHiringRuntime {
             interviewRepository,
             kafka.interview.preCommitDeadlineSeconds.seconds
           )
-        )
+        ),
+        coverageService
       )
 
     Argon2PasswordHasher
@@ -374,7 +383,12 @@ object MongoHiringRuntime {
                     diagnostics
                   )
                 val jobService = JobService.live(users, jobs, disabledEmbeddingPublisher, idempotent, diagnostics)
-                assemble(jobService, account, searchSessionHandoff = searchSessionHandoff)
+                assemble(
+                  jobService,
+                  account,
+                  EmbeddingCoverageService.vectorSearchDisabled(users),
+                  searchSessionHandoff = searchSessionHandoff
+                )
               case EmbeddingCapability.Enabled(_, _, _, search, embeddings, publisher, model) =>
                 val jobService = JobService.live(users, jobs, publisher, idempotent, diagnostics)
                 val accountService =
@@ -396,7 +410,13 @@ object MongoHiringRuntime {
                   search,
                   model
                 )
-                assemble(jobService, accountService, Some(semanticSearch), searchSessionHandoff)
+                assemble(
+                  jobService,
+                  accountService,
+                  EmbeddingCoverageService.live(users, embeddingCoverage, durableRetryCap),
+                  Some(semanticSearch),
+                  searchSessionHandoff
+                )
             }
         }
       }

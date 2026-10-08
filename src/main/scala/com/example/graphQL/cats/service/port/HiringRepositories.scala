@@ -315,6 +315,10 @@ enum EmbeddingWorkFailure {
   case RetryExhausted, DocumentTooLarge, InvalidWorkKey, InvalidResponse
 }
 
+enum EmbeddingWorkState {
+  case Ready, Retry, Processing, Failed
+}
+
 trait EmbeddingWorkRepository {
   def enqueue(key: EmbeddingWorkKey, now: Instant): RepositoryIO[Unit]
   def claim(

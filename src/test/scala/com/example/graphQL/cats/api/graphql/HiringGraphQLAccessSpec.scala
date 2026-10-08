@@ -10,6 +10,8 @@ import com.example.graphQL.cats.service.{
   AnalyticsError,
   AnalyticsReportSnapshot,
   AnalyticsReportingUseCases,
+  EmbeddingCoverageService,
+  EmbeddingCoverageUseCases,
   HiringReadService,
   ProbeResult,
   RepositoryError,
@@ -184,6 +186,177 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
           Right(asOf.toString)
         )
       }
+  }
+
+  private val embeddingCoverageQuery =
+    """query { embeddingCoverage(expectedModel: "model-a") {
+      |  asOf expectedModel queueTruncated oldestQueuedWorkAgeSeconds oldestNotCurrentAgeSeconds lagEntityKinds
+      |  kinds { kind searchableCount scannedCount truncated coverageShare }
+      |  cells { kind freshness repairState failureReason count }
+      |  observedModels { kind model count }
+      |  lagSeconds { p50Seconds p95Seconds p99Seconds sampleCount }
+      |  checks { check status offendingCount }
+      |} }""".stripMargin
+
+  private def coverageService(
+      users: com.example.graphQL.cats.service.port.UserRepository
+  ): EmbeddingCoverageUseCases = {
+    import com.example.graphQL.cats.service.search.*
+    val tally = EmbeddingCoverageTally.empty.add(
+      EmbeddingCoverageEntity(
+        com.example.graphQL.cats.service.port.EmbeddingWorkKind.Job,
+        Some(EmbeddingMeta("model-a", "h", now)),
+        "h",
+        Some(now),
+        None
+      ),
+      Some("model-a"),
+      now
+    )
+    val repository = new com.example.graphQL.cats.service.port.EmbeddingCoverageRepository {
+      override def observe(request: EmbeddingCoverageScanRequest): RepositoryIO[EmbeddingCoverageObservation] =
+        RepositoryIO.fromEither(
+          Right(
+            EmbeddingCoverageObservation(
+              tally,
+              List(
+                EmbeddingCoverageKindObservation(com.example.graphQL.cats.service.port.EmbeddingWorkKind.Job, 1L, false)
+              ),
+              EmbeddingQueueObservation(false, 0L, None)
+            )
+          )
+        )
+    }
+    EmbeddingCoverageService.live(
+      users,
+      repository,
+      scala.concurrent.duration.DurationInt(5).minutes,
+      clock = IO.pure(now)
+    )
+  }
+
+  test("embedding coverage requires authentication") {
+    execute(embeddingCoverageQuery, None).map(json => assertEquals(errorCode(json), Right("UNAUTHORIZED")))
+  }
+
+  test("embedding coverage is denied to Candidates and Recruiters by the service") {
+    List(
+      ActorContext(candidateId, UserRole.Candidate),
+      ActorContext(recruiterId, UserRole.Recruiter)
+    ).traverse { actor =>
+      executeWithUsers(
+        embeddingCoverageQuery,
+        Some(actor),
+        List(admin, candidate, recruiter),
+        embeddingCoverage = coverageService
+      )
+    }.map(_.foreach(json => assertEquals(errorCode(json), Right("UNAUTHORIZED"))))
+  }
+
+  test("embedding coverage returns only aggregate fields to an active Admin") {
+    executeWithUsers(
+      embeddingCoverageQuery,
+      Some(ActorContext(adminId, UserRole.Admin)),
+      List(admin),
+      embeddingCoverage = coverageService
+    ).map { json =>
+      val report = json.hcursor.downField("data").downField("embeddingCoverage")
+      assertEquals(report.get[String]("asOf"), Right(now.toString))
+      assertEquals(report.downField("cells").downArray.get[String]("freshness"), Right("CURRENT"))
+      assertEquals(report.downField("cells").downArray.get[String]("repairState"), Right("NO_QUEUED_WORK"))
+      assertEquals(report.downField("cells").downArray.get[String]("kind"), Right("JOB"))
+      assertEquals(
+        report.downField("checks").values.map(_.map(_.hcursor.get[String]("status"))).map(_.toList),
+        Some(List(Right("PASSED"), Right("PASSED")))
+      )
+      assertEquals(report.get[List[String]]("lagEntityKinds"), Right(List("JOB")))
+      assertEquals(json.hcursor.downField("errors").succeeded, false)
+    }
+  }
+
+  test("embedding coverage is typed unavailable when vector search is disabled and rejects a blank model") {
+    for {
+      disabled <- executeWithUsers(
+        embeddingCoverageQuery,
+        Some(ActorContext(adminId, UserRole.Admin)),
+        List(admin),
+        embeddingCoverage = users => EmbeddingCoverageService.vectorSearchDisabled(users)
+      )
+      blank <- executeWithUsers(
+        """query { embeddingCoverage(expectedModel: " ") { asOf } }""",
+        Some(ActorContext(adminId, UserRole.Admin)),
+        List(admin),
+        embeddingCoverage = coverageService
+      )
+    } yield {
+      assertEquals(errorCode(disabled), Right("VECTOR_SEARCH_UNAVAILABLE"))
+      assertEquals(errorCode(blank), Right("VALIDATION_FAILED"))
+    }
+  }
+
+  test("embedding coverage roots are expensive: aliased scans are rejected before any repository call") {
+    val adminActor = Some(ActorContext(adminId, UserRole.Admin))
+    for {
+      calls <- Ref.of[IO, Int](0)
+      repository = new com.example.graphQL.cats.service.port.EmbeddingCoverageRepository {
+        override def observe(
+            request: com.example.graphQL.cats.service.search.EmbeddingCoverageScanRequest
+        ): RepositoryIO[com.example.graphQL.cats.service.search.EmbeddingCoverageObservation] =
+          RepositoryIO.lift(
+            calls
+              .update(_ + 1)
+              .as(
+                com.example.graphQL.cats.service.search.EmbeddingCoverageObservation(
+                  com.example.graphQL.cats.service.search.EmbeddingCoverageTally.empty,
+                  Nil,
+                  com.example.graphQL.cats.service.search.EmbeddingQueueObservation(false, 0L, None)
+                )
+              )
+          )
+      }
+      service = (users: com.example.graphQL.cats.service.port.UserRepository) =>
+        EmbeddingCoverageService.live(
+          users,
+          repository,
+          scala.concurrent.duration.DurationInt(5).minutes,
+          clock = IO.pure(now)
+        )
+      aliased = (1 to 500).map(n => s"a$n: embeddingCoverage { asOf }").mkString("query { ", " ", " }")
+      twoRoots = "query { a: embeddingCoverage { asOf } b: embeddingCoverage { asOf } }"
+      rejectedMany <- executeEitherWithUsers(aliased, adminActor, List(admin), embeddingCoverage = service)
+      rejectedTwo <- executeEitherWithUsers(twoRoots, adminActor, List(admin), embeddingCoverage = service)
+      rejectedCount <- calls.get
+      single <- executeEitherWithUsers(
+        "query { a: embeddingCoverage { asOf } }",
+        adminActor,
+        List(admin),
+        embeddingCoverage = service
+      )
+      singleCount <- calls.get
+    } yield {
+      assertEquals(rejectedMany, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+      assertEquals(rejectedTwo, Left(HiringGraphQLSchema.Failure.InvalidQuery))
+      assertEquals(rejectedCount, 0)
+      assert(single.exists(_.hcursor.downField("data").downField("a").succeeded))
+      assertEquals(singleCount, 1)
+    }
+  }
+
+  test("an unwired embedding coverage capability denies even an Admin without leaking availability") {
+    executeWithUsers(
+      embeddingCoverageQuery,
+      Some(ActorContext(adminId, UserRole.Admin)),
+      List(admin)
+    ).map(json => assertEquals(errorCode(json), Right("UNAUTHORIZED")))
+  }
+
+  test("embedding coverage rejects an oversized expectedModel at the GraphQL boundary") {
+    executeWithUsers(
+      s"""query { embeddingCoverage(expectedModel: "${"m" * 129}") { asOf } }""",
+      Some(ActorContext(adminId, UserRole.Admin)),
+      List(admin),
+      embeddingCoverage = coverageService
+    ).map(json => assertEquals(errorCode(json), Right("VALIDATION_FAILED")))
   }
 
   test("anonymous Admin bootstrap is absent from the public schema") {
@@ -1093,8 +1266,32 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
       accountService: AccountUseCases = TestGraphQLSupport.accountService,
       variables: Json = Json.obj(),
       hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
-      analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable
-  ): IO[Json] = {
+      analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
+      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository => EmbeddingCoverageUseCases = _ =>
+        EmbeddingCoverageUseCases.denyAll
+  ): IO[Json] =
+    executeEitherWithUsers(
+      query,
+      actor,
+      users,
+      accountService,
+      variables,
+      hiringReady,
+      analyticsReporting,
+      embeddingCoverage
+    )
+      .map(_.fold(failure => fail(failure.toString), identity))
+
+  private def executeEitherWithUsers(
+      query: String,
+      actor: Option[ActorContext],
+      users: List[User],
+      accountService: AccountUseCases = TestGraphQLSupport.accountService,
+      variables: Json = Json.obj(),
+      hiringReady: IO[ProbeResult] = IO.pure(ProbeResult.Ready),
+      analyticsReporting: AnalyticsReportingUseCases = AnalyticsReportingUseCases.unavailable,
+      embeddingCoverage: com.example.graphQL.cats.service.port.UserRepository => EmbeddingCoverageUseCases
+  ): IO[Either[HiringGraphQLSchema.Failure, Json]] = {
     for {
       usersRef <- Ref.of[IO, Map[UserId, User]](users.map(user => user.id -> user).toMap)
       jobsRef <- Ref.of[IO, Map[JobId, Job]](List(openJob, closedJob).map(job => job.id -> job).toMap)
@@ -1122,13 +1319,14 @@ final class HiringGraphQLAccessSpec extends CatsEffectSuite {
         com.example.graphQL.cats.service.TestHiringServices.applications(users, jobs, applications),
         TestGraphQLSupport.cursorKey,
         accountService = accountService,
-        analyticsReporting = analyticsReporting
+        analyticsReporting = analyticsReporting,
+        embeddingCoverage = embeddingCoverage(users)
       )
       request <- parseRequest(query, variables)
       result <- TestGraphQLSupport
         .context(IO.pure(ProbeResult.Ready), actor, services, hiringReady)
         .use(TestGraphQLSupport.parseAndExecute(request, _))
-    } yield result.fold(failure => fail(failure.toString), identity)
+    } yield result
   }
 
   private def encodeCursor(json: Json): String =

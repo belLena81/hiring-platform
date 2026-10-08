@@ -1,0 +1,40 @@
+query EmbeddingCoverage($expectedModel: String) {
+  embeddingCoverage(expectedModel: $expectedModel) {
+    asOf
+    expectedModel
+    kinds {
+      kind
+      searchableCount
+      scannedCount
+      truncated
+      coverageShare
+    }
+    cells {
+      kind
+      freshness
+      repairState
+      failureReason
+      count
+    }
+    observedModels {
+      kind
+      model
+      count
+    }
+    queueTruncated
+    oldestQueuedWorkAgeSeconds
+    oldestNotCurrentAgeSeconds
+    lagEntityKinds
+    lagSeconds {
+      p50Seconds
+      p95Seconds
+      p99Seconds
+      sampleCount
+    }
+    checks {
+      check
+      status
+      offendingCount
+    }
+  }
+}
