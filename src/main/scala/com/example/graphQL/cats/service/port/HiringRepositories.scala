@@ -148,9 +148,6 @@ trait UserAccountRepository {
   ): RepositoryIO[Unit]
 }
 
-/** A durable request for removing a deleted subject from analytical projections. */
-final case class AnalyticsErasureRequest(userId: UserId, requestedAt: Instant)
-
 trait AnalyticsErasureRequestRepository {
 
   /** Confirms an erasure worker is live before a new account deletion can mutate Mongo. */

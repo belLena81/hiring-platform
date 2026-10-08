@@ -22,7 +22,6 @@ final case class NearbyJobsQuery(
   def fingerprint: String = NearbyJobCursorCodec.fingerprint(this)
 }
 final case class NearbyJobCursor(distanceKm: Double, jobId: JobId, queryFingerprint: String)
-final case class NearbyJobsPage(query: NearbyJobsQuery, first: Int, after: Option[NearbyJobCursor])
 final case class NearbyRadius(center: GeoPoint, radiusKm: Double) {
   def isValid: Boolean = JobDiscoveryValidation.validRadius(center, radiusKm)
 }

@@ -19,6 +19,7 @@ enum ConfigError(val key: String) {
   case InvalidAdminSeed extends ConfigError("AUTH_ADMIN_SEED")
   case InvalidKafkaRestartMaxDelay extends ConfigError("KAFKA_RESTART_MAX_DELAY_SECONDS")
   case InvalidJwtSecret extends ConfigError("AUTH_JWT_HS256_SECRET")
+  case InvalidReceiptFingerprintSecret extends ConfigError("AUTH_RECEIPT_FP_SECRET")
   case InvalidJwtIssuer extends ConfigError("AUTH_JWT_ISSUER")
   case InvalidJwtAudience extends ConfigError("AUTH_JWT_AUDIENCE")
   case InvalidCursorTtl extends ConfigError("AUTH_JWT_CURSOR_TTL_SECONDS")
@@ -165,8 +166,14 @@ final case class JwtAuthConfig(
     issuer: String,
     audience: String,
     accessTokenSeconds: Long = 900L,
-    cursorTtlSeconds: Long = 900L
-)
+    cursorTtlSeconds: Long = 900L,
+    receiptFingerprintSecret: Option[String] = None
+) {
+
+  /** Idempotency-receipt key; independent of JWT signing so rotating the signing secret keeps receipts valid. */
+  def receiptSecret: String = receiptFingerprintSecret.getOrElse(hmacSecret)
+  override def toString: String = s"JwtAuthConfig($issuer, $audience, [REDACTED])"
+}
 final case class PasswordHashConfig(iterations: Int, memoryKilobytes: Int, parallelism: Int)
 final case class AuthRateLimitConfig(windowSeconds: Int, attempts: Int, maxBuckets: Int)
 final case class TrustedProxyConfig(cidrs: List[Cidr[IpAddress]])

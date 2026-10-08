@@ -1,6 +1,0 @@
-# Test classpath only. Used solely when restarting an already purged isolated smoke volume.
-services:
-  analytics-erasure-worker:
-    entrypoint: ["sbt"]
-    command:
-      - "Test / runMain com.example.hiring.analytics.cli.AnalyticsErasureCalendarProofMain ${HIRING_ANALYTICS_RETENTION_PROOF_SUBJECT_ID:?Set synthetic subject UUID}"

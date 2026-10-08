@@ -11,7 +11,6 @@ object HiringHttpPaths {
   val HealthPath: Uri.Path = Uri.Path.Root / "health"
   val ReadyPath: Uri.Path = Uri.Path.Root / "ready"
   val GraphQLPath: Uri.Path = Uri.Path.Root / "graphql"
-  val SchemaPath: Uri.Path = Uri.Path.Root / "schema.graphql"
 
   val public: Set[String] = Set(Health, Ready, GraphQL, Schema)
 }

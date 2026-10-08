@@ -14,13 +14,22 @@ private[config] final case class RawAuthConfig(
 ) derives ConfigReader
 private[config] final case class RawJwtAuthConfig(
     hs256Secret: Option[String],
+    receiptFingerprintSecret: Option[String],
     issuer: NonBlank128,
     audience: NonBlank128,
     cursorTtlSeconds: CursorTtlSeconds
-)
+) {
+  override def toString: String = "RawJwtAuthConfig([REDACTED])"
+}
 private[config] object RawJwtAuthConfig {
   given ConfigReader[RawJwtAuthConfig] =
-    ConfigReader.forProduct4("hs256-secret", "issuer", "audience", "cursor-ttl-seconds")(RawJwtAuthConfig.apply)
+    ConfigReader.forProduct5(
+      "hs256-secret",
+      "receipt-fingerprint-secret",
+      "issuer",
+      "audience",
+      "cursor-ttl-seconds"
+    )(RawJwtAuthConfig.apply)
 }
 private[config] final case class RawAuthRateLimitConfig(
     windowSeconds: AuthRateWindowSeconds,

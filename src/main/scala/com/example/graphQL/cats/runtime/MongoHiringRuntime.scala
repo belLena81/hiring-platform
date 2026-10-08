@@ -44,7 +44,6 @@ import com.example.graphQL.cats.infrastructure.embedding.VoyageEmbeddingService
 import com.example.graphQL.cats.repository.mongo.{
   MongoApplicationRepository,
   MongoAdminSeed,
-  MongoAuthenticationReceiptMigration,
   MongoInterviewWorkflowRepository,
   MongoInterviewSubjectCleanup,
   MongoConsumerReceiptRepository,
@@ -145,12 +144,7 @@ object MongoHiringRuntime {
         config.diagnostics
       )
       _ <- Resource.eval(setup.awaitSuccessful)
-      _ <- Resource.eval(
-        MongoAuthenticationReceiptMigration.initialize(
-          database,
-          new HmacAuthenticationFingerprint(config.jwtAuth.hmacSecret)
-        )
-      )
+      fingerprints = new HmacAuthenticationFingerprint(config.jwtAuth.receiptSecret)
       seedAccounts = MongoUserRepository.transactional(
         database,
         client,
@@ -198,6 +192,7 @@ object MongoHiringRuntime {
         interviewRepository,
         config.kafka,
         config.jwtAuth,
+        fingerprints,
         config.passwordHash,
         passwordHashPermits,
         config.diagnostics
@@ -312,6 +307,7 @@ object MongoHiringRuntime {
       interviewRepository: MongoInterviewWorkflowRepository,
       kafka: KafkaConfig,
       jwtAuth: JwtAuthConfig,
+      fingerprints: HmacAuthenticationFingerprint,
       passwordHash: PasswordHashConfig,
       passwordHashPermits: Semaphore[IO],
       diagnostics: Diagnostics
@@ -371,7 +367,7 @@ object MongoHiringRuntime {
                     users,
                     hasher,
                     tokenIssuer,
-                    new HmacAuthenticationFingerprint(jwtAuth.hmacSecret),
+                    fingerprints,
                     erasureRequests,
                     disabledEmbeddingPublisher,
                     idempotent,
@@ -387,7 +383,7 @@ object MongoHiringRuntime {
                     users,
                     hasher,
                     tokenIssuer,
-                    new HmacAuthenticationFingerprint(jwtAuth.hmacSecret),
+                    fingerprints,
                     erasureRequests,
                     publisher,
                     idempotent,

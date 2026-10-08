@@ -1,6 +1,6 @@
 # MongoDB design
 
-[Authentication receipt protection](specs/hiring-security-and-runtime-reliability.md) adds migration `017_authentication_receipt_protection`: bounded guarded HMAC conversion with primary/majority consistency, restart key pinning, metadata preservation and complete-state verification. Old account writers must stop; user data and non-authentication receipts remain unchanged.
+[Authentication receipt protection](specs/hiring-security-and-runtime-reliability.md): login/signUp receipt fingerprints are HMAC-protected; no conversion of older receipt shapes pre-MVP (receipts expire by TTL); user data and non-authentication receipts are unaffected.
 
 See the [current collection inventory](wiki/mongodb-and-analytics.md) for every operational and analytics MongoDB collection, relationships, indexes, retention and use-case links.
 

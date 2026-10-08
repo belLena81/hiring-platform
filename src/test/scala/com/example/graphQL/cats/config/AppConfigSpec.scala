@@ -687,6 +687,31 @@ class AppConfigSpec extends FunSuite {
     assertEquals(loaded.map(_.jwtAuth.hmacSecret), Right("abcdefghijklmnopqrstuvwxyz123456"))
   }
 
+  test("authentication receipt secret is optional, strong when set, and falls back to the JWT secret") {
+    val strong = "abcdefghijklmnopqrstuvwxyz123456"
+    assertEquals(
+      AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.receiptSecret),
+      Right(defaultJwtAuth.hmacSecret)
+    )
+    assertEquals(
+      AppConfig
+        .fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"" + strong + "\"\n", Map.empty)
+        .map(_.jwtAuth.receiptSecret),
+      Right(strong)
+    )
+    assertEquals(
+      AppConfig
+        .fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"  \"\n", Map.empty)
+        .map(_.jwtAuth.receiptSecret),
+      Right(defaultJwtAuth.hmacSecret)
+    )
+    assertContainsError(
+      AppConfig.fromConfig(defaultConfig + "auth.jwt.receipt-fingerprint-secret = \"short\"\n", Map.empty),
+      ConfigError.InvalidReceiptFingerprintSecret
+    )
+    assert(!defaultJwtAuth.copy(receiptFingerprintSecret = Some(strong)).toString.contains(strong))
+  }
+
   test("HGQL-AC02 cursor JWT TTL is bounded and defaults to fifteen minutes") {
     assertEquals(AppConfig.fromConfig(defaultConfig, Map.empty).map(_.jwtAuth.cursorTtlSeconds), Right(900L))
     assertContainsError(

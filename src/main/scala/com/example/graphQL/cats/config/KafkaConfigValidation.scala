@@ -123,21 +123,6 @@ private[config] object KafkaConfigValidation {
     group(raw.workerGroup) && group(raw.orchestratorGroup) && raw.workerGroup != raw.orchestratorGroup
   }
 
-  def validKafkaBatchSize(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 500, ConfigError.InvalidKafkaBatchSize)(value)
-  def validKafkaLeaseSeconds(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 3600, ConfigError.InvalidKafkaLeaseSeconds)(value)
-  def validKafkaRetryDelaySeconds(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 3600, ConfigError.InvalidKafkaRetryDelaySeconds)(value)
-  def validKafkaMaxAttempts(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 100, ConfigError.InvalidKafkaMaxAttempts)(value)
-  def validKafkaPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(100, 60000, ConfigError.InvalidKafkaPollInterval)(value)
-  def validKafkaReceiptTtl(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 365, ConfigError.InvalidKafkaReceiptTtl)(value)
-  def validKafkaQuarantineTtl(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 365, ConfigError.InvalidKafkaQuarantineTtl)(value)
-
   def validKafkaSaslSecurityProtocol(
       value: Option[String],
       bootstrapServers: String

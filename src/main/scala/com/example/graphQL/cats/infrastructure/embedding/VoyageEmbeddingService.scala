@@ -2,7 +2,7 @@ package com.example.graphQL.cats.infrastructure.embedding
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import fs2.Stream
+import fs2.{Chunk, Stream}
 import com.example.graphQL.cats.service.port.{
   EmbeddingError,
   EmbeddingInput,
@@ -61,11 +61,11 @@ final class VoyageEmbeddingService(
             if (!response.status.isSuccess)
               IO.pure(Left(EmbeddingError.ProviderUnavailable))
             else
-              response.body.take(maximumResponseBytes + 1L).compile.toVector.flatMap { bytes =>
+              response.body.take(maximumResponseBytes + 1L).compile.to(Chunk).flatMap { bytes =>
                 if (bytes.size.toLong > maximumResponseBytes) IO.pure(Left(EmbeddingError.InvalidResponse))
                 else
                   response
-                    .withBodyStream(Stream.emits(bytes).covary[IO])
+                    .withBodyStream(Stream.chunk(bytes).covary[IO])
                     .attemptAs[VoyageEmbeddingResponse](using jsonOf[IO, VoyageEmbeddingResponse])
                     .value
                     .map { decoded =>
@@ -83,6 +83,7 @@ final class VoyageEmbeddingService(
     }
   }
 
+  // Headroom over ~25 JSON characters per float for the single embedding plus response metadata.
   private val maximumResponseBytes: Long = 64L * 1024L + 32L * dimension.toLong
 
   private def validate(response: VoyageEmbeddingResponse): Either[EmbeddingError, EmbeddingVector] =

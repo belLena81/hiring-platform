@@ -2,9 +2,8 @@
 
 ## Authentication receipt protection and trusted Admin seed
 
-Migration `017_authentication_receipt_protection` changes only password-bearing `login`, `signUp`, and historical `bootstrapAdmin` receipt fingerprints. Stop incompatible account writers before startup. Primary/majority reads and journaled majority writes pin the derived HMAC key in the Running ledger before converting batches of at most 500 with exact old-value guards. Receipt identity, authoritative result and expiry remain intact; malformed rows block progress. Restart uses the same key and saved checkpoint, and completion verifies every relevant fingerprint has the protected shape. A completed startup also verifies no plain fingerprints were reintroduced. No legacy runtime reader or rollback to the old account binary is supported.
 
-JWT secret rotation after completion invalidates existing authentication receipt matches; use new idempotency keys. Migration cannot remediate previously captured backups. Public GraphQL `bootstrapAdmin` is removed under the pre-MVP single-active-shape policy; trusted `auth.admin-seed` startup configuration owns provisioning and never resets an existing same-name singleton. Existing users and non-authentication mutation receipts are preserved. See [acceptance evidence](specs/hiring-security-and-runtime-reliability.md).
+Receipt fingerprints are keyed by `auth.jwt.receipt-fingerprint-secret` (`AUTH_RECEIPT_FP_SECRET`, at least 32 bytes), falling back to the JWT secret when unset. Pre-MVP there is no receipt conversion: older receipt shapes expire by TTL. Changing the receipt key invalidates existing authentication receipt matches, so use new idempotency keys. Public GraphQL `bootstrapAdmin` is removed under the pre-MVP single-active-shape policy; trusted `auth.admin-seed` startup configuration owns provisioning and never resets an existing singleton. Existing users and non-authentication mutation receipts are preserved. See [acceptance evidence](specs/hiring-security-and-runtime-reliability.md).
 
 ## Candidate residence integrity
 

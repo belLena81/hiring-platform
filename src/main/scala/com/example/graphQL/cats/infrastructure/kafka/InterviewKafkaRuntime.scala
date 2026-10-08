@@ -26,8 +26,6 @@ import java.nio.charset.StandardCharsets
 import scala.concurrent.duration.*
 
 object InterviewMessageCodec {
-  val CommandsTopic = "hiring.interview-commands"
-  val ResultsTopic = "hiring.interview-results"
   given Encoder[InterviewStep] = Encoder.encodeString.contramap(_.toString)
   given Decoder[InterviewStep] =
     Decoder.decodeString.emap(value => InterviewStep.values.find(_.toString == value).toRight("invalid interview step"))

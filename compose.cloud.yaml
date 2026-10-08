@@ -1,0 +1,34 @@
+# Cloud-shaped overlay for compose.yaml: analytics workers run against externally managed MongoDB and Kafka.
+# Usage: docker compose -f compose.yaml -f compose.cloud.yaml --profile analytics up analytics-batch
+# Everything is injected from the environment or a secret store; no provisioning or paid service is created here.
+services:
+  mongodb:
+    profiles: ["local-infra"]
+  kafka:
+    profiles: ["local-infra"]
+  kafka-acl-init:
+    profiles: ["local-infra"]
+
+  analytics-batch: &analytics-cloud
+    depends_on: !reset []
+    environment: &analytics-cloud-environment
+      ANALYTICS_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:?Set the managed Kafka bootstrap servers}
+      ANALYTICS_KAFKA_SECURITY_PROTOCOL: SASL_SSL
+      ANALYTICS_KAFKA_ALLOW_PLAINTEXT: "false"
+      ANALYTICS_LAKEHOUSE_ROOT: ${ANALYTICS_LAKEHOUSE_ROOT:?Set the object-store lakehouse root URI}
+      MONGODB_URI: ${MONGODB_URI:?Set the managed MongoDB connection string}
+    volumes: !override
+      - analytics-scratch:/var/lib/hiring-analytics
+
+  analytics-streaming:
+    <<: *analytics-cloud
+    environment:
+      <<: *analytics-cloud-environment
+
+  analytics-erasure-worker:
+    <<: *analytics-cloud
+    environment:
+      <<: *analytics-cloud-environment
+
+volumes:
+  analytics-scratch:

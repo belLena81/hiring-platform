@@ -56,7 +56,7 @@ final class MongoAdminSeedIntegrationSpec extends MongoIntegrationSuite {
               assertEquals(count, 1L)
               assertEquals(original, Some(true))
               assertEquals(changed, Some(false))
-              assert(conflict.isLeft)
+              assert(conflict.isRight) // drifted seed name is a no-op once the registry is initialized
               assert(inconsistent.isLeft)
             }
           } yield ()

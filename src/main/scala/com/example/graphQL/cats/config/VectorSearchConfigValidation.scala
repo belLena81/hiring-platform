@@ -98,12 +98,4 @@ private[config] object VectorSearchConfigValidation {
         ConfigError.InvalidRerankModel
       )
       .toValidatedNel
-  def validIndexReadyTimeout(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1000, 600000, ConfigError.InvalidSearchIndexReadyTimeout)(value)
-  def validIndexPollInterval(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(100, 10000, ConfigError.InvalidSearchIndexPollInterval)(value)
-  def validEmbeddingRetryAttempts(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(1, 10, ConfigError.InvalidEmbeddingRetryAttempts)(value)
-  def validEmbeddingRetryDelay(value: Int): ValidatedNel[ConfigError, Int] =
-    ConfigBounds.bounded(100, 60000, ConfigError.InvalidEmbeddingRetryDelay)(value)
 }

@@ -192,8 +192,7 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
     val scenarios = List(
       (recruiter, recruiter.id.value.toString, "wrong-password", "user"),
       (deletedRecruiter, recruiter.id.value.toString, "password-password", "user"),
-      (recruiter, userId.value.toString, "password-password", "user"),
-      (recruiter, recruiter.id.value.toString, "password-password", "job")
+      (recruiter, userId.value.toString, "password-password", "user")
     )
     import cats.syntax.all.*
     scenarios.traverse_ { case (storedUser, referencedId, suppliedPassword, entityType) =>
@@ -217,6 +216,21 @@ final class UserAccountServiceSpec extends CatsEffectSuite {
         }
       } yield ()
     }
+  }
+
+  test("login replay with a corrupt stored reference type is a repository fault, not a credential failure") {
+    for {
+      accounts <- TestAccounts.create(initialized = true)
+      _ <- accounts.values.set(
+        Map("recruiter" -> AccountCredentials(recruiter, passwordHash("hash:password-password")))
+      )
+      service = accountService(
+        new TestUsers(Map.empty),
+        accounts,
+        idempotent = Idempotent(ReplayReceipts(MutationEntityReference("job", recruiter.id.value.toString)))
+      )
+      login <- service.login(request, LoginInput("Recruiter", "password-password")).value
+    } yield assertEquals(login, Left(UseCaseError.Repository(RepositoryError.Unavailable)))
   }
 
   test("authentication fingerprints reach the receipt repository protected with operation and scope") {

@@ -195,10 +195,18 @@ final class UserAccountService(
   private def replayAccount(name: String, password: String)(
       reference: com.example.graphQL.cats.service.port.MutationEntityReference
   ): UseCaseIO[(User, AccountToken)] =
+    if (reference.entityType != "user") UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable))
+    else
+      replayKnownAccount(name, password, reference)
+
+  private def replayKnownAccount(
+      name: String,
+      password: String,
+      reference: com.example.graphQL.cats.service.port.MutationEntityReference
+  ): UseCaseIO[(User, AccountToken)] =
     UseCaseIO.repository(accounts.findByCanonicalName(canonicalName(name))).flatMap {
       case Some(credentials)
-          if reference.entityType == "user" &&
-            credentials.user.id.value.toString == reference.entityId &&
+          if credentials.user.id.value.toString == reference.entityId &&
             credentials.user.accountStatus == AccountStatus.Active &&
             canonicalName(credentials.user.name) == canonicalName(name) =>
         UseCaseIO.liftIO(hasher.verify(credentials.passwordHash, password)).flatMap {
@@ -224,7 +232,7 @@ final class UserAccountService(
   )(reference: com.example.graphQL.cats.service.port.MutationEntityReference): UseCaseIO[String] =
     if (reference.entityType == "analytics-erasure-receipt" && validReceiptId(reference.entityId))
       authorization.resolve(actor, allowDeleted = true).map(_ => reference.entityId)
-    else UseCaseIO.left(UseCaseError.Authentication(AuthenticationError.Unauthorized))
+    else UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable)) // corrupt stored reference
 
   private def parseUserId(
       reference: com.example.graphQL.cats.service.port.MutationEntityReference

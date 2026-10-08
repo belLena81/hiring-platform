@@ -98,6 +98,7 @@ private[config] object AppConfigValidation {
     case "kafka.restart-max-delay-seconds"          => Some(ConfigError.InvalidKafkaRestartMaxDelay)
     case path if path.startsWith("auth.admin-seed") => Some(ConfigError.InvalidAdminSeed)
     case "auth.jwt.hs256-secret"                    => Some(ConfigError.InvalidJwtSecret)
+    case "auth.jwt.receipt-fingerprint-secret"      => Some(ConfigError.InvalidReceiptFingerprintSecret)
     case "auth.jwt.issuer"                          => Some(ConfigError.InvalidJwtIssuer)
     case "auth.jwt.audience"                        => Some(ConfigError.InvalidJwtAudience)
     case "auth.jwt.cursor-ttl-seconds"              => Some(ConfigError.InvalidCursorTtl)

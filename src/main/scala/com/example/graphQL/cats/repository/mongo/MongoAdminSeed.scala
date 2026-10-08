@@ -11,7 +11,7 @@ import mongo4cats.database.MongoDatabase
 import java.text.Normalizer
 import java.util.UUID
 
-/** Trusted startup-only provisioning; registry identity and singleton must agree before accepting a no-op. */
+/** Trusted startup-only provisioning. First run creates the singleton; later runs only require a coherent registry. */
 object MongoAdminSeed {
   private def rejected: IO[Unit] =
     IO.raiseError(new IllegalStateException("Admin seed conflicts with account registry"))
@@ -27,9 +27,21 @@ object MongoAdminSeed {
       (config.name, config.password) match {
         case (Some(name), Some(password)) =>
           val canonical = AccountName.canonical(name)
+          def registryState: IO[Option[org.bson.Document]] =
+            Mongo4catsCollections
+              .documents(database, MongoCollections.AccountRegistry)
+              .flatMap(_.find(Filters.eq(MongoFields.Id, "user-account-registry")).first)
+          // After first provisioning the seed is a no-op: later renames, status or password changes of the
+          // admin are account operations, not startup conflicts. Only an inconsistent registry is fatal.
+          def existing: IO[Unit] = registryState.flatMap {
+            case Some(document)
+                if Option(document.get(MongoFields.State)).contains("Initialized") &&
+                  scala.util.Try(UUID.fromString(String.valueOf(document.get(MongoFields.AdminId)))).isSuccess =>
+              IO.unit
+            case _ => rejected
+          }
           def reconcile: IO[Unit] = for {
-            registry <- Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry)
-            state <- registry.find(Filters.eq(MongoFields.Id, "user-account-registry")).first
+            state <- registryState
             account <- accounts.findByCanonicalName(canonical).value
             _ <- (state, account) match {
               case (Some(document), Right(Some(credentials)))
@@ -42,7 +54,7 @@ object MongoAdminSeed {
             }
           } yield ()
           accounts.initialized.value.flatMap {
-            case Right(true)  => reconcile
+            case Right(true)  => existing
             case Right(false) =>
               for {
                 now <- IO.realTimeInstant
