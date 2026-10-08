@@ -139,8 +139,8 @@ object SearchEvaluationAtlasRunner extends IOApp {
     client.getDatabase(settings.database).flatMap { database =>
       Resource
         .make(IO.pure(database))(_ =>
-          database
-            .runCommand(CatsDocument.fromJava(new Document("dropDatabase", 1)))
+          MongoAccessEvaluationSupport
+            .command(database, new Document("dropDatabase", 1))
             .attempt
             .void
         )
@@ -174,9 +174,9 @@ object SearchEvaluationAtlasRunner extends IOApp {
                     _ <- seedCollection(collection, settings)
                     _ <- createSearchIndex(database, collectionName, indexName, indexDefinition)
                     _ <- awaitIndex(collection, indexName, 120.seconds)
-                    version <- database
-                      .runCommand(CatsDocument.fromJava(new Document("buildInfo", 1)))
-                      .map(_.getString("version").getOrElse("unknown"))
+                    version <- MongoAccessEvaluationSupport
+                      .command(database, new Document("buildInfo", 1))
+                      .map(value => Option(value.getString("version")).getOrElse("unknown"))
                     _ <- Option
                       .when(settings.temperature == "warm")(
                         (1 to settings.queryCount).toList.traverse_(query =>
@@ -197,9 +197,9 @@ object SearchEvaluationAtlasRunner extends IOApp {
                       .traverse(batch => batch.parTraverse(query => evaluateQuery(collection, settings, query)))
                       .map(_.flatten)
                     ended <- IO.monotonic
-                    indexBytes <- database
-                      .runCommand(CatsDocument.fromJava(new Document("collStats", collectionName)))
-                      .map(_.getAs[Long]("totalIndexSize"))
+                    indexBytes <- MongoAccessEvaluationSupport
+                      .command(database, new Document("collStats", collectionName))
+                      .map(value => Option(value.get("totalIndexSize")).collect { case size: Number => size.longValue })
                       .handleError(_ => None)
                     _ <- writeReports(settings, version, queryResults, (ended - started).toMillis, indexBytes)
                     _ <- captureExplain(database, collectionName, settings)
@@ -215,19 +215,18 @@ object SearchEvaluationAtlasRunner extends IOApp {
       indexName: String,
       definition: Document
   ): IO[Unit] =
-    database
-      .runCommand(
-        CatsDocument.fromJava(
-          new Document("createSearchIndexes", collectionName)
-            .append(
-              "indexes",
-              List(
-                new Document("name", indexName)
-                  .append("type", "vectorSearch")
-                  .append("definition", definition)
-              ).asJava
-            )
-        )
+    MongoAccessEvaluationSupport
+      .command(
+        database,
+        new Document("createSearchIndexes", collectionName)
+          .append(
+            "indexes",
+            List(
+              new Document("name", indexName)
+                .append("type", "vectorSearch")
+                .append("definition", definition)
+            ).asJava
+          )
       )
       .void
 

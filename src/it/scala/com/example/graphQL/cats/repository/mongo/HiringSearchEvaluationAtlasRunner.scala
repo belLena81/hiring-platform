@@ -60,7 +60,7 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
               Resource
                 .make(
                   IO(UUID.randomUUID()).flatMap(nonce => client.getDatabase(ownedDatabaseName(nonce)))
-                )(db => db.runCommand(mongo4cats.bson.Document.fromJava(new Document("dropDatabase", 1))).void)
+                )(db => MongoAccessEvaluationSupport.command(db, new Document("dropDatabase", 1)).void)
                 .use(database => evaluate(database, settings))
             }
             .attempt
@@ -98,11 +98,11 @@ object HiringSearchEvaluationAtlasRunner extends IOApp {
     _ <- seed(database)
     fingerprint <- SearchEvaluationArtifacts.sourceFingerprint
     timestamp <- IO.realTimeInstant
-    version <- database
-      .runCommand(mongo4cats.bson.Document.fromJava(new Document("buildInfo", 1)))
-      .map(
-        _.getString("version")
-          .filter(value => value.length <= 128 && value.matches("[0-9]+(\\.[0-9]+){1,3}[-a-zA-Z0-9.]*"))
+    version <- MongoAccessEvaluationSupport
+      .command(database, new Document("buildInfo", 1))
+      .map(value =>
+        Option(value.getString("version"))
+          .filter(text => text.length <= 128 && text.matches("[0-9]+(\\.[0-9]+){1,3}[-a-zA-Z0-9.]*"))
       )
       .handleError(_ => None)
     definitions <- List(MongoCollections.Jobs, MongoCollections.Users).traverse { collection =>
