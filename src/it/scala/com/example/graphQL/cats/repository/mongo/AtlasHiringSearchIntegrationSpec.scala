@@ -201,9 +201,10 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
   test("production vector and application RRF branches enforce the consent truth table and current eligibility") {
     live { (db, policy) =>
       for {
+        // Production order: indexes and migrations run on the empty database before any account exists.
+        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
         seeded <- fixture(db)
         (job, expected) = seeded
-        _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
         repo = repository(db, SearchFusionStrategy.ApplicationRrf, policy)
         // Poll only initial index ingestion. Mutation checks below do not wait for Atlas indexing.
         _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
@@ -291,8 +292,8 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
     test(s"explicit production $strategy capability gate") {
       live { (db, policy) =>
         for {
-          seeded <- fixture(db)
           _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
+          seeded <- fixture(db)
           _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
           result <- repository(db, strategy, policy).candidateMatches(query(seeded._1, true)).value
           _ = assert(result.isRight, s"BLOCKED: $strategy unavailable on this deployment")
@@ -304,8 +305,8 @@ final class AtlasHiringSearchIntegrationSpec extends CatsEffectSuite {
   test("explicit production native rerank capability gate") {
     live { (db, policy) =>
       for {
-        seeded <- fixture(db)
         _ <- MongoHiringSetup.initialize(db, Some(indexes), Diagnostics.noop)
+        seeded <- fixture(db)
         _ <- awaitIngestion(db, seeded._1, seeded._2, policy)
         result <- repository(db, SearchFusionStrategy.MongoRankFusion, policy, rerank = true)
           .candidateMatches(query(seeded._1, true))

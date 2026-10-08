@@ -40,7 +40,7 @@ The [hiring discovery specification](specs/hiring-discovery-search-quality.md) o
 - MongoDB query plans and indexes are evaluated against representative queries and measured workloads, accounting for read gains and write/storage costs.
 - Personalized ranking is compared with the relevance baseline and is adopted only if evidence shows a quality improvement; otherwise, defer it.
 
-Atlas is required for this stage's Atlas Search and Vector Search capabilities. Local MongoDB Community remains suitable for core workflows and local transaction tests. This roadmap adds no Atlas provisioning or spend.
+Atlas is required for this stage's Atlas Search and Vector Search capabilities. Local MongoDB Community remains suitable for core workflows and local transaction tests; the opt-in `compose.atlas-local.yaml` (MongoDB Atlas Local, mongot) runs `$search`, `$vectorSearch`, `$rankFusion` and `$scoreFusion` for correctness evidence only, while native `$rerank`, Atlas-scale latency/recall and index-size figures remain Atlas-only. This roadmap adds no Atlas provisioning or spend.
 
 ## Purpose
 

@@ -1,0 +1,24 @@
+# Opt-in local Atlas-compatible MongoDB (mongot: $search, $vectorSearch, $rankFusion, $scoreFusion) for the
+# Atlas-gated integration specs. Correctness only: local ANN recall, latency and index size are not Atlas figures.
+# Usage:
+#   docker compose -f compose.atlas-local.yaml up -d --wait
+#   ATLAS_TEST_URI='mongodb://127.0.0.1:27018/?directConnection=true' ATLAS_TEST_DISPOSABLE=true \
+#     ATLAS_TEST_ALLOWED_HOSTS=127.0.0.1:27018 sbt 'IntegrationTest/testOnly *AtlasHiringSearchIntegrationSpec'
+#   docker compose -f compose.atlas-local.yaml down --volumes
+name: hiring-atlas-local
+services:
+  atlas-local:
+    image: mongodb/mongodb-atlas-local:latest@sha256:3a8affee01fda1532d4083304bb6883f6fc0f1bf904c267d1785befa5391c58a
+    ports:
+      - "127.0.0.1:27018:27017"
+    tmpfs:
+      - /data/db:mode=1777
+      - /data/configdb:mode=1777
+      - /data/mongot:mode=1777
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.hello().isWritablePrimary ? quit(0) : quit(1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s

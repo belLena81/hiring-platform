@@ -199,6 +199,8 @@ Scheduling acceptance rechecks the authoritative application and job in its Mong
 
 Interview transactions classify exhausted transient MongoDB write conflicts as unavailable outcomes requiring reconciliation. They remain distinct from a confirmed guard rejection; existing transaction callers retain their configured classification. Transient publication authorization failures return the fenced claim to due work with bounded backoff rather than waiting for its entire lease. Timeout/claim validation and configuration validation uses widened arithmetic; elapsed-time drain is superseded by broker-confirmed publication fencing.
 
+Interview Kafka rerun (2026-10-08): `scripts/run-local-tests.sh interview` against the owned local Mongo replica set and SASL Kafka stack executed `InterviewKafkaRestartIntegrationSpec` (4/4), `InterviewPublicationFencingIntegrationSpec` (4/4) and `InterviewSchedulingWorkerIntegrationSpec` (1/1): 9 passed, 0 failed, 0 skipped. This converts the previously skipped restart proofs into executed local evidence; deployed redundancy, real providers and production writer exclusion remain open.
+
 ## Local scheduling measurements and executions
 
 The disposable MongoDB and isolated local SASL Kafka proof executed 32 workflows with two worker resources. Workers were cancelled after a durable calendar reservation and again after a durable notification receipt following the hiring commit, then restarted. All 32 workflows completed with 32 reservations, 64 recipient receipts and zero workflows requiring repair. The separate Kafka tests passed both failed-record replay before the next offset and null-record quarantine before a valid record.

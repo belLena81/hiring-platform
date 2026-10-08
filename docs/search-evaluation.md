@@ -75,6 +75,12 @@ These are **observed retrieval with synthetic embeddings** when actually execute
 
 The application continues to write Voyage embeddings through its durable work queue. Automated Embedding is only a separate Atlas preview experiment: create a disposable collection populated with synthetic documents, configure an isolated AutoEmbed index and query path, then measure indexing and query latency and provider/billing telemetry against the manual-embedding baseline. Record the Atlas preview status and version. Delete only this disposable collection and index after recording results. Never dual-write application collections or move the application read path as part of this experiment.
 
+## Local Atlas-compatible run
+
+`compose.atlas-local.yaml` starts a pinned MongoDB Atlas Local image on `127.0.0.1:27018` (tmpfs, no provisioning or spend). Point the existing disposable-Atlas guard at it with `ATLAS_TEST_URI='mongodb://127.0.0.1:27018/?directConnection=true' ATLAS_TEST_DISPOSABLE=true ATLAS_TEST_ALLOWED_HOSTS=127.0.0.1:27018`, then run `sbt 'IntegrationTest/testOnly *AtlasHiringSearchIntegrationSpec'`. This is correctness evidence only: local ANN recall, latency and index size are not Atlas figures, and it does not replace the disposable-Atlas gates above.
+
+Recorded run (October 8, 2026, Atlas Local reporting MongoDB 8.3.11): a direct `$search`, `$vectorSearch` (ANN with filter and exact), `$rankFusion` and `$scoreFusion` probe executed against READY indexes. `AtlasHiringSearchIntegrationSpec` passed 3/4 (consent truth table, `MongoRankFusion` and `MongoScoreFusion` capability gates); the native `$rerank` gate failed with its explicit BLOCKED assertion because the local image does not provide it. `HiringSearchEvaluationAtlasRunner` terminated with a `StackOverflowError` in BSON document encoding before capture, independent of JVM stack size; it has never run to completion and remains an open defect.
+
 ## Current evidence
 
 `SearchEvaluationMetrics` implements Recall@K and NDCG@K for offline run analysis. The recorded evidence contains no authorized live Atlas benchmark or Automated Embedding run. It establishes no live latency, recall, throughput, resource, or cost result; verify environment availability before any newly authorized benchmark.
