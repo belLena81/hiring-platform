@@ -4,6 +4,7 @@ import cats.effect.IO
 import cats.syntax.all.*
 import com.example.graphQL.cats.infrastructure.kafka.KafkaProducerGenerationRetirement
 import com.example.graphQL.cats.service.port.{RepositoryIO, RepositoryError}
+import com.example.graphQL.cats.service.Diagnostics
 import com.mongodb.client.model.Sorts
 import mongo4cats.database.MongoDatabase
 import org.bson.Document
@@ -16,12 +17,13 @@ final case class ProducerGenerationInventoryPage(transactionalIds: Vector[String
 final class MongoProducerGenerationMaintenance(
     database: MongoDatabase[IO],
     fence: String => RepositoryIO[Unit],
-    currentTime: IO[Instant] = IO.realTimeInstant
+    currentTime: IO[Instant] = IO.realTimeInstant,
+    diagnostics: Diagnostics = Diagnostics.noop
 ) {
   private val rows = Mongo4catsCollections.documents(database, MongoProducerRegistrations.Collection)
 
   private def boundary[A](effect: IO[A]): RepositoryIO[A] =
-    RepositoryIO.fromIOEither(effect.attempt.map(_.leftMap(_ => RepositoryError.Unavailable)))
+    MongoRepositorySupport.repositoryGuard(diagnostics, "producerGenerationMaintenance")(RepositoryIO.lift(effect))
 
   private def text(row: Document, field: String): Either[RepositoryError, String] =
     Option(row.get(field))

@@ -111,7 +111,8 @@ object LogFields {
     "com.example.graphQL.cats.repository.mongo.MigrationError$UnacknowledgedWrite",
     "com.example.graphQL.cats.repository.mongo.MigrationError$StepFailed",
     "com.example.graphQL.cats.repository.mongo.MigrationError$ValidatorMismatch",
-    "com.example.graphQL.cats.repository.mongo.MigrationError$IndexMismatch"
+    "com.example.graphQL.cats.repository.mongo.MigrationError$IndexMismatch",
+    "com.example.graphQL.cats.repository.mongo.MongoSetupError"
   )
   private val Root = "com.example.graphQL.cats."
 

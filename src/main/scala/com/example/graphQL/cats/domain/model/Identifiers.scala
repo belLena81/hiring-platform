@@ -4,8 +4,8 @@ import com.example.graphQL.cats.shared.Parsing
 import java.util.UUID
 
 object Identifiers {
-  def parse[A](value: String)(wrap: UUID => A): Either[Throwable, A] =
-    Parsing.parseUuid(value).map(wrap)
+  def parse[A](value: String)(wrap: UUID => A): Option[A] =
+    Parsing.parseUuid(value).toOption.map(wrap)
 
   sealed trait UserTag
   sealed trait JobTag

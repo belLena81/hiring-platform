@@ -91,11 +91,7 @@ final class MongoEmbeddingWorkRepository(
         MongoUpdate.inc(MongoFields.Version, 1L)
       )
     )
-    .subflatMap {
-      case Some(result) if result.getMatchedCount == 1L => Right(())
-      case Some(_)                                      => Left(RepositoryError.AuthorityRevoked)
-      case None                                         => Left(RepositoryError.MissingWriteResult)
-    }
+    .subflatMap(MongoRepositorySupport.matchedOne(_, RepositoryError.AuthorityRevoked))
 
   /** Maintenance capability: the trusted Admin and failed generation are checked in the same transaction. A
     * changed/repaired generation is never overwritten. No provider calls occur here.
@@ -130,9 +126,7 @@ final class MongoEmbeddingWorkRepository(
                 MongoUpdate.inc(MongoFields.Generation, 1L),
                 MongoUpdate.unset(MongoFields.Failure),
                 MongoUpdate.unset(MongoFields.FinishedAt),
-                MongoUpdate.unset(MongoFields.LeaseOwner),
-                MongoUpdate.unset(MongoFields.LeaseToken),
-                MongoUpdate.unset(MongoFields.LeaseUntil)
+                MongoLeaseQueue.releaseLease
               )
             )
           )
@@ -278,9 +272,7 @@ final class MongoEmbeddingWorkRepository(
     val updates = List(
       MongoUpdate.set(MongoFields.State, EmbeddingWorkState.Retry.toString),
       MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
-      MongoUpdate.unset(MongoFields.LeaseOwner),
-      MongoUpdate.unset(MongoFields.LeaseToken),
-      MongoUpdate.unset(MongoFields.LeaseUntil)
+      MongoLeaseQueue.releaseLease
     ) ++ Option.when(chargeAttempt)(MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1))).toList
     transition(claim, MongoUpdate.combine(updates*))
   }
@@ -296,9 +288,7 @@ final class MongoEmbeddingWorkRepository(
         MongoUpdate.set(MongoFields.State, EmbeddingWorkState.Failed.toString),
         MongoUpdate.set(MongoFields.Failure, failure.toString),
         MongoUpdate.set(MongoFields.FinishedAt, Date.from(now)),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil)
+        MongoLeaseQueue.releaseLease
       )
     )
 
@@ -313,11 +303,7 @@ final class MongoEmbeddingWorkRepository(
             MongoSessionOperations
               .updateOne(collection, None, leaseFilter(claim), update)
           )
-          .subflatMap {
-            case Some(result) if result.getMatchedCount == 1L => Right(())
-            case Some(_)                                      => Left(RepositoryError.Conflict)
-            case None                                         => Left(RepositoryError.MissingWriteResult)
-          }
+          .subflatMap(MongoRepositorySupport.matchedOne(_))
       }
 
   private def leaseFilter(claim: ClaimedEmbeddingWork) =

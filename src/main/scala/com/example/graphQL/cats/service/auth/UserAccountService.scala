@@ -238,10 +238,7 @@ final class UserAccountService(
       reference: com.example.graphQL.cats.service.port.MutationEntityReference
   ): UseCaseIO[UserId] =
     parseIdentifier(reference.entityId)(UserId.apply)
-      .fold(
-        _ => UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable)),
-        UseCaseIO.pure
-      )
+      .fold(UseCaseIO.left(UseCaseError.Repository(RepositoryError.Unavailable)))(UseCaseIO.pure)
 
   private def accountReference(
       value: (User, AccountToken)

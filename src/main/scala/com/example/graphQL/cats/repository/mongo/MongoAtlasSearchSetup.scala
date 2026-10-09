@@ -169,12 +169,12 @@ private[mongo] object MongoAtlasSearchSetup {
         def poll: IO[Unit] = indexDocuments(collectionName).flatMap { indexes =>
           indexes.find(_.getString("name") == name) match {
             case Some(index) if !validate(index) =>
-              IO.raiseError(new IllegalStateException(s"Atlas Search index '$name' has an incompatible definition"))
+              IO.raiseError(MongoSetupError(s"Atlas Search index '$name' has an incompatible definition"))
             case Some(index) if index.getBoolean("queryable", java.lang.Boolean.FALSE).booleanValue() => IO.unit
             case _                                                                                    =>
               IO.monotonic.flatMap(now =>
                 if (now >= until)
-                  IO.raiseError(new IllegalStateException(s"Atlas Search index '$name' is not queryable"))
+                  IO.raiseError(MongoSetupError(s"Atlas Search index '$name' is not queryable"))
                 else IO.sleep(config.pollIntervalMillis.millis) *> poll
               )
           }

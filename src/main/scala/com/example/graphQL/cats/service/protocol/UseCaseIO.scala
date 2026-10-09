@@ -3,6 +3,7 @@ package com.example.graphQL.cats.service.protocol
 import cats.data.EitherT
 import cats.effect.IO
 import com.example.graphQL.cats.service.port.{MutationReceiptFingerprint, RepositoryError, RepositoryIO}
+import com.example.graphQL.cats.domain.error.DomainError
 import com.example.graphQL.cats.service.UseCaseError
 
 import java.util.UUID
@@ -19,6 +20,14 @@ object UseCaseIO {
   def fromIO[A](value: IO[Either[UseCaseError, A]]): UseCaseIO[A] = EitherT(value)
 
   def liftIO[A](value: IO[A]): UseCaseIO[A] = EitherT.liftF(value)
+
+  /** Fails with `error` unless `condition` holds. */
+  def ensure(condition: Boolean, error: => UseCaseError): UseCaseIO[Unit] =
+    EitherT.cond[IO](condition, (), error)
+
+  /** A repository lookup whose absence is the domain `NotFound(entity)` outcome. */
+  def found[A](value: RepositoryIO[Option[A]], entity: String): UseCaseIO[A] =
+    repository(value).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound(entity))))
 
   def repository[A](value: RepositoryIO[A]): UseCaseIO[A] =
     value.leftMap {

@@ -12,9 +12,9 @@ object EmbeddingWorkRepair extends IOApp {
   private def request(args: List[String]): Either[String, (UserId, EmbeddingWorkKey, Option[Long])] = args match {
     case admin :: kind :: entity :: tail if tail.isEmpty || tail.size == 1 =>
       for {
-        actor <- parse(admin)(UserId.apply).leftMap(_ => "Invalid Admin identifier")
+        actor <- parse(admin)(UserId.apply).toRight("Invalid Admin identifier")
         selected <- EmbeddingWorkKind.values.find(_.toString == kind).toRight("Invalid work kind")
-        id <- parse(entity)(UserId.apply).leftMap(_ => "Invalid entity identifier")
+        id <- parse(entity)(UserId.apply).toRight("Invalid entity identifier")
         expected <- tail.headOption.traverse(
           _.toLongOption
             .filter(value => value >= 1L && value < Long.MaxValue)

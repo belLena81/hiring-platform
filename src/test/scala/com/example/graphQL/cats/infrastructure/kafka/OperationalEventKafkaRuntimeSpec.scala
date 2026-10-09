@@ -36,8 +36,8 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   )
 
   test("publisher and reader use independent SASL principals") {
-    val publisher = OperationalEventKafkaRuntime.saslProperties(Some("publisher"), Some("publish-secret"))
-    val reader = OperationalEventKafkaRuntime.saslProperties(Some("analytics_reader"), Some("read-secret"))
+    val publisher = KafkaClientSettings.security(Some("publisher"), Some("publish-secret"))
+    val reader = KafkaClientSettings.security(Some("analytics_reader"), Some("read-secret"))
     assertEquals(publisher.get("security.protocol"), Some("SASL_SSL"))
     assert(publisher.getOrElse("sasl.jaas.config", "").contains("username=\"publisher\""))
     assert(reader.getOrElse("sasl.jaas.config", "").contains("username=\"analytics_reader\""))
@@ -45,7 +45,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   }
 
   test("plaintext SASL transport requires explicit local configuration") {
-    val properties = OperationalEventKafkaRuntime.saslProperties(
+    val properties = KafkaClientSettings.security(
       Some("publisher"),
       Some("publish-secret"),
       KafkaSaslSecurityProtocol.Plaintext
@@ -54,7 +54,7 @@ class OperationalEventKafkaRuntimeSpec extends CatsEffectSuite {
   }
 
   test("Kafka clients without credentials state PLAINTEXT explicitly and carry no SASL properties") {
-    assertEquals(OperationalEventKafkaRuntime.saslProperties(None, None), Map("security.protocol" -> "PLAINTEXT"))
+    assertEquals(KafkaClientSettings.security(None, None), Map("security.protocol" -> "PLAINTEXT"))
   }
 
   test("outbox failure reasons carry exception class names and never client messages or credentials") {

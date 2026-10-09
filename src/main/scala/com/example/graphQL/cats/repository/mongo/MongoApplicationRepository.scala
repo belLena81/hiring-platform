@@ -9,7 +9,6 @@ import com.example.graphQL.cats.service.port.*
 import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.*
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.MongoCommandException
 import com.mongodb.client.model.Filters
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.database.MongoDatabase
@@ -23,7 +22,6 @@ final class MongoApplicationRepository private (
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics
 ) extends ApplicationRepository
-    with MongoApplicationEventInsertion
     with MongoOperationalEventInsertion {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Applications)
   private def events = Mongo4catsCollections.documents(database, MongoCollections.ApplicationEvents)
@@ -34,7 +32,7 @@ final class MongoApplicationRepository private (
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.find") {
         RepositoryIO
-          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readApplication))
           )
@@ -133,7 +131,7 @@ final class MongoApplicationRepository private (
             .flatMap(session =>
               submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session)
             )
-        }(mapWrite)
+        }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   override def updateStatus(application: Application, event: ApplicationEvent): RepositoryIO[Unit] =
     updateStatusWithEvents(application, event, Nil)
@@ -146,7 +144,7 @@ final class MongoApplicationRepository private (
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "applications.updateStatus") {
         transactionRunner.run(session => updateStatusWithSession(application, event, operationalEvents, session))
-      }(mapWrite)
+      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   override def updateStatusWithEvents(
       application: Application,
@@ -159,7 +157,7 @@ final class MongoApplicationRepository private (
         RepositoryIO
           .lift(MongoMutationWriteContext.session(context))
           .flatMap(session => updateStatusWithSession(application, event, operationalEvents, session))
-      }(mapWrite)
+      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   private def updateStatusWithSession(
       application: Application,
@@ -175,16 +173,12 @@ final class MongoApplicationRepository private (
       result <- RepositoryIO.lift(
         MongoSessionOperations.replaceOne(collection, session, filter, MongoHiringCodecs.application(application))
       )
-      _ <- RepositoryIO.fromEither(result match {
-        case Some(value) if value.getMatchedCount == 1L => Right(())
-        case Some(_)                                    => Left(RepositoryError.Conflict)
-        case None                                       => Left(RepositoryError.MissingWriteResult)
-      })
+      _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertStatusEvent") {
         RepositoryIO
-          .lift(insertApplicationEvent(events, session, event))
+          .lift(MongoApplicationEventInsertion.insert(events, session, event))
           .subflatMap(MongoRepositorySupport.writeResult(_).void)
-      }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
+      }(MongoErrors.duplicateAs(RepositoryError.Conflict))
       _ <- insertOperationalEvents(outbox, session, operationalEvents, application.updatedAt, diagnostics)
     } yield ()
 
@@ -252,7 +246,7 @@ final class MongoApplicationRepository private (
       .repositoryGuard(diagnostics, "applications.submit") {
         transactionRunner
           .run(session => submitOnceWithSession(observedJob, application, initialEvent, operationalEvents, session))
-      }(mapWrite)
+      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
 
   private def submitOnceWithSession(
       observedJob: JobSubmissionSnapshot,
@@ -290,12 +284,12 @@ final class MongoApplicationRepository private (
         RepositoryIO
           .lift(MongoSessionOperations.insertOne(collection, session, MongoHiringCodecs.application(application)))
           .subflatMap(MongoRepositorySupport.writeResult(_).void)
-      }(error => mapDuplicateAs(RepositoryError.DuplicateApplication)(error))
+      }(MongoErrors.duplicateAs(RepositoryError.DuplicateApplication))
       _ <- MongoRepositorySupport.repositoryGuard(diagnostics, "applications.insertInitialEvent") {
         RepositoryIO
-          .lift(insertApplicationEvent(events, session, initialEvent))
+          .lift(MongoApplicationEventInsertion.insert(events, session, initialEvent))
           .subflatMap(MongoRepositorySupport.writeResult(_).void)
-      }(error => mapDuplicateAs(RepositoryError.Conflict)(error))
+      }(MongoErrors.duplicateAs(RepositoryError.Conflict))
       _ <- insertOperationalEvents(outbox, session, operationalEvents, application.createdAt, diagnostics)
     } yield ()
 
@@ -304,11 +298,8 @@ final class MongoApplicationRepository private (
       .repositoryGuard(diagnostics, "applications.findOpenJob") {
         RepositoryIO
           .lift(
-            jobs.flatMap(
-              _.find(Filters.eq(MongoFields.Id, id.value.toString))
-                .projection(MongoJobSubmissionSnapshotCodec.projection)
-                .first
-            )
+            MongoSessionOperations
+              .findById(jobs, None, id.value.toString, Some(MongoJobSubmissionSnapshotCodec.projection))
           )
           .subflatMap(document =>
             MongoStoredDocumentDecoding
@@ -316,22 +307,6 @@ final class MongoApplicationRepository private (
               .map(_.filter(_.status == JobStatus.Open))
           )
       }
-
-  private def mapWrite(error: Throwable): Either[RepositoryError, Unit] =
-    error match {
-      case MongoDuplicateKey(_) => Left(RepositoryError.DuplicateApplication)
-      case command: MongoCommandException if MongoTransactionRunner.isWriteConflict(command) =>
-        Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
-    }
-
-  private def mapDuplicateAs(error: RepositoryError)(throwable: Throwable): Either[RepositoryError, Unit] =
-    throwable match {
-      case MongoDuplicateKey(_)                                                              => Left(error)
-      case command: MongoCommandException if MongoTransactionRunner.isWriteConflict(command) =>
-        Left(RepositoryError.Conflict)
-      case _ => Left(RepositoryError.Unavailable)
-    }
 }
 
 object MongoApplicationRepository {

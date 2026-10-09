@@ -47,10 +47,7 @@ final class MongoSemanticSearchRepository(
   }
 
   private def collectWithin[A](stream: Stream[IO, A], maximum: Int): IO[List[A]] =
-    stream.take(maximum.toLong + 1L).compile.toList.flatMap { values =>
-      if (values.size > maximum) IO.raiseError(new IllegalStateException("Mongo result exceeded configured limit"))
-      else IO.pure(values)
-    }
+    MongoBoundedResults.collect(stream, maximum, MongoSetupError("Mongo result exceeded configured limit"))
 
   private def metadataFilter(meta: EmbeddingMeta): Bson = Filters.and(
     Filters.eq(MongoFields.EmbeddingMetaModel, meta.model),
@@ -647,7 +644,7 @@ private[mongo] object MongoSemanticSearchResult {
   ): Either[RepositoryError, Option[SearchRetrievalHit[Id]]] =
     for {
       raw <- Either.catchNonFatal(document.getString(MongoFields.Id)).leftMap(_ => RepositoryError.InvalidStoredData)
-      id <- parseIdentifier(raw)(identify).leftMap(_ => RepositoryError.InvalidStoredData)
+      id <- parseIdentifier(raw)(identify).toRight(RepositoryError.InvalidStoredData)
       score <- readScore(document, MongoFields.Score, required = true)
       retrievalScore <- readScore(document, MongoFields.RetrievalScore, required = false)
       metadata <- MongoSearchEligibilityCodecs.metadata(document)

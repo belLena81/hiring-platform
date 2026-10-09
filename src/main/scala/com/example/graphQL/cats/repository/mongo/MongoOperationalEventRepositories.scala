@@ -33,8 +33,7 @@ final class MongoSearchSessionRepository(
     transactionRunner: MongoTransactionRunner,
     diagnostics: Diagnostics
 ) extends SearchSessionRepository
-    with MongoOperationalEventInsertion
-    with MongoConflictWriteMapping {
+    with MongoOperationalEventInsertion {
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
 
@@ -60,7 +59,7 @@ final class MongoSearchSessionRepository(
               case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
             }
           }
-      )(mapWrite)
+      )(MongoErrors.duplicateAsConflict)
 
   override def find(id: UUID): RepositoryIO[Option[SearchSession]] =
     MongoRepositorySupport
@@ -93,7 +92,7 @@ final class MongoSearchSessionRepository(
       .flatMap(document => RepositoryIO.lift(MongoSessionOperations.insertOne(outbox, session, document)))
       .subflatMap(_.fold[Either[RepositoryError, Boolean]](Left(RepositoryError.MissingWriteResult))(_ => Right(true)))
     MongoRepositorySupport
-      .repositoryGuard(diagnostics, "searchSession.recordInteraction")(insert)(mapWrite)
+      .repositoryGuard(diagnostics, "searchSession.recordInteraction")(insert)(MongoErrors.duplicateAsConflict)
       .leftFlatMap {
         case RepositoryError.Conflict =>
           MongoRepositorySupport
@@ -268,9 +267,7 @@ final class MongoOperationalEventOutboxRepository(
         MongoUpdate.set(MongoFields.State, OutboxState.Published.toString),
         MongoUpdate.set(MongoFields.PublishedAt, Date.from(now)),
         MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(retentionExpiresAt)),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
     ).flatMap(_ => releaseSubjectLeases(leaseToken))
@@ -287,9 +284,7 @@ final class MongoOperationalEventOutboxRepository(
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, OutboxState.Retryable.toString),
         MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
     ).flatMap(_ => releaseSubjectLeases(leaseToken))
@@ -306,9 +301,7 @@ final class MongoOperationalEventOutboxRepository(
       MongoUpdate.combine(
         MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
         MongoUpdate.set(MongoFields.LastError, reason.take(512)),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
     ).flatMap(_ => releaseSubjectLeases(leaseToken))
@@ -436,9 +429,7 @@ final class MongoOperationalEventOutboxRepository(
             MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
             MongoUpdate.set(MongoFields.LastError, "INVALID_EVENT_CONTRACT"),
             MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
-            MongoUpdate.unset(MongoFields.LeaseOwner),
-            MongoUpdate.unset(MongoFields.LeaseToken),
-            MongoUpdate.unset(MongoFields.LeaseUntil)
+            MongoLeaseQueue.releaseLease
           )
         )
       )
@@ -527,9 +518,7 @@ final class MongoOperationalEventOutboxRepository(
       MongoUpdate.set(MongoFields.State, OutboxState.Failed.toString),
       MongoUpdate.set(MongoFields.LastError, "SUBJECT_DELETED"),
       MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now)),
-      MongoUpdate.unset(MongoFields.LeaseOwner),
-      MongoUpdate.unset(MongoFields.LeaseToken),
-      MongoUpdate.unset(MongoFields.LeaseUntil)
+      MongoLeaseQueue.releaseLease
     )
     MongoRepositorySupport.transactionGuard(diagnostics, "outbox.suppressDeletedClaim", session)(
       RepositoryIO.lift(MongoSessionOperations.updateOne(outbox, session, filter, update)).subflatMap {
@@ -583,11 +572,7 @@ final class MongoOperationalEventOutboxRepository(
                 update
               )
           )
-          .subflatMap {
-            case Some(result) if result.getMatchedCount == 1L => Right(())
-            case Some(_)                                      => Left(RepositoryError.Conflict)
-            case None                                         => Left(RepositoryError.MissingWriteResult)
-          }
+          .subflatMap(MongoRepositorySupport.matchedOne(_))
       )
 
   private def readClaimed(

@@ -15,11 +15,11 @@ final class MongoTransactionFailureClassificationSpec extends FunSuite {
     labelled.addLabel("TransientTransactionError")
     List(codeConflict, labelled).foreach { error =>
       assertEquals(
-        MongoTransactionRunner.mapWrite[Unit](error, RepositoryError.Conflict, RepositoryError.Unavailable),
+        MongoErrors.toRepositoryError[Unit](error, RepositoryError.Conflict, RepositoryError.Unavailable),
         Left(RepositoryError.Unavailable)
       )
       assertEquals(
-        MongoTransactionRunner.mapWrite[Unit](error, RepositoryError.Conflict),
+        MongoErrors.toRepositoryError[Unit](error, RepositoryError.Conflict),
         Left(RepositoryError.Conflict)
       )
     }
@@ -29,7 +29,7 @@ final class MongoTransactionFailureClassificationSpec extends FunSuite {
     val unknown = new MongoException("unknown transaction completion")
     unknown.addLabel("UnknownTransactionCommitResult")
     assertEquals(
-      MongoTransactionRunner.mapWrite[Unit](unknown, RepositoryError.Conflict, RepositoryError.Unavailable),
+      MongoErrors.toRepositoryError[Unit](unknown, RepositoryError.Conflict, RepositoryError.Unavailable),
       Left(RepositoryError.Unavailable)
     )
   }

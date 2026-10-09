@@ -18,12 +18,8 @@ private[service] final class AuthorizedJobAccess(
   )(operation: Job => UseCaseIO[A]): UseCaseIO[A] =
     for {
       user <- authorization.resolve(actor)
-      job <- UseCase
-        .repository(jobs.find(jobId))
-        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(
-        Either.cond(authorization.canManage(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
-      )
+      job <- UseCase.found(jobs.find(jobId), "job")
+      _ <- UseCase.ensure(authorization.canManage(user, job), UseCaseError.Domain(DomainError.Forbidden))
       result <- operation(job)
     } yield result
 
@@ -33,12 +29,8 @@ private[service] final class AuthorizedJobAccess(
   )(operation: Versioned[Job] => UseCaseIO[A]): UseCaseIO[A] =
     for {
       user <- authorization.resolve(actor)
-      observed <- UseCase
-        .repository(jobs.findVersioned(jobId))
-        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(
-        Either.cond(authorization.canManage(user, observed.value), (), UseCaseError.Domain(DomainError.Forbidden))
-      )
+      observed <- UseCase.found(jobs.findVersioned(jobId), "job")
+      _ <- UseCase.ensure(authorization.canManage(user, observed.value), UseCaseError.Domain(DomainError.Forbidden))
       result <- operation(observed)
     } yield result
 }

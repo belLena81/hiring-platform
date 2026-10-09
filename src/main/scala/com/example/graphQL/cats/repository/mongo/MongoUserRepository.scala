@@ -26,7 +26,6 @@ final class MongoUserRepository(
     diagnostics: Diagnostics
 ) extends UserRepository
     with UserAccountRepository
-    with MongoConflictWriteMapping
     with MongoOperationalEventInsertion {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Users)
   private def registry = Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry)
@@ -42,13 +41,13 @@ final class MongoUserRepository(
           RepositoryIO
             .lift(MongoSessionOperations.insertOne(collection, None, MongoHiringCodecs.user(user)))
             .subflatMap(MongoRepositorySupport.writeResult(_).void)
-        )(mapWrite)
+        )(MongoErrors.duplicateAsConflict)
 
   override def find(id: UserId): RepositoryIO[Option[User]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.find")(
         RepositoryIO
-          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readUser)))
       )
 
@@ -56,7 +55,7 @@ final class MongoUserRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.findVersioned")(
         RepositoryIO
-          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedUser))
           )
@@ -174,14 +173,10 @@ final class MongoUserRepository(
             )
           )
       )
-      .subflatMap {
-        case Some(result) if result.getMatchedCount == 1L => Right(())
-        case Some(_)                                      => Left(RepositoryError.Conflict)
-        case None                                         => Left(RepositoryError.MissingWriteResult)
-      }
+      .subflatMap(MongoRepositorySupport.matchedOne(_))
       .pipe(effect =>
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoUserRepository.updateEmbedding")(effect)(mapWrite)
+          .repositoryGuard(diagnostics, "MongoUserRepository.updateEmbedding")(effect)(MongoErrors.duplicateAsConflict)
       )
   }
 
@@ -189,7 +184,7 @@ final class MongoUserRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoUserRepository.initialized")(
         RepositoryIO
-          .lift(registry.flatMap(_.find(Filters.eq(MongoFields.Id, "user-account-registry")).first))
+          .lift(MongoSessionOperations.findById(registry, None, "user-account-registry"))
           .map(document => document.exists(value => Option(value.getString(MongoFields.State)).contains("Initialized")))
       )
 
@@ -206,7 +201,8 @@ final class MongoUserRepository(
           bootstrapWithSession(user, passwordHash, session)
         }
         .pipe(effect =>
-          MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+          MongoRepositorySupport
+            .repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(MongoErrors.duplicateAsConflict)
         )
 
   private def bootstrapWithSession(
@@ -274,7 +270,9 @@ final class MongoUserRepository(
           }
         } yield ()
       }.pipe(effect =>
-        MongoRepositorySupport.transactionGuard(diagnostics, "MongoUserRepository.write", session)(effect)(mapWrite)
+        MongoRepositorySupport.transactionGuard(diagnostics, "MongoUserRepository.write", session)(effect)(
+          MongoErrors.duplicateAsConflict
+        )
       )
 
   override def createAccount(
@@ -290,7 +288,9 @@ final class MongoUserRepository(
         transactionRequired = user.role == UserRole.Candidate && embeddingWork.requiresTransaction
       )(session => writeAccountSession(user, passwordHash, now, session))
       .pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(
+          MongoErrors.duplicateAsConflict
+        )
       )
 
   override def findByCanonicalName(nameCanonical: String): RepositoryIO[Option[AccountCredentials]] =
@@ -318,7 +318,9 @@ final class MongoUserRepository(
               findWithSession(userId, session).subflatMap(_.toRight(RepositoryError.MissingStoredResult))
           }
           .pipe(effect =>
-            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(
+              MongoErrors.duplicateAsConflict
+            )
           )
       case _ =>
         MongoMutationWriteContext
@@ -326,7 +328,9 @@ final class MongoUserRepository(
             updateProfileDirect(userId, profile, now, session)
           }
           .pipe(effect =>
-            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+            MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(
+              MongoErrors.duplicateAsConflict
+            )
           )
     }
 
@@ -360,7 +364,9 @@ final class MongoUserRepository(
         case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
       }
       .pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(
+          MongoErrors.duplicateAsConflict
+        )
       )
 
   private def updateCandidateProfileWithEmbeddingWork(
@@ -393,7 +399,9 @@ final class MongoUserRepository(
         case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
       }
       .pipe(effect =>
-        MongoRepositorySupport.transactionGuard(diagnostics, "MongoUserRepository.write", session)(effect)(mapWrite)
+        MongoRepositorySupport.transactionGuard(diagnostics, "MongoUserRepository.write", session)(effect)(
+          MongoErrors.duplicateAsConflict
+        )
       )
   }
 
@@ -421,7 +429,9 @@ final class MongoUserRepository(
         deleteAccountWithSession(userId, now, tombstone, session)
       }
       .pipe(effect =>
-        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(mapWrite)
+        MongoRepositorySupport.repositoryGuard(diagnostics, "MongoUserRepository.write")(effect)(
+          MongoErrors.duplicateAsConflict
+        )
       )
 
   private def deleteAccountWithSession(
@@ -550,11 +560,7 @@ final class MongoUserRepository(
 
 object MongoUserRepository {
   private[mongo] def classifyJobClose(result: Option[UpdateResult]): Either[RepositoryError, Unit] =
-    result match {
-      case Some(value) if value.getMatchedCount == 1L => Right(())
-      case Some(_)                                    => Left(RepositoryError.Conflict)
-      case None                                       => Left(RepositoryError.MissingWriteResult)
-    }
+    MongoRepositorySupport.matchedOne(result)
 
   def transactional(
       database: MongoDatabase[IO],

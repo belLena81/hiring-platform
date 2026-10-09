@@ -7,7 +7,6 @@ import com.example.graphQL.cats.domain.model.*
 import com.example.graphQL.cats.domain.model.Identifiers.UserId
 import com.example.graphQL.cats.service.auth.PasswordHasher
 import com.example.graphQL.cats.service.port.{MutationWriteContext, RepositoryError, UserAccountRepository}
-import com.mongodb.client.model.Filters
 import mongo4cats.database.MongoDatabase
 import java.text.Normalizer
 import java.util.UUID
@@ -15,7 +14,7 @@ import java.util.UUID
 /** Trusted startup-only provisioning. First run creates the singleton; later runs only require a coherent registry. */
 object MongoAdminSeed {
   private def rejected: IO[Unit] =
-    IO.raiseError(new IllegalStateException("Admin seed conflicts with account registry"))
+    IO.raiseError(MongoSetupError("Admin seed conflicts with account registry"))
 
   def run(
       database: MongoDatabase[IO],
@@ -31,9 +30,11 @@ object MongoAdminSeed {
         case (Some(name), Some(password)) =>
           val canonical = AccountName.canonical(name)
           def registryState: IO[Option[org.bson.Document]] =
-            Mongo4catsCollections
-              .documents(database, MongoCollections.AccountRegistry)
-              .flatMap(_.find(Filters.eq(MongoFields.Id, "user-account-registry")).first)
+            MongoSessionOperations.findById(
+              Mongo4catsCollections.documents(database, MongoCollections.AccountRegistry),
+              None,
+              "user-account-registry"
+            )
           // After first provisioning the seed is a no-op: later renames, status or password changes of the
           // admin are account operations, not startup conflicts. Only an inconsistent registry is fatal.
           def existing: IO[Unit] = registryState.flatMap {
@@ -69,11 +70,11 @@ object MongoAdminSeed {
                 _ <- result match {
                   case Right(_)                       => reconcile
                   case Left(RepositoryError.Conflict) => reconcile
-                  case Left(_) => IO.raiseError(new IllegalStateException("Admin seed persistence unavailable"))
+                  case Left(_) => IO.raiseError(MongoSetupError("Admin seed persistence unavailable"))
                 }
               } yield ()
-            case Left(_) => IO.raiseError(new IllegalStateException("Admin seed registry unavailable"))
+            case Left(_) => IO.raiseError(MongoSetupError("Admin seed registry unavailable"))
           }
-        case _ => IO.raiseError(new IllegalStateException("Admin seed credentials are required"))
+        case _ => IO.raiseError(MongoSetupError("Admin seed credentials are required"))
       }
 }

@@ -75,7 +75,7 @@ private[mongo] object MongoSearchEligibilityCodecs {
   private def candidateSource(document: Document): MongoDocumentFields.Read[CandidateSearchEligibility] =
     for {
       rawId <- MongoDocumentFields.requiredString(document, MongoFields.Id)
-      id <- parseIdentifier(rawId)(UserId.apply).leftMap(_ => StoredDocumentError.InvalidField(MongoFields.Id))
+      id <- parseIdentifier(rawId)(UserId.apply).toRight(StoredDocumentError.InvalidField(MongoFields.Id))
       role <- MongoDocumentFields.requiredEnum(document, MongoFields.Role)(MongoDocumentFields.byName(UserRole.values))
       status <- MongoDocumentFields.requiredEnum(document, MongoFields.AccountStatus)(
         MongoDocumentFields.byName(AccountStatus.values)

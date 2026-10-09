@@ -24,10 +24,11 @@ private[mongo] object MongoAtlasSearchAdmin {
       database.underlying
         .getCollection(collectionName, classOf[Document])
         .aggregate(List(new Document("$listSearchIndexes", new Document())).asJava)
-    ).flatMap(_.toStreamBuffered[IO](bufferSize = PublisherBufferSize).take(maximum.toLong + 1L).compile.toList)
-      .flatMap { indexes =>
-        if (indexes.size > maximum)
-          IO.raiseError(new IllegalStateException(s"Atlas Search index list exceeded its maximum of $maximum"))
-        else IO.pure(indexes)
-      }
+    ).flatMap(publisher =>
+      MongoBoundedResults.collect(
+        publisher.toStreamBuffered[IO](bufferSize = PublisherBufferSize),
+        maximum,
+        MongoSetupError(s"Atlas Search index list exceeded its maximum of $maximum")
+      )
+    )
 }

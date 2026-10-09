@@ -63,12 +63,8 @@ final class ApplicationService(
     ) { context =>
       for {
         candidate <- authorization.resolve(actor)
-        _ <- UseCase.fromEither(
-          Either.cond(candidate.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
-        )
-        job <- UseCase
-          .repository(jobs.findSubmissionSnapshot(jobId))
-          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
+        _ <- UseCase.ensure(candidate.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
+        job <- UseCase.found(jobs.findSubmissionSnapshot(jobId), "job")
         now <- UseCase.liftIO(clock.realTimeInstant)
         applicationId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationId(uuid)))
         eventId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
@@ -98,9 +94,7 @@ final class ApplicationService(
   ): UseCaseIO[List[Application]] =
     for {
       user <- authorization.resolve(actor)
-      _ <- UseCase.fromEither(
-        Either.cond(user.role == UserRole.Candidate, (), UseCaseError.Domain(DomainError.Forbidden))
-      )
+      _ <- UseCase.ensure(user.role == UserRole.Candidate, UseCaseError.Domain(DomainError.Forbidden))
       persisted <- UseCase
         .repository(users.find(actor.userId))
         .subflatMap(
@@ -148,19 +142,9 @@ final class ApplicationService(
     ) { context =>
       for {
         actorUser <- authorization.resolve(actor)
-        application <- UseCase
-          .repository(applications.find(applicationId))
-          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
-        job <- UseCase
-          .repository(jobs.find(application.jobId))
-          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-        _ <- UseCase.fromEither(
-          Either.cond(
-            authorization.canManage(actorUser, job),
-            (),
-            UseCaseError.Domain(DomainError.Forbidden)
-          )
-        )
+        application <- UseCase.found(applications.find(applicationId), "application")
+        job <- UseCase.found(jobs.find(application.jobId), "job")
+        _ <- UseCase.ensure(authorization.canManage(actorUser, job), UseCaseError.Domain(DomainError.Forbidden))
         now <- UseCase.liftIO(clock.realTimeInstant)
         eventId <- UseCase.liftIO(uuidGen.randomUUID.map(uuid => ApplicationEventId(uuid)))
         (persistedApplication, change) <- UseCase.fromEither(
@@ -178,14 +162,10 @@ final class ApplicationService(
       actor: ActorContext
   )(reference: MutationEntityReference): UseCaseIO[Application] =
     parseIdentifier(reference.entityId)(ApplicationId.apply)
-      .fold(
-        _ =>
-          UseCase
-            .left(UseCaseError.Repository(RepositoryError.Unavailable)),
-        id =>
-          readModel.canViewApplication(actor, id) *> readModel
-            .application(id)
-            .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
+      .fold(UseCase.left(UseCaseError.Repository(RepositoryError.Unavailable)))(id =>
+        readModel.canViewApplication(actor, id) *> readModel
+          .application(id)
+          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("application"))))
       )
 
   private def applicationReference(

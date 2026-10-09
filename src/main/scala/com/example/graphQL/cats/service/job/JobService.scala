@@ -74,9 +74,7 @@ final class JobService(
     idempotent.execute("createJob", Idempotent.actorScope(actor), request, jobReference, replayJob(actor)) { context =>
       for {
         user <- authorization.resolve(actor)
-        _ <- UseCase.fromEither(
-          Either.cond(authorization.canManageJobs(user), (), UseCaseError.Domain(DomainError.Forbidden))
-        )
+        _ <- UseCase.ensure(authorization.canManageJobs(user), UseCaseError.Domain(DomainError.Forbidden))
         now <- UseCase.liftIO(clock.realTimeInstant)
         jobId <- UseCase.liftIO(uuidGen.randomUUID.map(JobId.apply))
         job <- UseCase.fromEither(validateNewJob(user.id, input, now, jobId))
@@ -97,7 +95,7 @@ final class JobService(
           now <- UseCase.liftIO(clock.realTimeInstant)
           update <- UseCase.fromEither(validateUpdatedJob(job, input, now))
           replacement <- UseCase.fromEither(JobLifecycle.update(update).run(job).map(_._1).widenUseCase)
-          updated <- persistUpdatedJob(observed, Right(replacement), actor.userId, context)
+          updated <- persistJob(observed, Right(replacement), actor.userId, OperationalEventType.JOB_UPDATED, context)
         } yield updated
       }
     }
@@ -141,12 +139,8 @@ final class JobService(
   def viewJob(actor: ActorContext, jobId: JobId): UseCaseIO[Job] =
     for {
       user <- authorization.resolve(actor)
-      job <- UseCase
-        .repository(jobs.find(jobId))
-        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(
-        Either.cond(authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
-      )
+      job <- UseCase.found(jobs.find(jobId), "job")
+      _ <- UseCase.ensure(authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
     } yield job
 
   def searchOpenJobs(actor: ActorContext, filter: JobSearchFilter, page: JobPageRequest): UseCaseIO[List[Job]] =
@@ -160,20 +154,14 @@ final class JobService(
           .toEither
           .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
-      _ <- UseCase.fromEither(
-        Either.cond(
-          limit >= 1 && limit <= com.example.graphQL.cats.domain.pagination.PageSize.Max,
-          (),
-          UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("pageSize"))
-        )
+      _ <- UseCase.ensure(
+        limit >= 1 && limit <= com.example.graphQL.cats.domain.pagination.PageSize.Max,
+        UseCaseError.Search(com.example.graphQL.cats.service.SearchError.InvalidFilter("pageSize"))
       )
       user <- authorization.resolve(actor)
-      _ <- UseCase.fromEither(
-        Either.cond(
-          user.role == UserRole.Candidate || user.role == UserRole.Admin,
-          (),
-          UseCaseError.Domain(DomainError.Forbidden)
-        )
+      _ <- UseCase.ensure(
+        user.role == UserRole.Candidate || user.role == UserRole.Admin,
+        UseCaseError.Domain(DomainError.Forbidden)
       )
       scope <- UseCase.fromEither(
         com.example.graphQL.cats.service.read.HiringReadScope.validated(actor, user, authorization)
@@ -190,12 +178,9 @@ final class JobService(
           .leftMap(errors => UseCaseError.Search(SearchError.accumulated(errors)))
       )
       user <- authorization.resolve(actor)
-      _ <- UseCase.fromEither(
-        Either.cond(
-          user.role == UserRole.Candidate || user.role == UserRole.Admin,
-          (),
-          UseCaseError.Domain(DomainError.Forbidden)
-        )
+      _ <- UseCase.ensure(
+        user.role == UserRole.Candidate || user.role == UserRole.Admin,
+        UseCaseError.Domain(DomainError.Forbidden)
       )
       scope <- UseCase.fromEither(
         com.example.graphQL.cats.service.read.HiringReadScope.validated(actor, user, authorization)
@@ -219,12 +204,7 @@ final class JobService(
       actor: ActorContext
   )(reference: MutationEntityReference): UseCaseIO[Job] =
     parseIdentifier(reference.entityId)(JobId.apply)
-      .fold(
-        _ =>
-          UseCase
-            .left(UseCaseError.Repository(RepositoryError.Unavailable)),
-        viewJob(actor, _)
-      )
+      .fold(UseCase.left(UseCaseError.Repository(RepositoryError.Unavailable)))(viewJob(actor, _))
 
   private def jobReference(job: Job): MutationEntityReference =
     MutationEntityReference("job", job.id.value.toString)
@@ -300,14 +280,6 @@ final class JobService(
         notifyAfterCommit(UseCase.repository(jobs.createWithEvents(job, job.createdAt, List(valid), context)).as(job))
       }
     }
-
-  private def persistUpdatedJob(
-      expected: Versioned[Job],
-      result: Either[UseCaseError, Job],
-      actorId: UserId,
-      context: MutationWriteContext
-  ): UseCaseIO[Job] =
-    persistJob(expected, result, actorId, OperationalEventType.JOB_UPDATED, context)
 
   private def persistJob(
       expected: Versioned[Job],

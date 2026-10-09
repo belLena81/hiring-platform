@@ -23,7 +23,7 @@ import com.example.graphQL.cats.service.events.OperationalEventEnvelope
 import com.example.graphQL.cats.domain.pagination.PageSize
 import com.example.graphQL.cats.service.{Diagnostics, LogEvent, LogField, LogFields}
 import com.example.graphQL.cats.service.Diagnostics.*
-import com.mongodb.{MongoException, MongoWriteException}
+import com.mongodb.{MongoCommandException, MongoException, MongoWriteException}
 import com.mongodb.client.model.{Filters, Sorts}
 import org.bson.Document
 
@@ -99,6 +99,19 @@ private[mongo] object MongoSessionOperations {
     collection.flatMap(c =>
       session.fold(c.find(filter.bson).first)(active => c.find(active, filter.sessionFilter).first)
     )
+
+  def findById(
+      collection: IO[Documents],
+      session: Option[ClientSession[IO]],
+      id: String,
+      projection: Option[Bson] = None
+  ): IO[Option[Document]] = {
+    val filter = MongoFilter.eq(MongoFields.Id, id)
+    collection.flatMap { c =>
+      val query = session.fold(c.find(filter.bson))(active => c.find(active, filter.sessionFilter))
+      projection.fold(query)(query.projection).first
+    }
+  }
 
   /** Reads at most `limit` documents in `_id` order; the stream is bounded to the same limit. */
   def findManyById(
@@ -223,6 +236,14 @@ private[mongo] object MongoLeaseQueue {
   def claimable(available: MongoFilter, inProgress: MongoFilter, now: Instant): MongoFilter =
     MongoFilter.or(available, MongoFilter.and(inProgress, leaseExpired(now)))
 
+  /** Clears the lease so the work is claimable again; combined with the queue's own state change. */
+  val releaseLease: MongoUpdate =
+    MongoUpdate.combine(
+      MongoUpdate.unset(MongoFields.LeaseOwner),
+      MongoUpdate.unset(MongoFields.LeaseToken),
+      MongoUpdate.unset(MongoFields.LeaseUntil)
+    )
+
   def leaseStamp(
       inProgressState: String,
       workerId: String,
@@ -280,6 +301,17 @@ private[mongo] object MongoRepositorySupport {
   def writeResult[A](result: Option[A]): Either[RepositoryError, A] =
     result.toRight(RepositoryError.MissingWriteResult)
 
+  /** A guarded single-document transition: exactly one match succeeds, a lost guard is `mismatch`. */
+  def matchedOne(
+      result: Option[UpdateResult],
+      mismatch: RepositoryError = RepositoryError.Conflict
+  ): Either[RepositoryError, Unit] =
+    result match {
+      case Some(value) if value.getMatchedCount == 1L => Right(())
+      case Some(_)                                    => Left(mismatch)
+      case None                                       => Left(RepositoryError.MissingWriteResult)
+    }
+
   def reportFailure(diagnostics: Diagnostics, operation: String, error: Throwable): IO[Unit] =
     diagnostics.emit(
       LogEvent.MongoRepositoryFailed,
@@ -298,7 +330,7 @@ private[mongo] object MongoRepositorySupport {
       session: Option[ClientSession[IO]]
   )(result: RepositoryIO[A])(map: Throwable => Either[RepositoryError, A]): RepositoryIO[A] =
     RepositoryIO.fromIOEither(result.value.handleErrorWith {
-      case error: MongoException if session.nonEmpty && error.hasErrorLabel("TransientTransactionError") =>
+      case error: MongoException if session.nonEmpty && MongoErrors.isTransient(error) =>
         IO.raiseError(error)
       case error => reportFailure(diagnostics, operation, error).as(map(error))
     })
@@ -334,26 +366,69 @@ private[mongo] object MongoDuplicateKey {
   }
 }
 
-private[mongo] trait MongoConflictWriteMapping {
-  protected final def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
+/** The single classification of MongoDB write failures into repository outcomes. */
+private[mongo] object MongoErrors {
+  val TransientTransactionErrorLabel = "TransientTransactionError"
+  val UnknownTransactionCommitResultLabel = "UnknownTransactionCommitResult"
+
+  def isTransient(error: Throwable): Boolean = error match {
+    case mongo: MongoException => mongo.hasErrorLabel(TransientTransactionErrorLabel)
+    case _                     => false
+  }
+
+  def isDuplicateKey(error: Throwable): Boolean = MongoDuplicateKey.unapply(error).nonEmpty
+
+  def isWriteConflict(error: MongoCommandException): Boolean =
+    error.getErrorCode == 112 || error.hasErrorLabel(TransientTransactionErrorLabel)
+
+  /** Duplicate key is `duplicateKeyError`, any write conflict or transient label is `transientError`. */
+  def toRepositoryError[A](
+      error: Throwable,
+      duplicateKeyError: RepositoryError,
+      transientError: RepositoryError = RepositoryError.Conflict
+  ): Either[RepositoryError, A] =
     error match {
-      case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
-      case _                    => Left(RepositoryError.Unavailable)
+      case MongoDuplicateKey(_)                                       => Left(duplicateKeyError)
+      case command: MongoCommandException if isWriteConflict(command) => Left(transientError)
+      case mongo: MongoException if isTransient(mongo)                => Left(transientError)
+      case _                                                          => Left(RepositoryError.Unavailable)
+    }
+
+  /** Duplicate key is a `Conflict`; every other failure is `Unavailable`. */
+  def duplicateAsConflict[A](error: Throwable): Either[RepositoryError, A] =
+    if (isDuplicateKey(error)) Left(RepositoryError.Conflict) else Left(RepositoryError.Unavailable)
+
+  /** Duplicate key is `duplicateKeyError`; only command write conflicts are `Conflict`. */
+  def duplicateAs[A](duplicateKeyError: RepositoryError)(error: Throwable): Either[RepositoryError, A] =
+    error match {
+      case MongoDuplicateKey(_)                                       => Left(duplicateKeyError)
+      case command: MongoCommandException if isWriteConflict(command) => Left(RepositoryError.Conflict)
+      case _                                                          => Left(RepositoryError.Unavailable)
     }
 }
 
-private[mongo] trait MongoApplicationEventInsertion {
-  protected final def insertApplicationEvent(
+private[mongo] object MongoApplicationEventInsertion {
+  def insert(
       events: IO[MongoCollection[IO, Document]],
       session: Option[ClientSession[IO]],
       event: ApplicationEvent
   ): IO[Option[InsertOneResult]] =
     MongoSessionOperations.insertOne(events, session, MongoHiringCodecs.event(event))
-
 }
 
+/** Retained for the interview workflow repository; delegates to `MongoOperationalEventInsertion.insert`. */
 private[mongo] trait MongoOperationalEventInsertion {
   protected final def insertOperationalEvents(
+      outbox: IO[MongoCollection[IO, Document]],
+      session: Option[ClientSession[IO]],
+      events: List[OperationalEventEnvelope],
+      now: Instant,
+      diagnostics: Diagnostics
+  ): RepositoryIO[Unit] = MongoOperationalEventInsertion.insert(outbox, session, events, now, diagnostics)
+}
+
+private[mongo] object MongoOperationalEventInsertion {
+  def insert(
       outbox: IO[MongoCollection[IO, Document]],
       session: Option[ClientSession[IO]],
       events: List[OperationalEventEnvelope],
@@ -362,19 +437,13 @@ private[mongo] trait MongoOperationalEventInsertion {
   ): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "repository.outbox.insert")(
-        MongoOperationalEventInsertion.insertSequence(events, now)(document =>
+        insertSequence(events, now)(document =>
           RepositoryIO
             .lift(MongoSessionOperations.insertOne(outbox, session, document))
             .subflatMap(MongoRepositorySupport.writeResult(_).void)
         )
-      ) {
-        case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
-        case _                    => Left(RepositoryError.Unavailable)
-      }
+      )(MongoErrors.duplicateAsConflict)
 
-}
-
-private[mongo] object MongoOperationalEventInsertion {
   def insertSequence(events: List[OperationalEventEnvelope], now: Instant)(
       write: Document => RepositoryIO[Unit]
   ): RepositoryIO[Unit] =

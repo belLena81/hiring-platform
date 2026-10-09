@@ -20,7 +20,7 @@ private[mongo] object MongoMutationWriteContext {
   def session(context: MutationWriteContext): IO[Option[ClientSession[IO]]] = context match {
     case MongoMutationWriteContext(value) => IO.pure(value)
     case _                                =>
-      IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
+      IO.raiseError(MongoSetupError("Mutation write context belongs to another repository adapter"))
   }
 
   def run[A](
@@ -34,7 +34,7 @@ private[mongo] object MongoMutationWriteContext {
         if (transactionRequired) transactionRunner.run(operation) else operation(None)
       case _ =>
         RepositoryIO.lift(
-          IO.raiseError(new IllegalArgumentException("Mutation write context belongs to another repository adapter"))
+          IO.raiseError(MongoSetupError("Mutation write context belongs to another repository adapter"))
         )
     }
 }
@@ -92,7 +92,7 @@ final class MongoMutationReceiptRepository(
          * The preceding branches keep receipt insertion, the caller write, and completion in the same
          * transaction. A missing stored receipt is the only path that can start the write.
          */
-      })(mapWrite)
+      })(MongoErrors.duplicateAsConflict)
 
   private def find(
       session: Option[ClientSession[IO]],
@@ -108,7 +108,7 @@ final class MongoMutationReceiptRepository(
         RepositoryIO
           .lift(MongoSessionOperations.insertOne(collection, session, receipt))
           .subflatMap(MongoRepositorySupport.writeResult(_).void)
-      )(mapWrite)
+      )(MongoErrors.duplicateAsConflict)
 
   private def complete(
       session: Option[ClientSession[IO]],
@@ -133,12 +133,8 @@ final class MongoMutationReceiptRepository(
       .repositoryGuard(diagnostics, "mutationReceipt.complete")(
         RepositoryIO
           .lift(MongoSessionOperations.updateOne(collection, session, filter, update))
-          .subflatMap {
-            case Some(result) if result.getMatchedCount == 1L => Right(())
-            case Some(_)                                      => Left(RepositoryError.Conflict)
-            case None                                         => Left(RepositoryError.MissingWriteResult)
-          }
-      )(mapWrite)
+          .subflatMap(MongoRepositorySupport.matchedOne(_))
+      )(MongoErrors.duplicateAsConflict)
 
   private def remove(session: Option[ClientSession[IO]], key: MutationReceiptKey): IO[Unit] =
     MongoRepositorySupport.guard(diagnostics, "mutationReceipt.remove")(
@@ -203,12 +199,6 @@ final class MongoMutationReceiptRepository(
       MongoDocumentFields.optionalString(document, MongoFields.Type),
       MongoDocumentFields.optionalString(document, MongoFields.EntityId)
     ).mapN((entityType, entityId) => (entityType, entityId).mapN(MutationEntityReference.apply))
-
-  private def mapWrite[A](error: Throwable): Either[RepositoryError, A] =
-    error match {
-      case MongoDuplicateKey(_) => Left(RepositoryError.Conflict)
-      case _                    => Left(RepositoryError.Unavailable)
-    }
 }
 
 object MongoMutationReceiptRepository {

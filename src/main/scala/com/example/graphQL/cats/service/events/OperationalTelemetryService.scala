@@ -50,12 +50,8 @@ final class OperationalTelemetryService(
     ) { context =>
       for {
         user <- authorization.resolve(actor)
-        job <- UseCase
-          .repository(jobs.find(jobId))
-          .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-        _ <- UseCase.fromEither(
-          Either.cond(authorization.canView(user, job), (), UseCaseError.Domain(DomainError.Forbidden))
-        )
+        job <- UseCase.found(jobs.find(jobId), "job")
+        _ <- UseCase.ensure(authorization.canView(user, job), UseCaseError.Domain(DomainError.Forbidden))
         rank <- searchId.fold(UseCase.pure(Option.empty[Int]))(id =>
           verifiedSearchResult(actor, id, jobId.value.toString).map(value => Some(value._1))
         )

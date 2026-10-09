@@ -87,6 +87,10 @@ final class EmbeddingPipeline(
   private def reportRepositoryFailure: IO[Unit] =
     diagnostics.emit(LogEvent.EmbeddingProcessingFailed)
 
+  /** Runs a repository step, reporting (not raising) its typed failure. */
+  private def orReport[A](step: RepositoryIO[A]): IO[Unit] =
+    step.leftSemiflatMap(_ => reportRepositoryFailure).value.void
+
   private enum ProcessingOutcome {
     case Completed, Retry, Conflict, Abandoned
     case Terminal(failure: EmbeddingWorkFailure)
@@ -113,54 +117,42 @@ final class EmbeddingPipeline(
       result.fold(_.fold(identity, identity), _ => ProcessingOutcome.Abandoned) match {
         case ProcessingOutcome.Abandoned => IO.unit
         case ProcessingOutcome.Conflict  =>
-          conflictOutcome(claim)
-            .flatMap {
-              case ProcessingOutcome.Completed         => work.complete(claim).value
-              case ProcessingOutcome.Terminal(failure) => now.flatMap(work.fail(claim, failure, _).value)
-              case _                                   =>
-                // Revision fencing does not consume the provider failure budget.
-                now.flatMap(at =>
-                  work.retry(claim, at.plusMillis(durableRetryBase.toMillis), chargeAttempt = false).value
-                )
+          orReport(
+            RepositoryIO.lift(conflictOutcome(claim)).flatMap {
+              case ProcessingOutcome.Completed         => work.complete(claim)
+              case ProcessingOutcome.Terminal(failure) => RepositoryIO.lift(now).flatMap(work.fail(claim, failure, _))
+              // Revision fencing does not consume the provider failure budget.
+              case _ =>
+                RepositoryIO
+                  .lift(now)
+                  .flatMap(at => work.retry(claim, at.plusMillis(durableRetryBase.toMillis), chargeAttempt = false))
             }
-            .flatMap {
-              case Right(_) => IO.unit
-              case Left(_)  => reportRepositoryFailure
-            }
+          )
         case ProcessingOutcome.Retry =>
-          now
-            .flatMap { at =>
+          orReport(
+            RepositoryIO.lift(now).flatMap { at =>
               if (claim.attempts + 1 < durableRetryAttempts)
-                work
-                  .retry(
-                    claim,
-                    at.plusMillis(
-                      EmbeddingRecoveryPolicy.backoffMillis(
-                        claim.attempts.toLong + 1L,
-                        durableRetryBase.toMillis,
-                        durableRetryCap.toMillis
-                      )
+                work.retry(
+                  claim,
+                  at.plusMillis(
+                    EmbeddingRecoveryPolicy.backoffMillis(
+                      claim.attempts.toLong + 1L,
+                      durableRetryBase.toMillis,
+                      durableRetryCap.toMillis
                     )
                   )
-                  .value
-              else work.fail(claim, EmbeddingWorkFailure.RetryExhausted, at).value
+                )
+              else work.fail(claim, EmbeddingWorkFailure.RetryExhausted, at)
             }
-            .flatMap {
-              case Right(_) => IO.unit
-              case Left(_)  => reportRepositoryFailure
-            }
-        case ProcessingOutcome.Completed =>
-          work.complete(claim).value.flatMap {
-            case Right(_) => IO.unit
-            case Left(_)  => reportRepositoryFailure
-          }
+          )
+        case ProcessingOutcome.Completed         => orReport(work.complete(claim))
         case ProcessingOutcome.Terminal(failure) =>
-          now.flatMap(work.fail(claim, failure, _).value).flatMap {
-            case Right(_) => IO.unit
-            case Left(_)  => reportRepositoryFailure
-          }
+          orReport(RepositoryIO.lift(now).flatMap(work.fail(claim, failure, _)))
       }
     }
+
+  private def invalidWorkKey: IO[ProcessingOutcome] =
+    IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey))
 
   private def conflictOutcome(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] = {
     def preparedOutcome(source: Option[String], metadata: Option[EmbeddingMeta]): ProcessingOutcome =
@@ -172,31 +164,27 @@ final class EmbeddingPipeline(
 
     val reread = claim.key.kind match {
       case EmbeddingWorkKind.Job =>
-        parseIdentifier(claim.key.entityId)(JobId.apply).fold(
-          _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
-          id =>
-            jobs.findVersioned(id).value.map {
-              case Right(Some(observed)) =>
-                preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta))
-              case Right(None) => ProcessingOutcome.Completed
-              case Left(_)     => ProcessingOutcome.Retry
-            }
+        parseIdentifier(claim.key.entityId)(JobId.apply).fold(invalidWorkKey)(id =>
+          jobs.findVersioned(id).value.map {
+            case Right(Some(observed)) =>
+              preparedOutcome(Some(SearchableText.job(observed.value)), observed.value.embedding.map(_.meta))
+            case Right(None) => ProcessingOutcome.Completed
+            case Left(_)     => ProcessingOutcome.Retry
+          }
         )
       case EmbeddingWorkKind.CandidateProfile =>
-        parseIdentifier(claim.key.entityId)(UserId.apply).fold(
-          _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
-          id =>
-            users.findVersioned(id).value.map {
-              case Right(Some(observed))
-                  if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
-                    observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
-                preparedOutcome(
-                  observed.value.candidateProfile.map(SearchableText.candidate),
-                  observed.value.embedding.map(_.meta)
-                )
-              case Right(_) => ProcessingOutcome.Completed
-              case Left(_)  => ProcessingOutcome.Retry
-            }
+        parseIdentifier(claim.key.entityId)(UserId.apply).fold(invalidWorkKey)(id =>
+          users.findVersioned(id).value.map {
+            case Right(Some(observed))
+                if observed.value.accountStatus == com.example.graphQL.cats.domain.model.AccountStatus.Active &&
+                  observed.value.role == com.example.graphQL.cats.domain.model.UserRole.Candidate =>
+              preparedOutcome(
+                observed.value.candidateProfile.map(SearchableText.candidate),
+                observed.value.embedding.map(_.meta)
+              )
+            case Right(_) => ProcessingOutcome.Completed
+            case Left(_)  => ProcessingOutcome.Retry
+          }
         )
     }
     reread.handleErrorWith(error =>
@@ -223,17 +211,9 @@ final class EmbeddingPipeline(
   private def process(claim: ClaimedEmbeddingWork): IO[ProcessingOutcome] =
     claim.key.kind match {
       case EmbeddingWorkKind.Job =>
-        parseIdentifier(claim.key.entityId)(JobId.apply)
-          .fold(
-            _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
-            processJob
-          )
+        parseIdentifier(claim.key.entityId)(JobId.apply).fold(invalidWorkKey)(processJob)
       case EmbeddingWorkKind.CandidateProfile =>
-        parseIdentifier(claim.key.entityId)(UserId.apply)
-          .fold(
-            _ => IO.pure(ProcessingOutcome.Terminal(EmbeddingWorkFailure.InvalidWorkKey)),
-            processCandidate
-          )
+        parseIdentifier(claim.key.entityId)(UserId.apply).fold(invalidWorkKey)(processCandidate)
     }
 
   private def processJob(id: JobId): IO[ProcessingOutcome] =
@@ -272,12 +252,7 @@ final class EmbeddingPipeline(
   private def attemptOutcome(result: Either[RepositoryError, ProcessingOutcome]): ProcessingOutcome = result match {
     case Right(outcome)                 => outcome
     case Left(RepositoryError.Conflict) => ProcessingOutcome.Conflict
-    case Left(RepositoryError.AuthorityRevoked) | Left(RepositoryError.Unavailable) |
-        Left(RepositoryError.DuplicateApplication) | Left(
-          RepositoryError.InvalidStoredData
-        ) | Left(RepositoryError.InvalidEvent) | Left(RepositoryError.MissingWriteResult) |
-        Left(RepositoryError.MissingStoredResult) =>
-      ProcessingOutcome.Retry
+    case Left(_)                        => ProcessingOutcome.Retry
   }
 
   private def embedPrepared(prepared: EmbeddingPreparation)(

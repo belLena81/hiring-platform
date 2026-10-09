@@ -26,7 +26,6 @@ final class MongoJobRepository(
     diagnostics: Diagnostics,
     discoveryPolicy: Option[DiscoveryQueryPolicy] = None
 ) extends JobRepository
-    with MongoConflictWriteMapping
     with MongoOperationalEventInsertion {
   private def collection = Mongo4catsCollections.documents(database, MongoCollections.Jobs)
   private def outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
@@ -35,7 +34,7 @@ final class MongoJobRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.find")(
         RepositoryIO
-          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document => MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readJob)))
       )
 
@@ -43,7 +42,7 @@ final class MongoJobRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "MongoJobRepository.findVersioned")(
         RepositoryIO
-          .lift(collection.flatMap(_.find(Filters.eq(MongoFields.Id, id.value.toString)).first))
+          .lift(MongoSessionOperations.findById(collection, None, id.value.toString))
           .subflatMap(document =>
             MongoStoredDocumentDecoding.repository(document.traverse(MongoHiringCodecs.readVersionedJob))
           )
@@ -53,11 +52,8 @@ final class MongoJobRepository(
     MongoRepositorySupport.repositoryGuard(diagnostics, "MongoJobRepository.findSubmissionSnapshot")(
       RepositoryIO
         .lift(
-          collection.flatMap(
-            _.find(Filters.eq(MongoFields.Id, id.value.toString))
-              .projection(MongoJobSubmissionSnapshotCodec.projection)
-              .first
-          )
+          MongoSessionOperations
+            .findById(collection, None, id.value.toString, Some(MongoJobSubmissionSnapshotCodec.projection))
         )
         .subflatMap(document =>
           MongoStoredDocumentDecoding.repository(document.traverse(MongoJobSubmissionSnapshotCodec.read))
@@ -328,7 +324,7 @@ final class MongoJobRepository(
       )(session => writeJobSession(job, now, events, session))
       .pipe(effect =>
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoJobRepository.createWithEvents")(effect)(mapWrite)
+          .repositoryGuard(diagnostics, "MongoJobRepository.createWithEvents")(effect)(MongoErrors.duplicateAsConflict)
       )
 
   private def writeJobSession(
@@ -359,7 +355,7 @@ final class MongoJobRepository(
       )(session => writeJobUpdateSession(expected, replacement, now, events, session))
       .pipe(effect =>
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoJobRepository.updateWithEvents")(effect)(mapWrite)
+          .repositoryGuard(diagnostics, "MongoJobRepository.updateWithEvents")(effect)(MongoErrors.duplicateAsConflict)
       )
 
   private def writeJobUpdateSession(
@@ -382,11 +378,7 @@ final class MongoJobRepository(
           MongoHiringCodecs.job(replacement, nextVersion)
         )
       )
-      _ <- RepositoryIO.fromEither(result match {
-        case Some(value) if value.getMatchedCount == 1L => Right(())
-        case Some(_)                                    => Left(RepositoryError.Conflict)
-        case None                                       => Left(RepositoryError.MissingWriteResult)
-      })
+      _ <- RepositoryIO.fromEither(MongoRepositorySupport.matchedOne(result))
       _ <- embeddingWork.enqueue(session, EmbeddingWorkKey(EmbeddingWorkKind.Job, replacement.id.value.toString), now)
       _ <- insertOperationalEvents(outbox, session, events, now, diagnostics)
     } yield Versioned(replacement, nextVersion)
@@ -420,14 +412,10 @@ final class MongoJobRepository(
             )
           )
       )
-      .subflatMap {
-        case Some(result) if result.getMatchedCount == 1L => Right(())
-        case Some(_)                                      => Left(RepositoryError.Conflict)
-        case None                                         => Left(RepositoryError.MissingWriteResult)
-      }
+      .subflatMap(MongoRepositorySupport.matchedOne(_))
       .pipe(effect =>
         MongoRepositorySupport
-          .repositoryGuard(diagnostics, "MongoJobRepository.updateEmbedding")(effect)(mapWrite)
+          .repositoryGuard(diagnostics, "MongoJobRepository.updateEmbedding")(effect)(MongoErrors.duplicateAsConflict)
       )
   }
 

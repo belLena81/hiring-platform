@@ -23,8 +23,7 @@ final class MongoSearchSessionWorkRepository(
     diagnostics: Diagnostics,
     uuidGen: UUIDGen[IO] = UUIDGen[IO]
 ) extends SearchSessionWorkRepository
-    with MongoOperationalEventInsertion
-    with MongoConflictWriteMapping {
+    with MongoOperationalEventInsertion {
   private val work = Mongo4catsCollections.documents(database, MongoCollections.SearchSessionWork)
   private val sessions = Mongo4catsCollections.documents(database, MongoCollections.SearchSessions)
   private val outbox = Mongo4catsCollections.documents(database, MongoCollections.EventOutbox)
@@ -58,7 +57,7 @@ final class MongoSearchSessionWorkRepository(
                 case Some(_) => Right(())
                 case None    => Left(RepositoryError.MissingWriteResult)
               }
-          }(mapWrite)
+          }(MongoErrors.duplicateAsConflict)
       }
 
   override def findForActor(actorId: UserId, searchId: UUID): RepositoryIO[Option[SearchSessionLookup]] =
@@ -169,7 +168,7 @@ final class MongoSearchSessionWorkRepository(
                 }
             }
           }
-      }(mapWrite)
+      }(MongoErrors.duplicateAsConflict)
 
   override def retry(claim: ClaimedSearchSessionWork, availableAt: Instant): RepositoryIO[Unit] =
     transition(
@@ -178,9 +177,7 @@ final class MongoSearchSessionWorkRepository(
         MongoUpdate.set(MongoFields.State, SearchSessionWorkState.Retry.toString),
         MongoUpdate.set(MongoFields.AvailableAt, Date.from(availableAt)),
         MongoUpdate.inc(MongoFields.Attempts, java.lang.Integer.valueOf(1)),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, Date.from(availableAt))
       )
     )
@@ -197,9 +194,7 @@ final class MongoSearchSessionWorkRepository(
         MongoUpdate.set(MongoFields.Failure, failure.toString),
         MongoUpdate.set(MongoFields.FinishedAt, Date.from(now)),
         MongoUpdate.set(MongoFields.RetentionExpiresAt, Date.from(now.plusSeconds(7L * 24L * 60L * 60L))),
-        MongoUpdate.unset(MongoFields.LeaseOwner),
-        MongoUpdate.unset(MongoFields.LeaseToken),
-        MongoUpdate.unset(MongoFields.LeaseUntil),
+        MongoLeaseQueue.releaseLease,
         MongoUpdate.set(MongoFields.UpdatedAt, Date.from(now))
       )
     )
@@ -212,11 +207,7 @@ final class MongoSearchSessionWorkRepository(
       .repositoryGuard(diagnostics, "searchSessionWork.transition") {
         RepositoryIO
           .lift(MongoSessionOperations.updateOne(work, None, leaseFilter(claim), update))
-          .subflatMap {
-            case Some(result) if result.getMatchedCount == 1L => Right(())
-            case Some(_)                                      => Left(RepositoryError.Conflict)
-            case None                                         => Left(RepositoryError.MissingWriteResult)
-          }
+          .subflatMap(MongoRepositorySupport.matchedOne(_))
       }
 
   private def leaseFilter(claim: ClaimedSearchSessionWork): MongoFilter = MongoFilter.and(

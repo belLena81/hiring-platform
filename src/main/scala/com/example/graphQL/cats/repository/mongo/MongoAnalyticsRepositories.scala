@@ -1,5 +1,6 @@
 package com.example.graphQL.cats.repository.mongo
 
+import cats.data.OptionT
 import cats.effect.IO
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
@@ -34,42 +35,6 @@ import java.util.Date
 import java.time.Instant
 import scala.jdk.CollectionConverters.*
 
-private[mongo] object MongoAnalyticsRepositoryOperations {
-  type Documents = MongoCollection[IO, Document]
-
-  def findOne(
-      collection: IO[Documents],
-      session: Option[ClientSession[IO]],
-      filter: MongoFilter
-  ): RepositoryIO[Option[Document]] =
-    RepositoryIO.lift(MongoSessionOperations.findOne(collection, session, filter))
-
-  def insertOne(
-      collection: IO[Documents],
-      session: Option[ClientSession[IO]],
-      document: Document
-  ): RepositoryIO[Option[com.mongodb.client.result.InsertOneResult]] =
-    RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, document))
-
-  def updateOne(
-      collection: IO[Documents],
-      session: Option[ClientSession[IO]],
-      filter: MongoFilter,
-      update: MongoUpdate,
-      options: UpdateOptions = new UpdateOptions
-  ): RepositoryIO[Option[com.mongodb.client.result.UpdateResult]] =
-    RepositoryIO.lift(MongoSessionOperations.updateOne(collection, session, filter, update, options))
-
-  def replaceOne(
-      collection: IO[Documents],
-      session: Option[ClientSession[IO]],
-      filter: MongoFilter,
-      replacement: Document,
-      options: ReplaceOptions
-  ): RepositoryIO[Option[com.mongodb.client.result.UpdateResult]] =
-    RepositoryIO.lift(MongoSessionOperations.replaceOne(collection, session, filter, replacement, options))
-}
-
 /** Stores one idempotent erasure request per subject in the same Mongo transaction as account deletion. */
 final class MongoAnalyticsErasureRequestRepository(
     database: MongoDatabase[IO],
@@ -88,18 +53,40 @@ final class MongoAnalyticsErasureRequestRepository(
   override def workerReady(now: Instant): RepositoryIO[Unit] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.workerReady")(
-        MongoAnalyticsRepositoryOperations
-          .findOne(
-            workerHeartbeats,
-            None,
-            MongoFilter.and(
-              MongoFilter.eq(MongoFields.Id, "analytics-erasure"),
-              MongoFilter.eq(MongoFields.State, "Ready"),
-              MongoFilter.gt(MongoFields.LeaseUntil, Date.from(now))
+        RepositoryIO
+          .lift(
+            MongoSessionOperations.findOne(
+              workerHeartbeats,
+              None,
+              MongoFilter.and(
+                MongoFilter.eq(MongoFields.Id, "analytics-erasure"),
+                MongoFilter.eq(MongoFields.State, "Ready"),
+                MongoFilter.gt(MongoFields.LeaseUntil, Date.from(now))
+              )
             )
           )
           .subflatMap(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.Unavailable))(_ => Right(())))
       )
+
+  /** The receipt already stored for `requestId` in `documents`, assigning `freshReceiptId` when none was recorded. */
+  private def receiptOrAssign(
+      documents: IO[MongoSessionOperations.Documents],
+      session: Option[ClientSession[IO]],
+      requestId: String,
+      freshReceiptId: String
+  ): OptionT[RepositoryIO, String] = {
+    val byId = MongoFilter.eq(MongoFields.Id, requestId)
+    OptionT(RepositoryIO.lift(MongoSessionOperations.findOne(documents, session, byId))).semiflatMap { document =>
+      Option(document.getString(MongoFields.ReceiptId)).fold(
+        RepositoryIO
+          .lift(
+            MongoSessionOperations
+              .updateOne(documents, session, byId, MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId))
+          )
+          .subflatMap(_.toRight(RepositoryError.MissingWriteResult).as(freshReceiptId))
+      )(receipt => RepositoryIO.fromEither(Right(receipt)))
+    }
+  }
 
   override def enqueue(
       userId: UserId,
@@ -111,90 +98,55 @@ final class MongoAnalyticsErasureRequestRepository(
         RepositoryIO.lift(UUIDGen[IO].randomUUID.map(_.toString)).flatMap { freshReceiptId =>
           MongoMutationWriteContext.run(context, transactionRunner, transactionRequired = true) { session =>
             val requestId = userId.value.toString
-            val completion = MongoAnalyticsRepositoryOperations
-              .findOne(completions, session, MongoFilter.eq(MongoFields.Id, requestId))
-            completion
-              .flatMap {
-                case Some(document) =>
-                  Option(document.getString(MongoFields.ReceiptId)) match {
-                    case Some(value) => RepositoryIO.fromEither(Right(value))
-                    case None        =>
-                      val update = MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId)
-                      val result = MongoAnalyticsRepositoryOperations.updateOne(
-                        completions,
-                        session,
-                        MongoFilter.eq(MongoFields.Id, requestId),
-                        update,
-                        new UpdateOptions
-                      )
-                      result.subflatMap(
-                        _.fold[Either[RepositoryError, String]](Left(RepositoryError.MissingWriteResult))(_ =>
-                          Right(freshReceiptId)
-                        )
-                      )
-                  }
-                case None =>
-                  val existing = MongoAnalyticsRepositoryOperations
-                    .findOne(collection, session, MongoFilter.eq(MongoFields.Id, requestId))
-                  existing.flatMap {
-                    case Some(document) =>
-                      Option(document.getString(MongoFields.ReceiptId)) match {
-                        case Some(value) => RepositoryIO.fromEither(Right(value))
-                        case None        =>
-                          val update = MongoUpdate.set(MongoFields.ReceiptId, freshReceiptId)
-                          val result = MongoAnalyticsRepositoryOperations.updateOne(
-                            collection,
-                            session,
-                            MongoFilter.eq(MongoFields.Id, requestId),
-                            update,
-                            new UpdateOptions
-                          )
-                          result.subflatMap(
-                            _.fold[Either[RepositoryError, String]](Left(RepositoryError.MissingWriteResult))(_ =>
-                              Right(freshReceiptId)
-                            )
-                          )
-                      }
-                    case None =>
-                      val fence = MongoAnalyticsRepositoryOperations
-                        .findOne(subjectFences, session, MongoFilter.eq(MongoFields.Id, requestId))
-                      fence.flatMap { _ =>
-                        val request = new Document(MongoFields.Id, requestId)
-                          .append(MongoFields.RequestedAt, Date.from(now))
-                          .append(MongoFields.ReceiptId, freshReceiptId)
-                          .append(MongoFields.State, "Pending")
-                          .append(MongoFields.FencingVersion, 1)
-                          .append("producerRegistry", true)
-                        val insert = MongoAnalyticsRepositoryOperations.insertOne(collection, session, request)
-                        insert.flatMap {
-                          case Some(_) =>
-                            val reportControl =
-                              Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportControl)
-                            val hide = MongoUpdate.combine(
-                              MongoUpdate.inc(MongoFields.Generation, 1L),
-                              MongoUpdate.set(MongoFields.State, AnalyticsReportSnapshotDocument.Hidden),
-                              MongoUpdate.set(MongoFields.HiddenAt, Date.from(now))
-                            )
-                            val hideResult = MongoAnalyticsRepositoryOperations.updateOne(
-                              reportControl,
-                              session,
-                              MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
-                              hide,
-                              new UpdateOptions
-                            )
-                            hideResult.subflatMap {
-                              case Some(result) if result.getMatchedCount == 1L => Right(freshReceiptId)
-                              case Some(_)                                      => Left(RepositoryError.Conflict)
-                              case None => Left(RepositoryError.MissingWriteResult)
-                            }
-                          case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-                        }
-                      }
-                  }
-              }
+            receiptOrAssign(completions, session, requestId, freshReceiptId)
+              .orElse(receiptOrAssign(collection, session, requestId, freshReceiptId))
+              .getOrElseF(
+                // The fence read is retained as-is (open decision O3).
+                RepositoryIO.lift(
+                  MongoSessionOperations.findOne(subjectFences, session, MongoFilter.eq(MongoFields.Id, requestId))
+                ) *> createRequest(requestId, freshReceiptId, now, session)
+              )
           }
         }
       )
+
+  private def createRequest(
+      requestId: String,
+      freshReceiptId: String,
+      now: Instant,
+      session: Option[ClientSession[IO]]
+  ): RepositoryIO[String] = {
+    val request = new Document(MongoFields.Id, requestId)
+      .append(MongoFields.RequestedAt, Date.from(now))
+      .append(MongoFields.ReceiptId, freshReceiptId)
+      .append(MongoFields.State, "Pending")
+      .append(MongoFields.FencingVersion, 1)
+      .append("producerRegistry", true)
+    val reportControl = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportControl)
+    val hide = MongoUpdate.combine(
+      MongoUpdate.inc(MongoFields.Generation, 1L),
+      MongoUpdate.set(MongoFields.State, AnalyticsReportSnapshotDocument.Hidden),
+      MongoUpdate.set(MongoFields.HiddenAt, Date.from(now))
+    )
+    for {
+      inserted <- RepositoryIO.lift(MongoSessionOperations.insertOne(collection, session, request))
+      _ <- RepositoryIO.fromEither(inserted.toRight(RepositoryError.MissingWriteResult))
+      hidden <- RepositoryIO.lift(
+        MongoSessionOperations.updateOne(
+          reportControl,
+          session,
+          MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
+          hide,
+          new UpdateOptions
+        )
+      )
+      result <- RepositoryIO.fromEither(hidden match {
+        case Some(result) if result.getMatchedCount == 1L => Right(freshReceiptId)
+        case Some(_)                                      => Left(RepositoryError.Conflict)
+        case None                                         => Left(RepositoryError.MissingWriteResult)
+      })
+    } yield result
+  }
 
   override def statusForSubject(
       userId: UserId,
@@ -212,8 +164,8 @@ final class MongoAnalyticsErasureRequestRepository(
             MongoFilter.eq(MongoFields.Id, userId.value.toString),
             MongoFilter.eq(MongoFields.ReceiptId, receiptId)
           )
-          MongoAnalyticsRepositoryOperations
-            .findOne(collection, None, requestFilter)
+          RepositoryIO
+            .lift(MongoSessionOperations.findOne(collection, None, requestFilter))
             .flatMap {
               case Some(document) if document.getString(MongoFields.State) == "Complete" =>
                 RepositoryIO.fromEither(Right(AccountDeletionStatus.Complete))
@@ -221,8 +173,8 @@ final class MongoAnalyticsErasureRequestRepository(
                 RepositoryIO.fromEither(Right(AccountDeletionStatus.Pending))
               case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
               case None    =>
-                MongoAnalyticsRepositoryOperations
-                  .findOne(completions, None, completionFilter)
+                RepositoryIO
+                  .lift(MongoSessionOperations.findOne(completions, None, completionFilter))
                   .subflatMap(
                     _.fold[Either[RepositoryError, AccountDeletionStatus]](Right(AccountDeletionStatus.NotFound))(_ =>
                       Right(AccountDeletionStatus.Complete)
@@ -253,7 +205,8 @@ final class MongoAnalyticsErasureRequestRepository(
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.markComplete")(transactionRunner.run { session =>
         val requestId = userId.value.toString
-        val user = MongoAnalyticsRepositoryOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId))
+        val user =
+          RepositoryIO.lift(MongoSessionOperations.findOne(users, session, MongoFilter.eq(MongoFields.Id, requestId)))
         user
           .flatMap {
             case Some(document) if document.getString(MongoFields.AccountStatus) == "Deleted" =>
@@ -267,15 +220,19 @@ final class MongoAnalyticsErasureRequestRepository(
                 MongoUpdate.set(MongoFields.ExpiresAt, Date.from(now.plusSeconds(31L * 24L * 60L * 60L)))
               )
               val requests =
-                MongoAnalyticsRepositoryOperations.updateOne(collection, session, filter, update, new UpdateOptions)
+                RepositoryIO.lift(
+                  MongoSessionOperations.updateOne(collection, session, filter, update, new UpdateOptions)
+                )
               requests.flatMap {
                 case Some(result) if result.getMatchedCount == 1L => persistCompletion(session, requestId, now)
                 case Some(_)                                      =>
-                  val completed = MongoAnalyticsRepositoryOperations.findOne(
-                    collection,
-                    session,
-                    MongoFilter
-                      .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
+                  val completed = RepositoryIO.lift(
+                    MongoSessionOperations.findOne(
+                      collection,
+                      session,
+                      MongoFilter
+                        .and(MongoFilter.eq(MongoFields.Id, requestId), MongoFilter.eq(MongoFields.State, "Complete"))
+                    )
                   )
                   completed.flatMap(
                     _.fold(RepositoryIO.fromEither(Left(RepositoryError.Conflict)))(_ =>
@@ -294,7 +251,7 @@ final class MongoAnalyticsErasureRequestRepository(
       now: Instant
   ): RepositoryIO[Unit] = {
     val request =
-      MongoAnalyticsRepositoryOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, userId))
+      RepositoryIO.lift(MongoSessionOperations.findOne(collection, session, MongoFilter.eq(MongoFields.Id, userId)))
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsErasure.persistCompletion")(
         request
@@ -308,8 +265,9 @@ final class MongoAnalyticsErasureRequestRepository(
             ).flatten
             val filter = MongoFilter.eq(MongoFields.Id, userId)
             val update = MongoUpdate.combine(updates*)
-            val result = MongoAnalyticsRepositoryOperations
-              .updateOne(completions, session, filter, update, new UpdateOptions().upsert(true))
+            val result = RepositoryIO.lift(
+              MongoSessionOperations.updateOne(completions, session, filter, update, new UpdateOptions().upsert(true))
+            )
             result
               .subflatMap {
                 case Some(_) => Right(())
@@ -343,8 +301,6 @@ final class MongoAnalyticsReportRepository(
     diagnostics: Diagnostics
 ) extends AnalyticsReportRepository,
       AnalyticsReportSnapshotPublisher {
-  import MongoAnalyticsRepositoryOperations.{findOne, replaceOne, updateOne}
-
   private val collection = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportSnapshots)
   private val control = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportControl)
   private val reservations = Mongo4catsCollections.documents(database, MongoCollections.AnalyticsReportRuns)
@@ -352,35 +308,44 @@ final class MongoAnalyticsReportRepository(
   override def latest: RepositoryIO[Option[AnalyticsReportSnapshot]] =
     MongoRepositorySupport
       .repositoryGuard(diagnostics, "analyticsReport.latest")(transactionRunner.run { session =>
-        findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)).flatMap {
-          case Some(document) =>
-            MongoHiringPersistenceCodecs
-              .decodeAnalyticsReportControl(document)
-              .toOption
-              .filter(_.state == AnalyticsReportSnapshotDocument.Published) match {
-              case Some(state) if state.generation >= 0L && state.lastPublishedRevision >= 0L =>
-                findOne(
-                  collection,
-                  session,
-                  MongoFilter.and(
-                    MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
-                    MongoFilter.eq(MongoFields.State, AnalyticsReportSnapshotDocument.Published),
-                    MongoFilter.eq(MongoFields.Generation, state.generation),
-                    MongoFilter.eq(MongoFields.Revision, state.lastPublishedRevision),
-                    MongoFilter.gt(MongoFields.ExpiresAt, new Date())
-                  )
-                ).subflatMap {
-                  case None           => Right(None)
-                  case Some(snapshot) =>
-                    AnalyticsReportSnapshotDocument
-                      .read(snapshot)
-                      .toRight(RepositoryError.InvalidStoredData)
-                      .map(Some(_))
-                }
-              case _ => RepositoryIO.fromEither(Right(None))
-            }
-          case _ => RepositoryIO.fromEither(Right(None))
-        }
+        RepositoryIO
+          .lift(
+            MongoSessionOperations
+              .findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
+          )
+          .flatMap {
+            case Some(document) =>
+              MongoHiringPersistenceCodecs
+                .decodeAnalyticsReportControl(document)
+                .toOption
+                .filter(_.state == AnalyticsReportSnapshotDocument.Published) match {
+                case Some(state) if state.generation >= 0L && state.lastPublishedRevision >= 0L =>
+                  RepositoryIO
+                    .lift(
+                      MongoSessionOperations.findOne(
+                        collection,
+                        session,
+                        MongoFilter.and(
+                          MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
+                          MongoFilter.eq(MongoFields.State, AnalyticsReportSnapshotDocument.Published),
+                          MongoFilter.eq(MongoFields.Generation, state.generation),
+                          MongoFilter.eq(MongoFields.Revision, state.lastPublishedRevision),
+                          MongoFilter.gt(MongoFields.ExpiresAt, new Date())
+                        )
+                      )
+                    )
+                    .subflatMap {
+                      case None           => Right(None)
+                      case Some(snapshot) =>
+                        AnalyticsReportSnapshotDocument
+                          .read(snapshot)
+                          .toRight(RepositoryError.InvalidStoredData)
+                          .map(Some(_))
+                    }
+                case _ => RepositoryIO.fromEither(Right(None))
+              }
+            case _ => RepositoryIO.fromEither(Right(None))
+          }
       })
 
   override def reserve(
@@ -392,128 +357,161 @@ final class MongoAnalyticsReportRepository(
     if (!reservationExpiresAt.isAfter(now)) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
     else {
       val result = transactionRunner.run { session =>
-        findOne(reservations, session, MongoFilter.eq(MongoFields.Id, runId.value)).flatMap {
-          case Some(existing) =>
-            readReservation(existing) match {
-              case Some(reservation) if reservation.rangeFingerprint == rangeFingerprint =>
-                findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
-                  .flatMap {
-                    case Some(state)
-                        if existing.getString(MongoFields.State) == "Reserved" &&
-                          (Option(state.get(MongoFields.Generation, classOf[java.lang.Long]))
-                            .exists(_.longValue() > reservation.generation) ||
-                            Option(state.get(MongoFields.LastPublishedRevision, classOf[java.lang.Long]))
-                              .exists(_.longValue() >= reservation.revision)) =>
-                      updateOne(
+        RepositoryIO
+          .lift(MongoSessionOperations.findOne(reservations, session, MongoFilter.eq(MongoFields.Id, runId.value)))
+          .flatMap {
+            case Some(existing) =>
+              readReservation(existing) match {
+                case Some(reservation) if reservation.rangeFingerprint == rangeFingerprint =>
+                  RepositoryIO
+                    .lift(
+                      MongoSessionOperations.findOne(
                         control,
                         session,
-                        MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
-                        MongoUpdate.inc(MongoFields.NextRevision, 1L)
-                      ).flatMap {
-                        case Some(incremented) if incremented.getMatchedCount == 1L =>
-                          findOne(
-                            control,
-                            session,
-                            MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
-                          )
-                            .flatMap {
-                              case Some(updatedState) =>
-                                val generation =
-                                  Option(updatedState.get(MongoFields.Generation, classOf[java.lang.Long]))
-                                    .fold(-1L)(_.longValue())
-                                val revision =
-                                  Option(updatedState.get(MongoFields.NextRevision, classOf[java.lang.Long]))
-                                    .fold(-1L)(_.longValue())
-                                val refreshed = reservation.copy(generation = generation, revision = revision)
-                                if (generation < reservation.generation || revision <= reservation.revision)
-                                  RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
-                                else
-                                  updateOne(
-                                    reservations,
-                                    session,
-                                    MongoFilter.and(
-                                      MongoFilter.eq(MongoFields.Id, runId.value),
-                                      MongoFilter.eq(MongoFields.State, "Reserved")
-                                    ),
-                                    MongoUpdate.combine(
-                                      MongoUpdate.set(MongoFields.Generation, generation),
-                                      MongoUpdate.set(MongoFields.Revision, revision),
-                                      MongoUpdate.set(MongoFields.CreatedAt, Date.from(now)),
-                                      MongoUpdate.set(MongoFields.ExpiresAt, Date.from(reservationExpiresAt))
-                                    )
-                                  ).subflatMap {
-                                    case Some(result) if result.getMatchedCount == 1L => Right(refreshed)
-                                    case Some(_)                                      => Left(RepositoryError.Conflict)
-                                    case None => Left(RepositoryError.MissingWriteResult)
-                                  }
-                              case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
-                            }
-                        case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                        case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-                      }
-                    case Some(_) => RepositoryIO.fromEither(Right(reservation))
-                    case None    => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
-                  }
-              case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-              case None    => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
-            }
-          case None =>
-            val increment = MongoUpdate.combine(
-              MongoUpdate.setOnInsert(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
-              MongoUpdate.inc(MongoFields.NextRevision, 1L)
-            )
-            updateOne(
-              control,
-              session,
-              MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
-              increment
-            )
-              .flatMap {
-                case Some(result) if result.getMatchedCount == 1L =>
-                  findOne(control, session, MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId))
+                        MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
+                      )
+                    )
                     .flatMap {
-                      case Some(state) =>
-                        val generation = Option(state.get(MongoFields.Generation, classOf[java.lang.Long]))
-                          .fold(-1L)(_.longValue())
-                        val revision = Option(state.get(MongoFields.NextRevision, classOf[java.lang.Long]))
-                          .fold(-1L)(_.longValue())
-                        if (generation < 0L || revision < 1L)
-                          RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
-                        else {
-                          val reservation = AnalyticsReportRunReservation(runId, rangeFingerprint, generation, revision)
-                          val document = MongoHiringPersistenceCodecs.analyticsReportRun(
-                            MongoHiringPersistenceCodecs.StoredAnalyticsReportRun(
-                              runId.value,
-                              rangeFingerprint.value,
-                              generation,
-                              revision,
-                              Some("Reserved"),
-                              Some(Date.from(now)),
-                              Some(Date.from(reservationExpiresAt))
+                      case Some(state)
+                          if existing.getString(MongoFields.State) == "Reserved" &&
+                            (Option(state.get(MongoFields.Generation, classOf[java.lang.Long]))
+                              .exists(_.longValue() > reservation.generation) ||
+                              Option(state.get(MongoFields.LastPublishedRevision, classOf[java.lang.Long]))
+                                .exists(_.longValue() >= reservation.revision)) =>
+                        RepositoryIO
+                          .lift(
+                            MongoSessionOperations.updateOne(
+                              control,
+                              session,
+                              MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
+                              MongoUpdate.inc(MongoFields.NextRevision, 1L)
                             )
                           )
-                          insertOne(reservations, session, document).as(reservation)
-                        }
-                      case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+                          .flatMap {
+                            case Some(incremented) if incremented.getMatchedCount == 1L =>
+                              RepositoryIO
+                                .lift(
+                                  MongoSessionOperations.findOne(
+                                    control,
+                                    session,
+                                    MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
+                                  )
+                                )
+                                .flatMap {
+                                  case Some(updatedState) =>
+                                    val generation =
+                                      Option(updatedState.get(MongoFields.Generation, classOf[java.lang.Long]))
+                                        .fold(-1L)(_.longValue())
+                                    val revision =
+                                      Option(updatedState.get(MongoFields.NextRevision, classOf[java.lang.Long]))
+                                        .fold(-1L)(_.longValue())
+                                    val refreshed = reservation.copy(generation = generation, revision = revision)
+                                    if (generation < reservation.generation || revision <= reservation.revision)
+                                      RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+                                    else
+                                      RepositoryIO
+                                        .lift(
+                                          MongoSessionOperations.updateOne(
+                                            reservations,
+                                            session,
+                                            MongoFilter.and(
+                                              MongoFilter.eq(MongoFields.Id, runId.value),
+                                              MongoFilter.eq(MongoFields.State, "Reserved")
+                                            ),
+                                            MongoUpdate.combine(
+                                              MongoUpdate.set(MongoFields.Generation, generation),
+                                              MongoUpdate.set(MongoFields.Revision, revision),
+                                              MongoUpdate.set(MongoFields.CreatedAt, Date.from(now)),
+                                              MongoUpdate.set(MongoFields.ExpiresAt, Date.from(reservationExpiresAt))
+                                            )
+                                          )
+                                        )
+                                        .subflatMap {
+                                          case Some(result) if result.getMatchedCount == 1L => Right(refreshed)
+                                          case Some(_) => Left(RepositoryError.Conflict)
+                                          case None    => Left(RepositoryError.MissingWriteResult)
+                                        }
+                                  case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+                                }
+                            case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                            case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                          }
+                      case Some(_) => RepositoryIO.fromEither(Right(reservation))
+                      case None    => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
                     }
                 case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                case None    => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
               }
-        }
+            case None =>
+              val increment = MongoUpdate.combine(
+                MongoUpdate.setOnInsert(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
+                MongoUpdate.inc(MongoFields.NextRevision, 1L)
+              )
+              RepositoryIO
+                .lift(
+                  MongoSessionOperations.updateOne(
+                    control,
+                    session,
+                    MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId),
+                    increment
+                  )
+                )
+                .flatMap {
+                  case Some(result) if result.getMatchedCount == 1L =>
+                    RepositoryIO
+                      .lift(
+                        MongoSessionOperations.findOne(
+                          control,
+                          session,
+                          MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
+                        )
+                      )
+                      .flatMap {
+                        case Some(state) =>
+                          val generation = Option(state.get(MongoFields.Generation, classOf[java.lang.Long]))
+                            .fold(-1L)(_.longValue())
+                          val revision = Option(state.get(MongoFields.NextRevision, classOf[java.lang.Long]))
+                            .fold(-1L)(_.longValue())
+                          if (generation < 0L || revision < 1L)
+                            RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+                          else {
+                            val reservation =
+                              AnalyticsReportRunReservation(runId, rangeFingerprint, generation, revision)
+                            val document = MongoHiringPersistenceCodecs.analyticsReportRun(
+                              MongoHiringPersistenceCodecs.StoredAnalyticsReportRun(
+                                runId.value,
+                                rangeFingerprint.value,
+                                generation,
+                                revision,
+                                Some("Reserved"),
+                                Some(Date.from(now)),
+                                Some(Date.from(reservationExpiresAt))
+                              )
+                            )
+                            insertOne(reservations, session, document).as(reservation)
+                          }
+                        case None => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
+                      }
+                  case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                  case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                }
+          }
       }
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "analyticsReport.reserve")(result.recoverWith { case RepositoryError.Conflict =>
-          findOne(reservations, None, MongoFilter.eq(MongoFields.Id, runId.value)).subflatMap { existing =>
-            existing match {
-              case Some(document) if readReservation(document).isEmpty => Left(RepositoryError.InvalidStoredData)
-              case Some(document)                                      =>
-                readReservation(document).filter(_.rangeFingerprint == rangeFingerprint) match {
-                  case Some(reservation) => Right(reservation)
-                  case None              => Left(RepositoryError.Conflict)
-                }
-              case None => Left(RepositoryError.Conflict)
+          RepositoryIO
+            .lift(MongoSessionOperations.findOne(reservations, None, MongoFilter.eq(MongoFields.Id, runId.value)))
+            .subflatMap { existing =>
+              existing match {
+                case Some(document) if readReservation(document).isEmpty => Left(RepositoryError.InvalidStoredData)
+                case Some(document)                                      =>
+                  readReservation(document).filter(_.rangeFingerprint == rangeFingerprint) match {
+                    case Some(reservation) => Right(reservation)
+                    case None              => Left(RepositoryError.Conflict)
+                  }
+                case None => Left(RepositoryError.Conflict)
+              }
             }
-          }
         })
 
     }
@@ -529,11 +527,16 @@ final class MongoAnalyticsReportRepository(
       MongoRepositorySupport
         .repositoryGuard(diagnostics, "analyticsReport.publish")(transactionRunner.run { session =>
           for {
-            storedRun <- findOne(reservations, session, MongoFilter.eq(MongoFields.Id, reservation.runId.value))
-            controlState <- findOne(
-              control,
-              session,
-              MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
+            storedRun <- RepositoryIO.lift(
+              MongoSessionOperations
+                .findOne(reservations, session, MongoFilter.eq(MongoFields.Id, reservation.runId.value))
+            )
+            controlState <- RepositoryIO.lift(
+              MongoSessionOperations.findOne(
+                control,
+                session,
+                MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.ControlId)
+              )
             )
             result <- (storedRun.flatMap(readReservation), controlState) match {
               case (Some(stored), Some(state)) if stored == reservation =>
@@ -552,40 +555,48 @@ final class MongoAnalyticsReportRepository(
                     state.getString(MongoFields.LastRunId) == reservation.runId.value
                   if (!sameRunAlreadyPublished) RepositoryIO.fromEither(Left(RepositoryError.Conflict))
                   else
-                    findOne(
-                      collection,
-                      session,
-                      MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId)
-                    ).flatMap {
-                      case Some(existing)
-                          if Option(existing.get(MongoFields.Generation, classOf[java.lang.Long]))
-                            .exists(_.longValue() == reservation.generation) &&
-                            Option(existing.get(MongoFields.Revision, classOf[java.lang.Long]))
-                              .exists(_.longValue() == reservation.revision) &&
-                            existing.getString(MongoFields.RunId) == reservation.runId.value &&
-                            Option(existing.getDate(MongoFields.ExpiresAt)).exists(_.after(new Date())) =>
-                        RepositoryIO.fromEither(Right(()))
-                      case Some(existing)
-                          if Option(existing.getDate(MongoFields.ExpiresAt)).exists(_.after(new Date())) =>
-                        RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                      case _ =>
-                        val restored = AnalyticsReportSnapshotDocument
-                          .write(snapshot, expiresAt)
-                          .append(MongoFields.Generation, reservation.generation)
-                          .append(MongoFields.Revision, reservation.revision)
-                          .append(MongoFields.RunId, reservation.runId.value)
-                        replaceOne(
+                    RepositoryIO
+                      .lift(
+                        MongoSessionOperations.findOne(
                           collection,
                           session,
-                          MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
-                          restored,
-                          new ReplaceOptions().upsert(true)
-                        ).subflatMap(
-                          _.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ =>
-                            Right(())
-                          )
+                          MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId)
                         )
-                    }
+                      )
+                      .flatMap {
+                        case Some(existing)
+                            if Option(existing.get(MongoFields.Generation, classOf[java.lang.Long]))
+                              .exists(_.longValue() == reservation.generation) &&
+                              Option(existing.get(MongoFields.Revision, classOf[java.lang.Long]))
+                                .exists(_.longValue() == reservation.revision) &&
+                              existing.getString(MongoFields.RunId) == reservation.runId.value &&
+                              Option(existing.getDate(MongoFields.ExpiresAt)).exists(_.after(new Date())) =>
+                          RepositoryIO.fromEither(Right(()))
+                        case Some(existing)
+                            if Option(existing.getDate(MongoFields.ExpiresAt)).exists(_.after(new Date())) =>
+                          RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                        case _ =>
+                          val restored = AnalyticsReportSnapshotDocument
+                            .write(snapshot, expiresAt)
+                            .append(MongoFields.Generation, reservation.generation)
+                            .append(MongoFields.Revision, reservation.revision)
+                            .append(MongoFields.RunId, reservation.runId.value)
+                          RepositoryIO
+                            .lift(
+                              MongoSessionOperations.replaceOne(
+                                collection,
+                                session,
+                                MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
+                                restored,
+                                new ReplaceOptions().upsert(true)
+                              )
+                            )
+                            .subflatMap(
+                              _.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ =>
+                                Right(())
+                              )
+                            )
+                      }
                 } else {
                   val updateControl = MongoUpdate.combine(
                     MongoUpdate.set(MongoFields.State, AnalyticsReportSnapshotDocument.Published),
@@ -602,39 +613,49 @@ final class MongoAnalyticsReportRepository(
                       List(AnalyticsReportSnapshotDocument.Published, AnalyticsReportSnapshotDocument.Unpublished)
                     )
                   )
-                  updateOne(control, session, controlFilter, updateControl).flatMap {
-                    case Some(updateResult) if updateResult.getMatchedCount == 1L =>
-                      val snapshotDocument = AnalyticsReportSnapshotDocument
-                        .write(snapshot, expiresAt)
-                        .append(MongoFields.Generation, reservation.generation)
-                        .append(MongoFields.Revision, reservation.revision)
-                        .append(MongoFields.RunId, reservation.runId.value)
-                      replaceOne(
-                        collection,
-                        session,
-                        MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
-                        snapshotDocument,
-                        new ReplaceOptions().upsert(true)
-                      ).flatMap {
-                        case Some(_) =>
-                          updateOne(
-                            reservations,
-                            session,
-                            MongoFilter.and(
-                              MongoFilter.eq(MongoFields.Id, reservation.runId.value),
-                              MongoFilter.eq(MongoFields.Generation, reservation.generation),
-                              MongoFilter.eq(MongoFields.Revision, reservation.revision)
-                            ),
-                            MongoUpdate.set(MongoFields.State, "Published")
-                          ).subflatMap {
-                            case Some(_) => Right(())
-                            case None    => Left(RepositoryError.MissingWriteResult)
+                  RepositoryIO
+                    .lift(MongoSessionOperations.updateOne(control, session, controlFilter, updateControl))
+                    .flatMap {
+                      case Some(updateResult) if updateResult.getMatchedCount == 1L =>
+                        val snapshotDocument = AnalyticsReportSnapshotDocument
+                          .write(snapshot, expiresAt)
+                          .append(MongoFields.Generation, reservation.generation)
+                          .append(MongoFields.Revision, reservation.revision)
+                          .append(MongoFields.RunId, reservation.runId.value)
+                        RepositoryIO
+                          .lift(
+                            MongoSessionOperations.replaceOne(
+                              collection,
+                              session,
+                              MongoFilter.eq(MongoFields.Id, AnalyticsReportSnapshotDocument.CurrentId),
+                              snapshotDocument,
+                              new ReplaceOptions().upsert(true)
+                            )
+                          )
+                          .flatMap {
+                            case Some(_) =>
+                              RepositoryIO
+                                .lift(
+                                  MongoSessionOperations.updateOne(
+                                    reservations,
+                                    session,
+                                    MongoFilter.and(
+                                      MongoFilter.eq(MongoFields.Id, reservation.runId.value),
+                                      MongoFilter.eq(MongoFields.Generation, reservation.generation),
+                                      MongoFilter.eq(MongoFields.Revision, reservation.revision)
+                                    ),
+                                    MongoUpdate.set(MongoFields.State, "Published")
+                                  )
+                                )
+                                .subflatMap {
+                                  case Some(_) => Right(())
+                                  case None    => Left(RepositoryError.MissingWriteResult)
+                                }
+                            case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
                           }
-                        case None => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-                      }
-                    case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
-                    case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
-                  }
+                      case Some(_) => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
+                      case None    => RepositoryIO.fromEither(Left(RepositoryError.MissingWriteResult))
+                    }
                 }
               case (Some(_), Some(_))              => RepositoryIO.fromEither(Left(RepositoryError.Conflict))
               case (Some(_), None)                 => RepositoryIO.fromEither(Left(RepositoryError.InvalidStoredData))
@@ -649,8 +670,8 @@ final class MongoAnalyticsReportRepository(
       session: Option[ClientSession[IO]],
       document: Document
   ): RepositoryIO[Unit] =
-    MongoAnalyticsRepositoryOperations
-      .insertOne(collection, session, document)
+    RepositoryIO
+      .lift(MongoSessionOperations.insertOne(collection, session, document))
       .subflatMap(_.fold[Either[RepositoryError, Unit]](Left(RepositoryError.MissingWriteResult))(_ => Right(())))
 
   private def readReservation(document: Document): Option[AnalyticsReportRunReservation] =

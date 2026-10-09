@@ -3,7 +3,7 @@ package com.example.graphQL.cats.repository.mongo
 import cats.effect.{IO, Resource}
 import com.example.graphQL.cats.service.port.{RepositoryError, RepositoryIO}
 import com.example.graphQL.cats.service.Diagnostics
-import com.mongodb.{MongoCommandException, MongoException}
+import com.mongodb.MongoException
 import mongo4cats.client.{ClientSession, MongoClient}
 import mongo4cats.models.client.ClientSessionOptions
 import retry.*
@@ -34,11 +34,11 @@ private[mongo] object MongoTransactionRunner {
   object RetryDecision {
     def decide(stage: RetryStage, labels: Set[String]): RetryDecision =
       stage match {
-        case RetryStage.Operation if labels.contains("TransientTransactionError") =>
+        case RetryStage.Operation if labels.contains(MongoErrors.TransientTransactionErrorLabel) =>
           RetryTransaction
-        case RetryStage.Commit if labels.contains("UnknownTransactionCommitResult") =>
+        case RetryStage.Commit if labels.contains(MongoErrors.UnknownTransactionCommitResultLabel) =>
           RetryCommit
-        case RetryStage.Commit if labels.contains("TransientTransactionError") =>
+        case RetryStage.Commit if labels.contains(MongoErrors.TransientTransactionErrorLabel) =>
           RetryTransaction
         case _ => Fail
       }
@@ -71,7 +71,9 @@ private[mongo] object MongoTransactionRunner {
         val commitBackoff = backoff[CommitOutcome[A]](retryPolicy, retryPolicy.maxCommitAttempts)
 
         def labels(error: MongoException): Set[String] =
-          Set("TransientTransactionError", "UnknownTransactionCommitResult").filter(error.hasErrorLabel)
+          Set(MongoErrors.TransientTransactionErrorLabel, MongoErrors.UnknownTransactionCommitResultLabel).filter(
+            error.hasErrorLabel
+          )
 
         def commit(session: ClientSession[IO], result: A): IO[CommitOutcome[A]] = {
           val commitAttempt =
@@ -84,13 +86,18 @@ private[mongo] object MongoTransactionRunner {
                       case RetryDecision.RetryCommit      => CommitOutcome.RetryCommit(error)
                       case RetryDecision.RetryTransaction => CommitOutcome.RetryTransaction(error)
                       case RetryDecision.Fail             =>
-                        CommitOutcome.Completed(mapWrite(error, duplicateKeyError, transientExhaustionError))
+                        CommitOutcome.Completed(
+                          MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError)
+                        )
                     }
                   }
                 case error =>
                   MongoRepositorySupport
                     .reportFailure(diagnostics, "transaction.commit", error)
-                    .as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError, transientExhaustionError)))
+                    .as(
+                      CommitOutcome
+                        .Completed(MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError))
+                    )
               }
 
           retryingOnFailures(commitAttempt)(
@@ -128,7 +135,11 @@ private[mongo] object MongoTransactionRunner {
                         "transaction.operation",
                         error
                       ))
-                        .as(CommitOutcome.Completed(mapWrite(error, duplicateKeyError, transientExhaustionError)))
+                        .as(
+                          CommitOutcome.Completed(
+                            MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError)
+                          )
+                        )
                   }
                 case Right(Left(error)) =>
                   abort(active).as(CommitOutcome.Completed(Left(error)))
@@ -137,7 +148,8 @@ private[mongo] object MongoTransactionRunner {
                     case retry @ CommitOutcome.RetryTransaction(_) => abort(active).as(retry)
                     case CommitOutcome.RetryCommit(error)          =>
                       abort(active).as(
-                        CommitOutcome.Completed(mapWrite(error, duplicateKeyError, transientExhaustionError))
+                        CommitOutcome
+                          .Completed(MongoErrors.toRepositoryError(error, duplicateKeyError, transientExhaustionError))
                       )
                     case completed @ CommitOutcome.Completed(_) => IO.pure(completed)
                   }
@@ -183,25 +195,4 @@ private[mongo] object MongoTransactionRunner {
   private[mongo] def backoff[A](policy: RetryPolicy, maxAttempts: Int): retry.RetryPolicy[IO, A] =
     limitRetries[IO](math.max(maxAttempts - 1, 0)) join
       capDelay(policy.maxDelay, exponentialBackoff[IO](policy.initialDelay))
-
-  private[mongo] def mapWrite[A](
-      error: Throwable,
-      duplicateKeyError: RepositoryError,
-      transientExhaustionError: RepositoryError = RepositoryError.Conflict
-  ): Either[RepositoryError, A] =
-    error match {
-      case MongoDuplicateKey(_)                                        => Left(duplicateKeyError)
-      case command: MongoCommandException if isWriteConflict(command)  => Left(transientExhaustionError)
-      case mongo: MongoException if isTransientTransactionError(mongo) => Left(transientExhaustionError)
-      case _                                                           => Left(RepositoryError.Unavailable)
-    }
-
-  private[mongo] def isWriteConflict(error: MongoCommandException): Boolean =
-    error.getErrorCode == 112 || error.hasErrorLabel("TransientTransactionError")
-
-  private def isTransientTransactionError(error: Throwable): Boolean = error match {
-    case mongo: MongoException => mongo.hasErrorLabel("TransientTransactionError")
-    case _                     => false
-  }
-
 }

@@ -74,5 +74,5 @@ object JwtActorAuthenticator {
       .toOption
       .filter(_.isValid(issuer, audience))
       .flatMap(_.subject)
-      .flatMap(subject => parseIdentifier(subject)(UserId.apply).toOption)
+      .flatMap(subject => parseIdentifier(subject)(UserId.apply))
 }

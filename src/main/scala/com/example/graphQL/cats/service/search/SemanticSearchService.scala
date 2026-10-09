@@ -39,12 +39,9 @@ final class SemanticSearchService(
   ): UseCaseIO[List[RankedJob]] =
     for {
       candidate <- resolveCandidate(actor)
-      _ <- UseCase.fromEither(
-        Either.cond(
-          text.length <= SearchableText.QueryMaxChars,
-          (),
-          UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))
-        )
+      _ <- UseCase.ensure(
+        text.length <= SearchableText.QueryMaxChars,
+        UseCaseError.Search(SearchError.InputTooLarge("query", SearchableText.QueryMaxChars))
       )
       vector <- embedQuery(text)
       results <- vectorSearch(
@@ -123,22 +120,13 @@ final class SemanticSearchService(
   ): UseCaseIO[List[RankedCandidate]] =
     for {
       user <- authorization.resolve(actor)
-      _ <- UseCase.fromEither(
-        Either.cond(user.role != UserRole.Candidate, (), UseCaseError.Domain(DomainError.RecruiterRequired))
+      _ <- UseCase.ensure(user.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
+      job <- UseCase.found(jobs.find(jobId), "job")
+      _ <- UseCase.ensure(
+        user.role != UserRole.Recruiter || job.recruiterId == user.id,
+        UseCaseError.Domain(DomainError.Forbidden)
       )
-      job <- UseCase
-        .repository(jobs.find(jobId))
-        .subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(
-        Either.cond(
-          user.role != UserRole.Recruiter || job.recruiterId == user.id,
-          (),
-          UseCaseError.Domain(DomainError.Forbidden)
-        )
-      )
-      _ <- UseCase.fromEither(
-        Either.cond(job.status == JobStatus.Open, (), UseCaseError.Domain(DomainError.JobMustBeOpen))
-      )
+      _ <- UseCase.ensure(job.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
       normalizedQuery <- UseCase.fromEither(
         queryText.map(_.trim).filter(_.nonEmpty) match {
           case Some(text) if text.length > SearchableText.QueryMaxChars =>
@@ -268,29 +256,19 @@ final class SemanticSearchService(
   ): UseCaseIO[List[RankedCandidate]] =
     for {
       currentActor <- currentActor(actor)
-      _ <- UseCase.fromEither(
-        Either.cond(currentActor.role != UserRole.Candidate, (), UseCaseError.Domain(DomainError.RecruiterRequired))
-      )
+      _ <- UseCase.ensure(currentActor.role != UserRole.Candidate, UseCaseError.Domain(DomainError.RecruiterRequired))
       currentJob <- searchRead(jobs.find(jobId)).subflatMap(_.toRight(UseCaseError.Domain(DomainError.NotFound("job"))))
-      _ <- UseCase.fromEither(
-        Either.cond(
-          currentActor.role != UserRole.Recruiter || currentJob.recruiterId == currentActor.id,
-          (),
-          UseCaseError.Domain(DomainError.Forbidden)
-        )
+      _ <- UseCase.ensure(
+        currentActor.role != UserRole.Recruiter || currentJob.recruiterId == currentActor.id,
+        UseCaseError.Domain(DomainError.Forbidden)
       )
-      _ <- UseCase.fromEither(
-        Either.cond(currentJob.status == JobStatus.Open, (), UseCaseError.Domain(DomainError.JobMustBeOpen))
-      )
-      _ <- UseCase.fromEither(
-        Either.cond(
-          currentJob.embedding.exists(embedding =>
-            embedding.meta == queryMeta && embedding.meta.model == embeddingModel &&
-              embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(currentJob))
-          ),
-          (),
-          UseCaseError.Search(SearchError.StaleEmbedding("job"))
-        )
+      _ <- UseCase.ensure(currentJob.status == JobStatus.Open, UseCaseError.Domain(DomainError.JobMustBeOpen))
+      _ <- UseCase.ensure(
+        currentJob.embedding.exists(embedding =>
+          embedding.meta == queryMeta && embedding.meta.model == embeddingModel &&
+            embedding.meta.sourceHash == SourceHash.sha256(SearchableText.job(currentJob))
+        ),
+        UseCaseError.Search(SearchError.StaleEmbedding("job"))
       )
       scope <- UseCase.fromEither(HiringReadScope.validated(actor, currentActor, authorization))
       currentUsers <- searchRead(

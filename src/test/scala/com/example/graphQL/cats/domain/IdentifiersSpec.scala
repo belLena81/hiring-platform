@@ -16,14 +16,14 @@ final class IdentifiersSpec extends FunSuite {
   }
 
   test("parse constructs typed identifiers from UUID strings") {
-    assertEquals(parse(uuid.toString)(UserId.apply), Right(UserId(uuid)))
-    assertEquals(parse(uuid.toString)(JobId.apply), Right(JobId(uuid)))
-    assertEquals(parse(uuid.toString)(ApplicationId.apply), Right(ApplicationId(uuid)))
-    assertEquals(parse(uuid.toString)(ApplicationEventId.apply), Right(ApplicationEventId(uuid)))
+    assertEquals(parse(uuid.toString)(UserId.apply), Some(UserId(uuid)))
+    assertEquals(parse(uuid.toString)(JobId.apply), Some(JobId(uuid)))
+    assertEquals(parse(uuid.toString)(ApplicationId.apply), Some(ApplicationId(uuid)))
+    assertEquals(parse(uuid.toString)(ApplicationEventId.apply), Some(ApplicationEventId(uuid)))
   }
 
   test("parse returns a failure for malformed identifier strings") {
-    assert(parse("not-a-uuid")(UserId.apply).isLeft)
+    assertEquals(parse("not-a-uuid")(UserId.apply), None)
   }
 
   test("identifier aliases remain type-safe despite sharing a UUID representation") {

@@ -148,8 +148,8 @@ final class MongoTransactionRetrySpec extends CatsEffectSuite {
         .attempt
       runCount <- runs.get
     } yield {
-      assert(sessionFailure.swap.exists(_.isInstanceOf[IllegalArgumentException]))
-      assert(runFailure.swap.exists(_.isInstanceOf[IllegalArgumentException]))
+      assert(sessionFailure.swap.exists(_.isInstanceOf[MongoSetupError]))
+      assert(runFailure.swap.exists(_.isInstanceOf[MongoSetupError]))
       assertEquals(runCount, 0)
     }
   }

@@ -4,6 +4,7 @@ import cats.effect.{Clock, IO, Resource}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
 import com.example.graphQL.cats.config.{KafkaConfig, KafkaSaslSecurityProtocol}
+import com.example.graphQL.cats.service.RepositoryError
 import com.example.graphQL.cats.service.port.{
   ClaimedOperationalEvent,
   ConsumerReceiptRepository,
@@ -126,19 +127,15 @@ object OperationalEventKafkaRuntime {
   ): IO[Unit] =
     publishWaves(config.publisher.batchSize) { limit =>
       clock.realTimeInstant.flatMap { now =>
-        outbox
-          .claim(
+        requireOutboxSuccess(
+          outbox.claim(
             config.publisher.workerId,
             transactionalId,
             now,
             now.plusSeconds(config.publisher.leaseSeconds.toLong),
             limit
           )
-          .value
-          .flatMap {
-            case Right(claims) => IO.pure(claims)
-            case Left(error)   => IO.raiseError(new IllegalStateException(s"outbox claim failed: $error"))
-          }
+        )
       }
     } { claim =>
       val record = ProducerRecord(config.topic, claim.partitionKey, claim.envelopeBytes)
@@ -221,11 +218,8 @@ object OperationalEventKafkaRuntime {
       }
   }
 
-  private def requireOutboxSuccess(result: RepositoryIO[Unit]): IO[Unit] =
-    result.value.flatMap {
-      case Right(())   => IO.unit
-      case Left(error) => IO.raiseError(new IllegalStateException(s"outbox operation failed: $error"))
-    }
+  private def requireOutboxSuccess[A](result: RepositoryIO[A]): IO[A] =
+    result.leftMap(OutboxOperationFailed(_)).rethrowT
 
   /** Operational facts may arrive out of order; Kafka preserves append order within each partition. */
   private[kafka] def publishClaims(
@@ -260,8 +254,8 @@ object OperationalEventKafkaRuntime {
           config.consumer.partitionConcurrency
         ) { message =>
           val record = message.record
-          processRecordBeforeCommit(record.topic, record.partition, record.offset)(
-            handleRecord(
+          processRecord(record.topic, record.partition, record.offset)(
+            recordDurably(
               config,
               receipts,
               quarantine,
@@ -286,6 +280,7 @@ object OperationalEventKafkaRuntime {
       protocol: KafkaSaslSecurityProtocol = KafkaSaslSecurityProtocol.Tls
   ): Map[String, String] = KafkaClientSettings.security(username, password, protocol)
 
+  /** Boolean form of [[recordDurably]] kept for the interview runtime; the repository failure is not carried. */
   private[kafka] def handleRecord(
       config: KafkaConfig,
       receipts: ConsumerReceiptRepository,
@@ -296,7 +291,20 @@ object OperationalEventKafkaRuntime {
       bytes: Option[Array[Byte]],
       clock: Clock[IO] = Clock[IO]
   ): IO[Boolean] =
-    clock.realTimeInstant.flatMap { now =>
+    recordDurably(config, receipts, quarantine, topic, partition, offset, bytes, clock).value.map(_.isRight)
+
+  /** Makes the record durable (receipt, or quarantine when malformed); a repository failure stays typed. */
+  private[kafka] def recordDurably(
+      config: KafkaConfig,
+      receipts: ConsumerReceiptRepository,
+      quarantine: EventQuarantineRepository,
+      topic: String,
+      partition: Int,
+      offset: Long,
+      bytes: Option[Array[Byte]],
+      clock: Clock[IO] = Clock[IO]
+  ): RepositoryIO[Unit] =
+    RepositoryIO.lift(clock.realTimeInstant).flatMap { now =>
       bytes.toRight("MalformedEnvelope").flatMap(OperationalEventJson.decode) match {
         case Left(_) =>
           quarantineRecord(
@@ -309,7 +317,7 @@ object OperationalEventKafkaRuntime {
             bytes.fold("null event envelope")(_ => "malformed event envelope"),
             bytes.getOrElse(Array.emptyByteArray),
             now
-          ).value.map(_.isRight)
+          )
         case Right(event) =>
           receipts
             .record(
@@ -318,21 +326,30 @@ object OperationalEventKafkaRuntime {
               now,
               now.plusSeconds(config.consumer.receiptTtlDays.days.toSeconds)
             )
-            .value
-            .map(_.isRight)
+            .void
       }
     }
 
+  /** Boolean form of [[processRecord]] kept for the interview runtime. */
   private[kafka] def processRecordBeforeCommit(
       topic: String,
       partition: Int,
       offset: Long
   )(process: IO[Boolean])(commit: IO[Unit]): IO[Unit] =
-    process.flatMap {
-      case true => commit
-      // Stop this stream before reading a later offset. Continuing with false here could
+    processRecord(topic, partition, offset)(
+      RepositoryIO.fromIOEither(process.map(durable => Either.cond(durable, (), RepositoryError.Unavailable)))
+    )(commit)
+
+  private[kafka] def processRecord(
+      topic: String,
+      partition: Int,
+      offset: Long
+  )(process: RepositoryIO[Unit])(commit: IO[Unit]): IO[Unit] =
+    process.value.flatMap {
+      case Right(()) => commit
+      // Stop this stream before reading a later offset. Continuing here could
       // commit N+1 and make the undurable record at N unrecoverable for this group.
-      case false => IO.raiseError(UndurableRecord(topic, partition, offset))
+      case Left(error) => IO.raiseError(RecordNotDurable(topic, partition, offset, error))
     }
 
   private def quarantineRecord(
@@ -390,8 +407,11 @@ object OperationalEventKafkaRuntime {
       .mkString(" <- ")
       .take(512)
 
-  private final case class UndurableRecord(topic: String, partition: Int, offset: Long)
-      extends RuntimeException(s"Kafka record could not be durably processed: $topic-$partition@$offset")
+  private final case class RecordNotDurable(topic: String, partition: Int, offset: Long, cause: RepositoryError)
+      extends RuntimeException(s"Kafka record could not be durably processed: $topic-$partition@$offset ($cause)")
+
+  private final case class OutboxOperationFailed(error: RepositoryError)
+      extends RuntimeException(s"outbox operation failed: $error")
 
   private[kafka] def isProducerFenced(error: Throwable): Boolean =
     Iterator
