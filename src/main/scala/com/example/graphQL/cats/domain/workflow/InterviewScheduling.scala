@@ -25,6 +25,14 @@ enum InterviewWorkflowError {
   case ApplicationMustBeAccepted
   case StaleRevision
   case InvalidTransition
+  case InterviewAlreadyStarted
+  case InterviewAlreadyCancelled
+  case InterviewNotSettled
+  case RescheduleIntervalUnchanged
+  case ProposalAlreadyOpen
+  case NoOpenProposal
+  case ProposalExpired
+  case ProposalTtlOutOfRange
 }
 
 enum InterviewWorkflowPhase {
@@ -34,6 +42,15 @@ enum InterviewWorkflowPhase {
   case NotificationsPending
   case Completed
   case RepairRequired
+  case ProposalPending
+  case CancelPending
+  case CancelNotificationsPending
+  case Cancelled
+  case RescheduleHoldPending
+  case RescheduleSwapPending
+  case RescheduleCancelOldPending
+  case RescheduleNotificationsPending
+  case RescheduleCompensationPending
 }
 
 enum InterviewParticipant {
@@ -82,7 +99,12 @@ final case class InterviewWorkflow(
     revision: Long,
     phase: InterviewWorkflowPhase,
     notified: Set[InterviewParticipant],
-    initiatedBy: UserId
+    initiatedBy: UserId,
+    generation: Int = 0,
+    pendingInterval: Option[InterviewInterval] = None,
+    cancelledAt: Option[Instant] = None,
+    proposal: Option[InterviewRescheduleProposal] = None,
+    rescheduleRequestedAt: Option[Instant] = None
 )
 
 final case class InterviewWorkflowDecision(workflow: InterviewWorkflow, commands: List[InterviewWorkflowCommand])
@@ -114,8 +136,14 @@ object InterviewWorkflow {
     (workflow.revision == commandRevision || (notification && commandRevision <= workflow.revision))
   }
 
+  /** The original generation keeps the scheduling key; each replacement hold gets its own generation-qualified key. */
+  def reservationKey(id: InterviewWorkflowId, generation: Int): String =
+    if (generation == 0) s"${id.value}:reserve" else s"${id.value}:reserve:g$generation"
+
+  def cancellationKey(id: InterviewWorkflowId, generation: Int): String = s"${id.value}:cancel:g$generation"
+
   def initialCommand(workflow: InterviewWorkflow): InterviewWorkflowCommand =
-    InterviewWorkflowCommand.ReserveCalendarSlot(s"${workflow.id.value}:reserve")
+    InterviewWorkflowCommand.ReserveCalendarSlot(reservationKey(workflow.id, 0))
 
   def create(
       id: InterviewWorkflowId,
@@ -201,7 +229,7 @@ object InterviewWorkflow {
           (
             InterviewWorkflowPhase.ReservationPending,
             workflow.notified,
-            List(InterviewWorkflowCommand.ReserveCalendarSlot(s"${workflow.id.value}:reserve"))
+            List(InterviewWorkflowCommand.ReserveCalendarSlot(reservationKey(workflow.id, 0)))
           )
         )
       case (InterviewWorkflowPhase.ReservationPending, InterviewWorkflowEvent.ReservationRejected) =>
