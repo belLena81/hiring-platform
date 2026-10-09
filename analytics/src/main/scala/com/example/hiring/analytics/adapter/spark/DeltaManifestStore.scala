@@ -6,7 +6,6 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.service.batch.{AnalyticsManifestStatus, AnalyticsRunManifestStore}
 
 import cats.effect.Async
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{Row, SparkSession}
 import scala.jdk.CollectionConverters.*
 
@@ -37,8 +36,8 @@ private[analytics] final class DeltaManifestStore[F[_]: Async](
       val frame = spark.createDataFrame(rows.asJava, AnalyticsTableSchemas.struct(AnalyticsTableSchemas.manifests))
       val condition =
         "target.runId = source.runId AND target.topic = source.topic AND target.partition = source.partition"
-      DeltaTable
-        .forPath(spark, SparkPhysicalLocation.resolve(paths.manifests))
+      DeltaTables
+        .forPath(spark, paths.manifests)
         .as("target")
         .merge(frame.as("source"), condition)
         .whenMatched()

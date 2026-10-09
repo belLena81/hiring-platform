@@ -2,15 +2,13 @@ package com.example.hiring.analytics.service.batch
 
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.value
 import com.example.hiring.analytics.config.AnalyticsOperationalSettings
-import com.example.hiring.analytics.domain.{AnalyticsDigest, AnalyticsRunManifest, RangeFingerprint}
+import com.example.hiring.analytics.domain.{AnalyticsRunManifest, RangeFingerprint}
 import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
 
-import cats.data.NonEmptyChain
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 
-import java.nio.charset.StandardCharsets
 import java.time.Instant
 
 /** Coordinates one bounded analytics publication without depending on Spark or storage adapters. */
@@ -44,11 +42,7 @@ final class HiringAnalyticsBatch[F[_]: Async](
           markerTokens <- deletionMarkers.activeSubjectTokens
           _ <- lakehouse.validateHmacConfiguration
           reservedAt <- now
-          fingerprint <- effect.fromEither(
-            RangeFingerprint
-              .from(rangeFingerprint(manifest))
-              .leftMap(problem => AnalyticsError.InvalidInput(NonEmptyChain.one(problem)))
-          )
+          fingerprint = rangeFingerprint(manifest)
           reservation <- reportPublisher.reserve(manifest.runId, fingerprint, reservedAt)
           result <- lakehouse.prepare(manifest, markerTokens)
           completedAt <- now
@@ -99,13 +93,13 @@ final class HiringAnalyticsBatch[F[_]: Async](
       updatedAt: Instant
   ): F[Unit] = manifestStore.persist(manifest, status, updatedAt)
 
-  private def rangeFingerprint(manifest: AnalyticsRunManifest): String = {
+  private def rangeFingerprint(manifest: AnalyticsRunManifest): RangeFingerprint = {
     val canonical = manifest.offsetRanges
       .sortBy(range => (AnalyticsTopic.unwrap(range.topic), range.partition))
       .map(range =>
         s"${AnalyticsTopic.unwrap(range.topic)}:${range.partition}:${range.startOffset}:${range.endOffsetExclusive}"
       )
       .mkString("\n")
-    AnalyticsDigest.sha256Hex(canonical.getBytes(StandardCharsets.UTF_8))
+    RangeFingerprint.ofSha256(canonical)
   }
 }

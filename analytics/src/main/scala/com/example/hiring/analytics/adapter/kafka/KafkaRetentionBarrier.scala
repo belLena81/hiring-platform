@@ -4,6 +4,7 @@ import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.adapter.spark.SparkBlockingExecution
 import com.example.hiring.analytics.domain.{AnalyticsPartition, AnalyticsTopic}
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.erasure.{KafkaRetention, KafkaRetentionBarrier}
 
 import cats.effect.{Async, Resource}
@@ -11,9 +12,7 @@ import cats.syntax.all.*
 import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.TopicPartition
 
-import java.util.Properties
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
 
 private[analytics] final class KafkaRetentionAdapter[F[_]: Async](
     connection: KafkaConnection,
@@ -64,10 +63,7 @@ private[analytics] object KafkaRetentionAdapter {
           } yield barrier
         }
         .flatMap(Async[F].fromEither)
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+        .translating(AnalyticsError.SourceReadFailure(_))
     }
 
   /** Checks actual broker earliest offsets rather than inferring expiry from wall-clock age. */
@@ -91,10 +87,7 @@ private[analytics] object KafkaRetentionAdapter {
             KafkaRetentionBarrier.hasExpired(valid, earliest)
           }
           .flatMap(Async[F].fromEither)
-          .adaptError {
-            case error: AnalyticsError => error
-            case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-          }
+          .translating(AnalyticsError.SourceReadFailure(_))
       }
     }
 
@@ -114,10 +107,10 @@ private[analytics] object KafkaRetentionAdapter {
       consumerProperties <- Resource.eval(
         Async[F].fromEither(KafkaClientProperties.retentionConsumerProperties(connection))
       )
-      client <- Resource.make(driverExecution.blocking {
-        val properties = new Properties()
-        consumerProperties.foreach { case (key, value) => properties.setProperty(key, value) }
-        new KafkaConsumer[Array[Byte], Array[Byte]](properties)
-      })(client => driverExecution.blocking(client.close()).void)
+      client <- Resource.make(
+        driverExecution.blocking(
+          new KafkaConsumer[Array[Byte], Array[Byte]](KafkaClientProperties.asJava(consumerProperties))
+        )
+      )(client => driverExecution.blocking(client.close()).void)
     } yield client
 }

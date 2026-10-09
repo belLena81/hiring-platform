@@ -1,4 +1,5 @@
 package com.example.hiring.analytics
+import com.example.hiring.analytics.adapter.mongo.MongoPublisherStream
 import com.example.hiring.analytics.errors.*
 
 import cats.effect.{Clock, IO}
@@ -189,7 +190,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
     val expected = AnalyticsError.InvalidConfiguration("expected analytics failure")
 
     val result = AnalyticsTestOperationalConfig.streams
-      .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.raiseError(expected)))
+      .transaction(session)(EitherT.liftF[IO, AnalyticsError, Int](IO.raiseError(expected)))(Clock[IO])
       .rethrowT
       .attempt
       .unsafeRunSync()
@@ -217,7 +218,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
     val expected = AnalyticsError.InvalidConfiguration("expected typed failure")
 
     val result = AnalyticsTestOperationalConfig.streams
-      .transaction(session)(EitherT.leftT[IO, Int](expected))
+      .transaction(session)(EitherT.leftT[IO, Int](expected))(Clock[IO])
       .value
       .unsafeRunSync()
 
@@ -280,5 +281,7 @@ final class MongoPublisherStreamSpec extends FunSuite {
     assert(requested.get() > 0L, "FS2 did not request publisher elements")
     assert(requested.get() <= 256L, s"publisher demand exceeded the configured bound: ${requested.get()}")
     assertEquals(cancellations.get(), 1)
+    val empty = AnalyticsTestOperationalConfig.streams.one[IO, Void](completedPublisher).attempt.unsafeRunSync()
+    assertEquals(empty, Left(MongoPublisherStream.CompletedWithoutValue))
   }
 }

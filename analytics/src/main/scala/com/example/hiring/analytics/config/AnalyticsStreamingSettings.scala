@@ -9,7 +9,7 @@ import com.example.hiring.analytics.domain.{
 }
 import com.example.hiring.analytics.errors.AnalyticsError
 
-import cats.data.ValidatedNec
+import cats.data.{Validated, ValidatedNec}
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.numeric.Interval
@@ -77,14 +77,10 @@ final case class AnalyticsStreamingSettings private (
         .leftMap(_ => AnalyticsError.InvalidConfiguration("analytics lakehouse root is invalid"))
     } yield StreamingActivationIdentity(
       streamId,
-      AnalyticsDigest.sha256Hex(
-        s"$sourceClusterId\n$topic\n$sourceTopicId".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-      ),
+      AnalyticsDigest.sha256Hex(s"$sourceClusterId\n$topic\n$sourceTopicId"),
       lakehouseId,
-      AnalyticsDigest.sha256Hex(
-        "hiring-operational-event-envelope:seven-field:v1".getBytes(java.nio.charset.StandardCharsets.UTF_8)
-      ),
-      AnalyticsDigest.sha256Hex(settings.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      AnalyticsDigest.sha256Hex("hiring-operational-event-envelope:seven-field:v1"),
+      AnalyticsDigest.sha256Hex(settings)
     )
   }
 }
@@ -129,20 +125,16 @@ object AnalyticsStreamingSettings {
 
   private def validate(raw: StreamingSettingsInput): ValidatedNec[String, AnalyticsStreamingSettings] = {
     val offsets = raw.initialOffsets.traverse(offset => KafkaStartingOffset.from(offset.partition, offset.offset))
-    val uniquePartitions = Either
-      .cond(
-        raw.initialOffsets.map(_.partition).distinct.size == raw.initialOffsets.size,
-        (),
-        "analytics.streaming.initial-offsets must contain each partition once"
-      )
-      .toValidatedNec
-    val nonEmptyOffsets = Either
-      .cond(
-        raw.initialOffsets.nonEmpty,
-        (),
-        "analytics.streaming.initial-offsets must explicitly name every source partition"
-      )
-      .toValidatedNec
+    val uniquePartitions = Validated.condNec(
+      raw.initialOffsets.map(_.partition).distinct.size == raw.initialOffsets.size,
+      (),
+      "analytics.streaming.initial-offsets must contain each partition once"
+    )
+    val nonEmptyOffsets = Validated.condNec(
+      raw.initialOffsets.nonEmpty,
+      (),
+      "analytics.streaming.initial-offsets must explicitly name every source partition"
+    )
     (
       validateCheckpointLocation(raw.checkpointLocation),
       (offsets, uniquePartitions, nonEmptyOffsets).mapN((validOffsets, _, _) => validOffsets)

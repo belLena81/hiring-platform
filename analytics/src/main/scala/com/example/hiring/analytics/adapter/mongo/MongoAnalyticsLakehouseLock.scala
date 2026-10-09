@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AnalyticsLakehouseIdentity
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 
 import cats.Monad
@@ -122,11 +123,7 @@ private[analytics] final class MongoAnalyticsLakehouseLock[F[_]: Async: UUIDGen]
           .raiseWhen(result.getDeletedCount != 1L)(AnalyticsError.LakehouseLockOwnershipLost)
           .void
       )
-      .handleErrorWith {
-        case error: AnalyticsError => effect.raiseError(error)
-        case NonFatal(error)       => effect.raiseError(AnalyticsError.LakehouseFailure(error))
-        case error                 => effect.raiseError(error)
-      }
+      .translating(AnalyticsError.LakehouseFailure(_))
   }
 }
 

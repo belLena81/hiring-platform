@@ -17,6 +17,9 @@ final class AnalyticsLakehouseIdentitySpec extends FunSuite {
 
   test("lakehouse identity rejects URI credentials and query parameters") {
     assert(AnalyticsLakehouseIdentity.from("s3a://user:credential@example/lakehouse").isLeft)
+    assert(AnalyticsLakehouseIdentity.from("s3a://example/lakehouse").isRight)
+    assert(AnalyticsLakehouseIdentity.from("file://host/lakehouse").isLeft)
+    assert(AnalyticsLakehouseIdentity.from("file:///var/%61/lakehouse").isLeft)
     assert(AnalyticsLakehouseIdentity.from("file:///lakehouse?version=1").isLeft)
   }
 

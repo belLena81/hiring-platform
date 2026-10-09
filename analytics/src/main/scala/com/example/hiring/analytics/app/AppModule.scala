@@ -19,6 +19,7 @@ import com.example.hiring.analytics.config.{
 }
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.{translating, translatingWith}
 import com.example.hiring.analytics.service.batch.*
 import com.example.hiring.analytics.service.erasure.*
 import com.example.hiring.analytics.service.streaming.*
@@ -36,20 +37,11 @@ import io.github.iltotore.iron.constraint.any.Not
 import io.github.iltotore.iron.constraint.string.Blank
 
 import scala.util.control.NonFatal
-import java.nio.charset.StandardCharsets
 import java.nio.file.{Files, Paths}
 import java.util.Comparator
 
 /** Resource-managed composition for analytics command-line applications. */
 object AppModule {
-  final case class BatchProgram[F[_]] private[app] (run: F[AnalyticsPublication])
-  final case class WorkerProgram[F[_]] private[app] (run: F[Unit])
-  final case class StreamingProgram[F[_]] private[app] (run: F[Unit])
-  final case class ReplayProgram[F[_]] private[app] (run: F[AnalyticsLateFactReplayOutcome])
-  final case class KeyRetirementAuditProgram[F[_]] private[app] (
-      run: F[Either[NonEmptyChain[String], AnalyticsKeyRetirement.AuditSummary]]
-  )
-
   private final case class Shared[F[_]](
       paths: AnalyticsLakehousePaths,
       spark: SparkSession,
@@ -75,8 +67,8 @@ object AppModule {
       .toEither
       .leftMap(errors => AnalyticsError.InvalidConfiguration(errors.toNonEmptyList.toList.mkString("; ")))
 
-  def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, BatchProgram[F]] =
-    withSecureUuids[F, BatchProgram[F]] {
+  def batch[F[_]: Async](settings: AnalyticsBatchSettings): Resource[F, F[AnalyticsPublication]] =
+    withSecureUuids[F, F[AnalyticsPublication]] {
       for {
         pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
         shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-batch")
@@ -122,14 +114,14 @@ object AppModule {
           common.operational,
           Clock[F]
         )
-        BatchProgram(
-          job.run(settings.manifest)
-        )
+
+        job.run(settings.manifest)
+
       }
     }
 
-  def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, WorkerProgram[F]] =
-    withSecureUuids[F, WorkerProgram[F]] {
+  def worker[F[_]: Async](settings: AnalyticsWorkerSettings): Resource[F, F[Unit]] =
+    withSecureUuids[F, F[Unit]] {
       for {
         pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
         shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-erasure-worker")
@@ -157,13 +149,13 @@ object AppModule {
             ),
             Clock[F]
           )
-          WorkerProgram(job.run)
+          job.run
         }
       } yield program
     }
 
   /** Long-lived, opt-in Structured Streaming runtime. The Mongo activation gate is read-only and fail-closed. */
-  def streaming[F[_]: Async](settings: AnalyticsStreamingRuntimeSettings): Resource[F, StreamingProgram[F]] =
+  def streaming[F[_]: Async](settings: AnalyticsStreamingRuntimeSettings): Resource[F, F[Unit]] =
     streamingObserved(settings, None)
 
   /** Adapter-private observation seam: callbacks execute only after durable operations return. */
@@ -171,8 +163,8 @@ object AppModule {
       settings: AnalyticsStreamingRuntimeSettings,
       observer: Option[StreamingDurableBoundaryObserver[F]],
       costObserver: Option[StreamingBatchCost.Summary => F[Unit]] = None
-  ): Resource[F, StreamingProgram[F]] =
-    withSecureUuids[F, StreamingProgram[F]] {
+  ): Resource[F, F[Unit]] =
+    withSecureUuids[F, F[Unit]] {
       for {
         pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
         localDirectory <- ownedStreamingDirectory[F](settings.common.sparkLocalDirectory)
@@ -308,13 +300,15 @@ object AppModule {
               ).resource
             )
           )
-          publisher.ensurePinnedRetentionIndex.as(StreamingProgram(stream.resource.use(_ => Async[F].unit)))
+          publisher.ensurePinnedRetentionIndex.as(stream.resource.use(_ => Async[F].unit))
         }
       } yield program
     }
 
-  def lateFactReplay[F[_]: Async](settings: AnalyticsLateFactReplaySettings): Resource[F, ReplayProgram[F]] =
-    withSecureUuids[F, ReplayProgram[F]] {
+  def lateFactReplay[F[_]: Async](
+      settings: AnalyticsLateFactReplaySettings
+  ): Resource[F, F[AnalyticsLateFactReplayOutcome]] =
+    withSecureUuids[F, F[AnalyticsLateFactReplayOutcome]] {
       for {
         pseudonymizer <- Resource.eval(buildPseudonymizer[F](settings.common))
         shared <- shared[F](settings.common, pseudonymizer, appName = "hiring-analytics-late-replay")
@@ -341,14 +335,14 @@ object AppModule {
           common.operational.retention.publishedSnapshotDays,
           Clock[F]
         )
-        ReplayProgram(journal.ensureIndexes *> service.run(settings.request))
+        journal.ensureIndexes *> service.run(settings.request)
       }
     }
 
   def keyRetirementAudit[F[_]: Async](
       settings: AnalyticsKeyRetirementAuditSettings
-  ): Resource[F, KeyRetirementAuditProgram[F]] =
-    withSecureUuids[F, KeyRetirementAuditProgram[F]] {
+  ): Resource[F, F[Either[NonEmptyChain[String], AnalyticsKeyRetirement.AuditSummary]]] =
+    withSecureUuids[F, F[Either[NonEmptyChain[String], AnalyticsKeyRetirement.AuditSummary]]] {
       for {
         inputs <- Resource.eval(Async[F].fromEither(KeyRetirementAuditInputs.from(settings)))
         (spark, client, sparkExecution) <- sparkMongo[F](
@@ -360,22 +354,22 @@ object AppModule {
         database <- Resource.eval(mongoDatabase[F](client, inputs.mongoDatabase))
       } yield {
         val streams = new MongoPublisherStream(inputs.operational)
-        KeyRetirementAuditProgram(
-          Clock[F].realTimeInstant.flatMap(now =>
-            AnalyticsKeyRetirement.audit(
-              spark,
-              inputs.paths,
-              database.underlying,
-              inputs.retiringKeyId,
-              inputs.retention,
-              inputs.writers,
-              now,
-              new MongoAnalyticsLakehouseLock[F](database, streams, Clock[F]),
-              streams,
-              sparkExecution
-            )
+
+        Clock[F].realTimeInstant.flatMap(now =>
+          AnalyticsKeyRetirement.audit(
+            spark,
+            inputs.paths,
+            database.underlying,
+            inputs.retiringKeyId,
+            inputs.retention,
+            inputs.writers,
+            now,
+            new MongoAnalyticsLakehouseLock[F](database, streams, Clock[F]),
+            streams,
+            sparkExecution
           )
         )
+
       }
     }
 
@@ -460,17 +454,8 @@ object AppModule {
       _ <- authorize
       _ <- shared.maintenance.validateHmacConfigurationLocked
       _ <- shared.maintenance.configureRawTables
-      runId <- UUIDGen[F].randomUUID
-        .map(_.toString)
-        .flatMap(value =>
-          Async[F]
-            .fromEither(RunId.from(s"stream-maintenance-$value").leftMap(AnalyticsError.InvalidConfiguration.apply))
-        )
-      fingerprint <- Async[F].fromEither(
-        RangeFingerprint
-          .from(AnalyticsDigest.sha256Hex(s"${identity.canonical}\n$at".getBytes(StandardCharsets.UTF_8)))
-          .leftMap(AnalyticsError.InvalidConfiguration.apply)
-      )
+      runId <- UUIDGen[F].randomUUID.map(value => RunId.prefixed("stream-maintenance-", value.toString))
+      fingerprint = RangeFingerprint.ofSha256(s"${identity.canonical}\n$at")
       existingMarkers <- shared.markers.activeSubjectTokens
       reservation <-
         if (existingMarkers.nonEmpty) Async[F].pure(Option.empty[AnalyticsReportReservation])
@@ -498,10 +483,7 @@ object AppModule {
                     report,
                     at.plusSeconds(common.operational.retention.publishedSnapshotDays.toLong * 86400L)
                   )
-                  .handleErrorWith {
-                    case AnalyticsError.GuardedErasurePublicationRejected => Async[F].unit
-                    case error                                            => Async[F].raiseError[Unit](error)
-                  }
+                  .recover { case AnalyticsError.GuardedErasurePublicationRejected => () }
           } yield ()
       retained <- retainedCheckpoint()
       _ <- journal.prune(lineage, retained.map(_.batchId).toSet, at, settings.streaming.progressRetention)
@@ -556,8 +538,8 @@ object AppModule {
       for {
         safeOffsets <- offsets
         fingerprint <- RangeFingerprint
-          .from(AnalyticsDigest.sha256Hex(canonical.getBytes(StandardCharsets.UTF_8)))
-          .leftMap(problem => AnalyticsError.InvalidInput(cats.data.NonEmptyChain.one(problem)))
+          .from(AnalyticsDigest.sha256Hex(canonical))
+          .leftMap(problem => AnalyticsError.InvalidInput.one(problem))
         safeEndOffsets <- sourceEndOffsets.toVector
           .sortBy(_._1)
           .traverse { case ((topic, partition), offset) =>
@@ -642,10 +624,7 @@ object AppModule {
           }
       )(session =>
         shutdown.get.flatMap { owned =>
-          val stop = sparkExecution(session.stop()).adaptError {
-            case error: AnalyticsError => error
-            case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-          }
+          val stop = sparkExecution(session.stop()).translating(AnalyticsError.LakehouseFailure(_))
           owned.fold(stop)(drain =>
             SparkShutdownDrain.close(
               drain.await(sparkExecution),
@@ -665,20 +644,18 @@ object AppModule {
     } yield (spark, mongo, sparkExecution)
 
   private[analytics] def mongoClient[F[_]: Async](uri: String): Resource[F, MongoClient[F]] =
-    MongoClient.fromConnectionString[F](uri).handleErrorWith {
-      case _: IllegalArgumentException =>
-        Resource.eval(
-          Async[F].raiseError[MongoClient[F]](AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid"))
-        )
-      case NonFatal(cause) =>
-        Resource.eval(Async[F].raiseError[MongoClient[F]](AnalyticsError.MongoConnectionFailure(cause)))
-    }
+    MongoClient
+      .fromConnectionString[F](uri)
+      .translatingWith { case _: IllegalArgumentException =>
+        AnalyticsError.InvalidConfiguration("MONGODB_URI is invalid")
+      }(AnalyticsError.MongoConnectionFailure(_))
 
   private def mongoDatabase[F[_]: Async](client: MongoClient[F], name: String): F[MongoDatabase[F]] =
-    client.getDatabase(name).adaptError {
-      case _: IllegalArgumentException => AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")
-      case NonFatal(cause)             => AnalyticsError.MongoConnectionFailure(cause)
-    }
+    client
+      .getDatabase(name)
+      .translatingWith { case _: IllegalArgumentException =>
+        AnalyticsError.InvalidConfiguration("analytics.mongo.database is invalid")
+      }(AnalyticsError.MongoConnectionFailure(_))
 
   private def sparkSession[F[_]](
       master: String,

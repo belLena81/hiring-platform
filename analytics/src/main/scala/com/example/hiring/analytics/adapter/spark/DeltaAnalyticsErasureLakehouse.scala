@@ -1,7 +1,7 @@
 package com.example.hiring.analytics.adapter.spark
 
 import com.example.hiring.analytics.domain.{AnalyticsReportOutput, SubjectPseudonymizer, SubjectToken}
-import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MaximumErasureEvidenceFiles}
+import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.service.batch.{
   AnalyticsBatchMaintenance,
   AnalyticsLakehouseLock,
@@ -13,7 +13,6 @@ import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAutho
 import cats.effect.{Async, Clock}
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.typelevel.log4cats.Logger
 
@@ -47,7 +46,7 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
     paths,
     execution,
     retention.configureRawTablePrivacy,
-    MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles),
+    operational.maximumErasureEvidenceFiles,
     deltaLogFactory
   )
 
@@ -130,9 +129,9 @@ private[analytics] final class DeltaAnalyticsErasureLakehouse[F[_]: Async: UUIDG
     }.flatMap(use)
 
   private def rebuildGoldFromStoredSilver(spark: SparkSession): F[Unit] =
-    execution(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.silver))).flatMap {
+    execution(DeltaTables.exists(spark, paths.silver)).flatMap {
       case true =>
-        execution(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver))).flatMap(
+        execution(DeltaTables.read(spark, paths.silver)).flatMap(
           AnalyticsGoldStage.rebuild(paths, _, execution)
         )
       case false => AnalyticsGoldStage.clear(spark, paths, execution)

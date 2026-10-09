@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
 import com.example.hiring.analytics.service.batch.AnalyticsLakehouseLock
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
@@ -365,8 +366,8 @@ private[analytics] object AnalyticsKeyRetirement {
               } finally source.close()
             } else ScanResult(0L)
           }
-          if (io.delta.tables.DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(tablePath))) {
-            val current = spark.read.format("delta").load(SparkPhysicalLocation.resolve(tablePath))
+          if (DeltaTables.exists(spark, tablePath)) {
+            val current = DeltaTables.read(spark, tablePath)
             if (containsKeyReferenceInDataFrame(current, keyId))
               files.copy(blockers = files.blockers.append("a current Delta snapshot references the retiring key"))
             else files
@@ -457,11 +458,11 @@ private[analytics] object AnalyticsKeyRetirement {
     val parts = body.split("\n", -1).toVector
     val streamId = parts.dropRight(4).mkString("\n")
     if (name.matches("[a-f0-9]{64}\\.query-id"))
-      scala.util.Try(java.util.UUID.fromString(body).toString == body).getOrElse(false)
+      AccountSubjectId.from(body).isRight
     else if (name.matches("[a-f0-9]{64}\\.(identity|established)"))
       parts.size >= 5 && streamId.trim.nonEmpty && parts.takeRight(4).forall(_.matches("[a-f0-9]{64}")) &&
       com.example.hiring.analytics.domain.AnalyticsDigest
-        .sha256Hex(streamId.getBytes(java.nio.charset.StandardCharsets.UTF_8)) == name.take(64)
+        .sha256Hex(streamId) == name.take(64)
     else false
   }
 
@@ -607,10 +608,10 @@ private[analytics] object AnalyticsKeyRetirement {
 
   private def validateRegistry(spark: SparkSession, paths: AnalyticsLakehousePaths, keyId: String): Chain[String] =
     try {
-      if (!io.delta.tables.DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))) {
+      if (!DeltaTables.exists(spark, paths.hmacKeyRegistry)) {
         Chain.one("permanent HMAC continuity registry is missing")
       } else {
-        val registry = spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
+        val registry = DeltaTables.read(spark, paths.hmacKeyRegistry)
         if (!Set(Columns.KeyId, Columns.Verifier).subsetOf(registry.columns.toSet))
           Chain.one("permanent HMAC continuity registry schema is malformed")
         else {

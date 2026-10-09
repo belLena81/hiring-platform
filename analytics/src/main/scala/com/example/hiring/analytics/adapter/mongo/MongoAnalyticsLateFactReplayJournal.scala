@@ -4,6 +4,7 @@ import cats.effect.Async
 import cats.syntax.all.*
 import com.example.hiring.analytics.domain.*
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translatingWith
 import com.example.hiring.analytics.service.batch.*
 import com.mongodb.{MongoException, ReadConcern, WriteConcern}
 import com.mongodb.client.model.{Filters, Updates, Indexes, IndexOptions}
@@ -14,7 +15,6 @@ import mongo4cats.database.MongoDatabase
 import java.time.Instant
 import java.util.Date
 import java.util.concurrent.TimeUnit
-import scala.util.control.NonFatal
 import scala.jdk.CollectionConverters.*
 
 /** Natural-key Mongo journal. Completed request digests survive detailed-coordinate compaction. */
@@ -338,11 +338,10 @@ private[analytics] final class MongoAnalyticsLateFactReplayJournal[F[_]: Async](
       )
     }
 
-  private def guarded[A](work: F[A]): F[A] = work.adaptError {
-    case error: AnalyticsError                          => error
-    case _: mongo4cats.errors.MongoJsonParsingException => Conflict
-    case NonFatal(cause)                                => AnalyticsError.MongoConnectionFailure(cause)
-  }
+  private def guarded[A](work: F[A]): F[A] =
+    work.translatingWith { case _: mongo4cats.errors.MongoJsonParsingException => Conflict }(
+      AnalyticsError.MongoConnectionFailure(_)
+    )
 }
 
 private[analytics] object MongoAnalyticsLateFactReplayJournal {

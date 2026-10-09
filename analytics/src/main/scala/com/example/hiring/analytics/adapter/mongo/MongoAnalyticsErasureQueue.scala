@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.data.Chain
@@ -17,7 +18,6 @@ import java.time.Instant
 import scala.concurrent.duration.*
 import java.util.Date
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
 
 /** Mongo persistence for erasure claiming, publisher drain, worker liveness, and repair operations. */
 final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
@@ -75,10 +75,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
           .flatMap { documents =>
             Async[F].fromEither(documents.traverse(decodeRepairRequest))
           }
-          .adaptError {
-            case error: AnalyticsError => error
-            case NonFatal(error)       => AnalyticsError.MarkerStorageFailure(error)
-          }
+          .translating(AnalyticsError.MarkerStorageFailure(_))
       }
 
   /** Explicitly requeues one observed repair request without altering its durable phase or progress. */
@@ -336,10 +333,7 @@ final class MongoAnalyticsErasureQueue[F[_]: Async: UUIDGen] private (
         .compile
         .count
         .map(_ > 0L)
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.MarkerStorageFailure(cause)
-        }
+        .translating(AnalyticsError.MarkerStorageFailure(_))
     }
   }
 

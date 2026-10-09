@@ -1,5 +1,6 @@
 package com.example.hiring.analytics.adapter.spark
 
+import com.example.hiring.analytics.domain.AccountSubjectId
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 
@@ -10,9 +11,7 @@ import org.apache.spark.sql.SparkSession
 
 import java.nio.file.{Files, LinkOption, NoSuchFileException, Paths}
 import java.nio.file.attribute.BasicFileAttributes
-import java.util.UUID
 import scala.jdk.CollectionConverters.*
-import scala.util.Try
 
 /** Owns the temporary Delta path used while rewriting retained data files. */
 private[analytics] object DeltaPurgeRewrite {
@@ -120,8 +119,7 @@ private[analytics] object DeltaPurgeRewrite {
       }
       def recognized(path: Path): Boolean = {
         val name = path.getName
-        name.startsWith(Prefix) && Try(UUID.fromString(name.stripPrefix(Prefix))).toOption
-          .exists(id => Prefix + id.toString == name)
+        name.startsWith(Prefix) && AccountSubjectId.from(name.stripPrefix(Prefix)).isRight
       }
       @annotation.tailrec
       def walk(pending: List[Path], remaining: Int, observed: Vector[Path]): Either[AnalyticsError, Vector[Path]] =

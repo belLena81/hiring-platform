@@ -7,6 +7,7 @@ import com.example.hiring.analytics.domain.AnalyticsReportOutput
 import com.example.hiring.analytics.domain.RangeFingerprint
 import com.example.hiring.analytics.domain.RunId
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translatingWith
 import com.example.hiring.analytics.service.batch.AnalyticsReportPublisher
 import com.example.hiring.analytics.service.batch.AnalyticsReportPublicationReceipt
 import com.example.hiring.analytics.service.batch.AnalyticsReportReservation
@@ -28,7 +29,6 @@ import org.bson.conversions.Bson
 import java.time.Instant
 import java.util.Date
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
 
 /** Report revision allocation and publication use typed Mongo collections and transaction boundaries. */
 final class MongoAnalyticsReportPublisher[F[_]: Async](
@@ -106,15 +106,12 @@ final class MongoAnalyticsReportPublisher[F[_]: Async](
   private def withCollections[A](work: Collections => Result[A]): Result[A] =
     lift(collections).flatMap(work)
   private def transactional[A](work: ClientSession[F] => Result[A]): Result[A] =
-    EitherT(MongoSession.resource(client).use(session => streams.transaction(session)(work(session)).value))
+    EitherT(MongoSession.resource(client).use(session => streams.transaction(session)(work(session))(Clock[F]).value))
 
   private def rethrow[A](result: Result[A]): F[A] =
-    result.rethrowT.adaptError {
-      case error: AnalyticsError        => error
-      case _: MongoJsonParsingException =>
-        AnalyticsError.InvalidConfiguration("analytics report record is malformed")
-      case NonFatal(cause) => AnalyticsError.MongoConnectionFailure(cause)
-    }
+    result.rethrowT.translatingWith { case _: MongoJsonParsingException =>
+      AnalyticsError.InvalidConfiguration("analytics report record is malformed")
+    }(AnalyticsError.MongoConnectionFailure(_))
 
   private def allocateRevision(session: ClientSession[F], collections: Collections): Result[(Long, Long)] =
     for {

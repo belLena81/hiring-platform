@@ -16,7 +16,7 @@ object HiringAnalyticsLateFactReplayMain
       .flatMap(settings =>
         AppModule
           .lateFactReplay[IO](settings)
-          .use(_.run)
+          .use(identity)
           .flatMap(outcome => logger.info(s"late replay outcome: $outcome"))
       )
       .as(ExitCode.Success)

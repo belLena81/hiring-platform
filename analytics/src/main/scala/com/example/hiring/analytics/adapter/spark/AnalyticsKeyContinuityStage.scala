@@ -8,7 +8,6 @@ import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAutho
 
 import cats.effect.{Async, Clock}
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.*
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
@@ -32,9 +31,9 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     val failureColumn = "_hiringPrimaryTokenFailure"
     // Priorities retain the original Silver-before-late-facts error order when several tables are invalid.
     val failures = Vector(paths.silver, paths.lateFacts).zipWithIndex.flatMap { case (path, index) =>
-      if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Vector.empty
+      if (!DeltaTables.exists(spark, path)) Vector.empty
       else {
-        val stored = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+        val stored = DeltaTables.read(spark, path)
         val columns = stored.columns.toSet
         if (!columns.contains(Columns.SubjectToken))
           Vector(stored.limit(1).select(lit(index * 2).as(failureColumn)))
@@ -77,8 +76,8 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
     val tokenPattern = s"^${allowedKeyIds}_[A-Za-z0-9_-]{43}$$"
     val invalidTokens = Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts)
       .flatMap { path =>
-        if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
-          val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+        if (DeltaTables.exists(spark, path)) {
+          val frame = DeltaTables.read(spark, path)
           val tokenFrames = Vector(
             Option.when(frame.columns.contains(Columns.SubjectTokens))(
               frame.select(explode(col(Columns.SubjectTokens)).as(Columns.Token))
@@ -108,7 +107,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
   def validateKeyMaterialContinuity(spark: SparkSession): F[Unit] =
     retirementAuthorizations.list(paths.root).flatMap { authorizations =>
       blocking.either {
-        val registryExists = DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
+        val registryExists = DeltaTables.exists(spark, paths.hmacKeyRegistry)
         val existingAnalyticsData = Vector(
           paths.bronze,
           paths.quarantine,
@@ -118,12 +117,11 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
           paths.timeToHireGold,
           paths.skillsGold,
           paths.manifests
-        ).exists(path => DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
+        ).exists(path => DeltaTables.exists(spark, path))
         val existingRows =
           if (registryExists)
-            spark.read
-              .format("delta")
-              .load(SparkPhysicalLocation.resolve(paths.hmacKeyRegistry))
+            DeltaTables
+              .read(spark, paths.hmacKeyRegistry)
               .select(Columns.KeyId, Columns.Verifier)
               .collect()
               .toVector
@@ -176,9 +174,7 @@ private[analytics] final class AnalyticsKeyContinuityStage[F[_]: Async](
 
   private def hasStoredTokenForKey(spark: SparkSession, keyId: String): Boolean =
     Vector(paths.bronze, paths.quarantine, paths.silver, paths.lateFacts).exists { path =>
-      if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) false
-      else {
-        val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+      DeltaTables.readIfExists(spark, path).exists { frame =>
         val tokenFrames = Vector(
           Option.when(frame.columns.contains(Columns.SubjectTokens))(
             frame.select(explode(col(Columns.SubjectTokens)).as(Columns.Token))

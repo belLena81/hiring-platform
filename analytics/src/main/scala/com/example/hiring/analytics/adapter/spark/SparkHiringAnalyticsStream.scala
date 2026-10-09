@@ -11,6 +11,7 @@ import com.example.hiring.analytics.domain.{
   StreamingBatchId
 }
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehouseLock, AnalyticsStreamingRegistry}
 import com.example.hiring.analytics.service.streaming.StreamingActivationGate
 import com.example.hiring.analytics.service.streaming.StreamingCheckpointAcknowledgement
@@ -158,10 +159,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
           )
           .start()
       }
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+        .translating(AnalyticsError.SourceReadFailure(_))
         .handleErrorWith { error =>
           queryIdentityReady.complete(Left(error)).void *>
             stopQueryByName.attempt.flatMap {
@@ -193,7 +191,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   ): F[com.example.hiring.analytics.domain.StreamingLineage] =
     effect.fromEither(
       com.example.hiring.analytics.domain.StreamingLineage
-        .from(AnalyticsDigest.sha256Hex(activationIdentity.canonical.getBytes(StandardCharsets.UTF_8)))
+        .from(AnalyticsDigest.sha256Hex(activationIdentity.canonical))
         .leftMap(_ => invalidCheckpoint)
     )
 
@@ -447,7 +445,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
     val authorize = activationGate.requireAuthorized(activationIdentity, settings.activationGrantId).void
     val effectForBatch = StreamingBatchId
       .from(batchNumber)
-      .leftMap(problem => AnalyticsError.InvalidInput(cats.data.NonEmptyChain.one(problem)))
+      .leftMap(problem => AnalyticsError.InvalidInput.one(problem))
       .liftTo[F]
       .flatMap(batchId =>
         checkpointBatches.flatMap { batches =>
@@ -505,10 +503,7 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
       callbackResult <- callbackCancellation.traverse_(cancel => effect.fromFuture(effect.delay(cancel())).void).attempt
       queryResult <- driverExecution
         .blocking(spark.streams.active.filter(_.name.contains(settings.streamId)).foreach(_.stop()))
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.LakehouseFailure(cause)
-        }
+        .translating(AnalyticsError.LakehouseFailure(_))
         .attempt
       _ <- (callbackResult, queryResult) match {
         case (Right(_), Right(_))              => effect.unit
@@ -542,13 +537,13 @@ private[analytics] final class SparkHiringAnalyticsStream[F[_]: Async](
   )
 
   private def lineagePath(directory: Path, identity: StreamingActivationIdentity): Path =
-    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.identity")
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}.identity")
 
   private def establishedPath(directory: Path, identity: StreamingActivationIdentity): Path =
-    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.established")
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}.established")
 
   private def queryIdentityPath(directory: Path, identity: StreamingActivationIdentity): Path =
-    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId.getBytes(StandardCharsets.UTF_8))}.query-id")
+    new Path(directory, s"${AnalyticsDigest.sha256Hex(identity.streamId)}.query-id")
 
   private def failAtGrantExpiry(expiresAt: Instant): F[Unit] =
     effect.realTimeInstant.flatMap { now =>

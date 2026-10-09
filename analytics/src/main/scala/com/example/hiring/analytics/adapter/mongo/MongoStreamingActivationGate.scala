@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.{StreamingActivationAuthorization, StreamingActivationIdentity}
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.streaming.StreamingActivationGate
 
 import cats.effect.Async
@@ -9,7 +10,6 @@ import cats.syntax.all.*
 import com.mongodb.{ReadConcern, WriteConcern}
 import mongo4cats.database.MongoDatabase
 import java.util.concurrent.TimeUnit
-import scala.util.control.NonFatal
 
 /** Read-only runtime gate. Provisioning is an operator action after the Phase 6 audit and independent signoff. */
 private[analytics] final class MongoStreamingActivationGate[F[_]: Async](
@@ -62,10 +62,7 @@ private[analytics] final class MongoStreamingActivationGate[F[_]: Async](
               .map(_.expiresAt)
           }
       }
-      .adaptError {
-        case error: AnalyticsError => error
-        case NonFatal(cause)       => AnalyticsError.MongoConnectionFailure(cause)
-      }
+      .translating(AnalyticsError.MongoConnectionFailure(_))
 }
 
 private object MongoStreamingActivationGate {

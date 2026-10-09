@@ -9,7 +9,6 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 
 import cats.effect.Async
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.{DataType, StructType}
 
@@ -48,8 +47,8 @@ private[spark] object AnalyticsGoldStage {
   ): F[Unit] = lakehouse[F, Unit](
     {
       Vector(paths.funnelGold, paths.timeToHireGold, paths.skillsGold).foreach { path =>
-        if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
-          DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).delete()
+        if (DeltaTables.exists(spark, path))
+          DeltaTables.forPath(spark, path).delete()
       }
     },
     sparkExecution
@@ -107,9 +106,7 @@ private[spark] object AnalyticsGoldStage {
   ): F[Vector[Row]] =
     lakehouseEither[F, Vector[Row]](
       {
-        if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Right(Vector.empty)
-        else {
-          val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+        DeltaTables.readIfExists(spark, path).fold[Either[AnalyticsError, Vector[Row]]](Right(Vector.empty)) { frame =>
           validateOutputSchema(frame.schema, expected).map(_ => frame.limit(MaximumReportRows + 1).collect().toVector)
         }
       },

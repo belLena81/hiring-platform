@@ -1,6 +1,7 @@
 package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorization
 import com.example.hiring.analytics.service.keyretirement.HmacKeyRetirementAuthorizationStore
 
@@ -12,7 +13,6 @@ import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.util.concurrent.TimeUnit
-import scala.util.control.NonFatal
 
 /** Immutable Mongo record, read with majority concern and inserted with majority+journal acknowledgement. */
 private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: Async](
@@ -73,11 +73,12 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
             .toVector
         )
         .flatMap(_.traverse(decode).liftTo[F])
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(_)           =>
-            AnalyticsError.InvalidConfiguration("HMAC key retirement authorization is unavailable or malformed")
-        }
+        .translating(cause =>
+          AnalyticsError.InvalidConfiguration(
+            "HMAC key retirement authorization is unavailable or malformed",
+            Some(cause)
+          )
+        )
     }
 
   override def insert(root: String, authorization: HmacKeyRetirementAuthorization): F[Unit] =
@@ -102,10 +103,8 @@ private[analytics] final class MongoHmacKeyRetirementAuthorizationStore[F[_]: As
             new mongo4cats.models.collection.InsertOneOptions()
           )
         )
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(_)           =>
-            AnalyticsError.InvalidConfiguration("HMAC key retirement authorization could not be persisted")
-        }
+        .translating(cause =>
+          AnalyticsError.InvalidConfiguration("HMAC key retirement authorization could not be persisted", Some(cause))
+        )
     } yield ()
 }

@@ -47,6 +47,9 @@ object RunId {
       .refineEither[Not[Blank]]
       .leftMap(_ => "run id must be non-empty")
 
+  /** Total: a statically non-blank prefix keeps the whole identifier non-blank. */
+  def prefixed(prefix: String :| Not[Blank], rest: String): RunId = (prefix + rest).assume[Not[Blank]]
+
   extension (value: RunId) def value: String = value
 }
 
@@ -63,6 +66,10 @@ object AccountSubjectId {
 object RangeFingerprint {
   def from(value: String): Either[String, RangeFingerprint] =
     value.refineEither[Match["[0-9a-f]{64}"]].leftMap(_ => "range fingerprint must be a SHA-256 hex digest")
+
+  /** Total: [[AnalyticsDigest.sha256Hex]] always yields 64 lowercase hexadecimal characters. */
+  def ofSha256(content: String): RangeFingerprint =
+    AnalyticsDigest.sha256Hex(content).assume[Match["[0-9a-f]{64}"]]
 
   extension (value: RangeFingerprint) def value: String = value
 }
@@ -165,14 +172,19 @@ object AnalyticsRunManifest {
       ranges: Vector[PartitionOffsetRange]
   ): ValidatedNec[String, Vector[PartitionOffsetRange]] = {
     val nonEmpty =
-      if (ranges.nonEmpty) ().validNec[String]
-      else "at least one offset range is required".invalidNec[Unit]
+      Validated.condNec(ranges.nonEmpty, (), "at least one offset range is required")
     val unique =
-      if (ranges.map(range => (range.topic, range.partition)).distinct.size == ranges.size) ().validNec[String]
-      else "each topic partition may occur only once".invalidNec[Unit]
+      Validated.condNec(
+        ranges.map(range => (range.topic, range.partition)).distinct.size == ranges.size,
+        (),
+        "each topic partition may occur only once"
+      )
     val oneTopic =
-      if (ranges.map(_.topic).distinct.size <= 1) ().validNec[String]
-      else "a Kafka batch manifest must contain exactly one topic".invalidNec[Unit]
+      Validated.condNec(
+        ranges.map(_.topic).distinct.size <= 1,
+        (),
+        "a Kafka batch manifest must contain exactly one topic"
+      )
     (ranges.validNec[String], nonEmpty, unique, oneTopic).mapN((validRanges, _, _, _) => validRanges)
   }
 

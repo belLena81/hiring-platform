@@ -19,7 +19,7 @@ private[analytics] final class SparkAnalyticsLateFactReplayStages[F[_]: Async](
     spark: SparkSession,
     paths: AnalyticsLakehousePaths,
     execution: SparkExecution[F],
-    reader: DeltaReader[F],
+    reader: DeltaBatchReader[F],
     writer: DeltaWriter[F],
     maintenance: AnalyticsBatchMaintenance[F],
     clock: cats.effect.Clock[F],

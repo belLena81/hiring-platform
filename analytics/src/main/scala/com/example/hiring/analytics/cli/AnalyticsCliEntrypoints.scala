@@ -65,7 +65,7 @@ object HiringAnalyticsBatchMain
   override protected def program: IO[ExitCode] =
     AnalyticsRuntimeConfig
       .loadBatch[IO]
-      .flatMap(settings => AppModule.batch[IO](settings).use(_.run))
+      .flatMap(settings => AppModule.batch[IO](settings).use(identity))
       .flatTap(publication => logger.info(publication.toString))
       .as(ExitCode.Success)
 }
@@ -75,7 +75,7 @@ object HiringAnalyticsStreamingMain
   override protected def program: IO[ExitCode] =
     StreamingProcessTermination
       .run(
-        AnalyticsRuntimeConfig.loadStreaming[IO].flatMap(settings => AppModule.streaming[IO](settings).use(_.run))
+        AnalyticsRuntimeConfig.loadStreaming[IO].flatMap(settings => AppModule.streaming[IO](settings).use(identity))
       )
       .as(ExitCode.Success)
 }
@@ -84,6 +84,6 @@ object AnalyticsErasureWorkerMain
     extends HoconConfiguredCommand("analytics-erasure-worker", "Run the analytics erasure worker") {
   override protected def program: IO[ExitCode] =
     StreamingProcessTermination
-      .run(AnalyticsRuntimeConfig.loadWorker[IO].flatMap(settings => AppModule.worker[IO](settings).use(_.run)))
+      .run(AnalyticsRuntimeConfig.loadWorker[IO].flatMap(settings => AppModule.worker[IO](settings).use(identity)))
       .as(ExitCode.Success)
 }

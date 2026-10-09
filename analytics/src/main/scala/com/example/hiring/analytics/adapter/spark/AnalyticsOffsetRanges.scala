@@ -4,13 +4,12 @@ import com.example.hiring.analytics.domain.AnalyticsRunManifest
 import com.example.hiring.analytics.domain.PartitionOffsetRange
 import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 
 import cats.effect.Async
 import cats.syntax.all.*
 import org.apache.spark.sql.DataFrame
 import org.apache.spark.sql.functions.{col, countDistinct, max, min}
-
-import scala.util.control.NonFatal
 
 /** Checks the requested coordinates before a run can write its first manifest row. */
 private[analytics] object AnalyticsOffsetRanges {
@@ -109,10 +108,7 @@ private[analytics] object AnalyticsOffsetRanges {
         .map(row => (row.getString(0), row.getInt(1)) -> Observed(row.getLong(2), row.getLong(3), row.getLong(4)))
         .toMap
     }
-      .adaptError {
-        case error: AnalyticsError => error
-        case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-      }
+      .translating(AnalyticsError.SourceReadFailure(_))
 
   private def verifyObservedOffsets[F[_]: Async](
       manifest: AnalyticsRunManifest,
@@ -126,12 +122,10 @@ private[analytics] object AnalyticsOffsetRanges {
       case Some((topic, partition)) =>
         Async[F].raiseError(AnalyticsError.UnexpectedOffsetPartition(topic, partition))
       case None =>
-        Async[F].fromEither(manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
-          result.flatMap { _ =>
-            val observation = found.get((AnalyticsTopic.unwrap(range.topic), range.partition))
-            if (allowKafkaGaps) verifyKafkaCoordinates(range, observation)
-            else complete(range, observation)
-          }
+        Async[F].fromEither(manifest.offsetRanges.traverse_ { range =>
+          val observation = found.get((AnalyticsTopic.unwrap(range.topic), range.partition))
+          if (allowKafkaGaps) verifyKafkaCoordinates(range, observation)
+          else complete(range, observation)
         })
     }
   }

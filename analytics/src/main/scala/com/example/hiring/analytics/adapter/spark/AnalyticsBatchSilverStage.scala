@@ -26,8 +26,8 @@ private[analytics] final class AnalyticsBatchSilverStage[F[_]: Async](
     pseudonymizer: SubjectPseudonymizer,
     execution: SparkExecution[F],
     deltaWriter: DeltaWriter[F],
-    deltaReader: DeltaReader[F],
-    quarantineId: QuarantineId,
+    deltaReader: DeltaBatchReader[F],
+    quarantineId: QuarantineIdentifier.type,
     retention: AnalyticsRetentionSettings
 ) {
   private val blocking = execution

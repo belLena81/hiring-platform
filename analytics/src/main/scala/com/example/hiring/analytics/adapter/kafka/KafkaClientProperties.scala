@@ -5,6 +5,8 @@ import com.example.hiring.analytics.errors.AnalyticsError
 
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 
+import java.util.Properties
+
 /** Kafka client and Spark connector options derived from validated connection settings. */
 private[analytics] object KafkaClientProperties {
   val ClientTimeoutMillis: Int = 10000
@@ -49,15 +51,31 @@ private[analytics] object KafkaClientProperties {
 
   /** Offset-inspection consumer settings; the consumer never subscribes, commits or deserializes record contents. */
   def retentionConsumerProperties(connection: KafkaConnection): Either[AnalyticsError, Map[String, String]] =
+    consumerProperties(connection, Map("group.id" -> "hiring-analytics-erasure"))
+
+  /** Offset-inspection consumer that only sees committed transactional records. */
+  def readCommittedConsumerProperties(connection: KafkaConnection): Either[AnalyticsError, Map[String, String]] =
+    consumerProperties(connection, Map("isolation.level" -> "read_committed"))
+
+  /** Kafka client constructors take [[java.util.Properties]]; this is the single conversion. */
+  def asJava(properties: Map[String, String]): Properties = {
+    val converted = new Properties()
+    properties.foreach { case (key, value) => converted.setProperty(key, value) }
+    converted
+  }
+
+  private def consumerProperties(
+      connection: KafkaConnection,
+      specific: Map[String, String]
+  ): Either[AnalyticsError, Map[String, String]] =
     clientProperties(connection).map(
       Map(
         "bootstrap.servers" -> connection.bootstrapServers,
-        "group.id" -> "hiring-analytics-erasure",
         "key.deserializer" -> classOf[ByteArrayDeserializer].getName,
         "value.deserializer" -> classOf[ByteArrayDeserializer].getName,
         "enable.auto.commit" -> "false",
         "default.api.timeout.ms" -> ClientTimeoutMillis.toString
-      ) ++ _
+      ) ++ specific ++ _
     )
 
   /** A quoted JAAS string literal: escapes backslash, double quote and the control characters the parser unescapes. */

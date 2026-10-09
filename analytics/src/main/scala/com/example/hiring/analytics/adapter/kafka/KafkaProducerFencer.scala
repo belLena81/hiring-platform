@@ -9,7 +9,6 @@ import cats.syntax.all.*
 import org.apache.kafka.clients.admin.Admin
 
 import java.time.Duration
-import java.util.Properties
 import scala.jdk.CollectionConverters.*
 
 /** Confirms broker-side producer fencing before deletion passes its Kafka replay barrier. */
@@ -31,10 +30,8 @@ object KafkaProducerFencer {
       (KafkaConnection.preflight[F](connection) *> Async[F].fromEither(
         KafkaClientProperties.adminProperties(connection)
       )).flatMap { adminProperties =>
-        val properties = new Properties()
-        adminProperties.foreach { case (key, value) => properties.setProperty(key, value) }
         Resource
-          .make(driverExecution.blocking(Admin.create(properties)))(admin =>
+          .make(driverExecution.blocking(Admin.create(KafkaClientProperties.asJava(adminProperties))))(admin =>
             driverExecution.blocking(admin.close(Duration.ofSeconds(5))).void
           )
           .use { admin =>

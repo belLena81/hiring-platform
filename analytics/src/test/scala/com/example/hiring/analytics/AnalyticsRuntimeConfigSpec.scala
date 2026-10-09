@@ -130,8 +130,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(loaded.common.mongoDatabase, "hiring")
     assertEquals(loaded.common.operational.reportReservationTtl, 90.days)
     assertEquals(loaded.common.operational.mongoTransactionWindow, 120.seconds)
-    assertEquals(MaximumErasureEvidenceFiles.unwrap(loaded.common.operational.maximumErasureEvidenceFiles), 100000)
-    assertEquals(MongoPublisherBufferSize.unwrap(loaded.common.operational.mongoPublisherBufferSize), 256)
+    assertEquals(loaded.common.operational.maximumErasureEvidenceFiles, 100000)
+    assertEquals(loaded.common.operational.mongoPublisherBufferSize, 256)
     assert(!loaded.toString.contains(key))
   }
 
@@ -262,8 +262,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(configured.erasureWorkerTimings.leaseDuration, 120.seconds)
     assertEquals(configured.erasureWorkerTimings.deliveryTimeout, 45.seconds)
     assertEquals(configured.erasureWorkerTimings.pollInterval, 8.seconds)
-    assertEquals(MaximumErasureEvidenceFiles.unwrap(configured.maximumErasureEvidenceFiles), 8000)
-    assertEquals(MongoPublisherBufferSize.unwrap(configured.mongoPublisherBufferSize), 64)
+    assertEquals(configured.maximumErasureEvidenceFiles, 8000)
+    assertEquals(configured.mongoPublisherBufferSize, 64)
 
     val invalid = operational(
       Map("ANALYTICS_RETENTION_BRONZE_DAYS" -> "0", "ANALYTICS_MONGO_PUBLISHER_BUFFER_SIZE" -> "-1")
@@ -363,8 +363,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       )
     ).toOption
       .getOrElse(fail("expected minimum bounded settings to load"))
-    assertEquals(MaximumErasureEvidenceFiles.unwrap(minimums.maximumErasureEvidenceFiles), 1)
-    assertEquals(MongoPublisherBufferSize.unwrap(minimums.mongoPublisherBufferSize), 1)
+    assertEquals(minimums.maximumErasureEvidenceFiles, 1)
+    assertEquals(minimums.mongoPublisherBufferSize, 1)
 
     val maximums = operational(
       Map(
@@ -373,8 +373,8 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
       )
     ).toOption
       .getOrElse(fail("expected maximum bounded settings to load"))
-    assertEquals(MaximumErasureEvidenceFiles.unwrap(maximums.maximumErasureEvidenceFiles), Int.MaxValue - 1)
-    assertEquals(MongoPublisherBufferSize.unwrap(maximums.mongoPublisherBufferSize), 65536)
+    assertEquals(maximums.maximumErasureEvidenceFiles, Int.MaxValue - 1)
+    assertEquals(maximums.mongoPublisherBufferSize, 65536)
 
     val invalid = operational(
       Map(
@@ -563,7 +563,7 @@ class AnalyticsRuntimeConfigSpec extends munit.FunSuite {
     assertEquals(audit.lakehouseRoot, "file:///tmp/hiring-analytics")
     assertEquals(audit.kafkaBarrierOffset, None)
     assertEquals(audit.writers.managed, Vector.empty)
-    assertEquals(MongoPublisherBufferSize.unwrap(audit.operational.mongoPublisherBufferSize), 256)
+    assertEquals(audit.operational.mongoPublisherBufferSize, 256)
 
     val credentialedAudit = AnalyticsConfigFixtures
       .keyRetirementAudit(

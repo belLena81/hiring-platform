@@ -47,7 +47,7 @@ object HiringAnalyticsBatchDiagnosticMain extends IOApp {
     (for {
       _ <- IO.raiseUnless(args.isEmpty)(new IllegalArgumentException("batch diagnostic accepts no arguments"))
       settings <- AnalyticsRuntimeConfig.loadBatch[IO]
-      _ <- AppModule.batch[IO](settings).use(_.run)
+      _ <- AppModule.batch[IO](settings).use(identity)
       _ <- IO.println("BATCH_RUNTIME_DIAGNOSTIC_SUCCESS")
     } yield ExitCode.Success).handleErrorWith(error => diagnose(error).as(ExitCode.Error))
 }

@@ -2,10 +2,11 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.data.EitherT
-import cats.effect.{Async, Resource}
+import cats.effect.{Async, Clock, Resource}
 import cats.syntax.all.*
 import mongo4cats.client.MongoClient
 import mongo4cats.collection.MongoCollection
@@ -16,7 +17,6 @@ import com.mongodb.client.model.{ReplaceOneModel, ReplaceOptions, WriteModel}
 import java.time.Instant
 import java.util.Date
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
 
 /** Mongo persistence for lease-owned erasure progress and physical-file evidence. */
 final class MongoAnalyticsErasureProgress[F[_]: Async] private (
@@ -93,7 +93,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
                       .as(ErasureUpdate.Applied)
                 }
               )
-            }
+            }(Clock[F])
             .rethrowT
         }
       }
@@ -117,10 +117,7 @@ final class MongoAnalyticsErasureProgress[F[_]: Async] private (
         .compile
         .toVector
         .map(_.map(_.filePath))
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(error)       => AnalyticsError.MarkerStorageFailure(error)
-        }
+        .translating(AnalyticsError.MarkerStorageFailure(_))
     }
 
   def readAffectedRows(requestId: AccountSubjectId): F[Long] = mongo {

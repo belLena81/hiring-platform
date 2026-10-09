@@ -8,7 +8,11 @@ sealed abstract class AnalyticsError(message: String, cause: Option[Throwable] =
 object AnalyticsError {
   final case class InvalidInput(problems: NonEmptyChain[String])
       extends AnalyticsError(problems.toNonEmptyList.toList.mkString("; "))
-  final case class InvalidConfiguration(detail: String) extends AnalyticsError(detail)
+  object InvalidInput {
+    def one(problem: String): InvalidInput = InvalidInput(NonEmptyChain.one(problem))
+  }
+  final case class InvalidConfiguration(detail: String, underlying: Option[Throwable] = None)
+      extends AnalyticsError(detail, underlying)
   final case class InvalidSourceSchema(missing: Vector[String])
       extends AnalyticsError(s"Kafka batch records are missing required columns: ${missing.mkString(", ")}")
   final case class InvalidLateFactSchema(detail: String)

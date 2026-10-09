@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.adapter.mongo
 
-import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MongoPublisherBufferSize}
+import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import cats.data.EitherT
@@ -13,27 +13,25 @@ import mongo4cats.client.ClientSession
 import org.reactivestreams.Publisher
 import retry.{ResultHandler, retryingOnErrors}
 
+import scala.util.control.NoStackTrace
+
 /** FS2 boundary for Mongo's cold Reactive Streams publishers. */
 private[analytics] final class MongoPublisherStream(settings: AnalyticsOperationalSettings) {
   def stream[F[_], A](query: Int => Stream[F, A]): Stream[F, A] =
-    query(MongoPublisherBufferSize.unwrap(settings.mongoPublisherBufferSize))
-
-  def drain[F[_]: Async, A](source: Stream[F, A]): F[Unit] = source.compile.drain
+    query(settings.mongoPublisherBufferSize)
 
   def stream[F[_]: Async, A](publisher: => Publisher[A]): Stream[F, A] =
     Stream
       .eval(Async[F].delay(publisher))
       .flatMap(value =>
         fs2.interop.reactivestreams
-          .fromPublisher[F, A](value, MongoPublisherBufferSize.unwrap(settings.mongoPublisherBufferSize))
+          .fromPublisher[F, A](value, settings.mongoPublisherBufferSize)
       )
 
   def optional[F[_]: Async, A](publisher: => Publisher[A]): F[Option[A]] = stream[F, A](publisher).compile.last
 
   def one[F[_]: Async, A](publisher: => Publisher[A]): F[A] =
-    optional[F, A](publisher).flatMap(
-      _.liftTo[F](new IllegalStateException("Mongo publisher completed without a value"))
-    )
+    optional[F, A](publisher).flatMap(_.liftTo[F](MongoPublisherStream.CompletedWithoutValue))
 
   def drain[F[_]: Async, A](publisher: => Publisher[A]): F[Unit] = stream[F, A](publisher).compile.drain
 
@@ -41,11 +39,6 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
     * Preserve its retry rules: rerun the body for transient transaction failures and retry commit for an unknown commit
     * result, within Mongo's documented transaction callback retry window.
     */
-  def transaction[F[_]: Async: Clock, A](
-      session: ClientSession[F]
-  )(work: EitherT[F, AnalyticsError, A]): EitherT[F, AnalyticsError, A] =
-    transaction(session)(work)(Clock[F])
-
   def transaction[F[_]: Async, A](session: ClientSession[F])(
       work: EitherT[F, AnalyticsError, A]
   )(clock: Clock[F]): EitherT[F, AnalyticsError, A] =
@@ -85,4 +78,12 @@ private[analytics] final class MongoPublisherStream(settings: AnalyticsOperation
 
       retryingOnErrors(runOnce)(deadline, retryOn(hasLabel(MongoException.TRANSIENT_TRANSACTION_ERROR_LABEL)))
     })
+}
+
+private[analytics] object MongoPublisherStream {
+
+  /** A single-result driver operation completed empty; adapters translate it into their owning [[AnalyticsError]]. */
+  case object CompletedWithoutValue
+      extends RuntimeException("Mongo publisher completed without a value")
+      with NoStackTrace
 }

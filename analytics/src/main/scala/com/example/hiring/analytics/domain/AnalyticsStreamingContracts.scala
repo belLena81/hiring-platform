@@ -78,7 +78,7 @@ object StreamingActivationAuthorization {
         expiresAt,
         evidenceReferences,
         independentReviewerReferences,
-        AnalyticsDigest.sha256Hex(canonicalEvidence.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        AnalyticsDigest.sha256Hex(canonicalEvidence)
       ),
       identity,
       grantId,
@@ -100,7 +100,7 @@ object StreamingActivationAuthorization {
       authorization.expiresAt.toString
     )
     val canonicalEvidence = (authorizationFacts ++ references.sorted).mkString("\n")
-    val digest = AnalyticsDigest.sha256Hex(canonicalEvidence.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+    val digest = AnalyticsDigest.sha256Hex(canonicalEvidence)
     for {
       _ <- Either.cond(authorization.identity == expected, (), "activation authorization identity does not match")
       _ <- Either.cond(

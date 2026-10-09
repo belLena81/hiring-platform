@@ -5,20 +5,22 @@ import com.example.hiring.analytics.config.KafkaConnection
 import com.example.hiring.analytics.domain.{AnalyticsRunManifest, PartitionOffsetRange}
 import com.example.hiring.analytics.domain.AnalyticsTopic
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 
 import cats.effect.{Async, Resource}
+import cats.effect.syntax.temporal.*
 import cats.syntax.all.*
 import io.circe.Json
 import org.apache.kafka.clients.consumer.KafkaConsumer
-import org.apache.kafka.clients.admin.AdminClient
+import org.apache.kafka.clients.admin.Admin
 import org.apache.kafka.common.TopicPartition
-import org.apache.kafka.common.serialization.ByteArrayDeserializer
+import org.apache.kafka.common.KafkaFuture
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
-import java.util.Properties
-import java.util.concurrent.TimeUnit
+import java.time.Duration
+import scala.concurrent.duration.*
 import scala.jdk.CollectionConverters.*
-import scala.util.control.NonFatal
+import scala.util.control.NoStackTrace
 
 /** Reads exactly the offsets named by a manifest; it never starts a streaming query. */
 private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
@@ -45,10 +47,7 @@ private[analytics] final class KafkaOffsetRangeSource[F[_]: Async](
           .option("endingOffsets", KafkaOffsetRangeSource.offsetJson(manifest.offsetRanges, _.endOffsetExclusive))
           .option("failOnDataLoss", "true")
           .load()
-      }.adaptError {
-        case error: AnalyticsError => error
-        case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-      }
+      }.translating(AnalyticsError.SourceReadFailure(_))
     } yield frame
 }
 
@@ -62,40 +61,45 @@ object KafkaOffsetRangeSource {
   ): F[(String, String)] =
     for {
       _ <- KafkaConnection.preflight[F](connection)
-      clientProperties <- Async[F].fromEither(KafkaClientProperties.clientProperties(connection))
-      identity <- driverExecution
-        .blocking {
-          val settings = new Properties()
-          settings.setProperty("bootstrap.servers", connection.bootstrapServers)
-          settings.setProperty("default.api.timeout.ms", "10000")
-          settings.setProperty("request.timeout.ms", "10000")
-          clientProperties.foreach { case (key, value) => settings.setProperty(key, value) }
-          val client = AdminClient.create(settings)
-          try {
-            val timeoutSeconds = 10L
-            val clusterId = Option(client.describeCluster().clusterId().get(timeoutSeconds, TimeUnit.SECONDS))
-            val topicName = AnalyticsTopic.unwrap(topic)
-            val description = client
-              .describeTopics(java.util.Collections.singleton(topicName))
-              .allTopicNames()
-              .get(timeoutSeconds, TimeUnit.SECONDS)
-              .get(topicName)
-            for {
-              cluster <- clusterId.toRight(new IllegalStateException("Kafka cluster ID is unavailable"))
-              topicId <- Option(description)
+      adminProperties <- Async[F].fromEither(KafkaClientProperties.adminProperties(connection))
+      identity <- Resource
+        .make(driverExecution.blocking(Admin.create(KafkaClientProperties.asJava(adminProperties))))(admin =>
+          driverExecution.blocking(admin.close(Duration.ofMillis(KafkaClientProperties.ClientTimeoutMillis.toLong)))
+        )
+        .use { admin =>
+          val topicName = AnalyticsTopic.unwrap(topic)
+          for {
+            clusterId <- awaited(driverExecution.blocking(admin.describeCluster().clusterId()))
+            descriptions <- awaited(
+              driverExecution.blocking(admin.describeTopics(java.util.Collections.singleton(topicName)).allTopicNames())
+            )
+            cluster <- unavailable("cluster ID", Option(clusterId))
+            topicId <- unavailable(
+              "topic ID",
+              Option(descriptions.get(topicName))
                 .flatMap(value => Option(value.topicId()))
                 .map(_.toString)
                 .filter(_.nonEmpty)
-                .toRight(new IllegalStateException("Kafka topic ID is unavailable"))
-            } yield cluster -> topicId
-          } finally client.close(java.time.Duration.ofSeconds(10L))
+            )
+          } yield cluster -> topicId
         }
-        .flatMap(Async[F].fromEither)
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+        .translating(AnalyticsError.SourceReadFailure(_))
     } yield identity
+
+  /** The broker round trip completes off the single-thread driver executor, is cancellable and bounded. */
+  private def awaited[F[_]: Async, A](submitted: F[KafkaFuture[A]]): F[A] =
+    submitted.flatMap(future =>
+      Async[F]
+        .fromCompletableFuture(Async[F].delay(future.toCompletionStage.toCompletableFuture))
+        .timeout(KafkaClientProperties.ClientTimeoutMillis.millis)
+    )
+
+  private def unavailable[F[_]: Async, A](what: String, value: Option[A]): F[A] =
+    Async[F].fromOption(value, AnalyticsError.SourceReadFailure(SourceIdentityUnavailable(what)))
+
+  private final case class SourceIdentityUnavailable(what: String)
+      extends RuntimeException(s"Kafka $what is unavailable")
+      with NoStackTrace
 
   private def consumer[F[_]: Async](
       connection: KafkaConnection,
@@ -103,18 +107,14 @@ object KafkaOffsetRangeSource {
   ): Resource[F, KafkaConsumer[Array[Byte], Array[Byte]]] =
     for {
       _ <- Resource.eval(KafkaConnection.preflight[F](connection))
-      clientProperties <- Resource.eval(Async[F].fromEither(KafkaClientProperties.clientProperties(connection)))
-      client <- Resource.make(driverExecution.blocking {
-        val settings = new Properties()
-        settings.setProperty("bootstrap.servers", connection.bootstrapServers)
-        settings.setProperty("key.deserializer", classOf[ByteArrayDeserializer].getName)
-        settings.setProperty("value.deserializer", classOf[ByteArrayDeserializer].getName)
-        settings.setProperty("enable.auto.commit", "false")
-        settings.setProperty("isolation.level", "read_committed")
-        settings.setProperty("default.api.timeout.ms", "10000")
-        clientProperties.foreach { case (key, value) => settings.setProperty(key, value) }
-        new KafkaConsumer[Array[Byte], Array[Byte]](settings)
-      })(client => driverExecution.blocking(client.close()).void)
+      consumerProperties <- Resource.eval(
+        Async[F].fromEither(KafkaClientProperties.readCommittedConsumerProperties(connection))
+      )
+      client <- Resource.make(
+        driverExecution.blocking(
+          new KafkaConsumer[Array[Byte], Array[Byte]](KafkaClientProperties.asJava(consumerProperties))
+        )
+      )(client => driverExecution.blocking(client.close()).void)
     } yield client
 
   private[analytics] def availablePartitions[F[_]: Async](
@@ -130,10 +130,7 @@ object KafkaOffsetRangeSource {
             .map(_.partition())
             .toSet
         )
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+        .translating(AnalyticsError.SourceReadFailure(_))
     }
 
   private[analytics] def verifyAvailable[F[_]: Async](
@@ -146,47 +143,30 @@ object KafkaOffsetRangeSource {
         .blocking {
           val topic = AnalyticsTopic.unwrap(manifest.offsetRanges.head.topic)
           val partitions = Option(client.partitionsFor(topic)).toVector.flatMap(_.asScala).map(_.partition()).toSet
-          val missing = manifest.offsetRanges.find(range => !partitions.contains(range.partition))
-          missing match {
-            case Some(range) =>
-              Left(
-                AnalyticsError.MissingOffsetRange(
-                  AnalyticsTopic.unwrap(range.topic),
-                  range.partition,
-                  range.endOffsetExclusive - range.startOffset,
-                  0L
-                )
-              )
-            case None =>
-              val requested = manifest.offsetRanges.map(range =>
-                new TopicPartition(AnalyticsTopic.unwrap(range.topic), range.partition)
-              )
+          def missing(range: PartitionOffsetRange) =
+            AnalyticsError.MissingOffsetRange(
+              AnalyticsTopic.unwrap(range.topic),
+              range.partition,
+              range.endOffsetExclusive - range.startOffset,
+              0L
+            )
+          manifest.offsetRanges.find(range => !partitions.contains(range.partition)).map(missing).toLeft(()).flatMap {
+            _ =>
+              val requested = manifest.offsetRanges
+                .map(range => new TopicPartition(AnalyticsTopic.unwrap(range.topic), range.partition))
               val earliest = client.beginningOffsets(requested.asJava)
               val latest = client.endOffsets(requested.asJava)
-              manifest.offsetRanges.foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, range) =>
+              manifest.offsetRanges.traverse_ { range =>
                 val partition = new TopicPartition(AnalyticsTopic.unwrap(range.topic), range.partition)
-                result.flatMap { _ =>
-                  (Option(earliest.get(partition)), Option(latest.get(partition))) match {
-                    case (Some(first), Some(last)) =>
-                      AnalyticsOffsetRanges.available(range, first.longValue(), last.longValue())
-                    case _ =>
-                      Left(
-                        AnalyticsError.MissingOffsetRange(
-                          AnalyticsTopic.unwrap(range.topic),
-                          range.partition,
-                          range.endOffsetExclusive - range.startOffset,
-                          0L
-                        )
-                      )
-                  }
+                (Option(earliest.get(partition)), Option(latest.get(partition))) match {
+                  case (Some(first), Some(last)) =>
+                    AnalyticsOffsetRanges.available(range, first.longValue(), last.longValue())
+                  case _ => Left(missing(range))
                 }
               }
           }
         }
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.SourceReadFailure(cause)
-        }
+        .translating(AnalyticsError.SourceReadFailure(_))
         .flatMap(Async[F].fromEither)
     }
 

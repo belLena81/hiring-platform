@@ -1,12 +1,11 @@
 package com.example.hiring.analytics.adapter.spark
 
-import com.example.hiring.analytics.config.{AnalyticsOperationalSettings, MaximumErasureEvidenceFiles}
+import com.example.hiring.analytics.config.AnalyticsOperationalSettings
 import com.example.hiring.analytics.service.batch.{AnalyticsLakehousePaths, AnalyticsStoragePrivacy}
 
 import cats.effect.Async
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions.{col, lit}
 import org.typelevel.log4cats.Logger
@@ -28,7 +27,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
     DeltaPurgeRewrite.recover(
       paths.root,
       spark.sparkContext.hadoopConfiguration,
-      MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles),
+      operational.maximumErasureEvidenceFiles,
       execution
     )
 
@@ -59,7 +58,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
       retention.deltaVacuumSafetyCheckEnabled.toString
     )
     tables.foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
+      if (DeltaTables.exists(spark, path)) {
         val escaped = SparkPhysicalLocation.resolve(path).replace("`", "``")
         // DESCRIBE DETAIL computes file counts and sizes even when only properties are selected.
         // Read the same fresh snapshot's metadata without reconstructing those unused statistics.
@@ -78,9 +77,9 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
   }
 
   def expire(spark: SparkSession, path: String, at: Instant): F[Unit] = execution {
-    if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
-      DeltaTable
-        .forPath(spark, SparkPhysicalLocation.resolve(path))
+    if (DeltaTables.exists(spark, path))
+      DeltaTables
+        .forPath(spark, path)
         .delete(col(Columns.ExpiresAt) <= lit(Timestamp.from(at)))
   }
 
@@ -88,40 +87,36 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
     recoverAbandonedRewrites(spark) *> paths.inventory.delta
       .filter(_.privacy != AnalyticsStoragePrivacy.SanitizedControl)
       .map(_.location)
-      .foldLeft(Async[F].pure(0L)) { (removedFiles, path) =>
-        removedFiles.flatMap { count =>
-          execution(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))).flatMap {
-            case false => Async[F].pure(count)
-            case true  =>
-              UUIDGen[F].randomUUID.flatMap { id =>
-                val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-$id"
-                DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, execution).use { _ =>
-                  execution {
-                    spark.read
-                      .format("delta")
-                      .load(SparkPhysicalLocation.resolve(path))
-                      .write
-                      .format("delta")
-                      .mode("overwrite")
-                      .save(SparkPhysicalLocation.resolve(temporaryPath))
-                    spark.read
-                      .format("delta")
-                      .load(SparkPhysicalLocation.resolve(temporaryPath))
-                      .write
-                      .format("delta")
-                      .mode("overwrite")
-                      .option("overwriteSchema", "true")
-                      .save(SparkPhysicalLocation.resolve(path))
-                    // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
-                    val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
-                    count + DeltaTable
-                      .forPath(spark, SparkPhysicalLocation.resolve(path))
-                      .vacuum(retentionHours)
-                      .count()
-                  }
+      .foldM(0L) { (count, path) =>
+        execution(DeltaTables.exists(spark, path)).flatMap {
+          case false => Async[F].pure(count)
+          case true  =>
+            UUIDGen[F].randomUUID.flatMap { id =>
+              val temporaryPath = s"${paths.root.stripSuffix("/")}/control/purge-rewrite-$id"
+              DeltaPurgeRewrite.temporaryPath[F](spark, temporaryPath, execution).use { _ =>
+                execution {
+                  DeltaTables
+                    .read(spark, path)
+                    .write
+                    .format("delta")
+                    .mode("overwrite")
+                    .save(SparkPhysicalLocation.resolve(temporaryPath))
+                  DeltaTables
+                    .read(spark, temporaryPath)
+                    .write
+                    .format("delta")
+                    .mode("overwrite")
+                    .option("overwriteSchema", "true")
+                    .save(SparkPhysicalLocation.resolve(path))
+                  // Respect Delta's retention safety horizon. Erasure completes only after this reclaim horizon passes.
+                  val retentionHours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
+                  count + DeltaTables
+                    .forPath(spark, path)
+                    .vacuum(retentionHours)
+                    .count()
                 }
               }
-          }
+            }
         }
       }
       .handleErrorWith { error =>
@@ -135,7 +130,7 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
       .traverse { surface =>
         execution {
           val path = surface.location
-          if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) 0L
+          if (!DeltaTables.exists(spark, path)) 0L
           else {
             val escaped = SparkPhysicalLocation.resolve(path).replace("`", "``")
             val hours = retention.deltaVacuumSafety.toMillis.toDouble / 3600000d
@@ -143,13 +138,13 @@ private[analytics] final class AnalyticsDeltaRetention[F[_]: Async: UUIDGen](
               spark,
               path,
               hours,
-              MaximumErasureEvidenceFiles.unwrap(operational.maximumErasureEvidenceFiles)
+              operational.maximumErasureEvidenceFiles
             )
             val candidates =
               if (noCandidates) 0L
               else spark.sql(s"VACUUM delta.`$escaped` RETAIN $hours HOURS DRY RUN").limit(1).count()
             if (candidates == 0L) 0L
-            else DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).vacuum(hours).count()
+            else DeltaTables.forPath(spark, path).vacuum(hours).count()
           }
         }
       }

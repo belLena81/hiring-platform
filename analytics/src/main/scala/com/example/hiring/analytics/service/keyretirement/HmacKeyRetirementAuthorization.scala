@@ -4,7 +4,6 @@ import com.example.hiring.analytics.domain.AnalyticsDigest
 import com.example.hiring.analytics.errors.AnalyticsError
 
 import java.time.Instant
-import java.nio.charset.StandardCharsets
 
 /** Permanent evidence that one anchored key may be omitted from this exact lakehouse's runtime key ring. */
 private[analytics] final case class HmacKeyRetirementAuthorization(
@@ -17,7 +16,7 @@ private[analytics] final case class HmacKeyRetirementAuthorization(
 )
 
 private[analytics] object HmacKeyRetirementAuthorization {
-  def digest(facts: String): String = AnalyticsDigest.sha256Hex(facts.getBytes(StandardCharsets.UTF_8))
+  def digest(facts: String): String = AnalyticsDigest.sha256Hex(facts)
 
   def validate(value: HmacKeyRetirementAuthorization): Either[AnalyticsError, HmacKeyRetirementAuthorization] =
     Either.cond(

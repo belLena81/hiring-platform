@@ -18,7 +18,7 @@ object AnalyticsKeyRetirementAuditMain
   override protected def program: IO[ExitCode] =
     AnalyticsRuntimeConfig
       .loadKeyRetirementAudit[IO]
-      .flatMap(settings => AppModule.keyRetirementAudit[IO](settings).use(_.run))
+      .flatMap(settings => AppModule.keyRetirementAudit[IO](settings).use(identity))
       .flatMap {
         case Right(summary) =>
           logger.warn(summary.operatorEvidence + "; exit status is not approval to remove a key") *>

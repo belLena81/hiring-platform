@@ -1,7 +1,6 @@
 package com.example.hiring.analytics.service.streaming
 
 import cats.effect.Async
-import cats.data.NonEmptyChain
 import cats.syntax.all.*
 import com.example.hiring.analytics.domain.{
   AnalyticsDigest,
@@ -19,7 +18,6 @@ import com.example.hiring.analytics.service.batch.ActiveDeletionMarkerSource
 import com.example.hiring.analytics.service.batch.{AnalyticsReportPublicationReceipt, AnalyticsReportReservation}
 
 import java.time.Instant
-import java.nio.charset.StandardCharsets
 
 /** Immutable evidence captured once for a Spark batch, before any sink is changed. */
 final case class StreamingInputPreparation(
@@ -229,7 +227,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
           Either.cond(
             value.revision < Long.MaxValue,
             value.revision + 1L,
-            AnalyticsError.InvalidInput(NonEmptyChain.one("streaming decision revision is exhausted"))
+            AnalyticsError.InvalidInput.one("streaming decision revision is exhausted")
           )
       })
       reservation <- previous
@@ -356,9 +354,7 @@ final class StreamingBatchCoordinator[F[_]: Async](
         priorWatermark = state.preparation.priorWatermark
       )
       F.raiseWhen(stableIncoming != state.preparation)(
-        AnalyticsError.InvalidInput(
-          NonEmptyChain.one("streaming batch identity was reused with different immutable input evidence")
-        )
+        AnalyticsError.InvalidInput.one("streaming batch identity was reused with different immutable input evidence")
       )
   }
 
@@ -372,5 +368,5 @@ final class StreamingBatchCoordinator[F[_]: Async](
     )
 
   private def fingerprint(value: String): String =
-    AnalyticsDigest.sha256Hex(value.getBytes(StandardCharsets.UTF_8))
+    AnalyticsDigest.sha256Hex(value)
 }

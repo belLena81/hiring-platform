@@ -156,10 +156,8 @@ final class AnalyticsLateFactReplayService[F[_]: Async](
           reportPublisher
             .publish(record.reservation, report, expiresAt)
             .as(AnalyticsLateFactReplayOutcome.Published)
-            .handleErrorWith {
-              case AnalyticsError.GuardedErasurePublicationRejected =>
-                F.pure(AnalyticsLateFactReplayOutcome.ErasurePending)
-              case error => F.raiseError(error)
+            .recover { case AnalyticsError.GuardedErasurePublicationRejected =>
+              AnalyticsLateFactReplayOutcome.ErasurePending
             }
             .flatTap {
               case AnalyticsLateFactReplayOutcome.Published => now.flatMap(journal.markPublished(request, _))

@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AccountSubjectId
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translatingWith
 import com.example.hiring.analytics.service.erasure.*
 
 import cats.effect.Async
@@ -13,8 +14,7 @@ import org.bson.conversions.Bson
 import com.mongodb.client.model.Filters
 
 import java.time.Instant
-import java.util.{Date, UUID}
-import scala.util.control.NonFatal
+import java.util.Date
 
 /** Shared lease predicates and Mongo error translation for typed erasure records. */
 private[analytics] abstract class MongoAnalyticsErasureStoreSupport[F[_]: Async](
@@ -45,11 +45,11 @@ private[analytics] abstract class MongoAnalyticsErasureStoreSupport[F[_]: Async]
   ): F[Boolean] =
     streams.one(collection.underlying.updateOne(session.underlying, filter, update)).map(_.getMatchedCount == 1L)
 
-  protected def mongo[A](work: => F[A]): F[A] = Async[F].defer(work).adaptError {
-    case error: AnalyticsError        => error
-    case _: MongoJsonParsingException => AnalyticsError.MalformedMarker
-    case NonFatal(cause)              => AnalyticsError.MarkerStorageFailure(cause)
-  }
+  protected def mongo[A](work: => F[A]): F[A] = Async[F]
+    .defer(work)
+    .translatingWith { case _: MongoJsonParsingException =>
+      AnalyticsError.MalformedMarker
+    }(AnalyticsError.MarkerStorageFailure(_))
 }
 
 private[analytics] object MongoAnalyticsErasureStoreSupport {
@@ -60,9 +60,6 @@ private[analytics] object MongoAnalyticsErasureStoreSupport {
   val ProgressPerPhase = ErasurePhase.ProgressPerPhase
 
   final case class PublisherFence(deleted: Boolean, leaseToken: Option[String], leaseUntil: Option[Instant])
-
-  private def isCanonicalUuid(value: String): Boolean =
-    scala.util.Try(UUID.fromString(value)).toOption.exists(_.toString == value)
 
   private[analytics] def decodeRetentionBarrier(
       barrier: Option[AnalyticsMongoRecords.RetentionBarrier]
@@ -93,9 +90,9 @@ private[analytics] object MongoAnalyticsErasureStoreSupport {
       .orElse(Option.when(document.phase.isEmpty)(ErasurePhase.Requested))
     for {
       _ <- Option.when(document.fencingVersion.contains(1))(())
-      _ <- Option.when(isCanonicalUuid(document._id))(())
+      _ <- Option.when(AccountSubjectId.from(document._id).isRight)(())
       id <- AccountSubjectId.from(document._id).toOption
-      token <- document.leaseToken.filter(isCanonicalUuid)
+      token <- document.leaseToken.filter(AccountSubjectId.from(_).isRight)
       expiry <- document.leaseUntil
       currentPhase <- phase
       progress = document.progress.getOrElse(0)

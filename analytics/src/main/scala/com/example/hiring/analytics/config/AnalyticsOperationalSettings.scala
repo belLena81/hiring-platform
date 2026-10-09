@@ -8,14 +8,6 @@ type AnalyticsPositiveInt = Int :| Positive
 type MaximumErasureEvidenceFiles = Int :| Interval.Closed[1, 2147483646]
 type MongoPublisherBufferSize = Int :| Interval.Closed[1, 65536]
 
-object MaximumErasureEvidenceFiles {
-  def unwrap(value: MaximumErasureEvidenceFiles): Int = value
-}
-
-object MongoPublisherBufferSize {
-  def unwrap(value: MongoPublisherBufferSize): Int = value
-}
-
 object AnalyticsPositiveInt {
   extension (value: AnalyticsPositiveInt) def value: Int = value
 }

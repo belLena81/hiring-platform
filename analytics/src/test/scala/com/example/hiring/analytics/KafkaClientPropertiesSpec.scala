@@ -48,17 +48,28 @@ class KafkaClientPropertiesSpec extends munit.FunSuite {
     }
   }
 
-  test("admin and offset-inspection clients are bounded by explicit timeouts") {
+  test("admin and consumer properties keep the exact keys and values of the former hand-built copies") {
     val connection = KafkaConnection("broker.example:9093", Some("reader"), Some("credential"))
-    val admin = KafkaClientProperties.adminProperties(connection).toOption.get
-    assertEquals(admin("request.timeout.ms"), "10000")
-    assertEquals(admin("default.api.timeout.ms"), "10000")
-    assertEquals(admin("bootstrap.servers"), "broker.example:9093")
-    assertEquals(admin("security.protocol"), "SASL_SSL")
-    val consumer = KafkaClientProperties.retentionConsumerProperties(connection).toOption.get
-    assertEquals(consumer("default.api.timeout.ms"), "10000")
-    assertEquals(consumer("enable.auto.commit"), "false")
-    assertEquals(consumer("security.protocol"), "SASL_SSL")
+    val client = KafkaClientProperties.clientProperties(connection).toOption.get
+    val des = "org.apache.kafka.common.serialization.ByteArrayDeserializer"
+    val host = "bootstrap.servers" -> "broker.example:9093"
+    val timeout = "default.api.timeout.ms" -> "10000"
+    val consumer =
+      Map(host, timeout, "key.deserializer" -> des, "value.deserializer" -> des, "enable.auto.commit" -> "false")
+    def want(base: Map[String, String], extra: (String, String)) = Right(base + extra ++ client)
+    assertEquals(
+      KafkaClientProperties.adminProperties(connection),
+      want(Map(host, timeout), "request.timeout.ms" -> "10000")
+    )
+    assertEquals(
+      KafkaClientProperties.readCommittedConsumerProperties(connection),
+      want(consumer, "isolation.level" -> "read_committed")
+    )
+    assertEquals(
+      KafkaClientProperties.retentionConsumerProperties(connection),
+      want(consumer, "group.id" -> "hiring-analytics-erasure")
+    )
+    assertEquals(KafkaClientProperties.asJava(Map("a" -> "1")).getProperty("a"), "1")
   }
 
   test("JAAS connector options round-trip quoted, slashed, and control characters") {

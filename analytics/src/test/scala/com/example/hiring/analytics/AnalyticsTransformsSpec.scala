@@ -1427,7 +1427,7 @@ class AnalyticsTransformsSpec extends FunSuite {
       rotating
         .matchingTokens(subjectId)
         .left
-        .map(AnalyticsError.InvalidConfiguration.apply)
+        .map(AnalyticsError.InvalidConfiguration(_))
         .map(_.map(_.value).toSet)
     )
   }

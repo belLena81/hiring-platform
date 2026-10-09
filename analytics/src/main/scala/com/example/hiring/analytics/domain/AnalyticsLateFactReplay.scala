@@ -1,6 +1,6 @@
 package com.example.hiring.analytics.domain
 
-import cats.data.ValidatedNec
+import cats.data.{Validated, ValidatedNec}
 import cats.syntax.all.*
 import io.github.iltotore.iron.*
 import io.github.iltotore.iron.constraint.string.Match
@@ -59,15 +59,20 @@ object AnalyticsLateFactReplayRequest {
       AnalyticsReplayCoordinate.from(topic, partition, offset)
     }
     val nonEmpty =
-      if (coordinates.nonEmpty) ().validNec[String]
-      else "at least one Kafka coordinate is required".invalidNec[Unit]
+      Validated.condNec(coordinates.nonEmpty, (), "at least one Kafka coordinate is required")
     val configuredMaximumIsValid = configuredMaximum >= 1 && configuredMaximum <= MaximumCoordinates
     val validLimit =
-      if (configuredMaximumIsValid) ().validNec[String]
-      else s"replay coordinate limit must be between 1 and $MaximumCoordinates".invalidNec[Unit]
+      Validated.condNec(
+        configuredMaximumIsValid,
+        (),
+        s"replay coordinate limit must be between 1 and $MaximumCoordinates"
+      )
     val withinLimit =
-      if (!configuredMaximumIsValid || coordinates.size <= configuredMaximum) ().validNec[String]
-      else s"replay request exceeds its configured limit of $configuredMaximum coordinates".invalidNec[Unit]
+      Validated.condNec(
+        !configuredMaximumIsValid || coordinates.size <= configuredMaximum,
+        (),
+        s"replay request exceeds its configured limit of $configuredMaximum coordinates"
+      )
 
     (validId, validCoordinates, nonEmpty, validLimit, withinLimit)
       .mapN { (id, selected, _, _, _) =>
@@ -94,7 +99,7 @@ object AnalyticsLateFactReplayRequest {
           AnalyticsLateFactReplayRequest(
             id,
             selected,
-            AnalyticsDigest.sha256Hex(canonical.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+            AnalyticsDigest.sha256Hex(canonical)
           ).validNec
       }
   }

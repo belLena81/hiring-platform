@@ -2,6 +2,8 @@ package com.example.hiring.analytics
 import com.example.hiring.analytics.errors.*
 import com.example.hiring.analytics.service.erasure.*
 
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
 import munit.FunSuite
 
 import scala.concurrent.duration.*
@@ -17,6 +19,25 @@ final class ErasureFailurePolicySpec extends FunSuite {
     assertEquals(seventh.category, ErasureFailureCategory.TransientSource)
     assertEquals(seventh.retryAfter, Some(300.seconds))
     assertEquals(exhausted.retryAfter, None)
+  }
+
+  test("unexpected failures are translated once and typed errors pass through") {
+    import AnalyticsErrorTranslation.*
+    val cause = new IllegalStateException("x")
+    val wrap = AnalyticsError.SourceReadFailure(_)
+    def run(work: IO[Int]) = work.attempt.unsafeRunSync()
+    assertEquals(run(IO.raiseError(cause).translating(wrap)), Left(wrap(cause)))
+    assertEquals(
+      run(IO.raiseError(AnalyticsError.InvalidGoldSchema).translating(wrap)),
+      Left(AnalyticsError.InvalidGoldSchema)
+    )
+    assertEquals(
+      run(
+        IO.raiseError(cause).translatingWith { case _: IllegalStateException => AnalyticsError.MalformedMarker }(wrap)
+      ),
+      Left(AnalyticsError.MalformedMarker)
+    )
+    assertEquals(run(IO.pure(1).translating(wrap)), Right(1))
   }
 
   test("invalid state goes to repair immediately and unknown failures have fewer retries") {

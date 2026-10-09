@@ -18,7 +18,7 @@ final case class DataFrameDeletionMarkerSource[F[_]: Sync](tokens: DataFrame) ex
             .select("subjectToken")
             .collect()
             .toVector
-            .traverse(row => SubjectToken.fromHmac(row.getString(0)).leftMap(AnalyticsError.InvalidConfiguration.apply))
+            .traverse(row => SubjectToken.fromHmac(row.getString(0)).leftMap(AnalyticsError.InvalidConfiguration(_)))
       }
       .flatMap(Sync[F].fromEither)
       .handleErrorWith {

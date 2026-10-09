@@ -3,7 +3,6 @@ package com.example.hiring.analytics.adapter.spark
 import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import com.example.hiring.analytics.errors.AnalyticsError
 
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{Column, DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.{col, concat, count, lit, min, sha2, struct, to_json, when}
 import org.apache.spark.sql.types.StructType
@@ -41,8 +40,8 @@ private[analytics] final class DeltaBatchWriter[F[_]](
     )
     if (!AnalyticsTableSchemas.matches(source.schema, shape))
       throw com.example.hiring.analytics.errors.AnalyticsError.DeltaSchemaMismatch(path)
-    val mutation = DeltaTable
-      .forPath(source.sparkSession, SparkPhysicalLocation.resolve(path))
+    val mutation = DeltaTables
+      .forPath(source.sparkSession, path)
       .as("target")
       .merge(source.as("source"), condition)
       .whenNotMatched()
@@ -69,17 +68,15 @@ private[analytics] final class DeltaBatchWriter[F[_]](
 }
 
 /** Reads an existing Delta table or creates an empty frame with the caller's expected schema. */
-private[analytics] final class DeltaBatchReader[F[_]](execution: SparkExecution[F]) extends DeltaReader[F] {
-  override def readOrEmpty(spark: SparkSession, path: String, schema: StructType): F[DataFrame] = execution {
-    if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path)))
-      spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
-    else spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema)
+private[analytics] final class DeltaBatchReader[F[_]](execution: SparkExecution[F]) {
+  def readOrEmpty(spark: SparkSession, path: String, schema: StructType): F[DataFrame] = execution {
+    DeltaTables.readIfExists(spark, path).getOrElse(spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema))
   }
 }
 
 /** Builds stable quarantine keys for malformed and conflicting operational events. */
-private[analytics] object QuarantineIdentifier extends QuarantineId {
-  override def apply(): Column =
+private[analytics] object QuarantineIdentifier {
+  def apply(): Column =
     when(
       col(Columns.RawValue).isNull,
       concat(

@@ -73,19 +73,19 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     )
 
     assert(AnalyticsConfigFixtures.streaming(emptyOffsets).left.exists {
-      case AnalyticsError.InvalidConfiguration(message) => message.contains("explicitly name every source partition")
-      case _                                            => false
+      case AnalyticsError.InvalidConfiguration(message, _) => message.contains("explicitly name every source partition")
+      case _                                               => false
     })
     assert(AnalyticsConfigFixtures.streaming(duplicateOffsets).left.exists {
-      case AnalyticsError.InvalidConfiguration(message) => message.contains("each partition once")
-      case _                                            => false
+      case AnalyticsError.InvalidConfiguration(message, _) => message.contains("each partition once")
+      case _                                               => false
     })
   }
 
   test("replay cap cannot exceed one thousand retained records") {
     val overLimit = valid.replace("maximum-replay-records = 1000", "maximum-replay-records = 1001")
     assert(AnalyticsConfigFixtures.streaming(overLimit).left.exists {
-      case AnalyticsError.InvalidConfiguration(message) =>
+      case AnalyticsError.InvalidConfiguration(message, _) =>
         message.contains("analytics.streaming.maximum-replay-records") && message.contains("[1, 1000]")
       case _ => false
     })
@@ -117,8 +117,8 @@ class AnalyticsStreamingSettingsSpec extends FunSuite {
     assert(AnalyticsConfigFixtures.streaming(excessiveOffsets).isLeft)
     assert(AnalyticsConfigFixtures.streaming(unsupportedTrigger).isLeft)
     assert(AnalyticsConfigFixtures.streaming(sensitiveInvalidValue).left.exists {
-      case AnalyticsError.InvalidConfiguration(message) => !message.contains("private-value")
-      case _                                            => false
+      case AnalyticsError.InvalidConfiguration(message, _) => !message.contains("private-value")
+      case _                                               => false
     })
   }
   test("maintenance and progress retention settings are positive and identity-bound") {

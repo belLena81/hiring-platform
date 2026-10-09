@@ -15,6 +15,10 @@ class AnalyticsDomainContractsSpec extends munit.FunSuite {
     assertEquals(RangeFingerprint.from(digest).map(_.value), Right(digest))
     assert(RangeFingerprint.from("0123456789abcdef").isLeft)
     assert(RangeFingerprint.from(digest.toUpperCase).isLeft)
+    val abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    import io.github.iltotore.iron.autoRefine
+    assertEquals(RunId.prefixed("stream-", abc).value, s"stream-$abc")
+    assertEquals(RangeFingerprint.ofSha256("abc").value, abc)
   }
 
   test("late-fact replay selections are bounded, unique, and canonically fingerprinted") {

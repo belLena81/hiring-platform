@@ -6,7 +6,6 @@ import com.example.hiring.analytics.service.batch.AnalyticsLakehousePaths
 import cats.effect.Async
 import cats.effect.std.UUIDGen
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
 
@@ -27,19 +26,13 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
     val marker = BatchSubjectMatching.markerRows(markerTokens)
     paths.inventory.subjectDelta
       .map(_.location)
-      .foldLeft[Either[AnalyticsError, Unit]](Right(())) { (result, path) =>
-        result.flatMap { _ =>
-          if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
-            val matched = BatchSubjectMatching.matchedBySubject(
-              spark.read.format("delta").load(SparkPhysicalLocation.resolve(path)),
-              marker
-            )
-            Either.cond(
-              matched.limit(1).count() == 0L,
-              (),
-              AnalyticsError.MarkedSubjectRetained(path)
-            )
-          } else Right(())
+      .traverse_ { path =>
+        DeltaTables.readIfExists(spark, path).fold[Either[AnalyticsError, Unit]](Right(())) { frame =>
+          Either.cond(
+            BatchSubjectMatching.matchedBySubject(frame, marker).limit(1).count() == 0L,
+            (),
+            AnalyticsError.MarkedSubjectRetained(path)
+          )
         }
       }
   }
@@ -47,11 +40,9 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
   def countMarkedRows(spark: SparkSession, markerTokens: DataFrame): F[Long] = blocking {
     val marker = BatchSubjectMatching.markerRows(markerTokens)
     paths.inventory.subjectDelta.map(_.location).foldLeft(0L) { (total, path) =>
-      if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) total
-      else
-        total + BatchSubjectMatching
-          .matchedBySubject(spark.read.format("delta").load(SparkPhysicalLocation.resolve(path)), marker)
-          .count()
+      total + DeltaTables
+        .readIfExists(spark, path)
+        .fold(0L)(BatchSubjectMatching.matchedBySubject(_, marker).count())
     }
   }
 
@@ -62,9 +53,9 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
       val files = paths.inventory.subjectDelta
         .map(_.location)
         .flatMap { path =>
-          if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Vector.empty
+          if (!DeltaTables.exists(spark, path)) Vector.empty
           else {
-            val frame = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path))
+            val frame = DeltaTables.read(spark, path)
             val columns = frame.columns.toSet
             val attributed = BatchSubjectMatching.matchedBySubject(frame, marker)
             val affected =
@@ -99,7 +90,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
       nonces =>
         blocking.either {
           val retiredLogs = nonces.flatMap { case (path, nonce) =>
-            if (!DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) Vector.empty
+            if (!DeltaTables.exists(spark, path)) Vector.empty
             else {
               val log = deltaLogFactory(spark, path)
               val tableIdentifier = SparkPhysicalLocation.resolve(path).replace("`", "``")
@@ -135,7 +126,7 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
 
   def checkpointRawTableLogs(spark: SparkSession): F[Unit] = blocking {
     paths.inventory.delta.map(_.location).foreach { path =>
-      if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
+      if (DeltaTables.exists(spark, path)) {
         val log = deltaLogFactory(spark, path)
         log.checkpointAndCleanUpDeltaLog(log.update(), None)
       }
@@ -143,13 +134,13 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
   }
 
   def purgeMarkedSubjectRows(spark: SparkSession, path: String, markerTokens: DataFrame): F[Unit] = blocking {
-    if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(path))) {
+    if (DeltaTables.exists(spark, path)) {
       val markedSubjects =
         markerTokens.select(col(Columns.SubjectToken)).filter(col(Columns.SubjectToken).isNotNull).distinct()
-      val columns = spark.read.format("delta").load(SparkPhysicalLocation.resolve(path)).columns.toSet
+      val columns = DeltaTables.read(spark, path).columns.toSet
       val rawScope = path == paths.bronze || path == paths.quarantine || path == paths.lateFacts
       if (rawScope) {
-        val table = DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path))
+        val table = DeltaTables.forPath(spark, path)
         if (columns.contains(Columns.SubjectTokens))
           table.delete(col(Columns.SubjectTokens).isNull || size(col(Columns.SubjectTokens)) === 0)
         else table.delete()
@@ -163,12 +154,12 @@ private[spark] final class AnalyticsBatchErasureStage[F[_]: Async: UUIDGen](
         else if (columns.contains(Columns.SubjectToken))
           s"target.${Columns.SubjectToken} = source.${Columns.SubjectToken}"
         else {
-          DeltaTable.forPath(spark, SparkPhysicalLocation.resolve(path)).delete()
+          DeltaTables.forPath(spark, path).delete()
           ""
         }
       if (condition.nonEmpty) {
-        val _ = DeltaTable
-          .forPath(spark, SparkPhysicalLocation.resolve(path))
+        val _ = DeltaTables
+          .forPath(spark, path)
           .as("target")
           .merge(markedSubjects.as("source"), condition)
           .whenMatched()

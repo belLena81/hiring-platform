@@ -3,7 +3,6 @@ package com.example.hiring.analytics.service.erasure
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.value
 
 import com.example.hiring.analytics.config.AnalyticsErasureWorkerPolicy
-import com.example.hiring.analytics.domain.AnalyticsDigest
 import com.example.hiring.analytics.domain.RangeFingerprint
 import com.example.hiring.analytics.domain.RunId
 import com.example.hiring.analytics.errors.AnalyticsError
@@ -69,16 +68,11 @@ final class AnalyticsErasureWorker[F[_]: Async](
   private[analytics] def runClaim(claim: ErasureClaim): F[ErasureClaimOutcome] = {
     val work = for {
       current <- now
-      runId <- Async[F].fromEither(
-        RunId
-          .from("analytics-erasure-" + claim.requestId.value)
-          .leftMap(_ => AnalyticsError.InvalidConfiguration("invalid erasure run id"))
-      )
-      fingerprint <- Async[F].fromEither(
-        RangeFingerprint
-          .from(sha256("analytics-erasure:" + claim.requestId.value))
-          .leftMap(_ => AnalyticsError.InvalidConfiguration("invalid erasure range fingerprint"))
-      )
+      runId = {
+        import io.github.iltotore.iron.autoRefine
+        RunId.prefixed("analytics-erasure-", claim.requestId.value)
+      }
+      fingerprint = RangeFingerprint.ofSha256("analytics-erasure:" + claim.requestId.value)
       reservation <- publisher.reserve(runId, fingerprint, current)
       outcome <- process(claim, reservation)
     } yield outcome
@@ -383,7 +377,4 @@ final class AnalyticsErasureWorker[F[_]: Async](
     case ErasureUpdate.Applied   => EitherT.rightT(())
     case ErasureUpdate.LeaseLost => stop(ErasureClaimOutcome.ReleasedForOthers)
   }
-
-  private def sha256(value: String): String =
-    AnalyticsDigest.sha256Hex(value.getBytes(java.nio.charset.StandardCharsets.UTF_8))
 }

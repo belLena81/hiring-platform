@@ -11,7 +11,6 @@ import com.example.hiring.analytics.service.batch.{
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.storage.StorageLevel
@@ -46,10 +45,10 @@ private[analytics] final class SparkAnalyticsBatchLakehouse[F[_]: Async](
 
   override def rebuildGoldAndExtractReport(asOf: Instant): F[AnalyticsReportOutput] =
     for {
-      hasSilver <- lakehouse(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.silver)))
+      hasSilver <- lakehouse(DeltaTables.exists(spark, paths.silver))
       _ <-
         if (hasSilver)
-          lakehouse(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver)))
+          lakehouse(DeltaTables.read(spark, paths.silver))
             .flatMap(AnalyticsGoldStage.rebuild(paths, _, execution))
         else AnalyticsGoldStage.clear(spark, paths, execution)
       report <- extractReport(spark, asOf)

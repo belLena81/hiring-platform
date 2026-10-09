@@ -16,7 +16,6 @@ import com.example.hiring.analytics.service.batch.{
 import cats.effect.{Async, Clock}
 import cats.effect.Resource
 import cats.syntax.all.*
-import io.delta.tables.DeltaTable
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.functions.*
 
@@ -109,10 +108,9 @@ private[analytics] final class AnalyticsBatchIngestionStage[F[_]: Async](
     } yield AnalyticsBronzeInput(parsed, observedAt, counts._1, counts._2, counts._3)
 
   private def validateRunIdentity(spark: SparkSession, manifest: AnalyticsRunManifest): F[Unit] = blocking.either {
-    if (DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.manifests))) {
-      val existing = spark.read
-        .format("delta")
-        .load(SparkPhysicalLocation.resolve(paths.manifests))
+    if (DeltaTables.exists(spark, paths.manifests)) {
+      val existing = DeltaTables
+        .read(spark, paths.manifests)
         .filter(col("runId") === lit(manifest.runId.value))
         .select(Columns.Topic, Columns.Partition, "startOffset", "endOffsetExclusive")
         .distinct()

@@ -12,14 +12,12 @@ import com.example.hiring.analytics.service.batch.{
   AnalyticsReportReservation
 }
 import com.example.hiring.analytics.service.streaming.*
-import io.delta.tables.DeltaTable
 import com.example.hiring.analytics.config.AnalyticsPositiveInt.*
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.functions.*
 import org.apache.spark.sql.types.*
 import org.apache.spark.storage.StorageLevel
 
-import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
 import java.time.Instant
 import scala.jdk.CollectionConverters.*
@@ -95,7 +93,7 @@ private[analytics] object SparkStreamingBatchStages {
       silverStage: AnalyticsBatchSilverStage[F],
       lateFactStage: AnalyticsLateFactStage[F],
       deltaWriter: DeltaWriter[F],
-      deltaReader: DeltaReader[F],
+      deltaReader: DeltaBatchReader[F],
       reportPublisher: AnalyticsReportPublisher[F],
       retention: AnalyticsRetentionSettings,
       configureTables: F[Unit],
@@ -137,7 +135,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
     silverStage: AnalyticsBatchSilverStage[F],
     lateFactStage: AnalyticsLateFactStage[F],
     deltaWriter: DeltaWriter[F],
-    deltaReader: DeltaReader[F],
+    deltaReader: DeltaBatchReader[F],
     reportPublisher: AnalyticsReportPublisher[F],
     retention: AnalyticsRetentionSettings,
     configureTables: F[Unit],
@@ -172,9 +170,11 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   ): F[AnalyticsReportReservation] =
     for {
       _ <- authorizePublication
-      runId <- F.fromEither(streamRunId(preparation.identity, revision))
-      rangeFingerprint <- F.fromEither(streamRangeFingerprint(preparation, revision))
-      reservation <- reportPublisher.reservePinned(runId, rangeFingerprint, preparation.observedAt)
+      reservation <- reportPublisher.reservePinned(
+        streamRunId(preparation.identity, revision),
+        streamRangeFingerprint(preparation, revision),
+        preparation.observedAt
+      )
     } yield reservation
 
   override def publicationReceipt(
@@ -666,9 +666,7 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
       tokens: Vector[SubjectToken],
       decision: StreamingDecisionRevision
   ): F[Unit] = {
-    val expectedMarkerFingerprint = AnalyticsDigest.sha256Hex(
-      tokens.map(_.value).sorted.mkString("\n").getBytes(StandardCharsets.UTF_8)
-    )
+    val expectedMarkerFingerprint = AnalyticsDigest.sha256Hex(tokens.map(_.value).sorted.mkString("\n"))
     F.raiseWhen(
       decision.identity != preparation.identity || decision.deletionMarkerFingerprint != expectedMarkerFingerprint
     )(AnalyticsError.InvalidConfiguration("streaming batch decision does not match its input or deletion markers"))
@@ -691,9 +689,9 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
   }
 
   private def rebuildAndExtract(asOf: Instant): F[AnalyticsReportOutput] =
-    execution(DeltaTable.isDeltaTable(spark, SparkPhysicalLocation.resolve(paths.silver))).flatMap {
+    execution(DeltaTables.exists(spark, paths.silver)).flatMap {
       case true =>
-        execution(spark.read.format("delta").load(SparkPhysicalLocation.resolve(paths.silver)))
+        execution(DeltaTables.read(spark, paths.silver))
           .flatMap(AnalyticsGoldStage.rebuild(paths, _, execution)) *>
           AnalyticsGoldStage.extract(spark, paths, asOf, execution)
       case false =>
@@ -701,26 +699,22 @@ private final class LiveSparkStreamingBatchStages[F[_]: Async](
           AnalyticsGoldStage.extract(spark, paths, asOf, execution)
     }
 
-  private def streamRunId(identity: StreamingBatchIdentity, revision: Long): Either[AnalyticsError, RunId] = {
-    val digest = AnalyticsDigest.sha256Hex(
-      s"${identity.lineage.value}\n${identity.batchId.value}\n$revision".getBytes(StandardCharsets.UTF_8)
+  private def streamRunId(identity: StreamingBatchIdentity, revision: Long): RunId = {
+    import io.github.iltotore.iron.autoRefine
+    RunId.prefixed(
+      "stream-",
+      AnalyticsDigest.sha256Hex(s"${identity.lineage.value}\n${identity.batchId.value}\n$revision")
     )
-    RunId.from(s"stream-$digest").leftMap(AnalyticsError.InvalidConfiguration.apply)
   }
 
-  private def streamRangeFingerprint(
-      preparation: StreamingInputPreparation,
-      revision: Long
-  ): Either[AnalyticsError, RangeFingerprint] = {
+  private def streamRangeFingerprint(preparation: StreamingInputPreparation, revision: Long): RangeFingerprint = {
     val canonical = Vector(
       preparation.identity.lineage.value,
       preparation.identity.batchId.value.toString,
       preparation.inputFingerprint.value,
       revision.toString
     ).mkString("\n")
-    RangeFingerprint
-      .from(AnalyticsDigest.sha256Hex(canonical.getBytes(StandardCharsets.UTF_8)))
-      .leftMap(AnalyticsError.InvalidConfiguration.apply)
+    RangeFingerprint.ofSha256(canonical)
   }
 
 }

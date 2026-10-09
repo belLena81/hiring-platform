@@ -2,6 +2,7 @@ package com.example.hiring.analytics.adapter.mongo
 
 import com.example.hiring.analytics.domain.AnalyticsLakehouseIdentity
 import com.example.hiring.analytics.errors.AnalyticsError
+import com.example.hiring.analytics.errors.AnalyticsErrorTranslation.translating
 import com.example.hiring.analytics.service.batch.AnalyticsStreamingRegistry
 
 import cats.effect.Async
@@ -11,7 +12,6 @@ import mongo4cats.database.MongoDatabase
 import org.bson.Document
 
 import java.util.concurrent.TimeUnit
-import scala.util.control.NonFatal
 
 /** Durable stream ownership, separate from the short-lived process mutex and activation grant. */
 private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
@@ -36,12 +36,8 @@ private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
       registrations
         .flatMap(_.insertOne(AnalyticsMongoRecords.StreamingLakehouseRegistration(id, id)))
         .void
-        .handleErrorWith {
-          case error: MongoException if error.getCode == 11000 => verifyExisting(id)
-          case error: AnalyticsError                           => Async[F].raiseError(error)
-          case NonFatal(cause) => Async[F].raiseError(AnalyticsError.MongoConnectionFailure(cause))
-          case error           => Async[F].raiseError(error)
-        }
+        .recoverWith { case error: MongoException if error.getCode == 11000 => verifyExisting(id) }
+        .translating(AnalyticsError.MongoConnectionFailure(_))
     }
 
   override def rejectBatchIfRegistered(lakehouseRoot: String): F[Unit] =
@@ -61,10 +57,7 @@ private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
             )
           case None => Async[F].unit
         }
-        .adaptError {
-          case error: AnalyticsError => error
-          case NonFatal(cause)       => AnalyticsError.MongoConnectionFailure(cause)
-        }
+        .translating(AnalyticsError.MongoConnectionFailure(_))
     }
 
   private def verifyExisting(id: String): F[Unit] =
@@ -77,10 +70,7 @@ private[analytics] final class MongoAnalyticsStreamingRegistry[F[_]: Async](
         case _                                        =>
           Async[F].raiseError(AnalyticsError.InvalidConfiguration("streaming lakehouse registration is inconsistent"))
       }
-      .adaptError {
-        case error: AnalyticsError => error
-        case NonFatal(cause)       => AnalyticsError.MongoConnectionFailure(cause)
-      }
+      .translating(AnalyticsError.MongoConnectionFailure(_))
 
   private def lakehouseId(root: String): Either[AnalyticsError, String] =
     AnalyticsLakehouseIdentity
