@@ -20,8 +20,9 @@ if [[ -n "${JAVA_HOME:-}" ]]; then
   sbt_args=(-java-home "$JAVA_HOME")
 fi
 
-# Both builds: formatting gates first, then the Docker-independent unit suites.
-sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck test
-(cd analytics && sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck test)
+# Both builds: formatting gates first, then the Docker-independent unit suites under JaCoCo.
+# `jacoco` runs the unit tests once and fails when line coverage is below the build's threshold (60%).
+sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck jacoco
+(cd analytics && sbt "${sbt_args[@]}" scalafmtCheckAll scalafmtSbtCheck jacoco)
 
-printf '%s\n' 'Formatting and unit checks passed for the application and analytics builds. Run any additional integration, migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'
+printf '%s\n' 'Formatting, unit and coverage checks passed for the application and analytics builds. Run any additional integration, migration, compatibility, or performance checks required by this task; see docs/engineering-quality.md.'

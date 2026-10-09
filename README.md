@@ -116,7 +116,7 @@ Wrapper runs cache compiler output and reports under `.local/data/test-builds/ro
 
 ## Test coverage
 
-JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repository root for main-project unit coverage; run `sbt 'IntegrationTest / jacoco'` to run its integration tests with coverage and merge their results. Reports are written under `target/scala-<version>/jacoco/report/test/` and `.../report/it/`, with the merged report under `.../report/merged/`. Run the same commands from `analytics/` to generate analytics unit and integration coverage. Integration coverage requires the same Docker-backed services as the integration test suite. Coverage thresholds are not configured yet; reports provide measurement without imposing a baseline.
+JaCoCo coverage is available for both SBT builds. Run `sbt jacoco` from the repository root for main-project unit coverage; run `sbt 'IntegrationTest / jacoco'` to run its integration tests with coverage and merge their results. Reports are written under `target/scala-<version>/jacoco/report/test/` and `.../report/it/`, with the merged report under `.../report/merged/`. Run the same commands from `analytics/` to generate analytics unit and integration coverage. Integration coverage requires the same Docker-backed services as the integration test suite. Both builds enforce a 60% unit line-coverage threshold: `sbt jacoco` (and therefore `scripts/check-local.sh`) fails below it. Reports are written as HTML and `jacoco.xml`. Unit line coverage at 2026-10-09 HEAD was 64.47% (application) and 60.86% (analytics).
 
 ## Documentation
 

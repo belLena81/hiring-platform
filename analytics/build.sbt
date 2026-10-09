@@ -35,6 +35,9 @@ lazy val analytics = (project in file("."))
     publish / skip := true,
     Compile / run / fork := true,
     Test / fork := true,
+    Test / jacocoReportSettings := JacocoReportSettings()
+      .withThresholds(JacocoThresholds(line = 60))
+      .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value.getParentFile / "test-support" / "src" / "main" / "scala",
     Test / parallelExecution := false,
     Test / javaOptions += "--add-opens=java.base/sun.security.action=ALL-UNNAMED",

@@ -47,6 +47,9 @@ lazy val root = (project in file("."))
     IntegrationTest / resourceDirectory := baseDirectory.value / "src" / "it" / "resources",
     IntegrationTest / parallelExecution := false,
     Test / fork := true,
+    Test / jacocoReportSettings := JacocoReportSettings()
+      .withThresholds(JacocoThresholds(line = 60))
+      .withFormats(JacocoReportFormats.ScalaHTML, JacocoReportFormats.XML),
     Test / unmanagedSourceDirectories += baseDirectory.value / "test-support" / "src" / "main" / "scala",
     Test / javaOptions += "-Dcats.effect.trackFiberContext=true",
     IntegrationTest / javaOptions += "-Dcats.effect.trackFiberContext=true",
